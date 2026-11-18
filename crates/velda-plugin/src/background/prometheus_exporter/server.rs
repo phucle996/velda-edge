@@ -304,7 +304,7 @@ impl PrometheusExporter {
         loop {
             tokio::select! {
                 accept_res = listener.accept() => {
-                    let (tcp_stream, _peer_addr) = match accept_res {
+                    let (mut tcp_stream, _peer_addr) = match accept_res {
                         Ok(res) => res,
                         Err(err) => {
                             tracing::warn!(error = %err, "Exporter accept error");
@@ -312,8 +312,27 @@ impl PrometheusExporter {
                         }
                     };
 
+                    // Acquire concurrency permit BEFORE spawning task or performing TLS handshake.
+                    // This protects against Slowloris attacks, task queue exhaustion, and FD starvation.
+                    let permit = match self.concurrency_limiter.clone().try_acquire_owned() {
+                        Ok(permit) => permit,
+                        Err(_) => {
+                            let response = b"HTTP/1.1 503 Service Unavailable\r\n\
+                                             Retry-After: 1\r\n\
+                                             Content-Type: text/plain; charset=utf-8\r\n\
+                                             Content-Length: 30\r\n\
+                                             Connection: close\r\n\r\n\
+                                             Max Scrape Concurrency Reached";
+                            let _ = tcp_stream.write_all(response).await;
+                            let _ = tcp_stream.flush().await;
+                            drop(tcp_stream);
+                            continue;
+                        }
+                    };
+
                     let server = Arc::clone(&self);
                     tokio::spawn(async move {
+                        let _permit = permit;
                         if let Err(err) = server.handle_connection(tcp_stream).await {
                             tracing::debug!(error = %err, "Exporter client connection ended");
                         }
@@ -340,28 +359,31 @@ impl PrometheusExporter {
     /// Handles a single incoming scrape or health check connection.
     async fn handle_connection(&self, tcp_stream: TcpStream) -> Result<(), PluginError> {
         let timeout_duration = Duration::from_millis(self.config.scrape.timeout_ms);
+        let handshake_timeout = Duration::from_millis(self.config.scrape.timeout_ms.min(2000));
 
-        tokio::time::timeout(timeout_duration, async {
-            let mut stream = if let Some(tls_acceptor) = &self.tls_acceptor {
-                let tls_stream = tls_acceptor
-                    .accept(tcp_stream)
+        let mut stream = if let Some(tls_acceptor) = &self.tls_acceptor {
+            let tls_stream =
+                tokio::time::timeout(handshake_timeout, tls_acceptor.accept(tcp_stream))
                     .await
+                    .map_err(|_| PluginError::ScrapeTimeout(handshake_timeout.as_millis() as u64))?
                     .map_err(|e| PluginError::Tls(format!("TLS handshake failed: {e}")))?;
-                ExporterStream::Tls(Box::new(tls_stream))
-            } else {
-                ExporterStream::Plain(tcp_stream)
-            };
+            ExporterStream::Tls(Box::new(tls_stream))
+        } else {
+            ExporterStream::Plain(tcp_stream)
+        };
 
-            self.serve_stream(&mut stream).await
-        })
-        .await
-        .map_err(|_| PluginError::ScrapeTimeout(self.config.scrape.timeout_ms))?
+        tokio::time::timeout(timeout_duration, self.serve_stream(&mut stream))
+            .await
+            .map_err(|_| PluginError::ScrapeTimeout(self.config.scrape.timeout_ms))?
     }
 
     /// Parses HTTP request and writes formatted HTTP/1.1 response.
     async fn serve_stream(&self, stream: &mut ExporterStream) -> Result<(), PluginError> {
         let mut buf = [0u8; 4096];
-        let bytes_read = stream.read(&mut buf).await?;
+        let read_timeout = Duration::from_millis(self.config.scrape.timeout_ms.min(2000));
+        let bytes_read = tokio::time::timeout(read_timeout, stream.read(&mut buf))
+            .await
+            .map_err(|_| PluginError::ScrapeTimeout(read_timeout.as_millis() as u64))??;
         if bytes_read == 0 {
             return Ok(());
         }
@@ -477,22 +499,7 @@ impl PrometheusExporter {
 
         // 5. Route to Metrics Path
         if path == self.config.path {
-            // Check concurrency limit
-            let _permit = match self.concurrency_limiter.try_acquire() {
-                Ok(permit) => permit,
-                Err(_) => {
-                    let response = b"HTTP/1.1 503 Service Unavailable\r\n\
-                                     Retry-After: 1\r\n\
-                                     Content-Type: text/plain; charset=utf-8\r\n\
-                                     Content-Length: 30\r\n\
-                                     Connection: close\r\n\r\n\
-                                     Max Scrape Concurrency Reached";
-                    stream.write_all(response).await?;
-                    stream.flush().await?;
-                    return Ok(());
-                }
-            };
-
+            // Concurrency limit is already authoritatively enforced at the connection accept level
             // Acquire lock-free point-in-time snapshot
             let snapshot = self.metrics.snapshot();
             let max_buffer_bytes = self.config.scrape.max_buffer_size_kb * 1024;

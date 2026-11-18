@@ -17,11 +17,12 @@ use std::time::Duration;
 use bytes::{Bytes, BytesMut};
 use h2::client::{SendRequest, handshake};
 use http::HeaderMap;
+use rustls::ClientConfig;
 use tokio::io::{AsyncRead, AsyncWrite, ReadBuf};
 use tokio::net::TcpStream;
-use tokio_rustls::TlsConnector;
 use tokio_rustls::client::TlsStream;
 
+use crate::config::OutboundTlsConfig;
 use crate::error::PluginError;
 
 /// Unified transport stream for plaintext TCP or TLS connections.
@@ -143,7 +144,7 @@ impl OtlpGrpcEndpoint {
 pub struct OtlpMetricsGrpcClient {
     endpoint: OtlpGrpcEndpoint,
     send_request: Option<SendRequest<Bytes>>,
-    tls_connector: Option<TlsConnector>,
+    tls_config: Option<Arc<ClientConfig>>,
     connect_timeout: Duration,
     request_timeout: Duration,
 }
@@ -152,26 +153,17 @@ impl OtlpMetricsGrpcClient {
     pub const RPC_PATH: &'static str =
         "/opentelemetry.proto.collector.metrics.v1.MetricsService/Export";
 
-    /// Creates a new gRPC client targeting the given endpoint URL with explicit timeouts.
+    /// Creates a new gRPC client targeting the given endpoint URL with explicit timeouts and outbound TLS configuration.
     pub fn new(
         endpoint_url: &str,
         connect_timeout: Duration,
         request_timeout: Duration,
+        tls_cfg: &OutboundTlsConfig,
     ) -> Result<Self, PluginError> {
         let endpoint = OtlpGrpcEndpoint::parse(endpoint_url)?;
 
-        let tls_connector = if endpoint.is_tls {
-            let root_store = rustls::RootCertStore::empty();
-            let mut config = rustls::ClientConfig::builder_with_provider(Arc::new(
-                rustls::crypto::aws_lc_rs::default_provider(),
-            ))
-            .with_safe_default_protocol_versions()
-            .map_err(|e| PluginError::Tls(format!("Failed to set TLS protocol versions: {e}")))?
-            .with_root_certificates(root_store)
-            .with_no_client_auth();
-
-            config.alpn_protocols = vec![b"h2".to_vec()];
-            Some(TlsConnector::from(Arc::new(config)))
+        let tls_config = if endpoint.is_tls {
+            Some(tls_cfg.build_client_config(&["h2"])?)
         } else {
             None
         };
@@ -179,7 +171,7 @@ impl OtlpMetricsGrpcClient {
         Ok(Self {
             endpoint,
             send_request: None,
-            tls_connector,
+            tls_config,
             connect_timeout,
             request_timeout,
         })
@@ -206,27 +198,26 @@ impl OtlpMetricsGrpcClient {
         let _ = tcp.set_nodelay(true);
 
         let io_stream = if self.endpoint.is_tls {
-            let connector = self
-                .tls_connector
+            let config = self
+                .tls_config
                 .as_ref()
-                .ok_or_else(|| PluginError::Tls("TLS connector not initialized".into()))?;
-            let server_name =
-                rustls::pki_types::ServerName::try_from(self.endpoint.host.clone())
-                    .map_err(|e| PluginError::Tls(format!("Invalid DNS server name: {e}")))?;
+                .ok_or_else(|| PluginError::Tls("TLS config not initialized".into()))?;
 
-            let tls_stream =
-                tokio::time::timeout(self.connect_timeout, connector.connect(server_name, tcp))
-                    .await
-                    .map_err(|_| {
-                        PluginError::Tls(format!(
-                            "TLS handshake timeout to gRPC collector at {addr_str}"
-                        ))
-                    })?
-                    .map_err(|e| {
-                        PluginError::Tls(format!(
-                            "TLS handshake failed to gRPC collector at {addr_str}: {e}"
-                        ))
-                    })?;
+            let tls_stream = tokio::time::timeout(
+                self.connect_timeout,
+                velda_tls::client::connect(tcp, config, &self.endpoint.host),
+            )
+            .await
+            .map_err(|_| {
+                PluginError::Tls(format!(
+                    "TLS handshake timeout to gRPC collector at {addr_str}"
+                ))
+            })?
+            .map_err(|e| {
+                PluginError::Tls(format!(
+                    "TLS handshake failed to gRPC collector at {addr_str}: {e}"
+                ))
+            })?;
 
             GrpcIoStream::Tls(Box::new(tls_stream))
         } else {

@@ -124,7 +124,11 @@ impl AcmeCertRotatorPlugin {
     ) -> Result<Self, PluginError> {
         let cron = CronSchedule::parse(&config.schedule)?;
         let storage = CertStorage::new(&config.storage_dir)?;
-        let client = AcmeClient::new(Duration::from_secs(10), Duration::from_secs(30));
+        let client = AcmeClient::new(
+            Duration::from_secs(10),
+            Duration::from_secs(30),
+            &config.tls,
+        )?;
         let challenge_store = ChallengeStore::new();
 
         let router_registry = match (router, listener_id) {

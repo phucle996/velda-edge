@@ -1,6 +1,33 @@
 //! Declarative Plugin Configuration definition.
 
+use std::sync::Arc;
+
 use serde::{Deserialize, Serialize};
+
+/// Upstream backend TLS configuration for background outbound HTTP/gRPC clients.
+#[derive(Debug, Clone, PartialEq, Eq, Default, Serialize, Deserialize)]
+pub struct OutboundTlsConfig {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub ca_pem: Option<String>,
+    #[serde(default)]
+    pub insecure_skip_verify: bool,
+}
+
+impl OutboundTlsConfig {
+    /// Compiles this configuration into an `Arc<rustls::ClientConfig>` with the specified ALPN protocols.
+    pub fn build_client_config(
+        &self,
+        alpn: &[&str],
+    ) -> Result<Arc<rustls::ClientConfig>, velda_tls::TlsError> {
+        velda_tls::ClientTlsConfig {
+            alpn: alpn.iter().map(|s| s.to_string()).collect(),
+            ca_pem: self.ca_pem.clone(),
+            insecure_skip_verify: self.insecure_skip_verify,
+            ..Default::default()
+        }
+        .build()
+    }
+}
 
 /// Generic configuration container for a loaded plugin instance.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]

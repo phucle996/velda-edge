@@ -11,14 +11,17 @@ use std::time::Duration;
 
 use base64::Engine;
 use base64::engine::general_purpose::URL_SAFE_NO_PAD;
+use rustls::ClientConfig;
 use serde::Deserialize;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::TcpStream;
-use tokio_rustls::TlsConnector;
 use tokio_rustls::client::TlsStream;
 
 use super::crypto::{AccountKey, KeyIdentifier};
+use crate::config::OutboundTlsConfig;
 use crate::error::PluginError;
+
+pub const MAX_ACME_RESPONSE_BYTES: usize = 256 * 1024; // 256 KB cap
 
 /// RFC 8555 §7.1.1 Directory Object.
 #[derive(Debug, Clone, Deserialize)]
@@ -174,30 +177,25 @@ fn classify_header(name: &[u8]) -> KnownHeader {
 
 /// Async ACME Protocol Client driving directory discovery, account, orders, and challenges.
 pub struct AcmeClient {
-    tls_connector: Option<TlsConnector>,
+    tls_config: Arc<ClientConfig>,
     connect_timeout: Duration,
     request_timeout: Duration,
 }
 
 impl AcmeClient {
-    /// Creates a new ACME client with explicit timeouts.
-    pub fn new(connect_timeout: Duration, request_timeout: Duration) -> Self {
-        // Build TLS connector with standard crypto provider
-        let root_store = rustls::RootCertStore::empty();
-        // Add native/system root store or fallback
-        let config = rustls::ClientConfig::builder_with_provider(Arc::new(
-            rustls::crypto::aws_lc_rs::default_provider(),
-        ))
-        .with_safe_default_protocol_versions()
-        .expect("valid protocol versions")
-        .with_root_certificates(root_store)
-        .with_no_client_auth();
+    /// Creates a new ACME client with explicit timeouts and outbound TLS configuration.
+    pub fn new(
+        connect_timeout: Duration,
+        request_timeout: Duration,
+        tls_cfg: &OutboundTlsConfig,
+    ) -> Result<Self, PluginError> {
+        let tls_config = tls_cfg.build_client_config(&["http/1.1"])?;
 
-        Self {
-            tls_connector: Some(TlsConnector::from(Arc::new(config))),
+        Ok(Self {
+            tls_config,
             connect_timeout,
             request_timeout,
-        }
+        })
     }
 
     /// Discovers directory endpoints from the base directory URL.
@@ -680,7 +678,7 @@ impl AcmeClient {
 
         stream.flush().await.map_err(PluginError::Io)?;
 
-        // Read complete response
+        // Read complete response up to buffer limit
         let mut resp_raw = Vec::with_capacity(4096);
         let mut buf = [0u8; 4096];
         loop {
@@ -692,6 +690,11 @@ impl AcmeClient {
                 break;
             }
             resp_raw.extend_from_slice(&buf[..n]);
+            if resp_raw.len() > MAX_ACME_RESPONSE_BYTES {
+                return Err(PluginError::Config(format!(
+                    "ACME response exceeded maximum allowable size ({MAX_ACME_RESPONSE_BYTES} bytes)"
+                )));
+            }
         }
 
         Self::parse_http_response(&resp_raw)
@@ -710,18 +713,13 @@ impl AcmeClient {
             .map_err(PluginError::Io)?;
 
         if is_tls {
-            let connector = self
-                .tls_connector
-                .as_ref()
-                .ok_or_else(|| PluginError::Config("TLS connector is uninitialized".into()))?;
-            let server_name = rustls::pki_types::ServerName::try_from(host.to_string())
-                .map_err(|e| PluginError::Config(format!("Invalid DNS name '{host}': {e}")))?;
-
-            let tls =
-                tokio::time::timeout(self.connect_timeout, connector.connect(server_name, tcp))
-                    .await
-                    .map_err(|_| PluginError::Config(format!("TLS handshake timeout to '{addr}'")))?
-                    .map_err(|e| PluginError::Tls(format!("TLS handshake failed: {e}")))?;
+            let tls = tokio::time::timeout(
+                self.connect_timeout,
+                velda_tls::client::connect(tcp, &self.tls_config, host),
+            )
+            .await
+            .map_err(|_| PluginError::Config(format!("TLS handshake timeout to '{addr}'")))?
+            .map_err(|e| PluginError::Tls(format!("TLS handshake failed: {e}")))?;
 
             Ok(ClientStream::Tls(Box::new(tls)))
         } else {
@@ -803,5 +801,10 @@ mod tests {
         assert_eq!(r.header("Location"), Some("http://x/y"));
         assert_eq!(r.header("content-type"), None);
         assert_eq!(r.body, b"body");
+    }
+
+    #[test]
+    fn acme_response_limit_is_256kb() {
+        assert_eq!(MAX_ACME_RESPONSE_BYTES, 256 * 1024);
     }
 }

@@ -27,6 +27,9 @@ pub struct AcmeCertRotatorConfig {
     pub schedule: String,
     /// Directory holding the account key and per-domain LKG certificates.
     pub storage_dir: String,
+    /// Outbound TLS settings for connecting to ACME directory and CA endpoints.
+    #[serde(default)]
+    pub tls: crate::config::OutboundTlsConfig,
 }
 
 /// Validates ACME Certificate Rotator configuration strictly according to production standards.
@@ -121,5 +124,6 @@ pub fn validate_acme_cert_rotator_config(
         renew_before_days: cfg.renew_before_days,
         schedule: schedule.join(" "),
         storage_dir: storage_dir.to_string(),
+        tls: cfg.tls,
     })
 }

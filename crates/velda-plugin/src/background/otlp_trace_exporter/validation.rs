@@ -28,6 +28,9 @@ pub struct OtlpTraceExporterConfig {
     pub request_timeout_ms: u64,
     /// Optional HTTP/gRPC custom headers (use `{}` if no custom headers are required).
     pub headers: HashMap<String, String>,
+    /// Outbound TLS settings for connecting to HTTPS/gRPCs OTLP trace endpoints.
+    #[serde(default)]
+    pub tls: crate::config::OutboundTlsConfig,
 }
 
 /// Validates [`OtlpTraceExporterConfig`] at configuration compilation time.

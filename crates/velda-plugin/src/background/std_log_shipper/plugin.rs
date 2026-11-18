@@ -9,7 +9,7 @@
 //! │        ▼ AccessLogRecord (64B)                                                         │
 //! │   [LogStore SPSC Ring Buffers]                                                         │
 //! │        │                                                                               │
-//! │        ▼ Periodic flush_all_lanes() & subscriber.drain_batches()                       │
+//! │        ▼ subscriber.drain_batches()                                                     │
 //! │   Batched Arc<[AccessLogRecord]> Slices                                                │
 //! │        │                                                                               │
 //! │        ▼ format_std_log_payload() (Zero Heap Reallocations)                            │
@@ -100,8 +100,6 @@ impl BackgroundPlugin for StdLogShipperPlugin {
                     _ = interval.tick() => false,
                     _ = shutdown.changed() => true,
                 };
-
-                self.log_store.flush_all_lanes(self.config.max_batch_size);
 
                 let batches = subscriber.drain_batches(64);
                 let record_count =

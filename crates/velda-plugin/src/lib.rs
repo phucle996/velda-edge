@@ -27,7 +27,7 @@ pub mod validation;
 // (e.g. `velda_plugin::pre_route::WafLitePlugin`) so the phase stays visible at call sites.
 pub use background::{BackgroundPlugin, spawn_background_plugins};
 pub use capability::{AccessLevel, Direction, PluginCapability, SupportedProtocols};
-pub use config::PluginConfig;
+pub use config::{OutboundTlsConfig, PluginConfig};
 pub use error::PluginError;
 pub use factory::{
     LoadedPlugin, build_route_plugin_plan, instantiate_plugin, wire_plugin_dependencies,

@@ -84,7 +84,7 @@ impl JwksRotatorPlugin {
             })?;
         let parsed_config = raw_config.validate_and_sanitize()?;
 
-        let fetcher = JwksFetcher::new(parsed_config.request_timeout_secs);
+        let fetcher = JwksFetcher::new(parsed_config.request_timeout_secs, &parsed_config.tls)?;
 
         Ok(Self {
             id: config.id.clone(),

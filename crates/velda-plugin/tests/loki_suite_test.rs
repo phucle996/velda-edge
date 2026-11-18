@@ -122,6 +122,7 @@ async fn test_loki_log_shipper_multi_protocol_end_to_end() {
         connect_timeout_ms: 1000,
         request_timeout_ms: 1000,
         labels,
+        tls: Default::default(),
     };
 
     let shipper = Arc::new(
@@ -143,6 +144,7 @@ async fn test_loki_log_shipper_multi_protocol_end_to_end() {
 
     assert!(store.emit_on_core(0, &http_rec));
     assert!(store.emit_on_core(1, &grpc_rec));
+    store.flush_all_lanes(256);
 
     tokio::time::sleep(Duration::from_millis(200)).await;
     let _ = shutdown_tx.send(true);
@@ -248,6 +250,7 @@ async fn test_loki_log_shipper_grpc_end_to_end() {
         connect_timeout_ms: 1000,
         request_timeout_ms: 1000,
         labels,
+        tls: Default::default(),
     };
 
     let shipper = Arc::new(
@@ -267,6 +270,7 @@ async fn test_loki_log_shipper_grpc_end_to_end() {
 
     assert!(store.emit_on_core(0, &http_rec));
     assert!(store.emit_on_core(1, &raw_rec));
+    store.flush_all_lanes(256);
 
     tokio::time::sleep(Duration::from_millis(200)).await;
     let _ = shutdown_tx.send(true);

@@ -329,18 +329,40 @@ async fn test_exporter_concurrency_limiting() {
 
     tokio::time::sleep(Duration::from_millis(50)).await;
 
-    // Normal request succeeds with limit 1
-    {
-        let mut stream = TcpStream::connect(&addr).await.unwrap();
-        stream
-            .write_all(b"GET /metrics HTTP/1.1\r\nHost: localhost\r\n\r\n")
-            .await
-            .unwrap();
+    // 1. Connection 1 holds the only permit (max_concurrency: 1)
+    let mut conn1 = TcpStream::connect(&addr).await.unwrap();
 
-        let mut resp = String::new();
-        stream.read_to_string(&mut resp).await.unwrap();
-        assert!(resp.starts_with("HTTP/1.1 200 OK"));
-    }
+    // 2. Connection 2 attempts to connect while conn1 is active -> rejected immediately with 503
+    let mut conn2 = TcpStream::connect(&addr).await.unwrap();
+    let mut resp2 = String::new();
+    conn2.read_to_string(&mut resp2).await.unwrap();
+    assert!(
+        resp2.starts_with("HTTP/1.1 503 Service Unavailable"),
+        "Expected 503 rejection at accept level, got: {resp2}"
+    );
+    assert!(resp2.contains("Max Scrape Concurrency Reached"));
+
+    // 3. Complete connection 1 successfully
+    conn1
+        .write_all(b"GET /metrics HTTP/1.1\r\nHost: localhost\r\n\r\n")
+        .await
+        .unwrap();
+    let mut resp1 = String::new();
+    conn1.read_to_string(&mut resp1).await.unwrap();
+    assert!(resp1.starts_with("HTTP/1.1 200 OK"));
+
+    // 4. After conn1 closes, connection 3 succeeds normally
+    drop(conn1);
+    tokio::time::sleep(Duration::from_millis(20)).await;
+
+    let mut conn3 = TcpStream::connect(&addr).await.unwrap();
+    conn3
+        .write_all(b"GET /metrics HTTP/1.1\r\nHost: localhost\r\n\r\n")
+        .await
+        .unwrap();
+    let mut resp3 = String::new();
+    conn3.read_to_string(&mut resp3).await.unwrap();
+    assert!(resp3.starts_with("HTTP/1.1 200 OK"));
 
     let _ = shutdown_tx.send(true);
     let _ = server_task.await;

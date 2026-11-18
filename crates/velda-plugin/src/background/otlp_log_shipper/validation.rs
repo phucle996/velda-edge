@@ -28,6 +28,9 @@ pub struct OtlpLogShipperConfig {
     pub request_timeout_ms: u64,
     /// Optional HTTP/gRPC custom headers (use `{}` if no custom headers are required).
     pub headers: HashMap<String, String>,
+    /// Outbound TLS settings for connecting to HTTPS/gRPCs OTLP log endpoints.
+    #[serde(default)]
+    pub tls: crate::config::OutboundTlsConfig,
 }
 
 /// Validates [`OtlpLogShipperConfig`] at configuration compilation time.

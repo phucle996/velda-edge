@@ -158,6 +158,11 @@ async fn test_std_log_shipper_background_subscription_lifecycle() {
         async move { p.run(shutdown_rx).await }
     });
 
+    // Wait until background runner has registered its subscriber
+    while log_store.active_subscriber_count.load(Ordering::Acquire) == 0 {
+        tokio::time::sleep(Duration::from_millis(5)).await;
+    }
+
     // Emit 10 records across lanes
     for i in 0..10 {
         let rec = AccessLogRecord::from_scalars(
@@ -179,6 +184,7 @@ async fn test_std_log_shipper_background_subscription_lifecycle() {
         );
         log_store.emit_on_core(0, &rec);
     }
+    log_store.flush_all_lanes(128);
 
     // Wait for the background loop to flush and process
     tokio::time::sleep(Duration::from_millis(150)).await;

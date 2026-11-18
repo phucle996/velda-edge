@@ -27,6 +27,7 @@ pub mod prometheus_exporter;
 pub mod statsd_exporter;
 pub mod std_log_shipper;
 
+pub use crate::config::OutboundTlsConfig;
 pub use acme_cert_rotator::{AcmeCertRotatorConfig, AcmeCertRotatorPlugin};
 pub use health_probe::{HealthProbeConfig, HealthProbePlugin, HealthState};
 pub use jwks_rotator::{JwksRotatorConfig, JwksRotatorPlugin};

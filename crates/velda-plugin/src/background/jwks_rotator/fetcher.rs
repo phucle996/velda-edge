@@ -42,11 +42,12 @@ use std::io::Write as _;
 use std::sync::Arc;
 use std::time::Duration;
 
+use rustls::ClientConfig;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::TcpStream;
-use tokio_rustls::TlsConnector;
 use tokio_rustls::client::TlsStream;
 
+use crate::config::OutboundTlsConfig;
 use crate::error::PluginError;
 
 const MAX_JWKS_RESPONSE_BYTES: usize = 64 * 1024; // 64 KB cap
@@ -81,31 +82,24 @@ impl ClientStream {
 
 /// Standalone, non-blocking HTTP client for fetching JWKS keys.
 pub struct JwksFetcher {
-    tls_connector: Option<TlsConnector>,
+    tls_config: Arc<ClientConfig>,
     connect_timeout: Duration,
     request_timeout: Duration,
 }
 
 impl JwksFetcher {
-    /// Constructs a new JWKS fetcher with the specified request timeout.
-    pub fn new(request_timeout_secs: u64) -> Self {
+    /// Constructs a new JWKS fetcher with the specified request timeout and outbound TLS configuration.
+    pub fn new(request_timeout_secs: u64, tls: &OutboundTlsConfig) -> Result<Self, PluginError> {
         let timeout = Duration::from_secs(request_timeout_secs);
         let connect_timeout = timeout.min(Duration::from_secs(5));
 
-        let root_store = rustls::RootCertStore::empty();
-        let tls_config = rustls::ClientConfig::builder_with_provider(Arc::new(
-            rustls::crypto::aws_lc_rs::default_provider(),
-        ))
-        .with_safe_default_protocol_versions()
-        .expect("valid protocol versions")
-        .with_root_certificates(root_store)
-        .with_no_client_auth();
+        let client_config = tls.build_client_config(&["http/1.1"])?;
 
-        Self {
-            tls_connector: Some(TlsConnector::from(Arc::new(tls_config))),
+        Ok(Self {
+            tls_config: client_config,
             connect_timeout,
             request_timeout: timeout,
-        }
+        })
     }
 
     /// Fetches the JWKS JSON body from the specified URL over HTTP or HTTPS.
@@ -188,18 +182,13 @@ impl JwksFetcher {
             .map_err(PluginError::Io)?;
 
         if is_tls {
-            let connector = self
-                .tls_connector
-                .as_ref()
-                .ok_or_else(|| PluginError::Config("TLS connector is uninitialized".into()))?;
-            let server_name = rustls::pki_types::ServerName::try_from(host.to_string())
-                .map_err(|e| PluginError::Config(format!("Invalid DNS name '{host}': {e}")))?;
-
-            let tls =
-                tokio::time::timeout(self.connect_timeout, connector.connect(server_name, tcp))
-                    .await
-                    .map_err(|_| PluginError::Config(format!("TLS handshake timeout to '{addr}'")))?
-                    .map_err(|e| PluginError::Tls(format!("TLS handshake failed: {e}")))?;
+            let tls = tokio::time::timeout(
+                self.connect_timeout,
+                velda_tls::client::connect(tcp, &self.tls_config, host),
+            )
+            .await
+            .map_err(|_| PluginError::Config(format!("TLS handshake timeout to '{addr}'")))?
+            .map_err(|e| PluginError::Tls(format!("TLS handshake failed: {e}")))?;
 
             Ok(ClientStream::Tls(Box::new(tls)))
         } else {

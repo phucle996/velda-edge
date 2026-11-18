@@ -15,6 +15,7 @@ use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::TcpListener;
 use velda_core::{CompletionReason, GrpcStatus, HttpMethod, PipeKind};
 use velda_observability::{AccessLogRecord, MetricsStore};
+use velda_plugin::OutboundTlsConfig;
 
 use velda_plugin::background::otlp_log_shipper::json::{
     OtlpJsonEnvelope, OtlpLogClient, format_otlp_records_json,
@@ -92,8 +93,13 @@ async fn spawn_mock_collector(
 async fn test_otlp_metrics_persistent_connection_reuse() {
     let (url, conns, reqs, _shutdown) = spawn_mock_collector("/v1/metrics").await;
 
-    let mut client = OtlpMetricsClient::new(&url, Duration::from_secs(5), Duration::from_secs(10))
-        .expect("Client initialized");
+    let mut client = OtlpMetricsClient::new(
+        &url,
+        Duration::from_secs(5),
+        Duration::from_secs(10),
+        &OutboundTlsConfig::default(),
+    )
+    .expect("Client initialized");
     let store = Arc::new(MetricsStore::new());
     let snapshot = store.snapshot();
     let payload = format_otlp_metrics_json(&snapshot, "test-edge");
@@ -161,8 +167,13 @@ async fn test_otlp_metrics_transparent_reconnect() {
     });
 
     let url = format!("http://{addr}/v1/metrics");
-    let mut client =
-        OtlpMetricsClient::new(&url, Duration::from_secs(5), Duration::from_secs(10)).unwrap();
+    let mut client = OtlpMetricsClient::new(
+        &url,
+        Duration::from_secs(5),
+        Duration::from_secs(10),
+        &OutboundTlsConfig::default(),
+    )
+    .unwrap();
     let headers = HeaderMap::new();
 
     let s1 = client.send_metrics(b"{}", &headers).await.unwrap();
@@ -185,8 +196,13 @@ async fn test_otlp_metrics_transparent_reconnect() {
 async fn test_otlp_log_shipper_batching_and_send() {
     let (url, conns, reqs, _shutdown) = spawn_mock_collector("/v1/logs").await;
 
-    let mut client = OtlpLogClient::new(&url, Duration::from_secs(5), Duration::from_secs(10))
-        .expect("Client initialized");
+    let mut client = OtlpLogClient::new(
+        &url,
+        Duration::from_secs(5),
+        Duration::from_secs(10),
+        &OutboundTlsConfig::default(),
+    )
+    .expect("Client initialized");
 
     let rec1 = AccessLogRecord::from_scalars(
         0x4bf9_2f35_77b3_4da6,
@@ -303,9 +319,13 @@ async fn test_otlp_metrics_grpc_export() {
     let snapshot = store.snapshot();
     let proto_bytes = format_otlp_metrics_proto(&snapshot, "velda-test-grpc");
 
-    let mut client =
-        OtlpMetricsGrpcClient::new(&endpoint, Duration::from_secs(5), Duration::from_secs(10))
-            .unwrap();
+    let mut client = OtlpMetricsGrpcClient::new(
+        &endpoint,
+        Duration::from_secs(5),
+        Duration::from_secs(10),
+        &OutboundTlsConfig::default(),
+    )
+    .unwrap();
     let headers = HeaderMap::new();
 
     // First flush
@@ -355,6 +375,7 @@ async fn test_otlp_logs_grpc_export() {
         &logs_endpoint,
         Duration::from_secs(5),
         Duration::from_secs(10),
+        &OutboundTlsConfig::default(),
     )
     .unwrap();
     let headers = HeaderMap::new();

@@ -76,6 +76,7 @@ async fn trace_exporter_e2e() {
         connect_timeout_ms: 1000,
         request_timeout_ms: 2000,
         headers: HashMap::new(),
+        tls: Default::default(),
     };
 
     let exporter = Arc::new(
@@ -111,6 +112,7 @@ async fn trace_exporter_e2e() {
 
         store.emit_on_core((i % 2) as usize, &span);
     }
+    store.flush_all_lanes(100);
 
     // Wait for exporter to tick, drain, format, and ship
     tokio::time::sleep(Duration::from_millis(80)).await;

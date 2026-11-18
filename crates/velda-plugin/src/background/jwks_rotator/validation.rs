@@ -62,6 +62,10 @@ pub struct JwksRotatorConfig {
     /// Whether to preserve the static key configured in `jwt_auth` at Slot 0.
     #[serde(default = "default_true")]
     pub preserve_static_key: bool,
+
+    /// Outbound TLS settings for connecting to HTTPS JWKS endpoints.
+    #[serde(default)]
+    pub tls: crate::config::OutboundTlsConfig,
 }
 
 /// Validates JWKS Key Rotator configuration schema and value boundaries.

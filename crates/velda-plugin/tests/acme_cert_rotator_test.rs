@@ -226,6 +226,7 @@ async fn test_acme_cert_rotator_e2e_lifecycle() {
         renew_before_days: 30,
         schedule: "0 2 * * *".to_string(),
         storage_dir: temp_dir.path().to_str().unwrap().to_string(),
+        tls: Default::default(),
     };
 
     // 1. Setup in-memory Router and dynamic SniResolver

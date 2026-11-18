@@ -168,83 +168,217 @@ impl BackgroundPlugin for OtlpMetricsExporterPlugin {
             let request_timeout = Duration::from_millis(self.config.request_timeout_ms);
 
             if is_grpc {
-                let mut grpc_client = OtlpMetricsGrpcClient::new(
+                let mut grpc_client = Some(OtlpMetricsGrpcClient::new(
                     &self.config.endpoint,
                     connect_timeout,
                     request_timeout,
-                )?;
+                    &self.config.tls,
+                )?);
                 let mut proto_template = OtlpProtoTemplate::new(&self.config.service_name);
                 let mut proto_buf = Vec::with_capacity(32 * 1024);
+                let mut consecutive_failures: u32 = 0;
+                let mut cooldown_until: Option<tokio::time::Instant> = None;
 
                 loop {
-                    tokio::select! {
-                        _ = ticker.tick() => {
-                            let snapshot = self.metrics_store.snapshot();
-                            format_otlp_metrics_proto_into(&mut proto_template, &snapshot, &mut proto_buf);
+                    let is_shutting_down = tokio::select! {
+                        _ = ticker.tick() => false,
+                        _ = shutdown.changed() => true,
+                    };
 
-                            match grpc_client.send_metrics(&proto_buf, &self.custom_headers).await {
-                                Ok(()) => {
-                                    self.flushed_count.fetch_add(1, Ordering::Relaxed);
-                                    tracing::debug!(plugin_id = %self.id, "Flushed OTLP metrics batch via gRPC successfully");
-                                }
-                                Err(e) => {
-                                    self.failed_count.fetch_add(1, Ordering::Relaxed);
-                                    tracing::error!(plugin_id = %self.id, error = %e, "Failed to send OTLP metrics via gRPC to collector");
-                                }
-                            }
+                    if is_shutting_down {
+                        tracing::info!(
+                            plugin_id = %self.id,
+                            "Shutting down OTLP metrics background exporter (gRPC)"
+                        );
+                        break;
+                    }
+
+                    if cooldown_until.is_some_and(|until| tokio::time::Instant::now() < until) {
+                        tracing::debug!(
+                            plugin_id = %self.id,
+                            "OTLP gRPC metrics exporter in cool-down; skipping snapshot transmission"
+                        );
+                        continue;
+                    }
+
+                    if cooldown_until.is_some() {
+                        cooldown_until = None;
+                        grpc_client = Some(OtlpMetricsGrpcClient::new(
+                            &self.config.endpoint,
+                            connect_timeout,
+                            request_timeout,
+                            &self.config.tls,
+                        )?);
+                        consecutive_failures = 0;
+                    }
+
+                    let snapshot = self.metrics_store.snapshot();
+                    format_otlp_metrics_proto_into(&mut proto_template, &snapshot, &mut proto_buf);
+
+                    if grpc_client.is_none() {
+                        grpc_client = Some(OtlpMetricsGrpcClient::new(
+                            &self.config.endpoint,
+                            connect_timeout,
+                            request_timeout,
+                            &self.config.tls,
+                        )?);
+                    }
+
+                    let client = grpc_client.as_mut().unwrap();
+                    match client.send_metrics(&proto_buf, &self.custom_headers).await {
+                        Ok(()) => {
+                            consecutive_failures = 0;
+                            self.flushed_count.fetch_add(1, Ordering::Relaxed);
+                            tracing::debug!(
+                                plugin_id = %self.id,
+                                "Flushed OTLP metrics batch via gRPC successfully"
+                            );
                         }
-                        _ = shutdown.changed() => {
-                            tracing::info!(plugin_id = %self.id, "Shutting down OTLP metrics background exporter (gRPC)");
-                            break;
+                        Err(e) => {
+                            consecutive_failures += 1;
+                            self.failed_count.fetch_add(1, Ordering::Relaxed);
+                            tracing::error!(
+                                plugin_id = %self.id,
+                                error = %e,
+                                "Failed to send OTLP metrics via gRPC to collector"
+                            );
+
+                            if consecutive_failures <= 10 {
+                                let backoff_ms = (100u64
+                                    .saturating_mul(1u64 << (consecutive_failures - 1).min(31)))
+                                .min(2000);
+                                tokio::time::sleep(Duration::from_millis(backoff_ms)).await;
+                            } else {
+                                tracing::warn!(
+                                    plugin_id = %self.id,
+                                    "Shipper failed 10 consecutive times; tearing down connection and entering 30s cool-down"
+                                );
+                                grpc_client = None;
+                                cooldown_until =
+                                    Some(tokio::time::Instant::now() + Duration::from_secs(30));
+                                consecutive_failures = 0;
+                            }
                         }
                     }
                 }
             } else {
-                let mut http_client = OtlpMetricsClient::new(
+                let mut http_client = Some(OtlpMetricsClient::new(
                     &self.config.endpoint,
                     connect_timeout,
                     request_timeout,
-                )?;
+                    &self.config.tls,
+                )?);
                 let json_template = OtlpJsonTemplate::new(&self.config.service_name);
                 let mut json_buf = Vec::with_capacity(64 * 1024);
+                let mut consecutive_failures: u32 = 0;
+                let mut cooldown_until: Option<tokio::time::Instant> = None;
 
                 loop {
-                    tokio::select! {
-                        _ = ticker.tick() => {
-                            let snapshot = self.metrics_store.snapshot();
-                            json_template.format_into(&snapshot, &mut json_buf);
+                    let is_shutting_down = tokio::select! {
+                        _ = ticker.tick() => false,
+                        _ = shutdown.changed() => true,
+                    };
 
-                            match http_client.send_metrics(&json_buf, &self.custom_headers).await {
-                                Ok(status) => {
-                                    if (200..300).contains(&status) {
-                                        self.flushed_count.fetch_add(1, Ordering::Relaxed);
-                                        tracing::debug!(
-                                            plugin_id = %self.id,
-                                            status = status,
-                                            "Flushed OTLP metrics batch successfully"
-                                        );
-                                    } else {
-                                        self.failed_count.fetch_add(1, Ordering::Relaxed);
-                                        tracing::warn!(
-                                            plugin_id = %self.id,
-                                            status = status,
-                                            "OTLP metrics collector rejected payload"
-                                        );
-                                    }
-                                }
-                                Err(e) => {
-                                    self.failed_count.fetch_add(1, Ordering::Relaxed);
-                                    tracing::error!(
-                                        plugin_id = %self.id,
-                                        error = %e,
-                                        "Failed to send OTLP metrics to collector"
-                                    );
-                                }
+                    if is_shutting_down {
+                        tracing::info!(
+                            plugin_id = %self.id,
+                            "Shutting down OTLP metrics background exporter"
+                        );
+                        break;
+                    }
+
+                    if cooldown_until.is_some_and(|until| tokio::time::Instant::now() < until) {
+                        tracing::debug!(
+                            plugin_id = %self.id,
+                            "OTLP HTTP metrics exporter in cool-down; skipping snapshot transmission"
+                        );
+                        continue;
+                    }
+
+                    if cooldown_until.is_some() {
+                        cooldown_until = None;
+                        http_client = Some(OtlpMetricsClient::new(
+                            &self.config.endpoint,
+                            connect_timeout,
+                            request_timeout,
+                            &self.config.tls,
+                        )?);
+                        consecutive_failures = 0;
+                    }
+
+                    let snapshot = self.metrics_store.snapshot();
+                    json_template.format_into(&snapshot, &mut json_buf);
+
+                    if http_client.is_none() {
+                        http_client = Some(OtlpMetricsClient::new(
+                            &self.config.endpoint,
+                            connect_timeout,
+                            request_timeout,
+                            &self.config.tls,
+                        )?);
+                    }
+
+                    let client = http_client.as_mut().unwrap();
+                    let send_result = client.send_metrics(&json_buf, &self.custom_headers).await;
+                    match send_result {
+                        Ok(status) if (200..300).contains(&status) => {
+                            consecutive_failures = 0;
+                            self.flushed_count.fetch_add(1, Ordering::Relaxed);
+                            tracing::debug!(
+                                plugin_id = %self.id,
+                                status = status,
+                                "Flushed OTLP metrics batch successfully"
+                            );
+                        }
+                        Ok(status) => {
+                            consecutive_failures += 1;
+                            self.failed_count.fetch_add(1, Ordering::Relaxed);
+                            tracing::warn!(
+                                plugin_id = %self.id,
+                                status = status,
+                                "OTLP metrics collector rejected payload"
+                            );
+
+                            if consecutive_failures <= 10 {
+                                let backoff_ms = (100u64
+                                    .saturating_mul(1u64 << (consecutive_failures - 1).min(31)))
+                                .min(2000);
+                                tokio::time::sleep(Duration::from_millis(backoff_ms)).await;
+                            } else {
+                                tracing::warn!(
+                                    plugin_id = %self.id,
+                                    "Shipper failed 10 consecutive times; tearing down connection and entering 30s cool-down"
+                                );
+                                http_client = None;
+                                cooldown_until =
+                                    Some(tokio::time::Instant::now() + Duration::from_secs(30));
+                                consecutive_failures = 0;
                             }
                         }
-                        _ = shutdown.changed() => {
-                            tracing::info!(plugin_id = %self.id, "Shutting down OTLP metrics background exporter");
-                            break;
+                        Err(e) => {
+                            consecutive_failures += 1;
+                            self.failed_count.fetch_add(1, Ordering::Relaxed);
+                            tracing::error!(
+                                plugin_id = %self.id,
+                                error = %e,
+                                "Failed to send OTLP metrics to collector"
+                            );
+
+                            if consecutive_failures <= 10 {
+                                let backoff_ms = (100u64
+                                    .saturating_mul(1u64 << (consecutive_failures - 1).min(31)))
+                                .min(2000);
+                                tokio::time::sleep(Duration::from_millis(backoff_ms)).await;
+                            } else {
+                                tracing::warn!(
+                                    plugin_id = %self.id,
+                                    "Shipper failed 10 consecutive times; tearing down connection and entering 30s cool-down"
+                                );
+                                http_client = None;
+                                cooldown_until =
+                                    Some(tokio::time::Instant::now() + Duration::from_secs(30));
+                                consecutive_failures = 0;
+                            }
                         }
                     }
                 }
@@ -294,5 +428,47 @@ mod tests {
             OtlpMetricsExporterPlugin::from_config(&p_cfg).expect("Must parse valid config");
         assert_eq!(plugin.config.protocol, "grpc");
         assert_eq!(plugin.config.interval_secs, 15);
+    }
+
+    #[test]
+    fn test_exponential_backoff_progression() {
+        for failures in 1..=10 {
+            let backoff_ms = (100u64.saturating_mul(1u64 << (failures - 1).min(31))).min(2000);
+            match failures {
+                1 => assert_eq!(backoff_ms, 100),
+                2 => assert_eq!(backoff_ms, 200),
+                3 => assert_eq!(backoff_ms, 400),
+                4 => assert_eq!(backoff_ms, 800),
+                5 => assert_eq!(backoff_ms, 1600),
+                6..=10 => assert_eq!(backoff_ms, 2000),
+                _ => unreachable!(),
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn test_otlp_metrics_exporter_shutdown() {
+        let store = Arc::new(MetricsStore::new());
+        let config: OtlpMetricsExporterConfig = serde_json::from_value(serde_json::json!({
+            "protocol": "http",
+            "endpoint": "http://127.0.0.1:4318/v1/metrics",
+            "interval_secs": 1,
+            "connect_timeout_ms": 1000,
+            "request_timeout_ms": 1000,
+            "service_name": "velda-edge",
+            "headers": {}
+        }))
+        .unwrap();
+
+        let plugin = Arc::new(
+            OtlpMetricsExporterPlugin::with_store("otlp_metrics_test", config, store).unwrap(),
+        );
+        let (tx, rx) = watch::channel(false);
+
+        let handle = tokio::spawn(async move { plugin.run(rx).await });
+
+        tx.send(true).unwrap();
+        let res = handle.await.unwrap();
+        assert!(res.is_ok());
     }
 }

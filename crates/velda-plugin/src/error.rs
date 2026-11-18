@@ -55,3 +55,9 @@ pub enum PluginError {
     #[error("Invalid configuration for plugin '{plugin_id}': {reason}")]
     InvalidPluginConfig { plugin_id: String, reason: String },
 }
+
+impl From<velda_tls::TlsError> for PluginError {
+    fn from(err: velda_tls::TlsError) -> Self {
+        Self::Tls(err.to_string())
+    }
+}

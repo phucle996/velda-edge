@@ -26,6 +26,9 @@ pub struct OtlpMetricsExporterConfig {
     pub service_name: String,
     /// Optional HTTP/gRPC custom headers (use `{}` if no custom headers are required).
     pub headers: HashMap<String, String>,
+    /// Outbound TLS settings for connecting to HTTPS/gRPCs OTLP metrics endpoints.
+    #[serde(default)]
+    pub tls: crate::config::OutboundTlsConfig,
 }
 
 /// Validates OTLP Metrics Exporter configuration strictly according to production standards.

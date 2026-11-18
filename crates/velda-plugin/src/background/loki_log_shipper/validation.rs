@@ -30,6 +30,9 @@ pub struct LokiLogShipperConfig {
     pub request_timeout_ms: u64,
     /// Additional static stream labels merged into every Loki stream descriptor.
     pub labels: HashMap<String, String>,
+    /// Outbound TLS settings for connecting to HTTPS/gRPCs Loki push endpoints.
+    #[serde(default)]
+    pub tls: crate::config::OutboundTlsConfig,
 }
 
 /// Validates [`LokiLogShipperConfig`] at configuration compilation time so invalid endpoints,

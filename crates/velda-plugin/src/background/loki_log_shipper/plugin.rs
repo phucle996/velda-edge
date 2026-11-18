@@ -123,15 +123,18 @@ impl BackgroundPlugin for LokiLogShipperPlugin {
             let request_timeout = Duration::from_millis(self.config.request_timeout_ms);
 
             if is_grpc {
-                let mut grpc_client = LokiLogsGrpcClient::new(
+                let mut grpc_client = Some(LokiLogsGrpcClient::new(
                     &self.config.endpoint,
                     &self.config.tenant_id,
                     connect_timeout,
                     request_timeout,
-                )?;
+                    &self.config.tls,
+                )?);
                 let mut formatter =
                     LokiProtoFormatter::new(&self.config.service_name, &self.config.labels);
                 let mut proto_buf = Vec::with_capacity(32 * 1024);
+                let mut consecutive_failures: u32 = 0;
+                let mut cooldown_until: Option<tokio::time::Instant> = None;
 
                 loop {
                     let is_shutting_down = tokio::select! {
@@ -139,7 +142,30 @@ impl BackgroundPlugin for LokiLogShipperPlugin {
                         _ = shutdown.changed() => true,
                     };
 
-                    self.log_store.flush_all_lanes(self.config.max_batch_size);
+                    if cooldown_until.is_some_and(|until| tokio::time::Instant::now() < until) {
+                        let _ = subscriber.drain_batches(64);
+                        tracing::debug!(
+                            plugin_id = %self.id,
+                            "Loki gRPC log shipper in cool-down; discarded batches to free RAM"
+                        );
+                        if is_shutting_down {
+                            break;
+                        }
+                        continue;
+                    }
+
+                    if cooldown_until.is_some() {
+                        cooldown_until = None;
+                        grpc_client = Some(LokiLogsGrpcClient::new(
+                            &self.config.endpoint,
+                            &self.config.tenant_id,
+                            connect_timeout,
+                            request_timeout,
+                            &self.config.tls,
+                        )?);
+                        consecutive_failures = 0;
+                    }
+
                     let batches = subscriber.drain_batches(64);
 
                     if !batches.is_empty() {
@@ -147,16 +173,44 @@ impl BackgroundPlugin for LokiLogShipperPlugin {
                         drop(batches);
 
                         if record_count > 0 {
-                            match grpc_client
-                                .send_logs(&proto_buf, &self.custom_headers)
-                                .await
-                            {
+                            if grpc_client.is_none() {
+                                grpc_client = Some(LokiLogsGrpcClient::new(
+                                    &self.config.endpoint,
+                                    &self.config.tenant_id,
+                                    connect_timeout,
+                                    request_timeout,
+                                    &self.config.tls,
+                                )?);
+                            }
+
+                            let client = grpc_client.as_mut().unwrap();
+                            match client.send_logs(&proto_buf, &self.custom_headers).await {
                                 Ok(()) => {
+                                    consecutive_failures = 0;
                                     self.shipped_records
                                         .fetch_add(record_count as u64, Ordering::Relaxed);
                                 }
                                 Err(_) => {
+                                    consecutive_failures += 1;
                                     self.failed_pushes.fetch_add(1, Ordering::Relaxed);
+
+                                    if consecutive_failures <= 10 {
+                                        let backoff_ms = (100u64.saturating_mul(
+                                            1u64 << (consecutive_failures - 1).min(31),
+                                        ))
+                                        .min(2000);
+                                        tokio::time::sleep(Duration::from_millis(backoff_ms)).await;
+                                    } else {
+                                        tracing::warn!(
+                                            plugin_id = %self.id,
+                                            "Shipper failed 10 consecutive times; tearing down connection and entering 30s cool-down"
+                                        );
+                                        grpc_client = None;
+                                        cooldown_until = Some(
+                                            tokio::time::Instant::now() + Duration::from_secs(30),
+                                        );
+                                        consecutive_failures = 0;
+                                    }
                                 }
                             }
                         }
@@ -167,15 +221,18 @@ impl BackgroundPlugin for LokiLogShipperPlugin {
                     }
                 }
             } else {
-                let mut http_client = LokiLogClient::new(
+                let mut http_client = Some(LokiLogClient::new(
                     &self.config.endpoint,
                     &self.config.tenant_id,
                     connect_timeout,
                     request_timeout,
-                )?;
+                    &self.config.tls,
+                )?);
                 let mut formatter =
                     LokiJsonFormatter::new(&self.config.service_name, &self.config.labels);
                 let mut json_buf = Vec::with_capacity(32 * 1024);
+                let mut consecutive_failures: u32 = 0;
+                let mut cooldown_until: Option<tokio::time::Instant> = None;
 
                 loop {
                     let is_shutting_down = tokio::select! {
@@ -183,7 +240,30 @@ impl BackgroundPlugin for LokiLogShipperPlugin {
                         _ = shutdown.changed() => true,
                     };
 
-                    self.log_store.flush_all_lanes(self.config.max_batch_size);
+                    if cooldown_until.is_some_and(|until| tokio::time::Instant::now() < until) {
+                        let _ = subscriber.drain_batches(64);
+                        tracing::debug!(
+                            plugin_id = %self.id,
+                            "Loki HTTP log shipper in cool-down; discarded batches to free RAM"
+                        );
+                        if is_shutting_down {
+                            break;
+                        }
+                        continue;
+                    }
+
+                    if cooldown_until.is_some() {
+                        cooldown_until = None;
+                        http_client = Some(LokiLogClient::new(
+                            &self.config.endpoint,
+                            &self.config.tenant_id,
+                            connect_timeout,
+                            request_timeout,
+                            &self.config.tls,
+                        )?);
+                        consecutive_failures = 0;
+                    }
+
                     let batches = subscriber.drain_batches(64);
 
                     if !batches.is_empty() {
@@ -191,13 +271,44 @@ impl BackgroundPlugin for LokiLogShipperPlugin {
                         drop(batches);
 
                         if record_count > 0 {
-                            match http_client.send_logs(&json_buf, &self.custom_headers).await {
+                            if http_client.is_none() {
+                                http_client = Some(LokiLogClient::new(
+                                    &self.config.endpoint,
+                                    &self.config.tenant_id,
+                                    connect_timeout,
+                                    request_timeout,
+                                    &self.config.tls,
+                                )?);
+                            }
+
+                            let client = http_client.as_mut().unwrap();
+                            match client.send_logs(&json_buf, &self.custom_headers).await {
                                 Ok(status) if (200..300).contains(&status) => {
+                                    consecutive_failures = 0;
                                     self.shipped_records
                                         .fetch_add(record_count as u64, Ordering::Relaxed);
                                 }
                                 _ => {
+                                    consecutive_failures += 1;
                                     self.failed_pushes.fetch_add(1, Ordering::Relaxed);
+
+                                    if consecutive_failures <= 10 {
+                                        let backoff_ms = (100u64.saturating_mul(
+                                            1u64 << (consecutive_failures - 1).min(31),
+                                        ))
+                                        .min(2000);
+                                        tokio::time::sleep(Duration::from_millis(backoff_ms)).await;
+                                    } else {
+                                        tracing::warn!(
+                                            plugin_id = %self.id,
+                                            "Shipper failed 10 consecutive times; tearing down connection and entering 30s cool-down"
+                                        );
+                                        http_client = None;
+                                        cooldown_until = Some(
+                                            tokio::time::Instant::now() + Duration::from_secs(30),
+                                        );
+                                        consecutive_failures = 0;
+                                    }
                                 }
                             }
                         }
@@ -226,5 +337,54 @@ impl BackgroundPlugin for LokiLogShipperPlugin {
     #[inline(always)]
     fn direction(&self) -> Direction {
         Direction::Background
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::collections::HashMap;
+
+    #[test]
+    fn test_exponential_backoff_progression() {
+        for failures in 1..=10 {
+            let backoff_ms = (100u64.saturating_mul(1u64 << (failures - 1).min(31))).min(2000);
+            match failures {
+                1 => assert_eq!(backoff_ms, 100),
+                2 => assert_eq!(backoff_ms, 200),
+                3 => assert_eq!(backoff_ms, 400),
+                4 => assert_eq!(backoff_ms, 800),
+                5 => assert_eq!(backoff_ms, 1600),
+                6..=10 => assert_eq!(backoff_ms, 2000),
+                _ => unreachable!(),
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn test_loki_log_shipper_shutdown() {
+        let store = Arc::new(LogStore::new());
+        let config = LokiLogShipperConfig {
+            protocol: "http".to_string(),
+            endpoint: "http://127.0.0.1:3100/loki/api/v1/push".to_string(),
+            tenant_id: "test".to_string(),
+            service_name: "test-service".to_string(),
+            flush_interval_ms: 50,
+            max_batch_size: 100,
+            connect_timeout_ms: 1000,
+            request_timeout_ms: 1000,
+            labels: HashMap::new(),
+            tls: Default::default(),
+        };
+
+        let plugin =
+            Arc::new(LokiLogShipperPlugin::with_store("loki_test", config, store).unwrap());
+        let (tx, rx) = watch::channel(false);
+
+        let handle = tokio::spawn(async move { plugin.run(rx).await });
+
+        tx.send(true).unwrap();
+        let res = handle.await.unwrap();
+        assert!(res.is_ok());
     }
 }
