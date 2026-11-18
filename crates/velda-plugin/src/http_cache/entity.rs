@@ -10,7 +10,7 @@ use std::time::Duration;
 
 use bytes::Bytes;
 use http::StatusCode;
-use velda_core::coarse_time::coarse_now_sec;
+use velda_core::clock::coarse_sec;
 
 /// Pre-compressed wire payload variants for a cached entry.
 ///
@@ -86,7 +86,7 @@ impl CacheEntry {
         raw_body: Option<Bytes>,
         ttl: Duration,
     ) -> Self {
-        let now = coarse_now_sec() as u32;
+        let now = coarse_sec() as u32;
         let ttl_secs = ttl.as_secs().max(1) as u32;
         Self {
             key: key.into(),
@@ -134,14 +134,14 @@ impl CacheEntry {
     /// Returns `true` if this entry has not expired (evaluated via integer coarse clock).
     #[inline(always)]
     pub fn is_fresh(&self) -> bool {
-        let now = coarse_now_sec() as u32;
+        let now = coarse_sec() as u32;
         now < self.expires_at_sec
     }
 
     /// Returns the age of this entry in seconds.
     #[inline(always)]
     pub fn age_secs(&self) -> u64 {
-        let now = coarse_now_sec() as u32;
+        let now = coarse_sec() as u32;
         now.saturating_sub(self.created_at_sec) as u64
     }
 

@@ -208,7 +208,7 @@ impl Oauth2IntrospectionPlugin {
         let revalidation_task = Box::pin(async move {
             match client.introspect(&token_owned) {
                 Ok(resp) => {
-                    let cur = velda_core::coarse_time::coarse_now_sec();
+                    let cur = velda_core::clock::coarse_sec();
                     if resp.active {
                         let new_entry = build_cached_claims(
                             &claims_to_headers,

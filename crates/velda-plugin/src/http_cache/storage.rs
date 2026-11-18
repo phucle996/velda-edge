@@ -9,7 +9,7 @@
 //!   Lookup operations execute concurrently under Read Locks without queue mutation.
 //! - **CPU Cache Pollution Immunity**: Large payloads (>= 256 bytes) are confined directly to DRAM
 //!   via Non-Temporal Streaming Stores, preventing CPU L1/L2 data cache flushing.
-//! - **Integer Coarse Clock**: Time tracking uses [`velda_core::coarse_time::coarse_now_sec`] via 1-instruction
+//! - **Integer Coarse Clock**: Time tracking uses [`velda_core::clock::coarse_sec`] via 1-instruction
 //!   integer arithmetic, eliminating Linux vDSO `clock_gettime` syscall overhead.
 //! - **Second-Chance Clock Eviction**: Replaces $O(N)$ linear scans with $O(1)$ lockless accessed-bit
 //!   evaluations (`AtomicBool`).
@@ -20,7 +20,7 @@ use std::time::Duration;
 
 use http::Method;
 use rustc_hash::FxHashMap;
-use velda_core::coarse_time::coarse_now_sec;
+use velda_core::clock::coarse_sec;
 
 use crate::http_cache::entity::{CacheEntry, CompressedVariants, StoreVariantParams};
 use crate::http_cache::key::{compute_cache_key, compute_cache_key_with_headers, hash_key};
@@ -124,7 +124,7 @@ impl ShardInner {
             is_public,
         } = params;
 
-        let now = coarse_now_sec() as u32;
+        let now = coarse_sec() as u32;
         let ttl_secs = ttl.as_secs().max(1) as u32;
 
         // If entry exists and is fresh, merge into it
@@ -510,7 +510,7 @@ mod tests {
             true,
         );
 
-        let now = coarse_now_sec() as u32;
+        let now = coarse_sec() as u32;
         let entry = CacheEntry::with_raw(
             "GET:example.com:/clock",
             StatusCode::OK,

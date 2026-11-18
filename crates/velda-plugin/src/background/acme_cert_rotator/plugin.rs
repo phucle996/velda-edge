@@ -87,7 +87,7 @@ use std::time::Duration;
 
 use super::validation::AcmeCertRotatorConfig;
 use tokio::sync::watch;
-use velda_core::coarse_time::coarse_now_sec;
+use velda_core::clock::coarse_sec;
 use velda_router::Router;
 
 use super::challenge::ChallengeStore;
@@ -176,7 +176,7 @@ impl AcmeCertRotatorPlugin {
     /// Checks certificate status and triggers renewal with backoff if expired or nearing expiration.
     pub async fn check_and_renew(&self) -> Result<bool, PluginError> {
         let primary_domain = &self.config.domains[0];
-        let now_unix = coarse_now_sec() as i64;
+        let now_unix = coarse_sec() as i64;
 
         let needs_cert = match self.storage.read_fullchain_pem(primary_domain) {
             Some(cert_pem) => match not_after_unix(&cert_pem) {
@@ -426,7 +426,7 @@ impl AcmeCertRotatorPlugin {
 
         // 2. Cron-driven scheduled maintenance loop with integer coarse countdown
         loop {
-            let now_unix = coarse_now_sec();
+            let now_unix = coarse_sec();
 
             let next_fire_unix = match self.cron.next_after(now_unix) {
                 Some(ts) => ts,

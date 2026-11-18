@@ -44,7 +44,7 @@
 //!
 //! # Architectural Invariants
 //! - **Strict Task Isolation**: Executes purely on Shadow Logistics companion threads.
-//! - **Zero Syscall Clock Checks**: Interval progression uses [`velda_core::coarse_time::coarse_now_sec`].
+//! - **Zero Syscall Clock Checks**: Interval progression uses [`velda_core::clock::coarse_sec`].
 //! - **Lock-Free Hotswap**: Installs updated keys using atomic pointer replacement (`ArcSwap`),
 //!   never taking mutexes or halting traffic workers.
 
@@ -182,14 +182,14 @@ impl BackgroundPlugin for JwksRotatorPlugin {
             }
 
             // 2. Coarse Clock interval tracking
-            let mut next_refresh_sec = velda_core::coarse_time::coarse_now_sec()
-                .saturating_add(self.config.refresh_interval_secs);
+            let mut next_refresh_sec =
+                velda_core::clock::coarse_sec().saturating_add(self.config.refresh_interval_secs);
 
             // 3. Periodic rotation loop
             loop {
                 tokio::select! {
                     _ = tokio::time::sleep(Duration::from_secs(1)) => {
-                        let now_sec = velda_core::coarse_time::coarse_now_sec();
+                        let now_sec = velda_core::clock::coarse_sec();
                         if now_sec >= next_refresh_sec {
                             if let Err(e) = self.execute_rotation_step().await {
                                 tracing::error!(

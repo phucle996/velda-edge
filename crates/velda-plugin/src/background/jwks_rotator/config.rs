@@ -23,7 +23,7 @@
 //! # Architectural Invariants
 //! - **Non-blocking Logistics**: Runs on background companion threads isolated from frontline workers.
 //! - **Integer Coarse Clock**: Refresh intervals are evaluated using coarse integer time
-//!   (`velda_core::coarse_time::coarse_now_sec`), eliminating clock syscall overhead.
+//!   (`velda_core::clock::coarse_sec`), eliminating clock syscall overhead.
 
 use serde::{Deserialize, Serialize};
 
