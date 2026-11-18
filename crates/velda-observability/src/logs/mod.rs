@@ -8,13 +8,11 @@
 //!   on Frontline push and L2/L3 `_MM_HINT_T1` prefetching on Shadow drain.
 //! - `store`: Reference-counted `Arc<[AccessLogRecord]>` multi-exporter fan-out [`LogStore`].
 
-pub mod catalog;
 mod record;
 mod ring;
 mod store;
 mod types;
 
-pub use catalog::{register_route_name, set_route_catalog, with_route_name};
 pub use record::AccessLogRecord;
 pub use ring::{DEFAULT_CORE_RING_CAPACITY, SpscLogRing};
 pub use store::{LogStore, LogSubscriber, global_log_store, init_global_log_store};

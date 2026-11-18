@@ -93,7 +93,7 @@ impl AccessLogRecord {
             peer_port: 0,
             upstream_port: 0,
             status_code: 0,
-            route_id: 0,
+            route_id: velda_core::UNMATCHED_ROUTE_ID,
             ua_major_version: 0,
             rpc_msgs_or_flags: 0,
             pipe: PipeKind::BufferedH1H1,

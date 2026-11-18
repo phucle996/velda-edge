@@ -1,22 +1,24 @@
 //! Pre-Allocated 64-Byte Aligned SPSC Ring Buffer (`velda_observability::logs::ring`).
 //!
-//! # Hardware Mechanism & L1 Cache Protection ("L1 is Gold")
-//! 1. **Pre-Allocated 256-Byte Stride Buffer (4 CPU Cache Lines)**:
-//!    `Box<[UnsafeCell<AccessLogRecord>]>` is allocated once at worker initialization. Because
-//!    [`AccessLogRecord`] is `#[repr(C, align(64))]` with size 256, the slice base address and every
-//!    slot offset are strictly 64-byte aligned (each record spans exactly 4 cache lines).
-//! 2. **Non-Temporal Streaming Store on Push (`_mm256_stream_si256` + `_mm_sfence()`)**:
-//!    `velda-worker-{id}` writes the 256-byte record through CPU Write-Combining buffers directly
-//!    to L3/RAM without allocating a cache line in L1d, protecting hot routing and socket state.
-//!    `_mm_sfence()` enforces global visibility of the Write-Combining buffer before the
-//!    `Ordering::Release` store on `head`.
-//! 3. **Full Non-Temporal Pipeline on Drain (`_mm256_stream_load_si256` + `_mm256_stream_si256` + `_mm_sfence()`)**:
-//!    `velda-shadow-{id}` drains ring slots using Non-Temporal Streaming Loads (`VMOVNTDQA`) and writes
-//!    the destination batch slice using Non-Temporal Streaming Stores (`VMOVNTDQ`), completely bypassing L1d
-//!    cache allocation for both the source ring buffer and destination batch slice.
-//!    This guarantees zero L1d pollution and zero LFB starvation on the sibling Frontline serving thread.
-//!    `_mm_sfence()` flushes the Write-Combining buffers before publishing the batch to exporter subscribers.
-//!    Upcoming slots are prefetched ahead into L2/L3 via `_MM_HINT_T1` to eliminate DRAM wait latency.
+//! ```text
+//!   FRONTLINE TRAFFIC WORKER (Core-Local Hot Path)     SHADOW LOGISTICS WORKER (SCHED_IDLE)
+//!  ┌──────────────────────────────────────────────┐   ┌─────────────────────────────────────────────┐
+//!  │ AccessLogRecord (256B, 4 Cache Lines)        │   │ 1. Non-Temporal Load (_mm256_stream_load)   │
+//!  │   │                                          │   │    Bypass L1d for consumed ring slots       │
+//!  │   ▼                                          │   │      │                                      │
+//!  │ Non-Temporal Store (_mm256_stream) + sfence  │   │      ▼                                      │
+//!  │ Bypass L1d through WC Buffers to L3/RAM      │   │ 2. Non-Temporal Store (_mm256_stream)       │
+//!  └──────────────────────┬───────────────────────┘   │    Bypass L1d directly to L3/RAM + sfence   │
+//!                         │                           └──────────────────────┬──────────────────────┘
+//!                         ▼                                                  │
+//!          ┌────────────────────────── SPSC Ring Buffer ─────────────────────┴────────┐
+//!          │ Slot 0 │ Slot 1 │ Slot 2 │ ... │ Slot N-1 (Pre-allocated in RAM / 1 MB)  │
+//!          └──────────────────────────────────────────────────────────────────────────┘
+//!                                                                            │
+//!                                                                            ▼
+//!                                                           Stage into L2 via _MM_HINT_T1 (Skip L1d)
+//!                                                           Process 256B Record Window in Registers
+//! ```
 
 use std::cell::UnsafeCell;
 use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
@@ -161,7 +163,7 @@ impl SpscLogRing {
     ///   completely bypassing L1d cache allocation for the consumed ring slots.
     /// - Write path: Data writes directly through CPU Write-Combining buffers to L3/RAM without allocating
     ///   L1d cache lines for the newly allocated batch slice.
-    /// - `_mm_sfence()` guarantees that all streaming stores are flushed and globally visible before
+    /// - `_mm_sfence()` enforces that all streaming stores are flushed and globally visible before
     ///   the batch `Arc` is enqueued for exporter subscribers.
     pub fn drain_batch(&self, max_records: usize) -> Vec<AccessLogRecord> {
         let tail = self.tail.0.load(Ordering::Relaxed);
@@ -226,8 +228,8 @@ impl SpscLogRing {
                     let v6 = _mm256_stream_load_si256(s.add(6));
                     let v7 = _mm256_stream_load_si256(s.add(7));
 
-                    // 2. Non-Temporal Streaming Stores (VMOVNTDQ): stores 8 x 32-byte chunks directly through
-                    // Write-Combining buffers to L3/RAM, completely bypassing L1d cache allocation for the output batch slice!
+                    // 2. Non-Temporal Streaming Stores (VMOVNTDQ): writes destination batch directly to L3 (LLC)
+                    // through Write-Combining buffers, keeping L1d completely untouched ("L1 is gold").
                     _mm256_stream_si256(d, v0);
                     _mm256_stream_si256(d.add(1), v1);
                     _mm256_stream_si256(d.add(2), v2);
@@ -237,11 +239,11 @@ impl SpscLogRing {
                     _mm256_stream_si256(d.add(6), v6);
                     _mm256_stream_si256(d.add(7), v7);
                 } else {
-                    // SSE4.1 fallback: 16 x 16-byte chunks using _mm_stream_load_si128 and _mm_stream_si128
+                    // SSE4.1 fallback: 16 x 16-byte chunks using _mm_load_si128 and _mm_stream_si128
                     let s = src as *const __m128i;
                     let d = dst as *mut __m128i;
                     for k in 0..16 {
-                        let v = _mm_stream_load_si128(s.add(k));
+                        let v = _mm_load_si128(s.add(k));
                         _mm_stream_si128(d.add(k), v);
                     }
                 }
@@ -253,12 +255,10 @@ impl SpscLogRing {
             }
         }
 
-        // Enforce global visibility of Write-Combining non-temporal stores before handing off batch
         #[cfg(target_arch = "x86_64")]
-        if to_take > 0 {
-            unsafe {
-                core::arch::x86_64::_mm_sfence();
-            }
+        unsafe {
+            use core::arch::x86_64::_mm_sfence;
+            _mm_sfence();
         }
 
         // SAFETY: All `to_take` elements in `out` were initialized above via direct SIMD/pointer copy.
