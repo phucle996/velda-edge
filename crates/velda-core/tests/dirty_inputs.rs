@@ -30,18 +30,18 @@ fn test_extreme_integer_boundaries() {
 
     // Maximum possible bounds
     let max_req = RequestId::new(u128::MAX);
-    let max_route = RouteId::new(u32::MAX);
-    let max_upstream = UpstreamId::new(u32::MAX);
+    let max_route = RouteId::new(u16::MAX);
+    let max_upstream = UpstreamId::new(u16::MAX);
     let max_conn = ConnectionId(u64::MAX);
 
     assert_eq!(max_req.value(), u128::MAX);
-    assert_eq!(max_route.value(), u32::MAX);
-    assert_eq!(max_upstream.value(), u32::MAX);
+    assert_eq!(max_route.value(), u16::MAX);
+    assert_eq!(max_upstream.value(), u16::MAX);
     assert_eq!(max_conn.0, u64::MAX);
 
     // Formatter checks for extreme numbers
     assert_eq!(max_req.to_string(), "ffffffffffffffffffffffffffffffff");
-    assert_eq!(max_route.to_string(), u32::MAX.to_string());
+    assert_eq!(max_route.to_string(), u16::MAX.to_string());
 }
 
 #[test]

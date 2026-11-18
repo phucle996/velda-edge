@@ -35,9 +35,9 @@ L7: Client ──► velda-ingress (velda-sock/xdp) ──► TLS ──► HTTP
 ### 2.1 Strongly Typed Identifiers (`src/types.rs`)
 Wraps primitive integers (`u64`, `u32`) into distinct domain types to prevent accidental cross-domain misuse at compile-time:
 
-- `RequestId(pub u64)`: Unique identifier for an L7 request. Exactly 8 bytes, zero runtime overhead.
-- `RouteId(pub u32)`: Identifier for a compiled routing rule. Exactly 4 bytes.
-- `UpstreamId(pub u32)`: Identifier for a selected backend upstream cluster. Exactly 4 bytes.
+- `RequestId(pub u128)`: Unique 128-bit identifier for an L7 request (W3C TraceContext). Exactly 16 bytes.
+- `RouteId(pub u16)`: Dense integer index ($0..N-1$) for a compiled routing rule. Exactly 2 bytes.
+- `UpstreamId(pub u16)`: Dense integer index ($0..M-1$) for a selected backend upstream cluster. Exactly 2 bytes.
 - `ConnectionId(pub u64)`: Identifier for a physical L4 network connection. Exactly 8 bytes.
 
 All IDs implement: `Debug`, `Clone`, `Copy`, `PartialEq`, `Eq`, `Hash`, `Display`.

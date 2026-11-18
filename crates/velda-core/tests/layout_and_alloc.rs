@@ -83,11 +83,11 @@ fn test_type_sizes_and_alignment() {
     assert_eq!(size_of::<ConnectionId>(), 8);
     assert_eq!(align_of::<ConnectionId>(), 8);
 
-    assert_eq!(size_of::<RouteId>(), 4);
-    assert_eq!(align_of::<RouteId>(), 4);
+    assert_eq!(size_of::<RouteId>(), 2);
+    assert_eq!(align_of::<RouteId>(), 2);
 
-    assert_eq!(size_of::<UpstreamId>(), 4);
-    assert_eq!(align_of::<UpstreamId>(), 4);
+    assert_eq!(size_of::<UpstreamId>(), 2);
+    assert_eq!(align_of::<UpstreamId>(), 2);
 
     // 2. RequestState must be compact and easily fit in a single 64-byte L1 Cacheline!
     // request_id (8) + route Option<u32> (8) + upstream Option<u32> (8) + 3 bools (3) + padding = 32 bytes

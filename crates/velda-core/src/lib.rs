@@ -89,4 +89,7 @@ pub use lifecycle::{Action, CachedResponseDirective, HookPhase, Phase};
 
 pub use endpoint::{Endpoint, EndpointId};
 pub use provenance::Provenance;
-pub use types::{ConnectionId, ListenerId, RequestId, RouteId, UpstreamId};
+pub use types::{
+    ConnectionId, ListenerId, RequestId, RouteId, UNASSIGNED_UPSTREAM_ID, UNMATCHED_ROUTE_ID,
+    UpstreamId,
+};

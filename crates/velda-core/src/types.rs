@@ -190,10 +190,16 @@ impl From<std::sync::Arc<str>> for ListenerId {
     }
 }
 
+/// Sentinel ID emitted in telemetry when a request fails or 404s before matching any route.
+pub const UNMATCHED_ROUTE_ID: u16 = u16::MAX;
+
+/// Sentinel ID emitted in telemetry when no backend upstream cluster is assigned.
+pub const UNASSIGNED_UPSTREAM_ID: u16 = u16::MAX;
+
 /// Identifier of a configured route.
 ///
-/// A route ID is assigned by the routing/configuration subsystem and
-/// remains independent from the actual route matching algorithm.
+/// A dense integer index ($0..N-1$) assigned by the routing subsystem.
+/// Exactly 2 bytes (`u16`), optimized for L1D cache residency and zero-alloc array indexing.
 #[repr(transparent)]
 #[derive(
     Debug,
@@ -208,24 +214,24 @@ impl From<std::sync::Arc<str>> for ListenerId {
     serde::Serialize,
     serde::Deserialize,
 )]
-pub struct RouteId(pub u32);
+pub struct RouteId(pub u16);
 
 impl RouteId {
     /// Creates a new route identifier.
-    #[inline]
-    pub const fn new(value: u32) -> Self {
+    #[inline(always)]
+    pub const fn new(value: u16) -> Self {
         Self(value)
     }
 
-    /// Deterministically computes a `RouteId` from a route name using 32-bit FNV-1a.
-    #[inline]
-    pub const fn from_name(name: &str) -> Self {
-        Self(fnv1a_hash_32(name))
+    /// Returns the underlying identifier as a `usize` for direct array indexing.
+    #[inline(always)]
+    pub const fn as_usize(self) -> usize {
+        self.0 as usize
     }
 
     /// Returns the underlying identifier value.
-    #[inline]
-    pub const fn value(self) -> u32 {
+    #[inline(always)]
+    pub const fn value(self) -> u16 {
         self.0
     }
 }
@@ -236,31 +242,10 @@ impl fmt::Display for RouteId {
     }
 }
 
-impl From<&str> for RouteId {
-    #[inline]
-    fn from(name: &str) -> Self {
-        Self::from_name(name)
-    }
-}
-
-impl From<&String> for RouteId {
-    #[inline]
-    fn from(name: &String) -> Self {
-        Self::from_name(name.as_str())
-    }
-}
-
-impl From<String> for RouteId {
-    #[inline]
-    fn from(name: String) -> Self {
-        Self::from_name(name.as_str())
-    }
-}
-
 /// Identifier of a configured upstream.
 ///
-/// The ID identifies an upstream definition selected for the request.
-/// It does not represent a concrete TCP connection.
+/// A dense integer index ($0..M-1$) assigned by the upstream subsystem.
+/// Exactly 2 bytes (`u16`), optimized for L1D cache residency and zero-alloc array indexing.
 #[repr(transparent)]
 #[derive(
     Debug,
@@ -275,24 +260,24 @@ impl From<String> for RouteId {
     serde::Serialize,
     serde::Deserialize,
 )]
-pub struct UpstreamId(pub u32);
+pub struct UpstreamId(pub u16);
 
 impl UpstreamId {
     /// Creates a new upstream identifier.
-    #[inline]
-    pub const fn new(value: u32) -> Self {
+    #[inline(always)]
+    pub const fn new(value: u16) -> Self {
         Self(value)
     }
 
-    /// Deterministically computes an `UpstreamId` from an upstream name using 32-bit FNV-1a.
-    #[inline]
-    pub const fn from_name(name: &str) -> Self {
-        Self(fnv1a_hash_32(name))
+    /// Returns the underlying identifier as a `usize` for direct array indexing.
+    #[inline(always)]
+    pub const fn as_usize(self) -> usize {
+        self.0 as usize
     }
 
     /// Returns the underlying identifier value.
-    #[inline]
-    pub const fn value(self) -> u32 {
+    #[inline(always)]
+    pub const fn value(self) -> u16 {
         self.0
     }
 }
@@ -300,41 +285,6 @@ impl UpstreamId {
 impl fmt::Display for UpstreamId {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         write!(f, "{}", self.0)
-    }
-}
-
-impl From<&str> for UpstreamId {
-    #[inline]
-    fn from(name: &str) -> Self {
-        Self::from_name(name)
-    }
-}
-
-impl From<&String> for UpstreamId {
-    #[inline]
-    fn from(name: &String) -> Self {
-        Self::from_name(name.as_str())
-    }
-}
-
-impl From<String> for UpstreamId {
-    #[inline]
-    fn from(name: String) -> Self {
-        Self::from_name(name.as_str())
-    }
-}
-
-impl From<&std::sync::Arc<str>> for UpstreamId {
-    #[inline]
-    fn from(name: &std::sync::Arc<str>) -> Self {
-        Self::from_name(name)
-    }
-}
-
-impl From<std::sync::Arc<str>> for UpstreamId {
-    #[inline]
-    fn from(name: std::sync::Arc<str>) -> Self {
-        Self::from_name(&name)
     }
 }
 
@@ -369,13 +319,5 @@ mod tests {
         let l2 = ListenerId::from("http-80");
         assert_eq!(l1, l2);
         assert_ne!(l1, ListenerId::from_name("http-443"));
-
-        let r1 = RouteId::from_name("route-api");
-        let r2 = RouteId::from("route-api");
-        assert_eq!(r1, r2);
-
-        let u1 = UpstreamId::from_name("backend-v1");
-        let u2 = UpstreamId::from("backend-v1");
-        assert_eq!(u1, u2);
     }
 }
