@@ -6,11 +6,13 @@
 //! request serving hot path, and atomic swaps upon configuration reloads.
 
 mod ingress;
+pub mod lut;
 pub mod pipeline;
 pub mod plugin;
 pub mod router;
 pub mod tls;
 
+pub use lut::build_runtime_luts;
 pub use pipeline::{PipelineTable, TcpPipeline, TcpProtocol, UdpPipeline, UdpProtocol};
 pub use plugin::{PluginTable, build_plugin_table};
 pub use router::build_router;
@@ -80,6 +82,8 @@ pub struct Runtime {
     pub pipelines: PipelineTable,
     /// Pre-compiled upstream table holding protocol-isolated tables (tcp, udp, http1, http2, http3, grpc).
     pub upstreams: UpstreamTable,
+    /// Direct O(1) integer mapping from dense route index to dense upstream index.
+    pub route_to_upstream: Box<[velda_core::UpstreamId]>,
     /// Pre-compiled downstream TLS server engine for O(1) hot-path handshake execution.
     pub tls_server: Option<TlsServerEngine>,
     /// Pre-compiled upstream TLS client engine for O(1) hot-path backend handshake execution.
@@ -112,15 +116,16 @@ mod tests {
     use super::*;
 
     #[test]
-    fn test_empty_runtime() {
+    fn empty_runtime() {
         let rt = Runtime::empty();
         assert_eq!(rt.revision, 0);
         assert_eq!(rt.config.listeners.len(), 0);
         assert_eq!(rt.config.routes.len(), 0);
+        assert_eq!(rt.route_to_upstream.len(), 0);
     }
 
     #[test]
-    fn test_shared_runtime_atomic_swap() {
+    fn atomic_swap() {
         let initial = Runtime {
             revision: 1,
             ..Default::default()

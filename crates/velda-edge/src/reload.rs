@@ -145,12 +145,16 @@ pub fn load_initial_runtime(
         &runtime_config.listeners,
     )?);
 
+    let route_to_upstream =
+        crate::runtime::build_runtime_luts(&runtime_config.routes, &runtime_config.upstreams);
+
     Ok(Runtime {
         revision: 1,
         config: runtime_config,
         router,
         pipelines,
         upstreams: upstreams_table,
+        route_to_upstream,
         plugins,
         tls_server,
         tls_client,
@@ -287,12 +291,14 @@ pub async fn apply_reload(
     let current_rt = shared_runtime.load();
     let overload = current_rt.overload.clone();
     let buffer_pool = current_rt.buffer_pool.clone();
+    let route_to_upstream = crate::runtime::build_runtime_luts(&config.routes, &config.upstreams);
     let candidate = Runtime {
         revision: new_revision,
         config,
         router,
         pipelines,
         upstreams,
+        route_to_upstream,
         tls_server,
         tls_client,
         plugins,

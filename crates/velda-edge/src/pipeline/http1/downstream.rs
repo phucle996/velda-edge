@@ -172,7 +172,7 @@ pub async fn run_http1_loop<IO>(
                         peer_port: meta.peer.port(),
                         upstream_port: 0,
                         status_code: StatusCode::REQUEST_TIMEOUT.as_u16(),
-                        route_id: 0,
+                        route_id: velda_core::UNMATCHED_ROUTE_ID,
                         ua_major_version: 0,
                         rpc_msgs_or_flags: 0,
                         pipe: velda_core::PipeKind::BufferedH1H1,
@@ -223,7 +223,7 @@ pub async fn run_http1_loop<IO>(
                         peer_port: meta.peer.port(),
                         upstream_port: 0,
                         status_code: status.as_u16(),
-                        route_id: 0,
+                        route_id: velda_core::UNMATCHED_ROUTE_ID,
                         ua_major_version: 0,
                         rpc_msgs_or_flags: 0,
                         pipe: velda_core::PipeKind::BufferedH1H1,
@@ -304,7 +304,7 @@ pub async fn run_http1_loop<IO>(
                 peer_port: meta.peer.port(),
                 upstream_port: 0,
                 status_code: StatusCode::FORBIDDEN.as_u16(),
-                route_id: 0,
+                route_id: velda_core::UNMATCHED_ROUTE_ID,
                 ua_major_version,
                 rpc_msgs_or_flags: 0,
                 pipe: velda_core::PipeKind::BufferedH1H1,
@@ -351,7 +351,7 @@ pub async fn run_http1_loop<IO>(
                 peer_port: meta.peer.port(),
                 upstream_port: 0,
                 status_code: StatusCode::BAD_REQUEST.as_u16(),
-                route_id: 0,
+                route_id: velda_core::UNMATCHED_ROUTE_ID,
                 ua_major_version,
                 rpc_msgs_or_flags: 0,
                 pipe: velda_core::PipeKind::BufferedH1H1,
@@ -424,7 +424,7 @@ pub async fn run_http1_loop<IO>(
                 peer_port: meta.peer.port(),
                 upstream_port: 0,
                 status_code: StatusCode::NOT_FOUND.as_u16(),
-                route_id: 0,
+                route_id: velda_core::UNMATCHED_ROUTE_ID,
                 ua_major_version,
                 rpc_msgs_or_flags: 0,
                 pipe: velda_core::PipeKind::BufferedH1H1,
@@ -440,7 +440,12 @@ pub async fn run_http1_loop<IO>(
             break;
         };
 
-        let mut target_upstream: UpstreamId = route.upstream_id;
+        let route_idx = route.id.0 as usize;
+        let mut target_upstream: UpstreamId = rt
+            .route_to_upstream
+            .get(route_idx)
+            .copied()
+            .unwrap_or(UpstreamId::new(0));
 
         let plan = rt.plugins.get_plan(route.id);
         if !plan.is_empty() {
@@ -517,7 +522,7 @@ pub async fn run_http1_loop<IO>(
                                     peer_port: meta.peer.port(),
                                     upstream_port: 0,
                                     status_code: status,
-                                    route_id: route.id.0 as u16,
+                                    route_id: route.id.0,
                                     ua_major_version,
                                     rpc_msgs_or_flags: 0,
                                     pipe: velda_core::PipeKind::BufferedH1H1,
@@ -603,7 +608,7 @@ pub async fn run_http1_loop<IO>(
                                     peer_port: meta.peer.port(),
                                     upstream_port: 0,
                                     status_code: status,
-                                    route_id: route.id.0 as u16,
+                                    route_id: route.id.0,
                                     ua_major_version,
                                     rpc_msgs_or_flags: 0,
                                     pipe: velda_core::PipeKind::BufferedH1H1,
@@ -669,7 +674,7 @@ pub async fn run_http1_loop<IO>(
                             peer_port: meta.peer.port(),
                             upstream_port: 0,
                             status_code: status,
-                            route_id: route.id.0 as u16,
+                            route_id: route.id.0,
                             ua_major_version,
                             rpc_msgs_or_flags: 0,
                             pipe: velda_core::PipeKind::BufferedH1H1,
@@ -739,7 +744,7 @@ pub async fn run_http1_loop<IO>(
                 peer_port: meta.peer.port(),
                 upstream_port: 0,
                 status_code: StatusCode::SERVICE_UNAVAILABLE.as_u16(),
-                route_id: route.id.0 as u16,
+                route_id: route.id.0,
                 ua_major_version,
                 rpc_msgs_or_flags: 0,
                 pipe: velda_core::PipeKind::BufferedH1H1,
@@ -788,7 +793,7 @@ pub async fn run_http1_loop<IO>(
                 peer_port: meta.peer.port(),
                 upstream_port: 0,
                 status_code: StatusCode::TOO_MANY_REQUESTS.as_u16(),
-                route_id: route.id.0 as u16,
+                route_id: route.id.0,
                 ua_major_version,
                 rpc_msgs_or_flags: 0,
                 pipe: velda_core::PipeKind::BufferedH1H1,
@@ -964,7 +969,7 @@ pub async fn run_http1_loop<IO>(
         if let Err(ref e) = pipe_result {
             tracing::warn!(
                 error = %e,
-                upstream = %route.upstream_id,
+                upstream = %target_upstream,
                 "HTTP/1.1 upstream stream pipe failed"
             );
             conn.mark_close();
@@ -1015,7 +1020,7 @@ pub async fn run_http1_loop<IO>(
             peer_port: meta.peer.port(),
             upstream_port,
             status_code: final_status,
-            route_id: route.id.0 as u16,
+            route_id: route.id.0,
             ua_major_version,
             rpc_msgs_or_flags: 0,
             pipe: pipe_kind,
@@ -1027,6 +1032,22 @@ pub async fn run_http1_loop<IO>(
             url_len: log_url_len,
             url_bytes: log_url_bytes,
         });
+
+        let end_nano = velda_core::coarse_time::coarse_now_sec().saturating_mul(1_000_000_000);
+        let dur_nanos = elapsed.as_nanos().min(u64::MAX as u128) as u64;
+        velda_observability::global_trace_store().emit(
+            &velda_observability::SpanRecord::new_root_span(
+                request_id.0,
+                request_id.entropy(),
+                end_nano.saturating_sub(dur_nanos),
+                end_nano,
+                final_status,
+                log_method,
+                meta.peer.ip(),
+                route.id.0,
+                target_upstream.0,
+            ),
+        );
 
         if pipe_result.is_err() {
             conn.lingering_close().await;

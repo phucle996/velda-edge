@@ -10,6 +10,7 @@ use crate::pipeline::X_REQUEST_ID;
 use http::StatusCode;
 use http::header::HeaderValue;
 use tokio::io::{AsyncRead, AsyncWrite};
+use velda_core::UpstreamId;
 use velda_core::{Action, L7Request, PipeKind};
 use velda_http1::Http1PipeStrategy;
 use velda_http2::Http2Error;
@@ -217,7 +218,7 @@ pub async fn run_http2_loop<IO>(
                                 peer_port: meta.peer.port(),
                                 upstream_port: 0,
                                 status_code: StatusCode::REQUEST_HEADER_FIELDS_TOO_LARGE.as_u16(),
-                                route_id: 0,
+                                route_id: velda_core::UNMATCHED_ROUTE_ID,
                                 ua_major_version: 0,
                                 rpc_msgs_or_flags: 0,
                                 pipe: velda_core::PipeKind::BufferedH2H1,
@@ -270,7 +271,7 @@ pub async fn run_http2_loop<IO>(
                                 peer_port: meta.peer.port(),
                                 upstream_port: 0,
                                 status_code: StatusCode::BAD_REQUEST.as_u16(),
-                                route_id: 0,
+                                route_id: velda_core::UNMATCHED_ROUTE_ID,
                                 ua_major_version: 0,
                                 rpc_msgs_or_flags: 0,
                                 pipe: velda_core::PipeKind::BufferedH2H1,
@@ -340,7 +341,7 @@ pub async fn run_http2_loop<IO>(
                                 peer_port: meta.peer.port(),
                                 upstream_port: 0,
                                 status_code: StatusCode::NOT_FOUND.as_u16(),
-                                route_id: 0,
+                                route_id: velda_core::UNMATCHED_ROUTE_ID,
                                 ua_major_version: 0,
                                 rpc_msgs_or_flags: 0,
                                 pipe: velda_core::PipeKind::BufferedH2H1,
@@ -358,12 +359,19 @@ pub async fn run_http2_loop<IO>(
 
                     consecutive_not_founds = 0;
 
-                    let Some(upstream_target) = rt.upstreams.http.get(route.upstream_id).cloned()
+                    let route_idx = route.id.0 as usize;
+                    let target_upstream_id = rt
+                        .route_to_upstream
+                        .get(route_idx)
+                        .copied()
+                        .unwrap_or(UpstreamId::new(0));
+
+                    let Some(upstream_target) = rt.upstreams.http.get(target_upstream_id).cloned()
                     else {
                         tracing::error!(
                             listener = %meta.listener_id,
                             route = %route.id,
-                            upstream = %route.upstream_id,
+                            upstream = %target_upstream_id,
                             "No healthy backend endpoints available for HTTP upstream"
                         );
                         if !receiver.is_end_stream() {
@@ -397,7 +405,7 @@ pub async fn run_http2_loop<IO>(
                                 peer_port: meta.peer.port(),
                                 upstream_port: 0,
                                 status_code: StatusCode::SERVICE_UNAVAILABLE.as_u16(),
-                                route_id: route.id.0 as u16,
+                                route_id: route.id.0,
                                 ua_major_version: 0,
                                 rpc_msgs_or_flags: 0,
                                 pipe: velda_core::PipeKind::BufferedH2H1,
@@ -418,7 +426,7 @@ pub async fn run_http2_loop<IO>(
                     if overload_lvl.is_shedding() {
                         tracing::warn!(
                             route = %route.id,
-                            upstream = %route.upstream_id,
+                            upstream = %target_upstream_id,
                             overload = ?overload_lvl,
                             "Shedding HTTP/2 request due to memory saturation"
                         );
@@ -452,7 +460,7 @@ pub async fn run_http2_loop<IO>(
                                 peer_port: meta.peer.port(),
                                 upstream_port: 0,
                                 status_code: StatusCode::TOO_MANY_REQUESTS.as_u16(),
-                                route_id: route.id.0 as u16,
+                                route_id: route.id.0,
                                 ua_major_version: 0,
                                 rpc_msgs_or_flags: 0,
                                 pipe: velda_core::PipeKind::BufferedH2H1,
@@ -476,11 +484,11 @@ pub async fn run_http2_loop<IO>(
                         meta: Arc::clone(&meta),
                         config,
                         default_upstream: upstream_target,
-                        default_upstream_id: route.upstream_id,
+                        default_upstream_id: target_upstream_id,
                         http_upstreams: Arc::clone(&rt.upstreams.http),
                         plan: rt.plugins.get_plan(route.id).clone(),
                         request_id,
-                        route_id: route.id.0 as u16,
+                        route_id: route.id.0,
                     };
                     tokio::spawn(async move {
                         serve_http2_stream(req_head, receiver, responder, ctx).await;

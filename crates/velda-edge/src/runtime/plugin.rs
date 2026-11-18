@@ -130,7 +130,7 @@ pub fn build_plugin_table(
     let mut route_plans = FxHashMap::default();
     let empty_plan = Arc::new(RoutePluginPlan::default());
 
-    for route in routes {
+    for (idx, route) in routes.iter().enumerate() {
         if route.plugins.is_empty() {
             continue; // Zero overhead: do not populate routes map for empty routes!
         }
@@ -157,7 +157,7 @@ pub fn build_plugin_table(
         })?;
 
         if !plan.is_empty() {
-            let route_id = route.route_id();
+            let route_id = velda_core::RouteId(idx as u16);
             route_plans.insert(route_id, Arc::new(plan));
         }
     }

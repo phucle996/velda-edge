@@ -12,10 +12,11 @@ use super::rdma::RdmaUpstream;
 
 /// Pre-compiled single-protocol lookup table providing lock-free O(1) reads.
 ///
-/// Pre-constructed during snapshot build; maps `UpstreamId` -> `Arc<T>`.
+/// Pre-constructed during snapshot build; maps dense `UpstreamId(u16)` -> `Arc<T>`
+/// via a contiguous flat array in L1D cache without hash collisions or pointer chasing.
 pub struct SubUpstreamTable<T> {
-    /// [PRE-COMPILED]: In-memory mapping of upstream identifiers to protocol processors.
-    entries: FxHashMap<UpstreamId, Arc<T>>,
+    /// [PRE-COMPILED]: Flat dense array indexed directly by `UpstreamId(u16)`.
+    entries: Box<[Option<Arc<T>>]>,
 }
 
 impl<T> Clone for SubUpstreamTable<T> {
@@ -29,7 +30,7 @@ impl<T> Clone for SubUpstreamTable<T> {
 impl<T> Default for SubUpstreamTable<T> {
     fn default() -> Self {
         Self {
-            entries: FxHashMap::default(),
+            entries: Box::new([]),
         }
     }
 }
@@ -37,7 +38,8 @@ impl<T> Default for SubUpstreamTable<T> {
 impl<T> std::fmt::Debug for SubUpstreamTable<T> {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("SubUpstreamTable")
-            .field("keys", &self.entries.keys().collect::<Vec<_>>())
+            .field("total_slots", &self.entries.len())
+            .field("active_entries", &self.len())
             .finish()
     }
 }
@@ -45,31 +47,60 @@ impl<T> std::fmt::Debug for SubUpstreamTable<T> {
 impl<T> SubUpstreamTable<T> {
     /// Creates a new protocol sub-table from an owned entry map.
     pub fn new(entries: FxHashMap<UpstreamId, Arc<T>>) -> Self {
+        Self::from_map(entries)
+    }
+
+    /// Converts a sparse or dense `FxHashMap` into a dense, flat array.
+    pub fn from_map(map: FxHashMap<UpstreamId, Arc<T>>) -> Self {
+        if map.is_empty() {
+            return Self {
+                entries: Box::new([]),
+            };
+        }
+        let max_id = map.keys().map(|k| k.as_usize()).max().unwrap_or(0);
+        let mut entries: Vec<Option<Arc<T>>> = (0..=max_id).map(|_| None).collect();
+        for (k, v) in map {
+            entries[k.as_usize()] = Some(v);
+        }
+        Self {
+            entries: entries.into_boxed_slice(),
+        }
+    }
+
+    /// Creates a new protocol sub-table directly from a dense slice.
+    pub fn from_dense_slice(entries: Box<[Option<Arc<T>>]>) -> Self {
         Self { entries }
     }
 
-    /// Retrieves an upstream processor by identifier.
-    #[inline]
+    /// Retrieves an upstream processor in $O(1)$ by dense identifier.
+    #[inline(always)]
     pub fn get(&self, id: impl Into<UpstreamId>) -> Option<&Arc<T>> {
-        self.entries.get(&id.into())
+        let uid = id.into();
+        self.entries.get(uid.as_usize())?.as_ref()
     }
 
-    /// Returns the number of upstreams in this sub-table.
+    /// Returns whether this sub-table contains an entry for the given identifier.
+    #[inline(always)]
+    pub fn contains_key(&self, id: &UpstreamId) -> bool {
+        self.get(*id).is_some()
+    }
+
+    /// Returns the number of active upstreams in this sub-table.
     #[inline]
     pub fn len(&self) -> usize {
-        self.entries.len()
+        self.entries.iter().filter(|e| e.is_some()).count()
     }
 
-    /// Returns whether this sub-table is empty.
+    /// Returns whether this sub-table has no active upstreams.
     #[inline]
     pub fn is_empty(&self) -> bool {
-        self.entries.is_empty()
+        self.entries.iter().all(|e| e.is_none())
     }
 
     /// Returns an iterator over all upstream processors in this sub-table.
     #[inline]
     pub fn values(&self) -> impl Iterator<Item = &Arc<T>> {
-        self.entries.values()
+        self.entries.iter().filter_map(|e| e.as_ref())
     }
 }
 

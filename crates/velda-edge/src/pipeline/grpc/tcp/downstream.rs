@@ -190,7 +190,7 @@ async fn dispatch_grpc_tcp_request_stream(
             peer_port: meta.peer.port(),
             upstream_port: 0,
             status_code: 200,
-            route_id: 0,
+            route_id: velda_core::UNMATCHED_ROUTE_ID,
             ua_major_version,
             rpc_msgs_or_flags: 1,
             pipe: PipeKind::BufferedGrpcTcpTcp,
@@ -239,7 +239,7 @@ async fn dispatch_grpc_tcp_request_stream(
             peer_port: meta.peer.port(),
             upstream_port: 0,
             status_code: 200,
-            route_id: 0,
+            route_id: velda_core::UNMATCHED_ROUTE_ID,
             ua_major_version,
             rpc_msgs_or_flags: 1,
             pipe: PipeKind::BufferedGrpcTcpTcp,
@@ -275,7 +275,7 @@ async fn dispatch_grpc_tcp_request_stream(
             peer_port: meta.peer.port(),
             upstream_port: 0,
             status_code: 200,
-            route_id: 0,
+            route_id: velda_core::UNMATCHED_ROUTE_ID,
             ua_major_version,
             rpc_msgs_or_flags: 1,
             pipe: PipeKind::BufferedGrpcTcpTcp,
@@ -290,7 +290,12 @@ async fn dispatch_grpc_tcp_request_stream(
         return;
     };
 
-    let mut target_upstream: UpstreamId = route.upstream_id;
+    let route_idx = route.id.0 as usize;
+    let mut target_upstream: UpstreamId = rt
+        .route_to_upstream
+        .get(route_idx)
+        .copied()
+        .unwrap_or(UpstreamId::new(0));
 
     // ========================================================================
     // [Route Plugin Pipeline Evaluation: pre_route & pre_upstream hooks]
@@ -362,7 +367,7 @@ async fn dispatch_grpc_tcp_request_stream(
                             peer_port: meta.peer.port(),
                             upstream_port: 0,
                             status_code: 200,
-                            route_id: route.id.0 as u16,
+                            route_id: route.id.0,
                             ua_major_version,
                             rpc_msgs_or_flags: 1,
                             pipe: PipeKind::BufferedGrpcTcpTcp,
@@ -436,7 +441,7 @@ async fn dispatch_grpc_tcp_request_stream(
                             peer_port: meta.peer.port(),
                             upstream_port: 0,
                             status_code: 200,
-                            route_id: route.id.0 as u16,
+                            route_id: route.id.0,
                             ua_major_version,
                             rpc_msgs_or_flags: 1,
                             pipe: PipeKind::BufferedGrpcTcpTcp,
@@ -503,7 +508,7 @@ async fn dispatch_grpc_tcp_request_stream(
             peer_port: meta.peer.port(),
             upstream_port: 0,
             status_code: 200,
-            route_id: route.id.0 as u16,
+            route_id: route.id.0,
             ua_major_version,
             rpc_msgs_or_flags: 1,
             pipe: PipeKind::BufferedGrpcTcpTcp,
@@ -545,7 +550,7 @@ async fn dispatch_grpc_tcp_request_stream(
             peer_port: meta.peer.port(),
             upstream_port: 0,
             status_code: 200,
-            route_id: route.id.0 as u16,
+            route_id: route.id.0,
             ua_major_version,
             rpc_msgs_or_flags: 1,
             pipe: PipeKind::BufferedGrpcTcpTcp,
@@ -696,7 +701,7 @@ async fn dispatch_grpc_tcp_request_stream(
         peer_port: meta.peer.port(),
         upstream_port,
         status_code: outcome.status_code,
-        route_id: route.id.0 as u16,
+        route_id: route.id.0,
         ua_major_version,
         rpc_msgs_or_flags: 1,
         pipe: pipe_kind,

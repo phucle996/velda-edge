@@ -119,7 +119,7 @@ pub async fn serve(
         peer_port: peer.port(),
         upstream_port,
         status_code: 0,
-        route_id: route_id.0 as u16,
+        route_id: route_id.0,
         ua_major_version: 0,
         rpc_msgs_or_flags: 0,
         pipe: velda_core::PipeKind::TcpTcp,

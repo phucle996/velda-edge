@@ -4,7 +4,7 @@ use std::net::SocketAddr;
 use std::sync::Arc;
 
 use rustc_hash::FxHashMap;
-use velda_core::Endpoint;
+use velda_core::{Endpoint, UpstreamId};
 use velda_discovery::{
     Discovery, DnsResolverConfig, DnsResolverProvider, HostsFileSource, ResolvConfServerProvider,
     StaticServerProvider, UdpDnsTransport,
@@ -65,7 +65,7 @@ pub fn build_upstreams(
         None
     };
 
-    for config in configs {
+    for (idx, config) in configs.iter().enumerate() {
         let mut endpoints = Vec::new();
         for (i, ep) in config.endpoints.iter().enumerate() {
             if let Ok(addr) = ep.address.parse::<SocketAddr>() {
@@ -305,7 +305,7 @@ pub fn build_upstreams(
             _ => None,
         };
 
-        let uid = config.upstream_id();
+        let uid = UpstreamId::new(idx as u16);
 
         if transport == "rdma" && app != "grpc" {
             let rdma_config = velda_rdma::RdmaConfig {
@@ -637,15 +637,15 @@ mod tests {
         assert_eq!(table.rdma.len(), 1);
         assert_eq!(table.len(), 9);
 
-        assert!(table.get_raw("u-tcp").is_some());
-        assert!(table.get_raw("u-udp").is_some());
-        assert!(table.get_raw("u-rdma").is_some());
-        assert!(table.get_http("u-http1").is_some());
-        assert!(table.get_http("u-http2").is_some());
-        assert!(table.get_http("u-http3").is_some());
-        assert!(table.get_grpc("u-grpc-tcp").is_some());
-        assert!(table.get_grpc("u-grpc-udp").is_some());
-        assert!(table.get_rdma("u-rdma").is_some());
+        assert!(table.get_raw(UpstreamId::new(2)).is_some());
+        assert!(table.get_raw(UpstreamId::new(3)).is_some());
+        assert!(table.get_raw(UpstreamId::new(7)).is_some());
+        assert!(table.get_http(UpstreamId::new(0)).is_some());
+        assert!(table.get_http(UpstreamId::new(1)).is_some());
+        assert!(table.get_http(UpstreamId::new(6)).is_some());
+        assert!(table.get_grpc(UpstreamId::new(4)).is_some());
+        assert!(table.get_grpc(UpstreamId::new(5)).is_some());
+        assert!(table.get_rdma(UpstreamId::new(7)).is_some());
     }
 
     #[test]
@@ -663,7 +663,7 @@ mod tests {
 
         let table = build_upstreams_default(&[cfg], None);
         assert_eq!(table.http.len(), 1);
-        let u = table.get_http("u-dns").unwrap();
+        let u = table.get_http(UpstreamId::new(0)).unwrap();
         assert_eq!(u.id(), "u-dns");
     }
 

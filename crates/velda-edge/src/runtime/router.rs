@@ -15,19 +15,16 @@ pub fn build_router(
     upstreams: &[UpstreamConfig],
     listeners: &[ListenerConfig],
 ) -> Result<Router, EdgeError> {
-    // Register all route human names into the global route catalog for zero-alloc access logging
-    velda_observability::set_route_catalog(
-        routes
-            .iter()
-            .map(|r| (r.route_id().0 as u16, r.id.as_str())),
-    );
-
     let mut builder = RouterBuilder::new();
 
-    for route in routes {
-        let route_id = route.route_id();
+    for (idx, route) in routes.iter().enumerate() {
+        let route_id = velda_core::RouteId(idx as u16);
         let listener_id = route.listener_id();
-        let upstream_id = route.upstream_id();
+        let up_idx = upstreams
+            .iter()
+            .position(|u| u.id == route.upstream)
+            .unwrap_or(0);
+        let upstream_id = velda_core::UpstreamId(up_idx as u16);
 
         if route.kind.eq_ignore_ascii_case("l4") {
             let protocol_str = route.match_rule.protocol.as_deref().unwrap_or("tcp");
@@ -168,28 +165,18 @@ pub fn build_router(
                     let (mut http1_route, mut http2_route) =
                         if let Some(ref exact) = route.match_rule.path {
                             (
-                                Http1Route::new_exact(
-                                    route_id,
-                                    listener_id,
-                                    exact.clone(),
-                                    upstream_id,
-                                ),
-                                Http2Route::new_exact(
-                                    route_id,
-                                    listener_id,
-                                    exact.clone(),
-                                    upstream_id,
-                                ),
+                                Http1Route::new_exact(route_id, listener_id, exact.clone()),
+                                Http2Route::new_exact(route_id, listener_id, exact.clone()),
                             )
                         } else if let Some(ref prefix) = route.match_rule.path_prefix {
                             (
-                                Http1Route::new(route_id, listener_id, prefix.clone(), upstream_id),
-                                Http2Route::new(route_id, listener_id, prefix.clone(), upstream_id),
+                                Http1Route::new(route_id, listener_id, prefix.clone()),
+                                Http2Route::new(route_id, listener_id, prefix.clone()),
                             )
                         } else {
                             (
-                                Http1Route::new(route_id, listener_id, "/", upstream_id),
-                                Http2Route::new(route_id, listener_id, "/", upstream_id),
+                                Http1Route::new(route_id, listener_id, "/"),
+                                Http2Route::new(route_id, listener_id, "/"),
                             )
                         };
 
@@ -212,8 +199,7 @@ pub fn build_router(
                     let clean = raw_service.strip_prefix('/').unwrap_or(raw_service);
                     let service = clean.strip_suffix('/').unwrap_or(clean);
 
-                    let mut grpc_route =
-                        GrpcRoute::new(route_id, listener_id, service, upstream_id);
+                    let mut grpc_route = GrpcRoute::new(route_id, listener_id, service);
 
                     if let Some(ref auth) = route.match_rule.host {
                         grpc_route = grpc_route.with_authority(auth.clone());
@@ -223,11 +209,11 @@ pub fn build_router(
                 }
                 "http1" => {
                     let mut http1_route = if let Some(ref exact) = route.match_rule.path {
-                        Http1Route::new_exact(route_id, listener_id, exact.clone(), upstream_id)
+                        Http1Route::new_exact(route_id, listener_id, exact.clone())
                     } else if let Some(ref prefix) = route.match_rule.path_prefix {
-                        Http1Route::new(route_id, listener_id, prefix.clone(), upstream_id)
+                        Http1Route::new(route_id, listener_id, prefix.clone())
                     } else {
-                        Http1Route::new(route_id, listener_id, "/", upstream_id)
+                        Http1Route::new(route_id, listener_id, "/")
                     };
 
                     if let Some(ref host) = route.match_rule.host {
@@ -238,11 +224,11 @@ pub fn build_router(
                 }
                 "http2" => {
                     let mut http2_route = if let Some(ref exact) = route.match_rule.path {
-                        Http2Route::new_exact(route_id, listener_id, exact.clone(), upstream_id)
+                        Http2Route::new_exact(route_id, listener_id, exact.clone())
                     } else if let Some(ref prefix) = route.match_rule.path_prefix {
-                        Http2Route::new(route_id, listener_id, prefix.clone(), upstream_id)
+                        Http2Route::new(route_id, listener_id, prefix.clone())
                     } else {
-                        Http2Route::new(route_id, listener_id, "/", upstream_id)
+                        Http2Route::new(route_id, listener_id, "/")
                     };
 
                     if let Some(ref host) = route.match_rule.host {
@@ -253,11 +239,11 @@ pub fn build_router(
                 }
                 "http3" => {
                     let mut http3_route = if let Some(ref exact) = route.match_rule.path {
-                        Http3Route::new_exact(route_id, listener_id, exact.clone(), upstream_id)
+                        Http3Route::new_exact(route_id, listener_id, exact.clone())
                     } else if let Some(ref prefix) = route.match_rule.path_prefix {
-                        Http3Route::new(route_id, listener_id, prefix.clone(), upstream_id)
+                        Http3Route::new(route_id, listener_id, prefix.clone())
                     } else {
-                        Http3Route::new(route_id, listener_id, "/", upstream_id)
+                        Http3Route::new(route_id, listener_id, "/")
                     };
 
                     if let Some(ref host) = route.match_rule.host {
@@ -466,12 +452,12 @@ mod tests {
         // Verify L4 TCP route
         let tcp = router.route_tcp("postgres-in").unwrap();
         assert_eq!(tcp.listener_id, ListenerId::from_name("postgres-in"));
-        assert_eq!(tcp.upstream_id, UpstreamId::from_name("postgres-backend"));
+        assert_eq!(tcp.upstream_id, UpstreamId::new(0));
 
         // Verify L4 UDP route
         let udp = router.route_udp("dns-in").unwrap();
         assert_eq!(udp.listener_id, ListenerId::from_name("dns-in"));
-        assert_eq!(udp.upstream_id, UpstreamId::from_name("dns-backend"));
+        assert_eq!(udp.upstream_id, UpstreamId::new(1));
         assert_eq!(
             udp.session_affinity,
             velda_router::UdpSessionAffinity::ClientAddr
@@ -486,10 +472,7 @@ mod tests {
         // Verify L7 HTTP/1.1 route compilation
         let http_req = velda_router::Http1RouteRequest::new("/api/v1/users");
         let http_matched = router.route_http1("http-in", &http_req).unwrap();
-        assert_eq!(
-            http_matched.upstream_id,
-            UpstreamId::from_name("http-backend")
-        );
+        assert_eq!(http_matched.id, velda_core::RouteId(3));
 
         // Verify protocol isolation: HTTP/1 route is NOT in HTTP/2 router
         let h2_req = velda_router::Http2RouteRequest::new("/api/v1/users");

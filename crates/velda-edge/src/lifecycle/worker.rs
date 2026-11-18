@@ -333,10 +333,11 @@ pub fn spawn_shadow_worker(
                 // Single unified cooperative event loop
                 loop {
                     tokio::select! {
-                        // Drain core-local SPSC access log ring into reference-counted Arc<[AccessLogRecord]>
+                        // Drain core-local SPSC access log and trace span rings into reference-counted
                         // batches for registered background exporter plugins.
                         _ = log_flush_interval.tick() => {
                             velda_observability::global_log_store().flush_lane(worker_id, 512);
+                            velda_observability::global_trace_store().flush_lane(worker_id, 512);
                         }
 
                         // Autonomous background upstream pre-warming & core-local buffer maintenance on SCHED_IDLE
@@ -446,9 +447,10 @@ pub fn spawn_shadow_worker(
                     }
                 }
 
-                // Drain any remaining access log records from this core's SPSC ring into
+                // Drain any remaining access log records and trace spans from this core's SPSC rings into
                 // registered background exporter queues before terminating background tasks.
                 velda_observability::global_log_store().flush_lane(worker_id, 4096);
+                velda_observability::global_trace_store().flush_lane(worker_id, 4096);
 
                 // Gracefully cancel and flush all active tasks in both sets
                 shadow_tasks.shutdown().await;

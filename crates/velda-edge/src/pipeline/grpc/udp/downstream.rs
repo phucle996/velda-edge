@@ -140,7 +140,7 @@ pub async fn process_grpc_udp_request(
             peer_port: peer.port(),
             upstream_port: 0,
             status_code: 200,
-            route_id: 0,
+            route_id: velda_core::UNMATCHED_ROUTE_ID,
             ua_major_version,
             rpc_msgs_or_flags: 1,
             pipe: PipeKind::BufferedGrpcUdpUdp,
@@ -178,7 +178,7 @@ pub async fn process_grpc_udp_request(
             peer_port: peer.port(),
             upstream_port: 0,
             status_code: 200,
-            route_id: 0,
+            route_id: velda_core::UNMATCHED_ROUTE_ID,
             ua_major_version,
             rpc_msgs_or_flags: 1,
             pipe: PipeKind::BufferedGrpcUdpUdp,
@@ -210,7 +210,7 @@ pub async fn process_grpc_udp_request(
             peer_port: peer.port(),
             upstream_port: 0,
             status_code: 200,
-            route_id: 0,
+            route_id: velda_core::UNMATCHED_ROUTE_ID,
             ua_major_version,
             rpc_msgs_or_flags: 1,
             pipe: PipeKind::BufferedGrpcUdpUdp,
@@ -225,7 +225,12 @@ pub async fn process_grpc_udp_request(
         return GrpcStatus::Unimplemented.to_l7_response(Some("no route matched for service"));
     };
 
-    let mut target_upstream: UpstreamId = route.upstream_id;
+    let route_idx = route.id.0 as usize;
+    let mut target_upstream: UpstreamId = rt
+        .route_to_upstream
+        .get(route_idx)
+        .copied()
+        .unwrap_or(UpstreamId::new(0));
 
     // ========================================================================
     // [Route Plugin Pipeline Evaluation: pre_route & pre_upstream hooks]
@@ -278,7 +283,7 @@ pub async fn process_grpc_udp_request(
                         peer_port: peer.port(),
                         upstream_port: 0,
                         status_code: 200,
-                        route_id: route.id.0 as u16,
+                        route_id: route.id.0,
                         ua_major_version,
                         rpc_msgs_or_flags: 1,
                         pipe: PipeKind::BufferedGrpcUdpUdp,
@@ -343,7 +348,7 @@ pub async fn process_grpc_udp_request(
                         peer_port: peer.port(),
                         upstream_port: 0,
                         status_code: 200,
-                        route_id: route.id.0 as u16,
+                        route_id: route.id.0,
                         ua_major_version,
                         rpc_msgs_or_flags: 1,
                         pipe: PipeKind::BufferedGrpcUdpUdp,
@@ -393,7 +398,7 @@ pub async fn process_grpc_udp_request(
                 peer_port: peer.port(),
                 upstream_port: 0,
                 status_code,
-                route_id: route.id.0 as u16,
+                route_id: route.id.0,
                 ua_major_version,
                 rpc_msgs_or_flags: 1,
                 pipe: PipeKind::BufferedGrpcUdpUdp,
@@ -425,7 +430,7 @@ pub async fn process_grpc_udp_request(
             peer_port: peer.port(),
             upstream_port: 0,
             status_code: 200,
-            route_id: route.id.0 as u16,
+            route_id: route.id.0,
             ua_major_version,
             rpc_msgs_or_flags: 1,
             pipe: PipeKind::BufferedGrpcUdpUdp,
@@ -464,7 +469,7 @@ pub async fn process_grpc_udp_request(
             peer_port: peer.port(),
             upstream_port: 0,
             status_code: 200,
-            route_id: route.id.0 as u16,
+            route_id: route.id.0,
             ua_major_version,
             rpc_msgs_or_flags: 1,
             pipe: PipeKind::BufferedGrpcUdpUdp,
@@ -589,7 +594,7 @@ pub async fn process_grpc_udp_request(
         Err(e) => {
             tracing::warn!(
                 error = %e,
-                upstream = %route.upstream_id,
+                upstream = %target_upstream,
                 "gRPC over UDP stream pipe terminated with error"
             );
             (
@@ -639,7 +644,7 @@ pub async fn process_grpc_udp_request(
         peer_port: peer.port(),
         upstream_port,
         status_code,
-        route_id: route.id.0 as u16,
+        route_id: route.id.0,
         ua_major_version,
         rpc_msgs_or_flags: 1,
         pipe: pipe_kind,

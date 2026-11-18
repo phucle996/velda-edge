@@ -328,12 +328,16 @@ pub fn build_mock_runtime(
         build_plugin_table(&config.plugins, &config.routes, &config.listeners).unwrap(),
     );
 
+    let route_to_upstream =
+        velda_edge::runtime::build_runtime_luts(&config.routes, &config.upstreams);
+
     Runtime {
         revision,
         config,
         router,
         pipelines,
         upstreams: upstreams_table,
+        route_to_upstream,
         plugins: plugin_table,
         tls_server: None,
         tls_client: None,

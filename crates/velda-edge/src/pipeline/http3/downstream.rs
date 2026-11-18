@@ -7,6 +7,7 @@ use std::sync::Arc;
 
 use http::StatusCode;
 use http::header::HeaderValue;
+use velda_core::UpstreamId;
 use velda_core::{Action, L7Request, PipeKind};
 use velda_http1::Http1PipeStrategy;
 use velda_http2::Http2PipeStrategy;
@@ -251,7 +252,7 @@ pub async fn handle_http3_udp(
                         peer_port: peer.port(),
                         upstream_port: 0,
                         status_code: StatusCode::TOO_EARLY.as_u16(),
-                        route_id: 0,
+                        route_id: velda_core::UNMATCHED_ROUTE_ID,
                         ua_major_version: 0,
                         rpc_msgs_or_flags: 0,
                         pipe: velda_core::PipeKind::BufferedH3H1,
@@ -302,7 +303,7 @@ pub async fn handle_http3_udp(
                         peer_port: peer.port(),
                         upstream_port: 0,
                         status_code: StatusCode::BAD_REQUEST.as_u16(),
-                        route_id: 0,
+                        route_id: velda_core::UNMATCHED_ROUTE_ID,
                         ua_major_version: 0,
                         rpc_msgs_or_flags: 0,
                         pipe: velda_core::PipeKind::BufferedH3H1,
@@ -397,7 +398,7 @@ async fn process_http3_request(
             peer_port: peer.port(),
             upstream_port: 0,
             status_code: StatusCode::NOT_FOUND.as_u16(),
-            route_id: 0,
+            route_id: velda_core::UNMATCHED_ROUTE_ID,
             ua_major_version,
             rpc_msgs_or_flags: 0,
             pipe: velda_core::PipeKind::BufferedH3H1,
@@ -412,7 +413,12 @@ async fn process_http3_request(
         return;
     };
 
-    let mut target_upstream: velda_core::UpstreamId = route.upstream_id;
+    let route_idx = route.id.0 as usize;
+    let mut target_upstream: UpstreamId = rt
+        .route_to_upstream
+        .get(route_idx)
+        .copied()
+        .unwrap_or(UpstreamId::new(0));
 
     // ========================================================================
     // [Route Plugin Pipeline Evaluation: pre_route & pre_upstream hooks]
@@ -474,7 +480,7 @@ async fn process_http3_request(
                             peer_port: peer.port(),
                             upstream_port: 0,
                             status_code: status,
-                            route_id: route.id.0 as u16,
+                            route_id: route.id.0,
                             ua_major_version,
                             rpc_msgs_or_flags: 0,
                             pipe: velda_core::PipeKind::BufferedH3H1,
@@ -549,7 +555,7 @@ async fn process_http3_request(
                             peer_port: peer.port(),
                             upstream_port: 0,
                             status_code: status,
-                            route_id: route.id.0 as u16,
+                            route_id: route.id.0,
                             ua_major_version,
                             rpc_msgs_or_flags: 0,
                             pipe: velda_core::PipeKind::BufferedH3H1,
@@ -601,7 +607,7 @@ async fn process_http3_request(
                 peer_port: peer.port(),
                 upstream_port: 0,
                 status_code: status,
-                route_id: route.id.0 as u16,
+                route_id: route.id.0,
                 ua_major_version,
                 rpc_msgs_or_flags: 0,
                 pipe: velda_core::PipeKind::BufferedH3H1,
@@ -664,7 +670,7 @@ async fn process_http3_request(
             peer_port: peer.port(),
             upstream_port: 0,
             status_code: StatusCode::SERVICE_UNAVAILABLE.as_u16(),
-            route_id: route.id.0 as u16,
+            route_id: route.id.0,
             ua_major_version,
             rpc_msgs_or_flags: 0,
             pipe: velda_core::PipeKind::BufferedH3H1,
@@ -716,7 +722,7 @@ async fn process_http3_request(
             peer_port: peer.port(),
             upstream_port: 0,
             status_code: StatusCode::TOO_MANY_REQUESTS.as_u16(),
-            route_id: route.id.0 as u16,
+            route_id: route.id.0,
             ua_major_version,
             rpc_msgs_or_flags: 0,
             pipe: velda_core::PipeKind::BufferedH3H1,
@@ -976,7 +982,7 @@ async fn process_http3_request(
         peer_port: peer.port(),
         upstream_port,
         status_code: outcome.status_code,
-        route_id: route.id.0 as u16,
+        route_id: route.id.0,
         ua_major_version,
         rpc_msgs_or_flags: 0,
         pipe: pipe_kind,
