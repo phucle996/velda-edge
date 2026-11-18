@@ -237,7 +237,7 @@ fn make_auth_request(token: &str) -> L7Request {
 
 fn evaluate_token(plugin: &JwtAuthPlugin, token: &str) -> Action {
     let mut req = make_auth_request(token);
-    let mut target_upstream = UpstreamId::from("backend");
+    let mut target_upstream = UpstreamId::new(1);
     plugin.on_upstream_request(&mut req, &mut target_upstream)
 }
 

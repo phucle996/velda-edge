@@ -161,8 +161,8 @@ impl LokiJsonFormatter {
                         self.http_values.extend_from_slice(b" url=");
                         self.http_values.extend_from_slice(rec.url().as_bytes());
                         self.http_values.extend_from_slice(b" route=");
-                        velda_observability::with_route_name(rec.route_id, |name| {
-                            self.http_values.extend_from_slice(name.as_bytes());
+                        velda_router::with_route_bytes(rec.route_id, |bytes| {
+                            self.http_values.extend_from_slice(bytes);
                         });
                         self.http_values.extend_from_slice(b" status=");
                         fast_write_u64(&mut self.http_values, rec.status_code as u64);
@@ -214,8 +214,8 @@ impl LokiJsonFormatter {
                         self.grpc_values.extend_from_slice(b" method=POST url=");
                         self.grpc_values.extend_from_slice(rec.url().as_bytes());
                         self.grpc_values.extend_from_slice(b" route=");
-                        velda_observability::with_route_name(rec.route_id, |name| {
-                            self.grpc_values.extend_from_slice(name.as_bytes());
+                        velda_router::with_route_bytes(rec.route_id, |bytes| {
+                            self.grpc_values.extend_from_slice(bytes);
                         });
                         self.grpc_values.extend_from_slice(b" grpc_status=");
                         self.grpc_values
@@ -264,8 +264,8 @@ impl LokiJsonFormatter {
                         self.raw_values
                             .extend_from_slice(rec.pipe_name().as_bytes());
                         self.raw_values.extend_from_slice(b" route=");
-                        velda_observability::with_route_name(rec.route_id, |name| {
-                            self.raw_values.extend_from_slice(name.as_bytes());
+                        velda_router::with_route_bytes(rec.route_id, |bytes| {
+                            self.raw_values.extend_from_slice(bytes);
                         });
                         self.raw_values.extend_from_slice(b" duration_ns=");
                         fast_write_u64(&mut self.raw_values, rec.duration_ns);

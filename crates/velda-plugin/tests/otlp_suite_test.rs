@@ -1,21 +1,19 @@
-//! Comprehensive Test Suite for OTLP Plugins (`otlp_metrics_exporter`, `otlp_log_shipper`,
-//! `opentelemetry_tracer`, `w3c_trace_context`).
+//! Comprehensive Test Suite for OTLP Plugins (`otlp_metrics_exporter`, `otlp_log_shipper`).
 //!
 //! Validates:
 //! 1. OpenTelemetry JSON Schema conformance across Metrics, Logs, and Traces.
-//! 2. W3C TraceContext RFC propagation and generation.
-//! 3. Persistent Keep-Alive connection reuse avoiding connection churn and handshake storms.
-//! 4. Transparent reconnect resilience when server closes socket while idle.
+//! 2. Persistent Keep-Alive connection reuse avoiding connection churn and handshake storms.
+//! 3. Transparent reconnect resilience when server closes socket while idle.
 
 use std::sync::Arc;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::time::Duration;
 
-use http::{HeaderMap, HeaderValue, Method, Uri, Version};
+use http::HeaderMap;
 use prost::Message;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::TcpListener;
-use velda_core::{Body, CompletionReason, GrpcStatus, HttpMethod, L7Request, PipeKind};
+use velda_core::{CompletionReason, GrpcStatus, HttpMethod, PipeKind};
 use velda_observability::{AccessLogRecord, MetricsStore};
 
 use velda_plugin::background::otlp_log_shipper::json::{
@@ -30,13 +28,6 @@ use velda_plugin::background::otlp_metrics_exporter::json::{
 use velda_plugin::background::otlp_metrics_exporter::proto::{
     OtlpMetricsGrpcClient, format_otlp_metrics_proto,
 };
-use velda_plugin::header::{TRACEPARENT, X_SPAN_ID, X_TRACE_ID};
-use velda_plugin::post_response::opentelemetry_tracer::{
-    OtlpSpanItem, OtlpTraceClient, OtlpTracesGrpcClient, format_otlp_spans_json,
-    format_otlp_spans_proto,
-};
-use velda_plugin::pre_upstream::PreUpstreamPlugin;
-use velda_plugin::pre_upstream::w3c_trace_context::{W3cTraceContextConfig, W3cTraceContextPlugin};
 
 /// Helper: starts a mock OTLP Collector HTTP/1.1 server counting connections and requests.
 async fn spawn_mock_collector(
@@ -250,109 +241,6 @@ async fn test_otlp_log_shipper_batching_and_send() {
     assert_eq!(conns.load(Ordering::SeqCst), 1);
 }
 
-#[tokio::test]
-async fn test_opentelemetry_tracer_batching_and_send() {
-    let (url, conns, reqs, _shutdown) = spawn_mock_collector("/v1/traces").await;
-
-    let mut client = OtlpTraceClient::new(&url, Duration::from_secs(5), Duration::from_secs(10))
-        .expect("Client initialized");
-    let spans = vec![OtlpSpanItem {
-        trace_id: "4bf92f3577b34da6a3ce929d0e0e4736".to_string(),
-        span_id: "00f067aa0ba902b7".to_string(),
-        parent_span_id: None,
-        name: "GET /api/v1/health".to_string(),
-        start_time_unix_nano: 1710000000000000000,
-        end_time_unix_nano: 1710000000002000000,
-        status_code: 200,
-        method: "GET".to_string(),
-        path: "/api/v1/health".to_string(),
-        route_id: Some("health-route".to_string()),
-        client_ip: Some("127.0.0.1".to_string()),
-        upstream: Some("10.0.0.2:8080".to_string()),
-    }];
-
-    let payload = format_otlp_spans_json(&spans, "test-edge");
-    let headers = HeaderMap::new();
-
-    let status = client
-        .send_traces(payload.as_bytes(), &headers)
-        .await
-        .expect("Sent traces");
-    assert_eq!(status, 200);
-
-    tokio::time::sleep(Duration::from_millis(50)).await;
-    assert_eq!(reqs.load(Ordering::SeqCst), 1);
-    assert_eq!(conns.load(Ordering::SeqCst), 1);
-}
-
-#[test]
-fn test_w3c_trace_context_end_to_end_flow() {
-    let tracer_plugin = W3cTraceContextPlugin::new(
-        "w3c",
-        W3cTraceContextConfig {
-            generate_if_missing: true,
-            forward_tracestate: true,
-            sampled: true,
-        },
-    );
-
-    // Case A: Missing traceparent -> generated dynamically
-    let mut req = L7Request::new(
-        Method::GET,
-        Uri::from_static("/test"),
-        Version::HTTP_11,
-        HeaderMap::new(),
-        Body::Empty,
-    );
-
-    let mut target = velda_core::UpstreamId::from("upstream-srv");
-    let action = tracer_plugin.on_upstream_request(&mut req, &mut target);
-    assert!(matches!(action, velda_core::Action::Continue));
-
-    let tp = req.headers.get(&TRACEPARENT).unwrap().to_str().unwrap();
-    assert!(tp.starts_with("00-"));
-    assert_eq!(tp.len(), 55);
-
-    let trace_id = req
-        .headers
-        .get(&X_TRACE_ID)
-        .unwrap()
-        .to_str()
-        .unwrap()
-        .to_string();
-    let span_id = req
-        .headers
-        .get(&X_SPAN_ID)
-        .unwrap()
-        .to_str()
-        .unwrap()
-        .to_string();
-
-    // Verify format: 00-{trace_id}-{span_id}-01
-    assert_eq!(tp, format!("00-{trace_id}-{span_id}-01"));
-
-    // Case B: Existing traceparent forwarded with new span_id
-    let mut req2 = L7Request::new(
-        Method::POST,
-        Uri::from_static("/test2"),
-        Version::HTTP_11,
-        HeaderMap::new(),
-        Body::Empty,
-    );
-    req2.headers.insert(
-        TRACEPARENT,
-        HeaderValue::from_static("00-abcdef0123456789abcdef0123456789-1111222233334444-01"),
-    );
-
-    tracer_plugin.on_upstream_request(&mut req2, &mut target);
-    let tp2 = req2.headers.get(&TRACEPARENT).unwrap().to_str().unwrap();
-    assert!(tp2.starts_with("00-abcdef0123456789abcdef0123456789-"));
-    assert_ne!(
-        tp2,
-        "00-abcdef0123456789abcdef0123456789-1111222233334444-01"
-    );
-}
-
 /// Helper: starts a mock OTLP gRPC HTTP/2 server counting incoming RPC calls.
 async fn spawn_mock_grpc_collector(
     expected_path: &'static str,
@@ -436,8 +324,7 @@ async fn test_otlp_metrics_grpc_export() {
 }
 
 #[tokio::test]
-async fn test_otlp_logs_and_traces_grpc_export() {
-    // 1. Logs gRPC
+async fn test_otlp_logs_grpc_export() {
     let (logs_endpoint, logs_count, _logs_shutdown) =
         spawn_mock_grpc_collector(OtlpLogsGrpcClient::RPC_PATH).await;
 
@@ -477,37 +364,4 @@ async fn test_otlp_logs_and_traces_grpc_export() {
         .await
         .expect("Logs gRPC export must succeed");
     assert_eq!(logs_count.load(Ordering::SeqCst), 1);
-
-    // 2. Traces gRPC
-    let (traces_endpoint, traces_count, _traces_shutdown) =
-        spawn_mock_grpc_collector(OtlpTracesGrpcClient::RPC_PATH).await;
-
-    let span_item = OtlpSpanItem {
-        trace_id: "4bf92f3577b34da6a3ce929d0e0e4736".to_string(),
-        span_id: "00f067aa0ba902b7".to_string(),
-        parent_span_id: None,
-        name: "POST /api/pay".to_string(),
-        start_time_unix_nano: 1729579200000000000,
-        end_time_unix_nano: 1729579200002100000,
-        status_code: 200,
-        method: "POST".to_string(),
-        path: "/api/pay".to_string(),
-        route_id: Some("pay-route".to_string()),
-        client_ip: Some("127.0.0.1".to_string()),
-        upstream: Some("10.0.0.1:80".to_string()),
-    };
-
-    let span_proto_bytes = format_otlp_spans_proto(&[span_item], "pay-service");
-    let mut trace_client = OtlpTracesGrpcClient::new(
-        &traces_endpoint,
-        Duration::from_secs(5),
-        Duration::from_secs(10),
-    )
-    .unwrap();
-
-    trace_client
-        .send_traces(&span_proto_bytes, &headers)
-        .await
-        .expect("Traces gRPC export must succeed");
-    assert_eq!(traces_count.load(Ordering::SeqCst), 1);
 }

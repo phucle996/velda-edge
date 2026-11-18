@@ -14,7 +14,7 @@ use std::sync::RwLock;
 
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::TcpListener;
-use velda_core::{ListenerId, RouteId, UpstreamId};
+use velda_core::{ListenerId, RouteId};
 use velda_plugin::background::acme_cert_rotator::hot_swap::TlsHotSwapper;
 use velda_plugin::background::acme_cert_rotator::storage::CertStorage;
 use velda_plugin::background::acme_cert_rotator::{AcmeCertRotatorConfig, AcmeCertRotatorPlugin};
@@ -230,13 +230,8 @@ async fn test_acme_cert_rotator_e2e_lifecycle() {
 
     // 1. Setup in-memory Router and dynamic SniResolver
     let listener_id = ListenerId::from("ingress-http");
-    let http1 = Http1Router::new(vec![Http1Route::new(
-        RouteId::new(1),
-        listener_id,
-        "/api",
-        UpstreamId::new(10),
-    )])
-    .unwrap();
+    let http1 =
+        Http1Router::new(vec![Http1Route::new(RouteId::new(1), listener_id, "/api")]).unwrap();
 
     let router = Arc::new(RwLock::new(Router::new(
         Default::default(),

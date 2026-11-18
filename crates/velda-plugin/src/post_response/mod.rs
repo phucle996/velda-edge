@@ -15,7 +15,6 @@ use crate::capability::{Direction, PluginCapability, SupportedProtocols};
 pub mod ai_token_metering;
 pub mod cors;
 pub mod http_cache_store;
-pub mod opentelemetry_tracer;
 pub mod response_compression;
 pub mod response_header_mutation;
 pub mod security_headers;
@@ -25,7 +24,6 @@ pub use ai_token_metering::{
 };
 pub use cors::{CorsConfig, CorsResponsePlugin};
 pub use http_cache_store::{HttpCacheStoreConfig, HttpCacheStorePlugin};
-pub use opentelemetry_tracer::{OpentelemetryTracerConfig, OpentelemetryTracerPlugin};
 pub use response_compression::{
     CompressionAlgorithm, ResponseCompressionConfig, ResponseCompressionPlugin,
 };
@@ -89,7 +87,6 @@ pub fn instantiate(
             Ok(Arc::new(ResponseHeaderMutationPlugin::from_config(config)?))
         }
         "response_compression" => Ok(Arc::new(ResponseCompressionPlugin::from_config(config)?)),
-        "opentelemetry_tracer" => Ok(Arc::new(OpentelemetryTracerPlugin::from_config(config)?)),
         "ai_token_metering" => Ok(Arc::new(AiTokenMeteringPlugin::from_config(config)?)),
         other => Err(crate::error::PluginError::Config(format!(
             "Unsupported post_response plugin '{other}' for plugin '{}'",

@@ -262,7 +262,7 @@ pub struct CanaryPlugin {
 impl CanaryPlugin {
     /// Constructs a new canary plugin with full configuration.
     pub fn new(id: impl Into<String>, config: CanaryConfig) -> Result<Self, PluginError> {
-        let canary_upstream_id = velda_core::UpstreamId::from_name(config.canary_upstream.as_str());
+        let canary_upstream_id = velda_core::UpstreamId::new(2);
         let canary_upstream: Arc<str> = Arc::from(config.canary_upstream.as_str());
 
         let canary_marker = if config.canary_header.trim().eq_ignore_ascii_case("none") {
@@ -515,9 +515,9 @@ mod tests {
             },
             Body::Empty,
         );
-        let mut target1 = velda_core::UpstreamId::from("payments-v1");
+        let mut target1 = velda_core::UpstreamId::new(1);
         plugin.on_upstream_request(&mut req1, &mut target1);
-        assert_eq!(target1, velda_core::UpstreamId::from("payments-v2"));
+        assert_eq!(target1, velda_core::UpstreamId::new(2));
         assert_eq!(req1.headers.get("x-velda-canary").unwrap(), "true");
 
         // 2. Suffix match
@@ -532,9 +532,9 @@ mod tests {
             },
             Body::Empty,
         );
-        let mut target2 = velda_core::UpstreamId::from("payments-v1");
+        let mut target2 = velda_core::UpstreamId::new(1);
         plugin.on_upstream_request(&mut req2, &mut target2);
-        assert_eq!(target2, velda_core::UpstreamId::from("payments-v2"));
+        assert_eq!(target2, velda_core::UpstreamId::new(2));
 
         // 3. Prefix match
         let mut req3 = L7Request::new(
@@ -548,9 +548,9 @@ mod tests {
             },
             Body::Empty,
         );
-        let mut target3 = velda_core::UpstreamId::from("payments-v1");
+        let mut target3 = velda_core::UpstreamId::new(1);
         plugin.on_upstream_request(&mut req3, &mut target3);
-        assert_eq!(target3, velda_core::UpstreamId::from("payments-v2"));
+        assert_eq!(target3, velda_core::UpstreamId::new(2));
 
         // 4. Contains match
         let mut req4 = L7Request::new(
@@ -567,9 +567,9 @@ mod tests {
             },
             Body::Empty,
         );
-        let mut target4 = velda_core::UpstreamId::from("payments-v1");
+        let mut target4 = velda_core::UpstreamId::new(1);
         plugin.on_upstream_request(&mut req4, &mut target4);
-        assert_eq!(target4, velda_core::UpstreamId::from("payments-v2"));
+        assert_eq!(target4, velda_core::UpstreamId::new(2));
 
         // 5. Exists match
         let mut req5 = L7Request::new(
@@ -583,9 +583,9 @@ mod tests {
             },
             Body::Empty,
         );
-        let mut target5 = velda_core::UpstreamId::from("payments-v1");
+        let mut target5 = velda_core::UpstreamId::new(1);
         plugin.on_upstream_request(&mut req5, &mut target5);
-        assert_eq!(target5, velda_core::UpstreamId::from("payments-v2"));
+        assert_eq!(target5, velda_core::UpstreamId::new(2));
 
         // 6. Non-matching request with spoofed canary marker -> marker MUST be stripped!
         let mut req_spoof = L7Request::new(
@@ -599,9 +599,9 @@ mod tests {
             },
             Body::Empty,
         );
-        let mut target_base = velda_core::UpstreamId::from("payments-v1");
+        let mut target_base = velda_core::UpstreamId::new(1);
         plugin.on_upstream_request(&mut req_spoof, &mut target_base);
-        assert_eq!(target_base, velda_core::UpstreamId::from("payments-v1"));
+        assert_eq!(target_base, velda_core::UpstreamId::new(1));
         assert!(
             !req_spoof.headers.contains_key("x-velda-canary"),
             "Spoofed canary marker must be stripped on baseline path!"

@@ -60,7 +60,6 @@ pub fn canonical_phase_for_id(id: &str) -> Option<&'static str> {
         "http_fault_injection" => Some("pre_upstream"),
         "grpc_fault_injection" => Some("pre_upstream"),
         "request_termination" => Some("pre_upstream"),
-        "w3c_trace_context" => Some("pre_upstream"),
         "csrf" => Some("pre_upstream"),
         "csrf_protection" => Some("pre_upstream"),
         "consumer_quota" => Some("pre_upstream"),
@@ -70,7 +69,6 @@ pub fn canonical_phase_for_id(id: &str) -> Option<&'static str> {
         "http_cache_store" => Some("post_response"),
         "response_header_mutation" => Some("post_response"),
         "response_compression" => Some("post_response"),
-        "opentelemetry_tracer" => Some("post_response"),
         "ai_token_metering" => Some("post_response"),
         "prometheus_exporter" => Some("background"),
         "health_probe" => Some("background"),
@@ -81,6 +79,7 @@ pub fn canonical_phase_for_id(id: &str) -> Option<&'static str> {
         "loki_log_shipper" => Some("background"),
         "std_log_shipper" => Some("background"),
         "otlp_log_shipper" => Some("background"),
+        "otlp_trace_exporter" => Some("background"),
         _ => None,
     }
 }
@@ -384,17 +383,6 @@ pub fn validate_plugin_config(plugin: &mut PluginConfig) -> Result<(), PluginErr
             plugin.config =
                 serde_json::to_value(normalized).map_err(|e| PluginError::Config(e.to_string()))?;
         }
-        "w3c_trace_context" => {
-            if plugin.phase != "pre_upstream" {
-                return Err(PluginError::Config(format!(
-                    "Plugin '{}' must specify phase 'pre_upstream'",
-                    plugin.id
-                )));
-            }
-            let normalized = crate::pre_upstream::w3c_trace_context::validation::validate_w3c_trace_context_config(&plugin.id, &plugin.config)?;
-            plugin.config =
-                serde_json::to_value(normalized).map_err(|e| PluginError::Config(e.to_string()))?;
-        }
         "security_headers" => {
             if plugin.phase != "post_response" {
                 return Err(PluginError::Config(format!(
@@ -450,17 +438,6 @@ pub fn validate_plugin_config(plugin: &mut PluginConfig) -> Result<(), PluginErr
                 )));
             }
             let normalized = crate::post_response::response_compression::validation::validate_response_compression_config(&plugin.id, &plugin.config)?;
-            plugin.config =
-                serde_json::to_value(normalized).map_err(|e| PluginError::Config(e.to_string()))?;
-        }
-        "opentelemetry_tracer" => {
-            if plugin.phase != "post_response" {
-                return Err(PluginError::Config(format!(
-                    "Plugin '{}' must specify phase 'post_response'",
-                    plugin.id
-                )));
-            }
-            let normalized = crate::post_response::opentelemetry_tracer::validation::validate_opentelemetry_tracer_config(&plugin.id, &plugin.config)?;
             plugin.config =
                 serde_json::to_value(normalized).map_err(|e| PluginError::Config(e.to_string()))?;
         }
@@ -581,6 +558,21 @@ pub fn validate_plugin_config(plugin: &mut PluginConfig) -> Result<(), PluginErr
             }
             let normalized =
                 crate::background::otlp_log_shipper::validation::validate_otlp_log_shipper_config(
+                    &plugin.id,
+                    &plugin.config,
+                )?;
+            plugin.config =
+                serde_json::to_value(normalized).map_err(|e| PluginError::Config(e.to_string()))?;
+        }
+        "otlp_trace_exporter" => {
+            if plugin.phase != "background" {
+                return Err(PluginError::Config(format!(
+                    "Plugin '{}' must specify phase 'background'",
+                    plugin.id
+                )));
+            }
+            let normalized =
+                crate::background::otlp_trace_exporter::validate_otlp_trace_exporter_config(
                     &plugin.id,
                     &plugin.config,
                 )?;

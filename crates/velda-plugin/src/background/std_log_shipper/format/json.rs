@@ -7,7 +7,7 @@
 
 use std::sync::Arc;
 use velda_core::WireProtocol;
-use velda_observability::{AccessLogRecord, with_route_name};
+use velda_observability::AccessLogRecord;
 
 use super::super::lut::{
     fast_write_hex32, fast_write_ip, fast_write_ipv4, fast_write_iso8601_utc, fast_write_ts_sec,
@@ -89,8 +89,8 @@ pub fn format_ndjson_records(
                     out.extend_from_slice(JSON_URL);
                     out.extend_from_slice(rec.url().as_bytes());
                     out.extend_from_slice(JSON_ROUTE);
-                    with_route_name(rec.route_id, |name| {
-                        out.extend_from_slice(name.as_bytes());
+                    velda_router::with_route_bytes(rec.route_id, |bytes| {
+                        out.extend_from_slice(bytes);
                     });
                     out.extend_from_slice(JSON_STATUS);
                     fast_write_u64(out, rec.status_code as u64);
@@ -117,8 +117,8 @@ pub fn format_ndjson_records(
                     out.extend_from_slice(JSON_GRPC_METHOD);
                     out.extend_from_slice(rec.url().as_bytes());
                     out.extend_from_slice(JSON_ROUTE);
-                    with_route_name(rec.route_id, |name| {
-                        out.extend_from_slice(name.as_bytes());
+                    velda_router::with_route_bytes(rec.route_id, |bytes| {
+                        out.extend_from_slice(bytes);
                     });
                     out.extend_from_slice(JSON_GRPC_STATUS);
                     out.extend_from_slice(grpc_st.as_str().as_bytes());
@@ -148,8 +148,8 @@ pub fn format_ndjson_records(
                 }
                 WireProtocol::RawTcp | WireProtocol::RawUdp => {
                     out.extend_from_slice(JSON_ROUTE);
-                    with_route_name(rec.route_id, |name| {
-                        out.extend_from_slice(name.as_bytes());
+                    velda_router::with_route_bytes(rec.route_id, |bytes| {
+                        out.extend_from_slice(bytes);
                     });
                     out.extend_from_slice(b"\"");
                     out.extend_from_slice(JSON_DURATION_NS);

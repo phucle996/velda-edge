@@ -8,8 +8,8 @@ use std::hash::Hasher;
 use http::{HeaderMap, Method};
 use rustc_hash::FxHasher;
 
-use crate::header::{X_REQUEST_ID, X_ROUTE_ID, X_UPSTREAM_ADDR};
 use crate::http_cache::constants::{X_CACHE, X_VELDA_CACHE_HASH, X_VELDA_CACHE_KEY};
+use velda_core::buffer::header::X_REQUEST_ID;
 
 /// Normalizes and sorts query string parameters alphabetically (e.g. `b=2&a=1` -> `a=1&b=2`).
 pub fn normalize_query(query: &str) -> String {
@@ -101,8 +101,6 @@ pub fn filter_cacheable_headers(headers: &HeaderMap) -> HeaderMap {
     filtered.remove(PROXY_AUTHENTICATE);
     filtered.remove(PROXY_AUTHORIZATION);
     filtered.remove(&X_REQUEST_ID);
-    filtered.remove(&X_ROUTE_ID);
-    filtered.remove(&X_UPSTREAM_ADDR);
     filtered.remove(&X_CACHE);
     filtered.remove(&X_VELDA_CACHE_KEY);
     filtered.remove(&X_VELDA_CACHE_HASH);

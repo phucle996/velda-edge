@@ -250,7 +250,7 @@ mod tests {
             Body::Empty,
         );
 
-        let mut target = velda_core::UpstreamId::from("http_upstream");
+        let mut target = velda_core::UpstreamId::new(1);
         let action = plugin.on_upstream_request(&mut req, &mut target);
         assert!(matches!(action, Action::Continue));
     }
@@ -270,7 +270,7 @@ mod tests {
             Body::Empty,
         );
 
-        let mut target = velda_core::UpstreamId::from("http_upstream");
+        let mut target = velda_core::UpstreamId::new(1);
         let action = plugin.on_upstream_request(&mut req, &mut target);
         match action {
             Action::Delay { duration, and_then } => {
@@ -296,7 +296,7 @@ mod tests {
             Body::Empty,
         );
 
-        let mut target = velda_core::UpstreamId::from("http_upstream");
+        let mut target = velda_core::UpstreamId::new(1);
         let action = plugin.on_upstream_request(&mut req, &mut target);
         match action {
             Action::Respond(resp) => {
@@ -327,7 +327,7 @@ mod tests {
             Body::Empty,
         );
 
-        let mut target = velda_core::UpstreamId::from("http_upstream");
+        let mut target = velda_core::UpstreamId::new(1);
         let action = plugin.on_upstream_request(&mut req, &mut target);
         match action {
             Action::Delay { duration, and_then } => {
@@ -383,7 +383,7 @@ mod tests {
             Body::Empty,
         );
 
-        let mut target = velda_core::UpstreamId::from("http_upstream");
+        let mut target = velda_core::UpstreamId::new(1);
         let action = plugin.on_upstream_request(&mut req, &mut target);
         match action {
             Action::Delay { duration, and_then } => {

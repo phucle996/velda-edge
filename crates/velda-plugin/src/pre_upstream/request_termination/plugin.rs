@@ -16,11 +16,11 @@ use crate::config::PluginConfig;
 use bytes::Bytes;
 use http::header::{CONTENT_LENGTH, CONTENT_TYPE, HeaderName, HeaderValue};
 use http::{HeaderMap, StatusCode, Version};
+use velda_core::buffer::header::X_REQUEST_ID;
 use velda_core::{Action, Body, L7Request, L7Response};
 
 use crate::capability::{AccessLevel, PluginCapability, SupportedProtocols};
 use crate::error::PluginError;
-use crate::header::X_REQUEST_ID;
 use crate::pre_upstream::PreUpstreamPlugin;
 
 /// Returns the canonical static plain-text body for standard HTTP status codes.
@@ -275,7 +275,7 @@ mod tests {
             Body::Empty,
         );
 
-        let mut target = velda_core::UpstreamId::from("default-upstream");
+        let mut target = velda_core::UpstreamId::new(1);
         let action = plugin.on_upstream_request(&mut req, &mut target);
         match action {
             Action::Respond(resp) => {
@@ -327,7 +327,7 @@ mod tests {
             Body::Empty,
         );
 
-        let mut target = velda_core::UpstreamId::from("default-upstream");
+        let mut target = velda_core::UpstreamId::new(1);
         let action = plugin.on_upstream_request(&mut req, &mut target);
         match action {
             Action::Respond(resp) => {
@@ -380,7 +380,7 @@ mod tests {
             Body::Empty,
         );
 
-        let mut target = velda_core::UpstreamId::from("default-upstream");
+        let mut target = velda_core::UpstreamId::new(1);
         let action = plugin.on_upstream_request(&mut req, &mut target);
         match action {
             Action::Respond(resp) => {

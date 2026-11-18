@@ -396,7 +396,7 @@ mod tests {
 
         let mut req = make_test_request(HeaderMap::new());
 
-        let mut target = velda_core::UpstreamId::from("default-upstream");
+        let mut target = velda_core::UpstreamId::new(1);
 
         // 1st request -> PASS
         assert!(matches!(
@@ -434,7 +434,7 @@ mod tests {
         };
         let plugin = RateLimitPlugin::with_config("rate-fw", config);
         let mut req = make_test_request(HeaderMap::new());
-        let mut target = velda_core::UpstreamId::from("default-upstream");
+        let mut target = velda_core::UpstreamId::new(1);
 
         // 1st request -> PASS
         assert!(matches!(
@@ -520,7 +520,7 @@ mod tests {
         plugin.redis_pool.set_connected(false);
 
         let mut req = make_test_request(HeaderMap::new());
-        let mut target = velda_core::UpstreamId::from("default-upstream");
+        let mut target = velda_core::UpstreamId::new(1);
         // 1st request -> PASS via memory fallback
         assert!(matches!(
             plugin.on_upstream_request(&mut req, &mut target),
@@ -548,7 +548,7 @@ mod tests {
         plugin.redis_pool.set_connected(false);
 
         let mut req = make_test_request(HeaderMap::new());
-        let mut target = velda_core::UpstreamId::from("default-upstream");
+        let mut target = velda_core::UpstreamId::new(1);
         // Should continuously pass through (fail-open)
         assert!(matches!(
             plugin.on_upstream_request(&mut req, &mut target),

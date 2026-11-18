@@ -185,8 +185,8 @@ impl LokiProtoFormatter {
                         self.line_buf.extend_from_slice(b" url=");
                         self.line_buf.extend_from_slice(rec.url().as_bytes());
                         self.line_buf.extend_from_slice(b" route=");
-                        velda_observability::with_route_name(rec.route_id, |name| {
-                            self.line_buf.extend_from_slice(name.as_bytes());
+                        velda_router::with_route_bytes(rec.route_id, |bytes| {
+                            self.line_buf.extend_from_slice(bytes);
                         });
                         self.line_buf.extend_from_slice(b" status=");
                         fast_write_u64(&mut self.line_buf, rec.status_code as u64);
@@ -236,8 +236,8 @@ impl LokiProtoFormatter {
                         self.line_buf.extend_from_slice(b" method=POST url=");
                         self.line_buf.extend_from_slice(rec.url().as_bytes());
                         self.line_buf.extend_from_slice(b" route=");
-                        velda_observability::with_route_name(rec.route_id, |name| {
-                            self.line_buf.extend_from_slice(name.as_bytes());
+                        velda_router::with_route_bytes(rec.route_id, |bytes| {
+                            self.line_buf.extend_from_slice(bytes);
                         });
                         self.line_buf.extend_from_slice(b" grpc_status=");
                         self.line_buf.extend_from_slice(grpc_st.as_str().as_bytes());
@@ -284,8 +284,8 @@ impl LokiProtoFormatter {
                         self.line_buf.extend_from_slice(b" pipe=");
                         self.line_buf.extend_from_slice(rec.pipe_name().as_bytes());
                         self.line_buf.extend_from_slice(b" route=");
-                        velda_observability::with_route_name(rec.route_id, |name| {
-                            self.line_buf.extend_from_slice(name.as_bytes());
+                        velda_router::with_route_bytes(rec.route_id, |bytes| {
+                            self.line_buf.extend_from_slice(bytes);
                         });
                         self.line_buf.extend_from_slice(b" duration_ns=");
                         fast_write_u64(&mut self.line_buf, rec.duration_ns);

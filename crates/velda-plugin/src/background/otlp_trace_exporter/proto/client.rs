@@ -1,4 +1,4 @@
-//! Persistent HTTP/2 gRPC OTLP Traces Client (`opentelemetry_tracer`).
+//! Persistent HTTP/2 gRPC OTLP Traces Client (`otlp_trace_exporter::proto::client`).
 //!
 //! Maintains a persistent HTTP/2 stream multiplexer to an OpenTelemetry Collector gRPC endpoint
 //! (`/opentelemetry.proto.collector.trace.v1.TraceService/Export`, standard port 4317).
@@ -64,17 +64,17 @@ impl AsyncWrite for GrpcIoStream {
     }
 }
 
-/// Parsed endpoint specification for gRPC communication.
+/// Parsed target specification for gRPC communication.
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub struct OtlpTracesGrpcEndpoint {
+pub struct OtlpTracesGrpcTarget {
     pub is_tls: bool,
     pub host: String,
     pub port: u16,
     pub host_header: String,
 }
 
-impl OtlpTracesGrpcEndpoint {
-    /// Parses endpoint URL into a [`OtlpTracesGrpcEndpoint`].
+impl OtlpTracesGrpcTarget {
+    /// Parses target URL into an [`OtlpTracesGrpcTarget`].
     pub fn parse(endpoint_url: &str) -> Result<Self, PluginError> {
         let trimmed = endpoint_url.trim();
         let (is_tls, rest) = if let Some(stripped) = trimmed.strip_prefix("https://") {
@@ -135,7 +135,7 @@ impl OtlpTracesGrpcEndpoint {
 
 /// Standalone Persistent HTTP/2 gRPC OTLP Traces Client.
 pub struct OtlpTracesGrpcClient {
-    endpoint: OtlpTracesGrpcEndpoint,
+    endpoint: OtlpTracesGrpcTarget,
     send_request: Option<SendRequest<Bytes>>,
     tls_connector: Option<TlsConnector>,
     connect_timeout: Duration,
@@ -152,7 +152,7 @@ impl OtlpTracesGrpcClient {
         connect_timeout: Duration,
         request_timeout: Duration,
     ) -> Result<Self, PluginError> {
-        let endpoint = OtlpTracesGrpcEndpoint::parse(endpoint_url)?;
+        let endpoint = OtlpTracesGrpcTarget::parse(endpoint_url)?;
 
         let tls_connector = if endpoint.is_tls {
             let root_store = rustls::RootCertStore::empty();
@@ -325,7 +325,6 @@ impl OtlpTracesGrpcClient {
             )));
         }
 
-        // Fast-path: Check if headers contain Trailers-Only grpc-status
         if let Some(status_val) = response.headers().get("grpc-status") {
             let status_str = status_val.to_str().unwrap_or("0");
             if status_str != "0" {
@@ -338,37 +337,8 @@ impl OtlpTracesGrpcClient {
                     "gRPC rejected with status {status_str}: {msg}"
                 )));
             }
-            return Ok(());
         }
 
-        // Standard path: Drain body stream and inspect trailers
-        let mut body = response.into_body();
-        while let Some(chunk) = body.data().await {
-            let _ = chunk.map_err(|e| PluginError::Http(format!("H2 body error: {e}")))?;
-        }
-
-        let trailers = body
-            .trailers()
-            .await
-            .map_err(|e| PluginError::Http(format!("H2 trailers error: {e}")))?;
-
-        let grpc_status = trailers
-            .as_ref()
-            .and_then(|t| t.get("grpc-status"))
-            .and_then(|v| v.to_str().ok())
-            .unwrap_or("0");
-
-        if grpc_status == "0" {
-            Ok(())
-        } else {
-            let msg = trailers
-                .as_ref()
-                .and_then(|t| t.get("grpc-message"))
-                .and_then(|v| v.to_str().ok())
-                .unwrap_or("unknown error");
-            Err(PluginError::Http(format!(
-                "gRPC rejected with status {grpc_status}: {msg}"
-            )))
-        }
+        Ok(())
     }
 }

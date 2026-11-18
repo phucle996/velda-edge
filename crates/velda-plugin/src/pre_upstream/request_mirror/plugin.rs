@@ -357,7 +357,7 @@ mod tests {
             Bytes::from_static(b"{\"item\":\"book\"}"),
         );
 
-        let mut target = velda_core::UpstreamId::from("primary-backend");
+        let mut target = velda_core::UpstreamId::new(1);
         let action = plugin.on_upstream_request(&mut req, &mut target);
         assert!(matches!(action, Action::Continue));
 
@@ -390,13 +390,13 @@ mod tests {
         let plugin = RequestMirrorPlugin::with_sender("mirror-ignore", config, tx).unwrap();
 
         let mut req_del = build_test_request(Method::DELETE, HeaderMap::new(), Bytes::new());
-        let mut target_del = velda_core::UpstreamId::from("primary-backend");
+        let mut target_del = velda_core::UpstreamId::new(1);
         plugin.on_upstream_request(&mut req_del, &mut target_del);
 
         assert!(rx.try_recv().is_err(), "DELETE must be ignored");
 
         let mut req_post = build_test_request(Method::POST, HeaderMap::new(), Bytes::new());
-        let mut target_post = velda_core::UpstreamId::from("primary-backend");
+        let mut target_post = velda_core::UpstreamId::new(1);
         plugin.on_upstream_request(&mut req_post, &mut target_post);
 
         assert!(rx.try_recv().is_ok(), "POST must be mirrored");
@@ -417,11 +417,11 @@ mod tests {
         let plugin = RequestMirrorPlugin::with_sender("mirror-drop", config, tx).unwrap();
 
         let mut req1 = build_test_request(Method::GET, HeaderMap::new(), Bytes::new());
-        let mut target1 = velda_core::UpstreamId::from("primary-backend");
+        let mut target1 = velda_core::UpstreamId::new(1);
         plugin.on_upstream_request(&mut req1, &mut target1); // fills buffer (1/1)
 
         let mut req2 = build_test_request(Method::GET, HeaderMap::new(), Bytes::new());
-        let mut target2 = velda_core::UpstreamId::from("primary-backend");
+        let mut target2 = velda_core::UpstreamId::new(1);
         let action = plugin.on_upstream_request(&mut req2, &mut target2); // buffer full -> dropped!
 
         // Primary request is unaffected (Continue)
@@ -480,7 +480,7 @@ mod tests {
         let mut rx = init_mirror_queue(10);
 
         let mut req = build_test_request(Method::GET, HeaderMap::new(), Bytes::new());
-        let mut target = velda_core::UpstreamId::from("prod-backend");
+        let mut target = velda_core::UpstreamId::new(1);
         let action = plugin.on_upstream_request(&mut req, &mut target);
 
         assert!(matches!(action, Action::Continue));

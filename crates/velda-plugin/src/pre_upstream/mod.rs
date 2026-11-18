@@ -29,7 +29,6 @@ pub mod rate_limit;
 pub mod request_mirror;
 pub mod request_termination;
 pub mod url_rewrite;
-pub mod w3c_trace_context;
 
 pub use api_key_auth::{ApiKeyAuthPlugin, ApiKeyCache, ApiKeyEntry, KeySource};
 pub use api_metering::{
@@ -70,7 +69,6 @@ pub use url_rewrite::{
     CompiledPathStrategy, PathRewriteStrategy, QueryStrategy, ReplacementToken, UrlRewriteConfig,
     UrlRewritePlugin,
 };
-pub use w3c_trace_context::{W3cTraceContextConfig, W3cTraceContextPlugin};
 
 /// Contract for plugins evaluated prior to forwarding to upstream backend.
 pub trait PreUpstreamPlugin: Send + Sync {
@@ -156,7 +154,6 @@ pub fn instantiate(
         "http_fault_injection" => Ok(Arc::new(HttpFaultInjectionPlugin::from_config(config)?)),
         "grpc_fault_injection" => Ok(Arc::new(GrpcFaultInjectionPlugin::from_config(config)?)),
         "request_termination" => Ok(Arc::new(RequestTerminationPlugin::from_config(config)?)),
-        "w3c_trace_context" => Ok(Arc::new(W3cTraceContextPlugin::from_config(config)?)),
         "csrf" | "csrf_protection" => Ok(Arc::new(CsrfPlugin::from_config(config)?)),
         "hmac_auth" => Ok(Arc::new(HmacAuthPlugin::from_config(config)?)),
         "oauth2_introspection" => Ok(Arc::new(Oauth2IntrospectionPlugin::from_config(config)?)),
@@ -211,7 +208,7 @@ mod tests {
             Body::Empty,
         );
 
-        let mut target = UpstreamId::from("default-upstream");
+        let mut target = UpstreamId::new(1);
         let action = run_pre_upstream_plugins(&chain, &mut req, &mut target);
         assert!(matches!(action, Action::Continue));
         assert!(!req.headers.contains_key("x-internal-secret"));
@@ -234,7 +231,7 @@ mod tests {
             HeaderMap::new(),
             Body::Empty,
         );
-        let mut target1 = UpstreamId::from("default-upstream");
+        let mut target1 = UpstreamId::new(1);
         let action1 = run_pre_upstream_plugins(&chain, &mut req1, &mut target1);
         assert!(matches!(action1, Action::Continue));
 
@@ -245,7 +242,7 @@ mod tests {
             HeaderMap::new(),
             Body::Empty,
         );
-        let mut target2 = UpstreamId::from("default-upstream");
+        let mut target2 = UpstreamId::new(1);
         let action2 = run_pre_upstream_plugins(&chain, &mut req2, &mut target2);
         match action2 {
             Action::Reject(reason) => {
@@ -285,7 +282,7 @@ mod tests {
             Body::Empty,
         );
 
-        let mut target = UpstreamId::from("default-upstream");
+        let mut target = UpstreamId::new(1);
         let action = run_pre_upstream_plugins(&chain, &mut req, &mut target);
         assert!(matches!(action, Action::Continue));
         assert_eq!(req.uri.path(), "/customers/100");
@@ -324,7 +321,7 @@ mod tests {
             Body::Empty,
         );
 
-        let mut target = UpstreamId::from("default-upstream");
+        let mut target = UpstreamId::new(1);
         let action = run_pre_upstream_plugins(&chain, &mut req, &mut target);
         match action {
             Action::Respond(resp) => {

@@ -14,7 +14,6 @@ pub mod capability;
 pub mod config;
 pub mod error;
 pub mod factory;
-pub mod header;
 pub mod hook;
 pub mod http_cache;
 pub mod plan;

@@ -649,7 +649,7 @@ mod tests {
             Body::Empty,
         );
 
-        let mut target = velda_core::UpstreamId::from("default-upstream");
+        let mut target = velda_core::UpstreamId::new(1);
         plugin.on_upstream_request(&mut req, &mut target);
 
         assert!(!req.headers.contains_key("x-legacy-token"));
@@ -712,7 +712,7 @@ mod tests {
             Body::Empty,
         );
 
-        let mut target = velda_core::UpstreamId::from("billing-backend-cluster");
+        let mut target = velda_core::UpstreamId::new(1);
         plugin.on_upstream_request(&mut req, &mut target);
 
         // Verify arithmetic workspace state before rendering
@@ -769,7 +769,7 @@ mod tests {
             Body::Empty,
         );
 
-        let mut target = velda_core::UpstreamId::from("default-upstream");
+        let mut target = velda_core::UpstreamId::new(1);
         let action = plugin.on_upstream_request(&mut req, &mut target);
         assert!(matches!(action, Action::Continue));
         assert!(!req.headers.contains_key("x-sensitive"));

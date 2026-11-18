@@ -14,7 +14,7 @@ use velda_router::{Http1Route, Router};
 use super::challenge::{CHALLENGE_PATH_PREFIX, ChallengeGuard, ChallengeStore};
 
 /// Ephemeral route identifier reserved strictly for transient ACME HTTP-01 challenge matching.
-pub const ACME_CHALLENGE_ROUTE_ID: RouteId = RouteId::new(u32::MAX);
+pub const ACME_CHALLENGE_ROUTE_ID: RouteId = RouteId::new(u16::MAX);
 
 /// Dummy upstream identifier used because ACME challenges short-circuit directly in memory.
 pub const ACME_DUMMY_UPSTREAM_ID: UpstreamId = UpstreamId::new(0);
@@ -50,7 +50,6 @@ impl RouterRegistry {
         let route = Http1Route {
             id: ACME_CHALLENGE_ROUTE_ID,
             listener_id: self.listener_id,
-            upstream_id: ACME_DUMMY_UPSTREAM_ID,
         };
 
         if let Ok(mut r) = self.router.write() {
@@ -100,7 +99,6 @@ mod tests {
             RouteId::new(1),
             "listener-http",
             "/api",
-            UpstreamId::new(10),
         )])
         .unwrap();
 

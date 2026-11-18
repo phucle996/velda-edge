@@ -149,8 +149,8 @@ fn test_chaos_request_id_boundaries_and_bit_patterns() {
 fn test_chaos_timestamps_duration_and_counters() {
     let test_matrix: &[(u32, u64, u32, u32, u16, u16, u16)] = &[
         // (ts, dur_ns, rx, tx, status, route_id, msgs)
-        (0, 0, 0, 0, 0, 0, 0),
-        (1, 1, 1, 1, 200, 1, 1),
+        (0, 0, 0, 0, 0, u16::MAX, 0),
+        (1, 1, 1, 1, 200, u16::MAX, 1),
         (0x7FFF_FFFF, 999, 1024, 2048, 404, 100, 5), // Year 2038
         (
             u32::MAX,
@@ -161,7 +161,15 @@ fn test_chaos_timestamps_duration_and_counters() {
             u16::MAX,
             u16::MAX,
         ),
-        (1_710_000_000, u32::MAX as u64, 65535, 131072, 999, 42, 1000),
+        (
+            1_710_000_000,
+            u32::MAX as u64,
+            65535,
+            131072,
+            999,
+            4200,
+            1000,
+        ),
     ];
 
     let mut records = Vec::new();
@@ -495,7 +503,10 @@ fn test_chaos_combinatorial_protocols_and_statuses() {
 // ============================================================================
 #[test]
 fn test_chaos_syntax_roundtrip_parsing_all_18_keys() {
-    velda_observability::register_route_name(77, "api-upload");
+    let mut routes = vec!["unmatched"; 77];
+    routes.push("api-upload");
+    let catalog = velda_router::RouteCatalog::build(routes);
+    velda_router::set_global_route_catalog(catalog);
 
     let mut rec = build_chaos_record(
         0xDEAD_BEEF_CAFE_BABE,

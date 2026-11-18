@@ -70,8 +70,8 @@ pub fn format_text_records(
                     out.extend_from_slice(TEXT_PATH);
                     out.extend_from_slice(rec.path().as_bytes());
                     out.extend_from_slice(TEXT_ROUTE);
-                    velda_observability::with_route_name(rec.route_id, |name| {
-                        out.extend_from_slice(name.as_bytes());
+                    velda_router::with_route_bytes(rec.route_id, |bytes| {
+                        out.extend_from_slice(bytes);
                     });
                     out.extend_from_slice(TEXT_UPSTREAM);
                     fast_write_ipv4(out, rec.upstream_ip);
@@ -107,8 +107,8 @@ pub fn format_text_records(
                     out.extend_from_slice(TEXT_MSGS);
                     fast_write_u64(out, rec.rpc_msgs_or_flags as u64);
                     out.extend_from_slice(TEXT_ROUTE);
-                    velda_observability::with_route_name(rec.route_id, |name| {
-                        out.extend_from_slice(name.as_bytes());
+                    velda_router::with_route_bytes(rec.route_id, |bytes| {
+                        out.extend_from_slice(bytes);
                     });
                     out.extend_from_slice(TEXT_UPSTREAM);
                     fast_write_ipv4(out, rec.upstream_ip);
@@ -135,8 +135,8 @@ pub fn format_text_records(
                     out.extend_from_slice(TEXT_BYTES_TX);
                     fast_write_u64(out, rec.bytes_tx as u64);
                     out.extend_from_slice(TEXT_ROUTE);
-                    velda_observability::with_route_name(rec.route_id, |name| {
-                        out.extend_from_slice(name.as_bytes());
+                    velda_router::with_route_bytes(rec.route_id, |bytes| {
+                        out.extend_from_slice(bytes);
                     });
                     out.extend_from_slice(TEXT_UPSTREAM);
                     fast_write_ipv4(out, rec.upstream_ip);

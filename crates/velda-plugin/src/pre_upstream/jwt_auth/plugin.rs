@@ -414,7 +414,7 @@ mod tests {
             Body::Empty,
         );
 
-        let mut target = velda_core::UpstreamId::from("default-upstream");
+        let mut target = velda_core::UpstreamId::new(1);
         let action = plugin.on_upstream_request(&mut req, &mut target);
         assert!(matches!(action, Action::Reject(RejectReason::Unauthorized)));
         assert_eq!(
@@ -459,7 +459,7 @@ mod tests {
         );
 
         // First invocation: Cache Miss -> Cryptographic verification -> Cache Populate
-        let mut target1 = velda_core::UpstreamId::from("default-upstream");
+        let mut target1 = velda_core::UpstreamId::new(1);
         let action1 = plugin.on_upstream_request(&mut req, &mut target1);
         assert!(matches!(action1, Action::Continue));
         assert_eq!(req.headers.get("x-user-id").unwrap(), "user_123");
@@ -477,7 +477,7 @@ mod tests {
             Body::Empty,
         );
 
-        let mut target2 = velda_core::UpstreamId::from("default-upstream");
+        let mut target2 = velda_core::UpstreamId::new(1);
         let action2 = plugin.on_upstream_request(&mut req2, &mut target2);
         assert!(matches!(action2, Action::Continue));
         assert_eq!(req2.headers.get("x-user-id").unwrap(), "user_123");
@@ -511,7 +511,7 @@ mod tests {
         );
 
         // First attempt: validation fails and gets added to negative cache
-        let mut target1 = velda_core::UpstreamId::from("default-upstream");
+        let mut target1 = velda_core::UpstreamId::new(1);
         let action1 = plugin.on_upstream_request(&mut req, &mut target1);
         assert!(matches!(
             action1,
@@ -523,7 +523,7 @@ mod tests {
         );
 
         // Second attempt: hits negative cache immediately
-        let mut target2 = velda_core::UpstreamId::from("default-upstream");
+        let mut target2 = velda_core::UpstreamId::new(1);
         let action2 = plugin.on_upstream_request(&mut req, &mut target2);
         assert!(matches!(
             action2,
@@ -575,7 +575,7 @@ mod tests {
             headers,
             Body::Empty,
         );
-        let mut target = velda_core::UpstreamId::from("default-upstream");
+        let mut target = velda_core::UpstreamId::new(1);
         let action = plugin.on_upstream_request(&mut req, &mut target);
         assert!(matches!(action, Action::Continue));
         assert_eq!(req.headers.get("x-user-id").unwrap(), "cookie_user");
@@ -591,7 +591,7 @@ mod tests {
             HeaderMap::new(),
             Body::Empty,
         );
-        let mut target_q = velda_core::UpstreamId::from("default-upstream");
+        let mut target_q = velda_core::UpstreamId::new(1);
         let action_query = plugin.on_upstream_request(&mut req_query, &mut target_q);
         assert!(matches!(action_query, Action::Continue));
         assert_eq!(req_query.headers.get("x-user-id").unwrap(), "cookie_user");
@@ -637,7 +637,7 @@ mod tests {
         );
 
         // Must reject cleanly with 401 without panicking!
-        let mut target = velda_core::UpstreamId::from("default-upstream");
+        let mut target = velda_core::UpstreamId::new(1);
         let action = plugin.on_upstream_request(&mut req, &mut target);
         assert!(matches!(action, Action::Reject(RejectReason::Unauthorized)));
         assert_eq!(
