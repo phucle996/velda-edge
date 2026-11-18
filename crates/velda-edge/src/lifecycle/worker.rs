@@ -309,7 +309,7 @@ pub fn spawn_shadow_worker(
                     let rt = shared_runtime.load();
                     rt.buffer_pool.maintain_lane(worker_id);
                     let upstreams = rt.upstreams.clone();
-                    let seed = (velda_core::coarse_time::coarse_now_sec() as u32)
+                    let seed = (velda_core::clock::coarse_sec() as u32)
                         .wrapping_mul(2654435761)
                         .wrapping_add(worker_id as u32);
                     upstreams.check_active_health(worker_id, seed, heal_sock.as_ref()).await;
@@ -352,7 +352,7 @@ pub fn spawn_shadow_worker(
                             rt.buffer_pool.maintain_lane(worker_id);
 
                             let upstreams = rt.upstreams.clone();
-                            let seed = (velda_core::coarse_time::coarse_now_sec() as u32)
+                            let seed = (velda_core::clock::coarse_sec() as u32)
                                 .wrapping_mul(2654435761)
                                 .wrapping_add(worker_id as u32);
                             upstreams.check_active_health(worker_id, seed, heal_sock.as_ref()).await;
@@ -427,7 +427,7 @@ pub fn spawn_shadow_worker(
 
                                 current_rt.buffer_pool.maintain_lane(worker_id);
                                 let upstreams = current_rt.upstreams.clone();
-                                let seed = (velda_core::coarse_time::coarse_now_sec() as u32)
+                                let seed = (velda_core::clock::coarse_sec() as u32)
                                     .wrapping_mul(2654435761)
                                     .wrapping_add(worker_id as u32);
                                 upstreams.check_active_health(worker_id, seed, heal_sock.as_ref()).await;

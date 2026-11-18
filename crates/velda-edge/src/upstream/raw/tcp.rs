@@ -85,7 +85,7 @@ impl TcpUpstream {
             _ => return,
         };
 
-        let now_sec = velda_core::coarse_time::coarse_now_sec();
+        let now_sec = velda_core::clock::coarse_sec();
         let interval_sec = active_cfg.interval.as_secs().max(1);
         let last = self
             .last_probe_sec

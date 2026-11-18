@@ -1033,13 +1033,14 @@ pub async fn run_http1_loop<IO>(
             url_bytes: log_url_bytes,
         });
 
-        let end_nano = velda_core::coarse_time::coarse_now_sec().saturating_mul(1_000_000_000);
         let dur_nanos = elapsed.as_nanos().min(u64::MAX as u128) as u64;
+        let start_nano = velda_core::clock::instant_to_unix_nanos(req_start);
+        let end_nano = start_nano.saturating_add(dur_nanos);
         velda_observability::global_trace_store().emit(
             &velda_observability::SpanRecord::new_root_span(
                 request_id.0,
                 request_id.entropy(),
-                end_nano.saturating_sub(dur_nanos),
+                start_nano,
                 end_nano,
                 final_status,
                 log_method,
