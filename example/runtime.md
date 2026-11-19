@@ -57,7 +57,7 @@ Controls the background asynchronous DNS resolver (`velda-discovery`) for dynami
 
 ### 3.2 Transport & Kernel Socket Tuning (`transport`)
 
-Governs L4 ingress engines (`velda-transport`):
+Governs L4 ingress engines (`velda-ingress`, `velda-sock`):
 
 | Field | Type | Description |
 | :--- | :--- | :--- |

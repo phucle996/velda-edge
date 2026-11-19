@@ -60,7 +60,7 @@ Request processing in `crates/` must **never**:
 - Perform dynamic schema validation
 - Compile configuration
 
-All configuration is parsed, validated, and compiled into RAM (`RuntimeSnapshot`) by `velda-config` before publication to the hot path.
+All configuration is parsed, validated, and compiled into RAM (`RuntimeSnapshot`) by `velda-sync` and `velda-edge` before publication to the hot path.
 
 ### 2.5 Provider Definition
 A Provider is a generic, long-lived, workflow-independent capability (e.g., DNS resolution, clock/time, crypto, TLS backend).

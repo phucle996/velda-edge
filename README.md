@@ -8,9 +8,8 @@
 [![Go Version](https://img.shields.io/badge/go-1.27-blue.svg)](https://go.dev/)
 [![React Version](https://img.shields.io/badge/react-19.3-cyan.svg)](https://react.dev/)
 [![License](https://img.shields.io/badge/license-Apache--2.0-green.svg)](LICENSE)
-[![Tests](https://img.shields.io/badge/tests-51%2F51%20passing-brightgreen.svg)]()
 
-[Architecture Specification](ARCHITECTURE.md) • [Hourglass Model](docs/HOURGLASS_MODEL.md) • [Pump & Filter Pipelines](docs/pipe/README.md) • [Connection Storm Mitigation](docs/CONNECTION_STORMS_AND_UPSTREAM_THRASHING.md) • [Editions & Releases](docs/EDITIONS_AND_RELEASES.md) • [Benchmarks & Comparisons](COMPARE.md) • [Contributing Guide](CONTRIBUTING.md) • [Security Policy](SECURITY.md) • [Engineering Rules](AGENTS.md)
+[Architecture](ARCHITECTURE.md) • [Hourglass Model](docs/HOURGLASS_MODEL.md) • [Pipe Strategies](docs/pipe/README.md) • [Connection Storms](docs/CONNECTION_STORMS_AND_UPSTREAM_THRASHING.md) • [Editions & Releases](docs/EDITIONS_AND_RELEASES.md) • [Benchmarks](compare/README.md) • [Config Examples](example/README.md) • [Contributing](CONTRIBUTING.md) • [Security](SECURITY.md) • [Engineering Rules](AGENTS.md)
 
 </div>
 
@@ -18,157 +17,167 @@
 
 ## Overview
 
-**Velda Edge** is a cloud-native, performance-oriented edge platform built from the ground up for extreme throughput, predictable sub-millisecond latencies, and zero-downtime reloads. 
+**Velda Edge** is a performance-oriented edge gateway built for predictable low latency, strict protocol isolation, and zero-downtime reloads.
 
-Unlike traditional dynamic proxy architectures that incur JSON parsing, dynamic type guessing, and indirect virtual call overhead on every request, Velda Edge compiles all declarative routing rules, TLS contexts, and upstream pipelines into an **In-Memory Read-Optimized Snapshot** served via wait-free atomic pointer swaps (`ArcSwap`).
+Instead of parsing JSON, guessing types, or walking virtual-call chains on every request, Velda Edge compiles all declarative configuration (listeners, routes, upstreams, plugins, TLS) into an **in-memory runtime snapshot** published through wait-free atomic pointer swaps (`ArcSwap`). The request hot path only reads RAM.
+
+The platform has three tiers:
+
+| Tier | Technology | Role |
+|---|---|---|
+| **Data Plane** (`crates/`) | Rust 1.98, Edition 2024 | Serves traffic. Autonomous from the control plane via node-local Last Known Good (LKG) artifacts. |
+| **Control Plane** (`control-plane/`) | Go 1.27, PostgreSQL (`pgx/v5`) | Validates, versions and compiles configuration into binary artifacts. |
+| **Console** (`ui/`) | React 19.3, TypeScript, Vite 8, Tailwind v4 | Operator UI. |
 
 ---
 
 ## Key Features
 
-- **Flat Workflows (`decode -> route -> upstream -> encode`)**: Every request path is transparent, traceable, and readable from top to bottom without obfuscating helper chains.
-- **Zero-IO Hot-Path Invariant**: Request processing hot paths perform zero disk I/O, zero JSON parsing, and zero synchronous RPC calls.
-- **Pre-Compiled AOT Upstream Pipelines**: Backend TLS engines, SNI targets, streaming strategies, and zero-vtable load balancing algorithms (`LbAlgorithm`) are baked ahead-of-time during snapshot compilation.
-- **Strict Protocol & Pipeline Isolation**: Dedicated, non-sniffing pipelines for **HTTP/1.1**, **HTTP/2**, **HTTP/3 (QUIC)**, **gRPC**, and **L4 (TCP/UDP)**. HTTP routes never pollute gRPC; gRPC routes never sniff HTTP headers.
-- **Single-Round Load Balancing**: Eliminates double-selection bias by executing balancing algorithms (Round-Robin, Weighted Round-Robin, Least Connections, Random, IP Hash, Power-of-Two-Choices) exactly once inside the upstream core.
-- **Dual-Engine Health & Circuit Breaking**: Lock-free atomic passive circuit breaker combined with out-of-band active health probes. Zero false positives on application errors (HTTP 4xx/5xx).
-- **Autonomous Data Plane & LKG Resilience**: Operates entirely from node-local Last Known Good (LKG) binary artifacts even when the Control Plane is offline.
-- **Lock-Free Atomic Reloads**: Seamless atomic swapping of runtime snapshots over local Unix Domain Sockets without dropping a single active connection.
+- **Hourglass Architecture**: pre-bound ingress (top cone) → razor-thin in-memory route lookup (waist) → autonomous upstreams (bottom cone). See [Hourglass Model](docs/HOURGLASS_MODEL.md).
+- **Flat workflows**: `decode → pre_route → route → pre_upstream → upstream → post_response → encode`, readable top to bottom without helper chains.
+- **Zero-IO hot path**: no JSON parsing, no disk I/O, no Control Plane RPC and no config compilation while serving requests.
+- **Strict protocol isolation**: declared listener protocols (`raw`, `http`, `grpc`) with dedicated pipelines for HTTP/1.1, HTTP/2, HTTP/3 (QUIC), gRPC and raw L4 TCP/UDP. No payload sniffing.
+- **Upstream vs protocol boundary**: the upstream subsystem decides *when and who* (endpoint selection, health, pooling); protocol crates decide *how* (sockets, handshakes, framing). See [ARCHITECTURE.md §8](ARCHITECTURE.md).
+- **Dense integer lookups**: routes and upstreams are dense `u16` indices backed by page-aligned catalogs and a direct `route_to_upstream` table.
+- **Frontline + Shadow workers per core**: every CPU core runs a traffic worker and a `SCHED_IDLE` shadow worker. Connection pre-warming and background plugins live on the shadow worker, never on the hot path.
+- **Plugin system in four phases**: `pre_route`, `pre_upstream`, `post_response` and `background`, with 35+ plugins (WAF, auth, rate limiting, caching, compression, telemetry exporters, certificate rotation and more).
+- **Per-core observability**: lock-free sharded metrics, 256-byte access log records and 64-byte span records flowing through per-core SPSC rings to exporters.
+- **Single-round load balancing**: Round-Robin, WRR, Least-Connections, Random, Hash, P2C, Maglev and Ring-Hash, executed exactly once inside the upstream.
+- **Resilient background I/O**: outbound telemetry shippers use progressive backoff and a cool-down reconnect cycle; exporters are bounded against slow or malicious peers.
+- **Lock-free reloads**: new snapshots are swapped atomically; in-flight requests finish on the old generation.
 
 ---
 
-## Monorepo Architecture
-
-Velda Edge is engineered as a unified polyglot monorepo:
+## Monorepo Layout
 
 ```text
 velda-edge/
-├── crates/             # High-Performance Rust 2024 Data Plane (19 bounded crates)
-│   ├── velda-core      # Primitive vocabulary (Endpoint, L7Request, L7Response)
-│   ├── velda-ingress   # Top-cone Edge Traffic Ingress Engine & declarative reconciliation
-│   ├── velda-sock      # Linux OS kernel socket mechanics (SO_REUSEPORT, TCP BBR, UDP GRO/GSO)
-│   ├── velda-xdp       # Kernel-bypass eBPF / XDP / AF_XDP ingress driver & UMEM ring arena
-│   ├── velda-rdma      # Kernel-bypass RoCEv2 / InfiniBand RDMA transport engine
-│   ├── velda-tls       # TLS termination & client engine (rustls, zero unsafe)
-│   ├── velda-http1     # RFC 9112 zero-copy HTTP/1.1 streaming engine
-│   ├── velda-http2     # RFC 9113 multiplexed HTTP/2 binary framing
-│   ├── velda-http3     # RFC 9114 QUIC datagram state machine & engine shards
-│   ├── velda-grpc      # Length-prefixed gRPC proxying & stream lifecycle
-│   ├── velda-router    # O(1) route lookup tables
-│   ├── velda-discovery # Dynamic backend topology discovery & DNS cache
-│   ├── velda-upstream  # Logical backend management, endpoint lifecycle & health tracking
-│   ├── velda-lb        # Pure in-memory load balancing algorithms
-│   ├── velda-connection-pool # Generic lock-sharded connection pooling engine
-│   ├── velda-plugin    # In-memory hook registration & execution ordering
-│   ├── velda-observability # Zero-allocation metrics, tracing & logging
-│   ├── velda-sync      # LKG binary artifact staging & compiler
-│   └── velda-edge      # Composition root, supervisor, pipeline handoff
-├── control-plane/      # Go 1.27 Clean Architecture Control Plane (PostgreSQL + pgx/v5)
-│   ├── cmd/            # Application entrypoints
-│   ├── internal/       # Domain, repository (CTE-first), and service workflows
-│   └── transport/      # REST API (Gin) & gRPC handlers
-└── ui/                 # Modern Operator Console (React 19.3 + TypeScript + Vite 8 + Tailwind v4)
+├── crates/                  # Rust Data Plane (20 workspace crates)
+│   ├── velda-core           # Shared vocabulary: IDs, Endpoint, L4/L7 types, clock, buffers, worker registry
+│   ├── velda-sync           # Config staging, validation, LKG binary artifacts
+│   ├── velda-ingress        # Listener intake, shard runners, declarative reconciliation
+│   ├── velda-sock           # Linux socket mechanics (SO_REUSEPORT, TFO, BBR, GRO/GSO, splice)
+│   ├── velda-xdp            # AF_XDP kernel-bypass ingress
+│   ├── velda-rdma           # RoCEv2 / InfiniBand transport
+│   ├── velda-tls            # TLS server/client engines (rustls)
+│   ├── velda-http1/2/3      # HTTP/1.1, HTTP/2 and HTTP/3 (QUIC) protocol engines
+│   ├── velda-grpc           # gRPC framing, status codes, stream lifecycle
+│   ├── velda-router         # Protocol-isolated route matching and route catalog
+│   ├── velda-plugin         # Plugin engine: pre_route / pre_upstream / post_response / background
+│   ├── velda-discovery      # Backend topology discovery (static / DNS) with LKG
+│   ├── velda-upstream       # Endpoint lifecycle, health tracking, upstream catalog
+│   ├── velda-lb             # Load-balancing algorithms
+│   ├── velda-connection-pool# Sharded, protocol-agnostic connection pools
+│   ├── velda-observability  # Metrics, access logs, traces (per-core rings)
+│   ├── velda-edge           # Composition root, workers, pipelines, runtime, reload
+│   └── velda-bench-backend  # Benchmark backend used by the compare suite
+├── control-plane/           # Go Clean Architecture control plane
+│   ├── cmd/  infra/  migrations/
+│   └── internal/{app,config,console,domain,repository,service,transport}
+├── ui/                      # React operator console
+├── compare/                 # Benchmark scripts and results vs Nginx / Envoy
+├── example/                 # Complete declarative config examples
+├── docs/                    # Architecture deep-dives and pipe strategy specs
+├── proto/  systemd/  docker-compose*.yml  Dockerfile(s)
+└── AGENTS.md  ARCHITECTURE.md  CONTRIBUTING.md  SECURITY.md
 ```
 
 ---
 
-## End-to-End Request Flow
+## Request Flow
 
 ```text
-Downstream Wire
+Downstream wire
       │
       ▼
-1. Ingress Layer (velda-ingress, velda-sock, velda-xdp)
-   └── Multi-shard accept loops, kernel-bypass XDP filters, terminate downstream TLS (ALPN validation)
+1. Ingress          velda-ingress / velda-sock / velda-xdp
+   └── multi-shard accept, optional downstream TLS (ALPN checked against declared protocol)
       │
       ▼
-2. Pipeline Layer (Handoff & Frame Decode)
-   ├── Decode wire frames (HTTP/1, HTTP/2, HTTP/3, gRPC)
-   ├── O(1) Route evaluation ──> resolves upstream_name
-   └── Contiguous handoff to protocol upstream processor
+2. L7/L4 pipeline   velda-http1 / http2 / http3 / grpc, or raw L4
+   ├── decode frames, enrich forwarding headers once
+   ├── pre_route plugins
+   ├── route lookup  → dense route id → route_to_upstream[id] → upstream
+   └── pre_upstream plugins
       │
       ▼
-3. Upstream Stage (Logical Upstream & Connection Pool)
-   ├── Filter unhealthy endpoints via passive health tracker (velda-upstream)
-   ├── Single-round load balancing (velda-lb: RR, WRR, LeastConn, Maglev, P2C)
-   ├── Connection acquisition (Pool reuse HIT or socket connect MISS via velda-connection-pool)
-   ├── Stream pipe execution according to pre-compiled strategy (velda-http1/http2/grpc)
-   └── RAII connection release & health metric updates
+3. Upstream         velda-upstream / velda-lb / velda-connection-pool
+   ├── filter unhealthy endpoints, single-round load balancing
+   ├── lease connection (pool HIT, or protocol connector on MISS)
+   ├── stream pipe: buffered | server_stream | client_stream | duplex
+   └── RAII release + health update
       │
       ▼
-Client Receives Response
+4. post_response plugins → encode → client
 ```
 
-*For complete technical design details, see [ARCHITECTURE.md](ARCHITECTURE.md).*
+Full details: [ARCHITECTURE.md](ARCHITECTURE.md).
 
 ---
 
 ## Quick Start
 
 ### Prerequisites
-- **Rust**: `1.98` (Nightly or Stable with Edition 2024 support)
-- **Go**: `1.27+`
-- **Node.js**: `22+` & **pnpm**
-- **Docker & Docker Compose** (Optional, for full stack)
+- **Rust** `1.98` (pinned by `rust-toolchain.toml`)
+- **Go** `1.27+`
+- **Node.js** `22+`
+- **Docker & Docker Compose** (optional, full stack)
 
-### 1. Running the Rust Data Plane Locally
+### Run the Data Plane
 
 ```bash
-# Build data plane workspace in release mode
 cargo build --release --workspace
-
-# Run edge supervisor
-cargo run -p velda-edge -- --storage-dir /var/lib/velda
+VELDA_STORAGE_DIR=./storage cargo run --release -p velda-edge
 ```
 
-### 2. Running Full Monorepo with Docker Compose
+Ready-made declarative configs (`listeners`, `routes`, `upstreams`, `plugins`, `tls`, `manifest`) live in [`example/`](example/README.md).
+
+### Run the Full Stack
 
 ```bash
-# Start PostgreSQL, Go Control Plane, Rust Data Plane, and React UI
-docker compose up -d
+docker compose up -d        # production-like stack
+docker compose -f docker-compose.dev.yml up -d   # development stack
 ```
 
-Access the services:
-- **Operator Console**: `http://localhost:5173`
-- **Control Plane API**: `http://localhost:8080`
-- **Edge HTTP Ingress**: `http://localhost:80`
-- **Edge HTTPS Ingress**: `https://localhost:443`
+Default endpoints: Console `http://localhost:5173`, Control Plane API `http://localhost:8080`, Edge ingress `:80` / `:443`.
+
+### Install as systemd Services
+
+`build-systemd.sh` and `install-systemd.sh` install `velda-edge`, `velda-sync` and `velda-control-plane` units from [`systemd/`](systemd/). CPU-targeted release editions are described in [Editions & Releases](docs/EDITIONS_AND_RELEASES.md).
 
 ---
 
-## Verification & Testing
-
-Every subsystem adheres to continuous validation before merging:
+## Verification
 
 ```bash
-# 1. Rust Data Plane (Format, Clippy, and Tests)
+# Rust Data Plane
 cargo fmt --check
+cargo check
 cargo clippy --all-targets --all-features -- -D warnings
 cargo test --workspace
 
-# 2. Go Control Plane
-cd control-plane
-go vet ./...
-go test -v ./...
-cd ..
+# Go Control Plane
+cd control-plane && go vet ./... && go test ./... && go build -o /dev/null ./cmd/main.go && cd ..
 
-# 3. React UI Console
-cd ui
-npm run build
-cd ..
+# React Console
+cd ui && npm run build && cd ..
 ```
 
 ---
 
-## Performance Highlights
+## Performance Philosophy
 
-| Metric | Measured Invariant | Target |
-|---|---|---|
-| **Snapshot Read Latency** | `< 15.0 ns` | Wait-free atomic pointer dereference |
-| **Route Lookup Latency** | `< 25.0 ns` | $O(1)$ compiled linear lookup tables |
-| **Heap Allocations in Serving** | **0 bytes** | Zero heap churn on request serving hot path |
-| **Reload Downtime** | **0.00 ms** | Zero traffic interruption during runtime swaps |
-| **Memory Leak Audit** | **0 bytes** delta | Verified across 10M operations & 5,000 runtime swaps |
+Velda Edge states its performance rules as invariants, and backs them with benchmarks rather than claims:
+
+| Invariant | Meaning |
+|---|---|
+| Wait-free snapshot reads | Serving threads read the runtime through an atomic pointer load. |
+| Zero heap allocation in serving | Hot-path structures are pre-sized and pre-compiled. |
+| No cross-core coordination on `acquire()` | Pool lanes are per-core; warming belongs to the shadow worker. |
+| Zero-downtime reload | Snapshots swap atomically; old generations drain naturally. |
+| Bounded background work | Every outbound or inbound background path has size, time and concurrency limits. |
+
+Measured results and per-plugin benchmark specifications are in [`compare/`](compare/README.md) and the `BENCHMARK.md` file next to each plugin. Metric cells marked `[TBD]` have not been measured yet.
 
 ---
 
