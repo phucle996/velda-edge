@@ -259,7 +259,7 @@ impl PreUpstreamPlugin for Oauth2IntrospectionPlugin {
         };
 
         // Use authoritative pre-sampled ingress timestamp (0ns, zero redundant clock reads)
-        let now = req.ingress_time_sec;
+        let now = req.ingress_time_sec();
         let fp = super::cache::token_fingerprint_128(token);
 
         // Tier 1: Check Core-Local L1 Cache (Zero Lock, Zero Atomic, sub-2ns hot path)

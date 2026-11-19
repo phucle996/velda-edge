@@ -231,7 +231,7 @@ fn make_auth_request(token: &str) -> L7Request {
         headers,
         Body::Empty,
     );
-    req.ingress_time_sec = current_epoch_secs();
+    req.ingress_time_nanos = current_epoch_secs() * 1_000_000_000;
     req
 }
 

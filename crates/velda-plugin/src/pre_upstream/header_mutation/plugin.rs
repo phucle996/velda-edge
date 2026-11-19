@@ -408,11 +408,11 @@ impl PreUpstreamPlugin for HeaderMutationPlugin {
                     DynamicVar::ClientIp => {
                         let ip = req
                             .headers
-                            .get_ip("x-real-ip")
-                            .or_else(|| req.headers.get_ip("x-forwarded-for"))
-                            .or(req.state.client_ip)
-                            .unwrap_or(std::net::IpAddr::V4(std::net::Ipv4Addr::LOCALHOST));
-                        req.headers.set_ip(name.clone(), ip);
+                            .get_ip_u128("x-real-ip")
+                            .or_else(|| req.headers.get_ip_u128("x-forwarded-for"))
+                            .or_else(|| (req.state.client_ip != 0).then_some(req.state.client_ip))
+                            .unwrap_or_else(|| velda_core::lut::ip::encode_ipv4_u128(0x7F00_0001));
+                        req.headers.set_ip_u128(name.clone(), ip);
                     }
                     DynamicVar::RequestId => {
                         req.headers
@@ -468,11 +468,11 @@ impl PreUpstreamPlugin for HeaderMutationPlugin {
                     DynamicVar::ClientIp => {
                         let ip = req
                             .headers
-                            .get_ip("x-real-ip")
-                            .or_else(|| req.headers.get_ip("x-forwarded-for"))
-                            .or(req.state.client_ip)
-                            .unwrap_or(std::net::IpAddr::V4(std::net::Ipv4Addr::LOCALHOST));
-                        req.headers.append_ip(name.clone(), ip);
+                            .get_ip_u128("x-real-ip")
+                            .or_else(|| req.headers.get_ip_u128("x-forwarded-for"))
+                            .or_else(|| (req.state.client_ip != 0).then_some(req.state.client_ip))
+                            .unwrap_or_else(|| velda_core::lut::ip::encode_ipv4_u128(0x7F00_0001));
+                        req.headers.append_ip_u128(name.clone(), ip);
                     }
                     DynamicVar::RequestId => {
                         req.headers
@@ -717,8 +717,8 @@ mod tests {
 
         // Verify arithmetic workspace state before rendering
         assert_eq!(
-            req.headers.get_ip("x-client-ip"),
-            Some("198.51.100.25".parse().unwrap())
+            req.headers.get_ip_u128("x-client-ip"),
+            velda_core::lut::ip::parse_ip_u128(b"198.51.100.25")
         );
         assert_eq!(
             req.headers.get_hex128("x-req-id"),

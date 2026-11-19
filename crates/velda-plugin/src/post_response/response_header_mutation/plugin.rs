@@ -211,7 +211,7 @@ impl PostResponsePlugin for ResponseHeaderMutationPlugin {
                         }
                         ResponseDynamicVar::TimestampEpoch => {
                             resp.headers
-                                .set_u64(name.clone(), req_headers.ingress_time_sec);
+                                .set_u64(name.clone(), req_headers.ingress_time_sec());
                         }
                     }
                 }
@@ -230,7 +230,7 @@ impl PostResponsePlugin for ResponseHeaderMutationPlugin {
                         }
                         ResponseDynamicVar::TimestampEpoch => {
                             resp.headers
-                                .append_u64(name.clone(), req_headers.ingress_time_sec);
+                                .append_u64(name.clone(), req_headers.ingress_time_sec());
                         }
                     }
                 }
@@ -250,7 +250,7 @@ impl PostResponsePlugin for ResponseHeaderMutationPlugin {
                             }
                             ResponseDynamicVar::TimestampEpoch => {
                                 resp.headers
-                                    .set_u64(name.clone(), req_headers.ingress_time_sec);
+                                    .set_u64(name.clone(), req_headers.ingress_time_sec());
                             }
                         }
                     }
@@ -367,7 +367,7 @@ mod tests {
         assert_eq!(resp.headers.get_u64("x-status-reflected"), Some(201));
         assert_eq!(
             resp.headers.get_u64("x-timestamp"),
-            Some(req_headers.ingress_time_sec)
+            Some(req_headers.ingress_time_sec())
         );
 
         // Batch-render workspace and verify wire strings

@@ -4,7 +4,6 @@
 //! for lock-striped rate limiting.
 
 use std::hash::Hasher;
-use std::net::IpAddr;
 
 use velda_core::L7Request;
 
@@ -35,7 +34,9 @@ impl KeyStrategy {
                 for hdr_name in headers_list {
                     if hdr_name == "client_ip" || hdr_name == "ip" {
                         if let Some(ip) = extract_client_ip(req) {
-                            return format!("ip:{ip}");
+                            let (buf, len) = velda_core::lut::ip::format_ip_bytes(ip);
+                            let ip_str = std::str::from_utf8(&buf[..len]).unwrap_or("");
+                            return format!("ip:{ip_str}");
                         }
                     } else if let Some(val) = req.headers.get(hdr_name)
                         && let Ok(s) = val.to_str()
@@ -48,7 +49,9 @@ impl KeyStrategy {
                 }
                 // Fallback if none matched
                 if let Some(ip) = extract_client_ip(req) {
-                    format!("ip:{ip}")
+                    let (buf, len) = velda_core::lut::ip::format_ip_bytes(ip);
+                    let ip_str = std::str::from_utf8(&buf[..len]).unwrap_or("");
+                    format!("ip:{ip_str}")
                 } else {
                     "global:default".to_string()
                 }
@@ -58,7 +61,9 @@ impl KeyStrategy {
                 for hdr_name in headers_list {
                     if hdr_name == "client_ip" || hdr_name == "ip" {
                         if let Some(ip) = extract_client_ip(req) {
-                            parts.push(ip.to_string());
+                            let (buf, len) = velda_core::lut::ip::format_ip_bytes(ip);
+                            let ip_str = std::str::from_utf8(&buf[..len]).unwrap_or("unknown");
+                            parts.push(ip_str.to_string());
                         } else {
                             parts.push("unknown".to_string());
                         }
@@ -91,10 +96,7 @@ impl KeyStrategy {
                     if hdr_name == "client_ip" || hdr_name == "ip" {
                         if let Some(ip) = extract_client_ip(req) {
                             hasher.write(b"ip:");
-                            match ip {
-                                IpAddr::V4(v4) => hasher.write(&v4.octets()),
-                                IpAddr::V6(v6) => hasher.write(&v6.octets()),
-                            }
+                            hasher.write_u128(ip);
                             return hasher.finish();
                         }
                     } else if let Some(val) = req.headers.get(hdr_name)
@@ -112,10 +114,7 @@ impl KeyStrategy {
                 // Fallback if none matched
                 if let Some(ip) = extract_client_ip(req) {
                     hasher.write(b"ip:");
-                    match ip {
-                        IpAddr::V4(v4) => hasher.write(&v4.octets()),
-                        IpAddr::V6(v6) => hasher.write(&v6.octets()),
-                    }
+                    hasher.write_u128(ip);
                     hasher.finish()
                 } else {
                     hasher.write(b"global:default");
@@ -126,10 +125,7 @@ impl KeyStrategy {
                 for hdr_name in headers_list {
                     if hdr_name == "client_ip" || hdr_name == "ip" {
                         if let Some(ip) = extract_client_ip(req) {
-                            match ip {
-                                IpAddr::V4(v4) => hasher.write(&v4.octets()),
-                                IpAddr::V6(v6) => hasher.write(&v6.octets()),
-                            }
+                            hasher.write_u128(ip);
                         } else {
                             hasher.write(b"unknown");
                         }
@@ -153,15 +149,15 @@ impl KeyStrategy {
     }
 }
 
-/// Resolves client IP address from `HeaderWorkspace` integer key lookup or request state.
+/// Resolves client IP address as an RFC 4291 `u128` integer from request state or `HeaderWorkspace`.
 #[inline]
-pub fn extract_client_ip(req: &L7Request) -> Option<IpAddr> {
-    if let Some(ip) = req.state.client_ip {
-        return Some(ip);
+pub fn extract_client_ip(req: &L7Request) -> Option<u128> {
+    if req.state.client_ip != 0 {
+        return Some(req.state.client_ip);
     }
     req.headers
-        .get_ip("x-forwarded-for")
-        .or_else(|| req.headers.get_ip("x-real-ip"))
+        .get_ip_u128("x-forwarded-for")
+        .or_else(|| req.headers.get_ip_u128("x-real-ip"))
 }
 
 /// Hashes the key string into a 64-bit integer for zero-alloc sharded table lookup.

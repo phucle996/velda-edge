@@ -296,10 +296,10 @@ impl PreUpstreamPlugin for ConsumerQuotaPlugin {
         let key_hash = resolve_quota_key(req, &self.config.key_headers);
 
         // Use authoritative pre-sampled ingress timestamp from HeaderWorkspace (0ns)
-        let now_sec = if req.headers.ingress_time_sec != 0 {
-            req.headers.ingress_time_sec
+        let now_sec = if req.headers.ingress_time_sec() != 0 {
+            req.headers.ingress_time_sec()
         } else {
-            req.ingress_time_sec
+            req.ingress_time_sec()
         };
         let now_instant = Instant::now();
 

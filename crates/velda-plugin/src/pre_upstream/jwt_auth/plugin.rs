@@ -269,7 +269,7 @@ impl PreUpstreamPlugin for JwtAuthPlugin {
 
         let token_hash = JwtCache::hash_token(token_str);
         // Use authoritative pre-sampled ingress timestamp (zero redundant clock syscalls on hot path)
-        let now = req.ingress_time_sec;
+        let now = req.ingress_time_sec();
 
         // 1. Negative Cache check: fail-fast on known bad tokens
         if self.cache.is_negative(token_hash, now) {

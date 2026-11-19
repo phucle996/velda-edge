@@ -247,7 +247,7 @@ impl PreUpstreamPlugin for HmacAuthPlugin {
         _target_upstream: &mut velda_core::UpstreamId,
     ) -> Action {
         // Use authoritative pre-sampled ingress timestamp (0ns, zero redundant clock reads)
-        let now = req.ingress_time_sec;
+        let now = req.ingress_time_sec();
 
         // 1. Extract Access Key ID (Pure byte trimming, zero UTF-8 validation overhead!)
         let access_key_id = match req.headers.get(&self.access_key_header) {

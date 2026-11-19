@@ -17,10 +17,9 @@
 //! - **Subnet Compaction & Deduplication**: Sorts CIDRs by prefix length ascending (broadest first) and
 //!   eliminates redundant subsumed rules.
 
-use std::net::{IpAddr, Ipv4Addr, Ipv6Addr};
-
 use http::header::HeaderName;
 use velda_core::L7Request;
+pub use velda_core::lut::ip::parse_ipv4_bytes;
 
 pub const X_FORWARDED_FOR: HeaderName = HeaderName::from_static("x-forwarded-for");
 pub const X_REAL_IP: HeaderName = HeaderName::from_static("x-real-ip");
@@ -39,12 +38,12 @@ pub enum ParsedIp {
 }
 
 impl ParsedIp {
-    /// Converts the parsed bit representation into a standard [`IpAddr`].
+    /// Converts the parsed bit representation into an RFC 4291 `u128` integer.
     #[inline]
-    pub fn to_ip_addr(self) -> IpAddr {
+    pub const fn to_u128(self) -> u128 {
         match self {
-            Self::V4(bits) => IpAddr::V4(Ipv4Addr::from_bits(bits)),
-            Self::V6(bits) => IpAddr::V6(Ipv6Addr::from_bits(bits)),
+            Self::V4(bits) => velda_core::lut::ip::encode_ipv4_u128(bits),
+            Self::V6(bits) => bits,
         }
     }
 }
@@ -112,10 +111,10 @@ impl ClientIpSource {
         self.extract_all_parsed_ips(req).map(|ext| ext.ips[0])
     }
 
-    /// Extracts the candidate downstream client IP address as standard [`IpAddr`].
+    /// Extracts the candidate downstream client IP address as an RFC 4291 `u128` integer.
     #[inline]
-    pub fn extract_client_ip(&self, req: &L7Request) -> Option<IpAddr> {
-        self.extract_parsed_ip(req).ok().map(|p| p.to_ip_addr())
+    pub fn extract_client_ip(&self, req: &L7Request) -> Option<u128> {
+        self.extract_parsed_ip(req).ok().map(|p| p.to_u128())
     }
 }
 
@@ -268,87 +267,24 @@ pub fn parse_ip_bytes(mut bytes: &[u8]) -> Option<ParsedIp> {
     parse_ipv6_str_canonical(bytes)
 }
 
-/// Zero-allocation, single-cycle decimal octet parser directly computing IPv4 `u32` bits.
-///
-/// Strictly rejects leading zeros (e.g. `010.0.0.1`) to prevent octal parser differential attacks (CVE-2021-28918).
+/// Extracts an embedded IPv4 `u32` from IPv4-mapped, SIIT-translated, NAT64, or deprecated IPv4-compatible IPv6 `u128` bits.
 #[inline]
-pub fn parse_ipv4_bytes(bytes: &[u8]) -> Option<u32> {
-    if bytes.is_empty() || bytes.len() > 15 {
-        return None;
-    }
-    let mut octets = [0u32; 4];
-    let mut octet_idx = 0;
-    let mut current_val: u32 = 0;
-    let mut digit_count: u8 = 0;
-
-    for &b in bytes {
-        if b == b'.' {
-            if digit_count == 0 || octet_idx >= 3 || current_val > 255 {
-                return None;
-            }
-            octets[octet_idx] = current_val;
-            octet_idx += 1;
-            current_val = 0;
-            digit_count = 0;
-        } else if b.is_ascii_digit() {
-            // Reject octal / leading-zero notation (e.g. "01", "00", "010")
-            if digit_count > 0 && current_val == 0 {
-                return None;
-            }
-            let digit = (b - b'0') as u32;
-            current_val = current_val * 10 + digit;
-            if current_val > 255 {
-                return None;
-            }
-            digit_count += 1;
-        } else {
-            return None;
-        }
-    }
-    if digit_count == 0 || octet_idx != 3 || current_val > 255 {
-        return None;
-    }
-    octets[3] = current_val;
-    Some((octets[0] << 24) | (octets[1] << 16) | (octets[2] << 8) | octets[3])
-}
-
-/// Extracts an embedded IPv4 address from IPv4-mapped, SIIT-translated, NAT64, or deprecated IPv4-compatible IPv6 addresses.
-#[inline]
-pub fn extract_embedded_ipv4(v6: Ipv6Addr, raw_str_has_dots: bool) -> Option<Ipv4Addr> {
-    let segs = v6.segments();
+pub const fn extract_embedded_ipv4(bits: u128, raw_str_has_dots: bool) -> Option<u32> {
+    let upper_96 = bits >> 32;
+    let lower_32 = bits as u32;
     // 1. Standard IPv4-mapped IPv6: ::ffff:a.b.c.d (0:0:0:0:0:ffff:hi:lo)
     // 2. SIIT IPv4-translated IPv6: ::ffff:0:a.b.c.d (0:0:0:0:ffff:0:hi:lo)
     // 3. Well-Known NAT64 prefix:   64:ff9b::a.b.c.d (0x0064:0xff9b:0:0:0:0:hi:lo)
-    if (segs[0] == 0
-        && segs[1] == 0
-        && segs[2] == 0
-        && segs[3] == 0
-        && segs[4] == 0
-        && segs[5] == 0xffff)
-        || (segs[0] == 0
-            && segs[1] == 0
-            && segs[2] == 0
-            && segs[3] == 0
-            && segs[4] == 0xffff
-            && segs[5] == 0)
-        || (segs[0] == 0x0064
-            && segs[1] == 0xff9b
-            && segs[2] == 0
-            && segs[3] == 0
-            && segs[4] == 0
-            && segs[5] == 0)
+    if upper_96 == 0x0000_FFFF
+        || upper_96 == 0xFFFF_0000
+        || upper_96 == 0x0064_FF9B_0000_0000_0000_0000
     {
-        let bits = ((segs[6] as u32) << 16) | (segs[7] as u32);
-        return Some(Ipv4Addr::from_bits(bits));
+        return Some(lower_32);
     }
     // 4. Deprecated RFC 4291 IPv4-compatible syntax (`::a.b.c.d` / `0:0:0:0:0:0:hi:lo`),
     //    excluding standard IPv6 unspecified `::` (0) and loopback `::1` (1) unless written with dots.
-    if segs[0] == 0 && segs[1] == 0 && segs[2] == 0 && segs[3] == 0 && segs[4] == 0 && segs[5] == 0
-    {
-        let bits = ((segs[6] as u32) << 16) | (segs[7] as u32);
-        if raw_str_has_dots || bits > 1 {
-            return Some(Ipv4Addr::from_bits(bits));
-        }
+    if upper_96 == 0 && (raw_str_has_dots || lower_32 > 1) {
+        return Some(lower_32);
     }
     None
 }
@@ -359,17 +295,11 @@ fn parse_ipv6_str_canonical(bytes: &[u8]) -> Option<ParsedIp> {
         return None;
     }
     let has_dots = bytes.contains(&b'.');
-    // If an IPv6 string uses dotted-quad notation (e.g. `::ffff:010.0.0.1`), validate the trailing IPv4 part
-    if has_dots {
-        let last_colon = bytes.iter().rposition(|&b| b == b':')?;
-        parse_ipv4_bytes(&bytes[last_colon + 1..])?;
-    }
-    let s = std::str::from_utf8(bytes).ok()?;
-    let v6: Ipv6Addr = s.parse().ok()?;
-    if let Some(v4) = extract_embedded_ipv4(v6, has_dots) {
-        Some(ParsedIp::V4(v4.to_bits()))
+    let bits = velda_core::lut::ip::parse_ipv6_u128(bytes)?;
+    if let Some(v4) = extract_embedded_ipv4(bits, has_dots) {
+        Some(ParsedIp::V4(v4))
     } else {
-        Some(ParsedIp::V6(v6.to_bits()))
+        Some(ParsedIp::V6(bits))
     }
 }
 
@@ -403,102 +333,85 @@ impl IpNetwork {
                 .parse()
                 .map_err(|e| format!("Invalid CIDR prefix length '{prefix_str}': {e}"))?;
 
-            let ip: IpAddr = ip_str
-                .parse()
-                .map_err(|e| format!("Invalid IP address '{ip_str}': {e}"))?;
-
-            match ip {
-                IpAddr::V4(v4) => {
-                    if prefix > 32 {
-                        return Err(format!("IPv4 prefix cannot exceed 32, got {prefix}"));
+            if let Some(v4_bits) = parse_ipv4_bytes(ip_str.as_bytes()) {
+                if prefix > 32 {
+                    return Err(format!("IPv4 prefix cannot exceed 32, got {prefix}"));
+                }
+                let mask = if prefix == 0 {
+                    0u32
+                } else {
+                    !0u32 << (32 - prefix)
+                };
+                let net = v4_bits & mask;
+                Ok(Self::V4 { net, mask })
+            } else if let Some(v6_bits) = velda_core::lut::ip::parse_ipv6_u128(ip_str.as_bytes()) {
+                if let Some(v4_bits) = extract_embedded_ipv4(v6_bits, ip_str.contains('.')) {
+                    if prefix < 96 {
+                        return Err(format!(
+                            "IPv4-embedded IPv6 prefix must be >= 96, got {prefix}"
+                        ));
                     }
-                    let mask = if prefix == 0 {
+                    let v4_prefix = prefix - 96;
+                    if v4_prefix > 32 {
+                        return Err(format!("IPv4 prefix cannot exceed 32, got {v4_prefix}"));
+                    }
+                    let mask = if v4_prefix == 0 {
                         0u32
                     } else {
-                        !0u32 << (32 - prefix)
+                        !0u32 << (32 - v4_prefix)
                     };
-                    let net = v4.to_bits() & mask;
+                    let net = v4_bits & mask;
                     Ok(Self::V4 { net, mask })
-                }
-                IpAddr::V6(v6) => {
-                    if let Some(v4) = extract_embedded_ipv4(v6, ip_str.contains('.')) {
-                        if prefix < 96 {
-                            return Err(format!(
-                                "IPv4-embedded IPv6 prefix must be >= 96, got {prefix}"
-                            ));
-                        }
-                        let v4_prefix = prefix - 96;
-                        if v4_prefix > 32 {
-                            return Err(format!("IPv4 prefix cannot exceed 32, got {v4_prefix}"));
-                        }
-                        let mask = if v4_prefix == 0 {
-                            0u32
-                        } else {
-                            !0u32 << (32 - v4_prefix)
-                        };
-                        let net = v4.to_bits() & mask;
-                        Ok(Self::V4 { net, mask })
-                    } else {
-                        if prefix > 128 {
-                            return Err(format!("IPv6 prefix cannot exceed 128, got {prefix}"));
-                        }
-                        let mask = if prefix == 0 {
-                            0u128
-                        } else {
-                            !0u128 << (128 - prefix)
-                        };
-                        let net = v6.to_bits() & mask;
-                        Ok(Self::V6 { net, mask })
+                } else {
+                    if prefix > 128 {
+                        return Err(format!("IPv6 prefix cannot exceed 128, got {prefix}"));
                     }
+                    let mask = if prefix == 0 {
+                        0u128
+                    } else {
+                        !0u128 << (128 - prefix)
+                    };
+                    let net = v6_bits & mask;
+                    Ok(Self::V6 { net, mask })
                 }
+            } else {
+                Err(format!("Invalid IP address '{ip_str}'"))
+            }
+        } else if let Some(v4_bits) = parse_ipv4_bytes(s.as_bytes()) {
+            Ok(Self::V4 {
+                net: v4_bits,
+                mask: !0u32,
+            })
+        } else if let Some(v6_bits) = velda_core::lut::ip::parse_ipv6_u128(s.as_bytes()) {
+            if let Some(v4_bits) = extract_embedded_ipv4(v6_bits, s.contains('.')) {
+                Ok(Self::V4 {
+                    net: v4_bits,
+                    mask: !0u32,
+                })
+            } else {
+                Ok(Self::V6 {
+                    net: v6_bits,
+                    mask: !0u128,
+                })
             }
         } else {
-            // Bare IP without slash (/32 or /128)
-            let ip: IpAddr = s
-                .parse()
-                .map_err(|e| format!("Invalid IP address '{s}': {e}"))?;
-            match ip {
-                IpAddr::V4(v4) => Ok(Self::V4 {
-                    net: v4.to_bits(),
-                    mask: !0u32,
-                }),
-                IpAddr::V6(v6) => {
-                    if let Some(v4) = extract_embedded_ipv4(v6, s.contains('.')) {
-                        Ok(Self::V4 {
-                            net: v4.to_bits(),
-                            mask: !0u32,
-                        })
-                    } else {
-                        Ok(Self::V6 {
-                            net: v6.to_bits(),
-                            mask: !0u128,
-                        })
-                    }
-                }
-            }
+            Err(format!("Invalid IP address '{s}'"))
         }
     }
 
-    /// Tests whether an [`IpAddr`] falls within this network prefix.
+    /// Tests whether an RFC 4291 `u128` IP address falls within this network prefix.
     #[inline(always)]
-    pub fn contains(&self, ip: IpAddr) -> bool {
-        match (self, ip) {
-            (Self::V4 { net, mask }, IpAddr::V4(v4)) => (v4.to_bits() & mask) == *net,
-            (Self::V6 { net, mask }, IpAddr::V6(v6)) => {
-                if extract_embedded_ipv4(v6, false).is_some() {
-                    false
-                } else {
-                    (v6.to_bits() & mask) == *net
-                }
+    pub fn contains(&self, ip: u128) -> bool {
+        if let Some(v4_bits) = extract_embedded_ipv4(ip, false) {
+            match self {
+                Self::V4 { net, mask } => (v4_bits & mask) == *net,
+                Self::V6 { .. } => false,
             }
-            (Self::V4 { net, mask }, IpAddr::V6(v6)) => {
-                if let Some(v4) = extract_embedded_ipv4(v6, false) {
-                    (v4.to_bits() & mask) == *net
-                } else {
-                    false
-                }
+        } else {
+            match self {
+                Self::V6 { net, mask } => (ip & mask) == *net,
+                Self::V4 { .. } => false,
             }
-            _ => false,
         }
     }
 
@@ -525,12 +438,14 @@ impl IpNetwork {
     pub fn to_canonical_string(&self) -> String {
         match self {
             Self::V4 { net, mask } => {
-                let ip = Ipv4Addr::from_bits(*net);
+                let (buf, len) = velda_core::lut::ip::format_ipv4_bytes(*net);
+                let ip = std::str::from_utf8(&buf[..len]).unwrap_or("0.0.0.0");
                 let prefix = mask.count_ones();
                 format!("{ip}/{prefix}")
             }
             Self::V6 { net, mask } => {
-                let ip = Ipv6Addr::from_bits(*net);
+                let (buf, len) = velda_core::lut::ip::format_ipv6_bytes(*net);
+                let ip = std::str::from_utf8(&buf[..len]).unwrap_or("::");
                 let prefix = mask.count_ones();
                 format!("{ip}/{prefix}")
             }
@@ -589,30 +504,38 @@ mod tests {
     #[test]
     fn test_ipv4_cidr_matching() {
         let net = IpNetwork::from_cidr("192.168.1.0/24").unwrap();
-        assert!(net.contains("192.168.1.1".parse().unwrap()));
-        assert!(net.contains("192.168.1.254".parse().unwrap()));
-        assert!(!net.contains("192.168.2.1".parse().unwrap()));
-        assert!(!net.contains("10.0.0.1".parse().unwrap()));
+        assert!(net.contains(velda_core::lut::ip::parse_ip_u128(b"192.168.1.1").unwrap()));
+        assert!(net.contains(velda_core::lut::ip::parse_ip_u128(b"192.168.1.254").unwrap()));
+        assert!(!net.contains(velda_core::lut::ip::parse_ip_u128(b"192.168.2.1").unwrap()));
+        assert!(!net.contains(velda_core::lut::ip::parse_ip_u128(b"10.0.0.1").unwrap()));
     }
 
     #[test]
     fn test_ipv6_cidr_matching() {
         let net = IpNetwork::from_cidr("2001:db8::/32").unwrap();
-        assert!(net.contains("2001:db8:1234::1".parse().unwrap()));
-        assert!(net.contains("2001:db8:ffff:ffff::1".parse().unwrap()));
-        assert!(!net.contains("2001:db9::1".parse().unwrap()));
-        assert!(!net.contains("::1".parse().unwrap()));
+        assert!(net.contains(velda_core::lut::ip::parse_ip_u128(b"2001:db8:1234::1").unwrap()));
+        assert!(
+            net.contains(velda_core::lut::ip::parse_ip_u128(b"2001:db8:ffff:ffff::1").unwrap())
+        );
+        assert!(!net.contains(velda_core::lut::ip::parse_ip_u128(b"2001:db9::1").unwrap()));
+        assert!(!net.contains(1));
     }
 
     #[test]
     fn test_ipv4_mapped_and_translated_ipv6_matching() {
         let net = IpNetwork::from_cidr("192.168.1.0/24").unwrap();
-        assert!(net.contains("::ffff:192.168.1.50".parse().unwrap()));
-        assert!(net.contains("::ffff:0:192.168.1.50".parse().unwrap()));
-        assert!(net.contains("64:ff9b::192.168.1.50".parse().unwrap()));
+        assert!(net.contains(velda_core::lut::ip::parse_ip_u128(b"::ffff:192.168.1.50").unwrap()));
+        assert!(
+            net.contains(velda_core::lut::ip::parse_ip_u128(b"::ffff:0:192.168.1.50").unwrap())
+        );
+        assert!(
+            net.contains(velda_core::lut::ip::parse_ip_u128(b"64:ff9b::192.168.1.50").unwrap())
+        );
 
         let net_from_mapped = IpNetwork::from_cidr("::ffff:192.168.1.0/120").unwrap();
-        assert!(net_from_mapped.contains("192.168.1.50".parse().unwrap()));
+        assert!(
+            net_from_mapped.contains(velda_core::lut::ip::parse_ip_u128(b"192.168.1.50").unwrap())
+        );
         assert_eq!(net_from_mapped, net);
     }
 
@@ -620,36 +543,33 @@ mod tests {
     fn test_parse_ip_bytes_and_adversarial_inputs() {
         assert_eq!(
             parse_ip_bytes(b"192.168.1.1").unwrap(),
-            ParsedIp::V4(Ipv4Addr::new(192, 168, 1, 1).to_bits())
+            ParsedIp::V4(0xC0A8_0101)
         );
         assert_eq!(
             parse_ip_bytes(b"192.168.1.1:8080").unwrap(),
-            ParsedIp::V4(Ipv4Addr::new(192, 168, 1, 1).to_bits())
+            ParsedIp::V4(0xC0A8_0101)
         );
         assert_eq!(
             parse_ip_bytes(b"\"192.168.1.1\"").unwrap(),
-            ParsedIp::V4(Ipv4Addr::new(192, 168, 1, 1).to_bits())
+            ParsedIp::V4(0xC0A8_0101)
         );
         assert_eq!(
             parse_ip_bytes(b"[2001:db8::1]:8080").unwrap(),
-            ParsedIp::V6("2001:db8::1".parse::<Ipv6Addr>().unwrap().to_bits())
+            ParsedIp::V6(0x2001_0DB8_0000_0000_0000_0000_0000_0001)
         );
         assert_eq!(
             parse_ip_bytes(b"::ffff:10.0.0.1").unwrap(),
-            ParsedIp::V4(Ipv4Addr::new(10, 0, 0, 1).to_bits())
+            ParsedIp::V4(0x0A00_0001)
         );
         assert_eq!(
             parse_ip_bytes(b"64:ff9b::10.0.0.1").unwrap(),
-            ParsedIp::V4(Ipv4Addr::new(10, 0, 0, 1).to_bits())
+            ParsedIp::V4(0x0A00_0001)
         );
         assert_eq!(
             parse_ip_bytes(b"::10.0.0.1").unwrap(),
-            ParsedIp::V4(Ipv4Addr::new(10, 0, 0, 1).to_bits())
+            ParsedIp::V4(0x0A00_0001)
         );
-        assert_eq!(
-            parse_ip_bytes(b"::1").unwrap(),
-            ParsedIp::V6(Ipv6Addr::LOCALHOST.to_bits())
-        );
+        assert_eq!(parse_ip_bytes(b"::1").unwrap(), ParsedIp::V6(1));
 
         // CVE-2021-28918 Octal / Leading-Zero IPv4 Evasion must be rejected
         assert!(parse_ip_bytes(b"010.0.0.1").is_none());

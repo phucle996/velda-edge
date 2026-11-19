@@ -10,8 +10,6 @@
 //!   `allow_header_override` is explicitly set to `true`. Max delay is strictly clamped to
 //!   `max_override_delay_ms` to prevent Slowloris denial-of-service vulnerabilities.
 
-use std::net::IpAddr;
-
 use http::header::HeaderName;
 use velda_core::L7Request;
 
@@ -38,57 +36,48 @@ impl IpRangeMatcher {
             }
 
             if let Some((ip_str, prefix_str)) = s.split_once('/') {
-                let ip: IpAddr = ip_str
-                    .trim()
+                let ip_trimmed = ip_str.trim();
+                let prefix_trimmed = prefix_str.trim();
+                let prefix: u8 = prefix_trimmed
                     .parse()
-                    .map_err(|e| format!("Invalid IP address '{ip_str}': {e}"))?;
-                let prefix: u8 = prefix_str
-                    .trim()
-                    .parse()
-                    .map_err(|e| format!("Invalid CIDR prefix '{prefix_str}': {e}"))?;
+                    .map_err(|e| format!("Invalid CIDR prefix '{prefix_trimmed}': {e}"))?;
 
-                match ip {
-                    IpAddr::V4(v4) => {
-                        if prefix > 32 {
-                            return Err(format!("IPv4 prefix cannot exceed 32, got {prefix}"));
-                        }
-                        let mask = if prefix == 0 {
-                            0u32
-                        } else {
-                            !0u32 << (32 - prefix)
-                        };
-                        let start = v4.to_bits() & mask;
-                        let end = start | !mask;
-                        v4_intervals.push((start, end));
+                if let Some(v4_bits) = velda_core::lut::ip::parse_ipv4_bytes(ip_trimmed.as_bytes())
+                {
+                    if prefix > 32 {
+                        return Err(format!("IPv4 prefix cannot exceed 32, got {prefix}"));
                     }
-                    IpAddr::V6(v6) => {
-                        if prefix > 128 {
-                            return Err(format!("IPv6 prefix cannot exceed 128, got {prefix}"));
-                        }
-                        let mask = if prefix == 0 {
-                            0u128
-                        } else {
-                            !0u128 << (128 - prefix)
-                        };
-                        let start = v6.to_bits() & mask;
-                        let end = start | !mask;
-                        v6_intervals.push((start, end));
+                    let mask = if prefix == 0 {
+                        0u32
+                    } else {
+                        !0u32 << (32 - prefix)
+                    };
+                    let start = v4_bits & mask;
+                    let end = start | !mask;
+                    v4_intervals.push((start, end));
+                } else if let Some(v6_bits) =
+                    velda_core::lut::ip::parse_ipv6_u128(ip_trimmed.as_bytes())
+                {
+                    if prefix > 128 {
+                        return Err(format!("IPv6 prefix cannot exceed 128, got {prefix}"));
                     }
+                    let mask = if prefix == 0 {
+                        0u128
+                    } else {
+                        !0u128 << (128 - prefix)
+                    };
+                    let start = v6_bits & mask;
+                    let end = start | !mask;
+                    v6_intervals.push((start, end));
+                } else {
+                    return Err(format!("Invalid IP address '{ip_trimmed}'"));
                 }
+            } else if let Some(v4_bits) = velda_core::lut::ip::parse_ipv4_bytes(s.as_bytes()) {
+                v4_intervals.push((v4_bits, v4_bits));
+            } else if let Some(v6_bits) = velda_core::lut::ip::parse_ipv6_u128(s.as_bytes()) {
+                v6_intervals.push((v6_bits, v6_bits));
             } else {
-                let ip: IpAddr = s
-                    .parse()
-                    .map_err(|e| format!("Invalid IP address '{s}': {e}"))?;
-                match ip {
-                    IpAddr::V4(v4) => {
-                        let bits = v4.to_bits();
-                        v4_intervals.push((bits, bits));
-                    }
-                    IpAddr::V6(v6) => {
-                        let bits = v6.to_bits();
-                        v6_intervals.push((bits, bits));
-                    }
-                }
+                return Err(format!("Invalid IP address '{s}'"));
             }
         }
 
@@ -98,42 +87,37 @@ impl IpRangeMatcher {
         })
     }
 
-    /// Tests whether an [`IpAddr`] falls within any configured network prefix.
+    /// Tests whether an RFC 4291 `u128` IP address falls within any configured network prefix.
     ///
     /// # Performance Contract
     /// - For $N = 1$: Executes in ~0.5ns using exactly two integer comparisons (`ip >= s && ip <= e`).
     /// - For $N > 1$: Executes in $O(\log N)$ via cache-friendly `partition_point` binary search.
     /// - **Zero heap allocations**.
     #[inline]
-    pub fn contains(&self, ip: IpAddr) -> bool {
-        match ip {
-            IpAddr::V4(v4) => {
-                let bits = v4.to_bits();
-                match self.v4_ranges.len() {
-                    0 => false,
-                    1 => bits >= self.v4_ranges[0].0 && bits <= self.v4_ranges[0].1,
-                    _ => {
-                        let idx = self.v4_ranges.partition_point(|&(_, end)| end < bits);
-                        if idx < self.v4_ranges.len() {
-                            bits >= self.v4_ranges[idx].0 && bits <= self.v4_ranges[idx].1
-                        } else {
-                            false
-                        }
+    pub fn contains(&self, ip: u128) -> bool {
+        if let Some(bits) = velda_core::lut::ip::is_ipv4_mapped_u128(ip) {
+            match self.v4_ranges.len() {
+                0 => false,
+                1 => bits >= self.v4_ranges[0].0 && bits <= self.v4_ranges[0].1,
+                _ => {
+                    let idx = self.v4_ranges.partition_point(|&(_, end)| end < bits);
+                    if idx < self.v4_ranges.len() {
+                        bits >= self.v4_ranges[idx].0 && bits <= self.v4_ranges[idx].1
+                    } else {
+                        false
                     }
                 }
             }
-            IpAddr::V6(v6) => {
-                let bits = v6.to_bits();
-                match self.v6_ranges.len() {
-                    0 => false,
-                    1 => bits >= self.v6_ranges[0].0 && bits <= self.v6_ranges[0].1,
-                    _ => {
-                        let idx = self.v6_ranges.partition_point(|&(_, end)| end < bits);
-                        if idx < self.v6_ranges.len() {
-                            bits >= self.v6_ranges[idx].0 && bits <= self.v6_ranges[idx].1
-                        } else {
-                            false
-                        }
+        } else {
+            match self.v6_ranges.len() {
+                0 => false,
+                1 => ip >= self.v6_ranges[0].0 && ip <= self.v6_ranges[0].1,
+                _ => {
+                    let idx = self.v6_ranges.partition_point(|&(_, end)| end < ip);
+                    if idx < self.v6_ranges.len() {
+                        ip >= self.v6_ranges[idx].0 && ip <= self.v6_ranges[idx].1
+                    } else {
+                        false
                     }
                 }
             }
@@ -291,28 +275,25 @@ impl HttpFaultCondition {
     }
 }
 
-/// Helper to extract client IP authoritatively from req.state, X-Real-IP, or right-most X-Forwarded-For.
+/// Helper to extract client IP as RFC 4291 `u128` authoritatively from `req.state.client_ip`, `X-Real-IP`, or right-most `X-Forwarded-For`.
 #[inline]
-fn extract_client_ip(req: &L7Request) -> Option<IpAddr> {
-    if let Some(ip) = req.state.client_ip {
-        return Some(ip);
+fn extract_client_ip(req: &L7Request) -> Option<u128> {
+    if req.state.client_ip != 0 {
+        return Some(req.state.client_ip);
     }
     // Security Invariant: Prefer authoritative edge-assigned x-real-ip first to eliminate IP spoofing attacks.
-    if let Some(real_ip) = req
-        .headers
-        .get("x-real-ip")
-        .and_then(|val| val.to_str().ok())
-        .and_then(|raw| raw.trim().parse::<IpAddr>().ok())
-    {
+    if let Some(real_ip) = req.headers.get_ip_u128("x-real-ip") {
         return Some(real_ip);
     }
 
     // Fall back to nearest proxy (right-most IP in comma-separated list)
-    req.headers
-        .get("x-forwarded-for")
-        .and_then(|val| val.to_str().ok())
-        .and_then(|raw| raw.rsplit(',').next())
-        .and_then(|last| last.trim().parse::<IpAddr>().ok())
+    let val = req.headers.get("x-forwarded-for")?;
+    let bytes = val.as_bytes();
+    let last = match bytes.iter().rposition(|&b| b == b',') {
+        Some(idx) => &bytes[idx + 1..],
+        None => bytes,
+    };
+    velda_core::lut::ip::parse_ip_u128(last.trim_ascii())
 }
 
 #[cfg(test)]
@@ -324,10 +305,10 @@ mod tests {
     #[test]
     fn test_ip_range_matcher_single_cidr() {
         let matcher = IpRangeMatcher::from_cidrs(&["10.0.0.0/8".to_string()]).unwrap();
-        assert!(matcher.contains("10.1.2.3".parse().unwrap()));
-        assert!(matcher.contains("10.255.255.255".parse().unwrap()));
-        assert!(!matcher.contains("11.0.0.1".parse().unwrap()));
-        assert!(!matcher.contains("192.168.1.1".parse().unwrap()));
+        assert!(matcher.contains(velda_core::lut::ip::parse_ip_u128(b"10.1.2.3").unwrap()));
+        assert!(matcher.contains(velda_core::lut::ip::parse_ip_u128(b"10.255.255.255").unwrap()));
+        assert!(!matcher.contains(velda_core::lut::ip::parse_ip_u128(b"11.0.0.1").unwrap()));
+        assert!(!matcher.contains(velda_core::lut::ip::parse_ip_u128(b"192.168.1.1").unwrap()));
     }
 
     #[test]
@@ -341,18 +322,18 @@ mod tests {
 
         // 192.168.1.0/24 and 192.168.2.0/24 merge into 192.168.1.0 - 192.168.2.255
         assert_eq!(matcher.v4_ranges.len(), 2);
-        assert!(matcher.contains("192.168.1.50".parse().unwrap()));
-        assert!(matcher.contains("192.168.2.200".parse().unwrap()));
-        assert!(matcher.contains("10.5.0.1".parse().unwrap()));
-        assert!(!matcher.contains("10.5.0.2".parse().unwrap()));
-        assert!(!matcher.contains("192.168.3.1".parse().unwrap()));
+        assert!(matcher.contains(velda_core::lut::ip::parse_ip_u128(b"192.168.1.50").unwrap()));
+        assert!(matcher.contains(velda_core::lut::ip::parse_ip_u128(b"192.168.2.200").unwrap()));
+        assert!(matcher.contains(velda_core::lut::ip::parse_ip_u128(b"10.5.0.1").unwrap()));
+        assert!(!matcher.contains(velda_core::lut::ip::parse_ip_u128(b"10.5.0.2").unwrap()));
+        assert!(!matcher.contains(velda_core::lut::ip::parse_ip_u128(b"192.168.3.1").unwrap()));
     }
 
     #[test]
     fn test_ip_range_matcher_ipv6() {
         let matcher = IpRangeMatcher::from_cidrs(&["2001:db8::/32".to_string()]).unwrap();
-        assert!(matcher.contains("2001:db8:1234::1".parse().unwrap()));
-        assert!(!matcher.contains("2001:db9::1".parse().unwrap()));
+        assert!(matcher.contains(velda_core::lut::ip::parse_ip_u128(b"2001:db8:1234::1").unwrap()));
+        assert!(!matcher.contains(velda_core::lut::ip::parse_ip_u128(b"2001:db9::1").unwrap()));
     }
 
     #[test]
