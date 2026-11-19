@@ -23,10 +23,14 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     curl \
     && rm -rf /var/lib/apt/lists/*
 
+RUN groupadd -r velda && useradd -r -g velda -s /bin/false velda
+
 WORKDIR /app
 COPY --from=go-builder /app/velda-cp /app/velda-cp
 
 EXPOSE 8080
 EXPOSE 9099
+
+USER velda:velda
 
 ENTRYPOINT ["/app/velda-cp"]

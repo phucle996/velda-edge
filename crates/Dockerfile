@@ -15,10 +15,14 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     ca-certificates \
     && rm -rf /var/lib/apt/lists/*
 
+RUN groupadd -r velda && useradd -r -g velda -s /bin/false velda
+
 WORKDIR /app
 COPY --from=builder /app/target/release/velda-edge /app/velda-edge
 
 EXPOSE 80
 EXPOSE 443
+
+USER velda:velda
 
 ENTRYPOINT ["/app/velda-edge"]

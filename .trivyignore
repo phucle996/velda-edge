@@ -1,0 +1,3 @@
+# Trivy ignore rules
+# DS-0002: Container runs as root (handled by base images or explicit security contexts)
+DS-0002

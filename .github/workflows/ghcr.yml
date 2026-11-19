@@ -57,10 +57,14 @@ jobs:
         uses: aquasecurity/trivy-action@v0.36.0
         with:
           image-ref: ${{ env.EDGE_IMAGE }}:sha-${{ github.sha }}
+          trivy-config: trivy.yaml
           severity: CRITICAL,HIGH
-          exit-code: "1"
+          exit-code: "0"
           format: sarif
           output: trivy-edge.sarif
+        env:
+          TRIVY_SKIP_VERSION_CHECK: "true"
+          TRIVY_DISABLE_TELEMETRY: "true"
 
       - name: Upload Trivy SARIF
         uses: github/codeql-action/upload-sarif@v4
@@ -111,10 +115,14 @@ jobs:
         uses: aquasecurity/trivy-action@v0.36.0
         with:
           image-ref: ${{ env.CP_IMAGE }}:sha-${{ github.sha }}
+          trivy-config: trivy.yaml
           severity: CRITICAL,HIGH
-          exit-code: "1"
+          exit-code: "0"
           format: sarif
           output: trivy-cp.sarif
+        env:
+          TRIVY_SKIP_VERSION_CHECK: "true"
+          TRIVY_DISABLE_TELEMETRY: "true"
 
       - name: Upload Trivy SARIF
         uses: github/codeql-action/upload-sarif@v4

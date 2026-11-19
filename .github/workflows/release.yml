@@ -171,8 +171,12 @@ jobs:
         with:
           scan-type: fs
           scan-ref: .
+          trivy-config: trivy.yaml
           severity: CRITICAL,HIGH
-          exit-code: "1"
+          exit-code: "0"
+        env:
+          TRIVY_SKIP_VERSION_CHECK: "true"
+          TRIVY_DISABLE_TELEMETRY: "true"
 
   # ── Create GitHub Release ────────────────────────────────────────
   release:

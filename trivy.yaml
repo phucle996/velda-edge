@@ -1,0 +1,3 @@
+# Trivy global scanner configuration
+skip-version-check: true
+disable-telemetry: true
