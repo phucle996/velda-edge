@@ -139,7 +139,7 @@ Under the Velda Edge Workload Distribution Model, background logistics plugins d
 
 ## 6. Empirical Machine Code Disassembly Proof
 
-### SSSE3 SIMD PSHUFB 32-Character Hex Stamping (`format_hex32_bytes` / `lut.rs`)
+### SSSE3 SIMD PSHUFB 32-Character Hex Stamping (`format_hex32_bytes` / `wire.rs`)
 
 Compiled under `rustc 1.98` with `--release` (`-C opt-level=3`, `-C target-feature=+ssse3`):
 

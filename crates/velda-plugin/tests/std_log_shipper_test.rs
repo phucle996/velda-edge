@@ -6,7 +6,7 @@ use std::time::Duration;
 
 use tokio::sync::watch;
 use velda_core::{CompletionReason, GrpcStatus, HttpMethod, PipeKind};
-use velda_observability::{AccessLogRecord, LogStore};
+use velda_observability::{AccessLogRecord, LogBatch, LogStore};
 use velda_plugin::PluginConfig;
 use velda_plugin::background::BackgroundPlugin;
 use velda_plugin::background::std_log_shipper::config::TargetStream;
@@ -14,87 +14,99 @@ use velda_plugin::background::std_log_shipper::format::format_std_log_payload;
 use velda_plugin::background::std_log_shipper::{StdLogShipperConfig, StdLogShipperPlugin};
 
 #[test]
-fn test_std_log_shipper_formatting_all_protocols() {
-    let http1_rec = AccessLogRecord::from_scalars(
-        0x1111_2222,
-        1_710_000_000,
-        150,
-        "10.0.0.1:12345".parse().unwrap(),
-        Some("192.168.1.1:8080".parse().unwrap()),
-        120,
-        1024,
-        200,
-        10,
-        0,
-        PipeKind::BufferedH1H1,
-        CompletionReason::Complete,
-        HttpMethod::Get,
-        GrpcStatus::NonGrpc,
-        b"Mozilla/5.0 (Windows NT 10.0; Win64; x64)",
-    );
+fn test_std_log_format_all() {
+    let mut http1_rec = AccessLogRecord::zeroed();
+    http1_rec.request_id = 0x1111_2222;
+    http1_rec.ingress_time_nanos = 1_710_000_000_000_000_000;
+    http1_rec.duration_ns = 150;
+    http1_rec.peer_ip = velda_core::lut::ip::encode_ip_u128("10.0.0.1".parse().unwrap());
+    http1_rec.upstream_ip =
+        velda_core::lut::ip::encode_upstream_ip_u32("192.168.1.1".parse().unwrap());
+    http1_rec.upstream_port = 8080;
+    http1_rec.bytes_rx = 120;
+    http1_rec.bytes_tx = 1024;
+    http1_rec.status_code = 200;
+    http1_rec.route_id = 10;
+    http1_rec.pipe = PipeKind::BufferedH1H1;
+    http1_rec.completion = CompletionReason::Complete;
+    http1_rec.method = HttpMethod::Get;
+    http1_rec.grpc_status = GrpcStatus::NonGrpc;
+    let (fam, os, ver) =
+        velda_core::lut::classify_user_agent(b"Mozilla/5.0 (Windows NT 10.0; Win64; x64)");
+    http1_rec.ua_family = fam;
+    http1_rec.ua_os = os;
+    http1_rec.ua_major_version = ver;
 
-    let h2_rec = AccessLogRecord::from_scalars(
-        0x3333_4444,
-        1_710_000_001,
-        220,
-        "10.0.0.2:12346".parse().unwrap(),
-        Some("192.168.1.2:8443".parse().unwrap()),
-        200,
-        4096,
-        200,
-        11,
-        0,
-        PipeKind::ServerStreamH2H2,
-        CompletionReason::Complete,
-        HttpMethod::Post,
-        GrpcStatus::NonGrpc,
-        b"curl/8.6.0",
-    );
+    let mut h2_rec = AccessLogRecord::zeroed();
+    h2_rec.request_id = 0x3333_4444;
+    h2_rec.ingress_time_nanos = 1_710_000_001_000_000_000;
+    h2_rec.duration_ns = 220;
+    h2_rec.peer_ip = velda_core::lut::ip::encode_ip_u128("10.0.0.2".parse().unwrap());
+    h2_rec.upstream_ip =
+        velda_core::lut::ip::encode_upstream_ip_u32("192.168.1.2".parse().unwrap());
+    h2_rec.upstream_port = 8443;
+    h2_rec.bytes_rx = 200;
+    h2_rec.bytes_tx = 4096;
+    h2_rec.status_code = 200;
+    h2_rec.route_id = 11;
+    h2_rec.pipe = PipeKind::ServerStreamH2H2;
+    h2_rec.completion = CompletionReason::Complete;
+    h2_rec.method = HttpMethod::Post;
+    h2_rec.grpc_status = GrpcStatus::NonGrpc;
+    let (fam, os, ver) = velda_core::lut::classify_user_agent(b"curl/8.6.0");
+    h2_rec.ua_family = fam;
+    h2_rec.ua_os = os;
+    h2_rec.ua_major_version = ver;
 
-    let grpc_rec = AccessLogRecord::from_scalars(
-        0x5555_6666,
-        1_710_000_002,
-        350,
-        "10.0.0.3:12347".parse().unwrap(),
-        Some("192.168.1.3:50051".parse().unwrap()),
-        512,
-        2048,
-        200,
-        12,
-        10,
-        PipeKind::DuplexGrpcTcpTcp,
-        CompletionReason::Complete,
-        HttpMethod::Post,
-        GrpcStatus::Ok,
-        b"grpc-go/1.64.0",
-    );
+    let mut grpc_rec = AccessLogRecord::zeroed();
+    grpc_rec.request_id = 0x5555_6666;
+    grpc_rec.ingress_time_nanos = 1_710_000_002_000_000_000;
+    grpc_rec.duration_ns = 350;
+    grpc_rec.peer_ip = velda_core::lut::ip::encode_ip_u128("10.0.0.3".parse().unwrap());
+    grpc_rec.upstream_ip =
+        velda_core::lut::ip::encode_upstream_ip_u32("192.168.1.3".parse().unwrap());
+    grpc_rec.upstream_port = 50051;
+    grpc_rec.bytes_rx = 512;
+    grpc_rec.bytes_tx = 2048;
+    grpc_rec.status_code = 200;
+    grpc_rec.route_id = 12;
+    grpc_rec.rpc_msgs_or_flags = 10;
+    grpc_rec.pipe = PipeKind::DuplexGrpcTcpTcp;
+    grpc_rec.completion = CompletionReason::Complete;
+    grpc_rec.method = HttpMethod::Post;
+    grpc_rec.grpc_status = GrpcStatus::Ok;
+    let (fam, os, ver) = velda_core::lut::classify_user_agent(b"grpc-go/1.64.0");
+    grpc_rec.ua_family = fam;
+    grpc_rec.ua_os = os;
+    grpc_rec.ua_major_version = ver;
 
-    let raw_rec = AccessLogRecord::from_scalars(
-        0x7777_8888,
-        1_710_000_003,
-        80,
-        "10.0.0.4:12348".parse().unwrap(),
-        Some("192.168.1.4:9000".parse().unwrap()),
-        1024,
-        2048,
-        0,
-        13,
-        0,
-        PipeKind::TcpTcp,
-        CompletionReason::Complete,
-        HttpMethod::Unknown,
-        GrpcStatus::NonGrpc,
-        b"",
-    );
+    let mut raw_rec = AccessLogRecord::zeroed();
+    raw_rec.request_id = 0x7777_8888;
+    raw_rec.ingress_time_nanos = 1_710_000_003_000_000_000;
+    raw_rec.duration_ns = 80;
+    raw_rec.peer_ip = velda_core::lut::ip::encode_ip_u128("10.0.0.4".parse().unwrap());
+    raw_rec.upstream_ip =
+        velda_core::lut::ip::encode_upstream_ip_u32("192.168.1.4".parse().unwrap());
+    raw_rec.upstream_port = 9000;
+    raw_rec.bytes_rx = 1024;
+    raw_rec.bytes_tx = 2048;
+    raw_rec.status_code = 0;
+    raw_rec.route_id = 13;
+    raw_rec.pipe = PipeKind::TcpTcp;
+    raw_rec.completion = CompletionReason::Complete;
+    raw_rec.method = HttpMethod::Unknown;
+    raw_rec.grpc_status = GrpcStatus::NonGrpc;
 
-    let batches = vec![Arc::from(vec![http1_rec, h2_rec, grpc_rec, raw_rec])];
+    let batches = vec![LogBatch::from_arc(Arc::from(vec![
+        http1_rec, h2_rec, grpc_rec, raw_rec,
+    ]))];
 
     // Verify Text format
     let mut text_buf = Vec::new();
     let count = format_std_log_payload(&batches, "text", &mut text_buf);
     assert_eq!(count, 4);
     let text = String::from_utf8(text_buf).unwrap();
-    assert!(text.contains("10.0.0.1:12345"));
+    assert!(text.contains("10.0.0.1"));
     assert!(text.contains("duration_ns=150 pipe=buffered_h1_h1"));
     assert!(text.contains("duration_ns=220 pipe=server_stream_h2_h2"));
     assert!(text.contains("grpc_status=OK rpc_messages=10"));
@@ -137,7 +149,7 @@ async fn test_std_log_shipper_from_plugin_config() {
 }
 
 #[tokio::test]
-async fn test_std_log_shipper_background_subscription_lifecycle() {
+async fn test_std_log_subscription() {
     let log_store = Arc::new(LogStore::with_cores_and_capacity(1, 1024));
 
     let config = StdLogShipperConfig {
@@ -165,23 +177,23 @@ async fn test_std_log_shipper_background_subscription_lifecycle() {
 
     // Emit 10 records across lanes
     for i in 0..10 {
-        let rec = AccessLogRecord::from_scalars(
-            i as u64,
-            1_710_000_000 + i as u32,
-            100 + i as u64,
-            "127.0.0.1:8080".parse().unwrap(),
-            None,
-            10,
-            20,
-            200,
-            1,
-            0,
-            PipeKind::BufferedH1H1,
-            CompletionReason::Complete,
-            HttpMethod::Get,
-            GrpcStatus::NonGrpc,
-            b"test-client",
-        );
+        let mut rec = AccessLogRecord::zeroed();
+        rec.request_id = i as u64;
+        rec.ingress_time_nanos = 1_710_000_000_000_000_000 + i as u64;
+        rec.duration_ns = 100 + i as u64;
+        rec.peer_ip = velda_core::lut::ip::encode_ip_u128("127.0.0.1".parse().unwrap());
+        rec.bytes_rx = 10;
+        rec.bytes_tx = 20;
+        rec.status_code = 200;
+        rec.route_id = 1;
+        rec.pipe = PipeKind::BufferedH1H1;
+        rec.completion = CompletionReason::Complete;
+        rec.method = HttpMethod::Get;
+        rec.grpc_status = GrpcStatus::NonGrpc;
+        let (fam, os, ver) = velda_core::lut::classify_user_agent(b"test-client");
+        rec.ua_family = fam;
+        rec.ua_os = os;
+        rec.ua_major_version = ver;
         log_store.emit_on_core(0, &rec);
     }
     log_store.flush_all_lanes(128);

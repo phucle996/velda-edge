@@ -1,10 +1,11 @@
 //! Text & Common Log Format (CLF) Access Log Formatting (`std_log_shipper::format::text`).
 
-use std::sync::Arc;
 use velda_core::WireProtocol;
-use velda_observability::AccessLogRecord;
+use velda_observability::{AccessLogRecord, LogBatch};
 
-use super::super::lut::{fast_write_ip, fast_write_ipv4, fast_write_iso8601_utc, fast_write_u64};
+use super::fast_write_iso8601_utc;
+use velda_core::lut::decimal::fast_write_u64;
+use velda_core::lut::ip::{fast_write_ip, fast_write_ipv4};
 
 // Pre-baked static text chunks
 const TEXT_OPEN_BRACKET: &[u8] = b" [";
@@ -28,34 +29,42 @@ const CLF_PREFIX: &[u8] = b" - - [";
 /// Formats batches of [`AccessLogRecord`] into Extended Text format directly into `out`.
 ///
 /// Pre-reserves buffer capacity to guarantee 0 heap reallocations.
-pub fn format_text_records(
-    batches: &[Arc<[AccessLogRecord]>],
-    total_recs: usize,
-    out: &mut Vec<u8>,
-) {
+pub fn format_text_records(batches: &[LogBatch], total_recs: usize, out: &mut Vec<u8>) {
     out.reserve(total_recs * 340);
 
     for batch in batches {
-        for rec in batch.iter() {
+        let recs = batch.as_ref();
+        for (idx, rec) in recs.iter().enumerate() {
+            #[cfg(target_arch = "x86_64")]
+            if idx + 4 < recs.len() {
+                unsafe {
+                    use core::arch::x86_64::*;
+                    let next_rec =
+                        recs.get_unchecked(idx + 4) as *const AccessLogRecord as *const i8;
+                    _mm_prefetch(next_rec, _MM_HINT_T1);
+                    _mm_prefetch(next_rec.add(64), _MM_HINT_T1);
+                    _mm_prefetch(next_rec.add(128), _MM_HINT_T1);
+                    _mm_prefetch(next_rec.add(192), _MM_HINT_T1);
+                }
+            }
             let downstream_protocol = rec.downstream_protocol();
             let completion = rec.completion;
             let method = rec.method;
             let grpc_st = rec.grpc_status;
             let ua_fam = rec.ua_family;
 
+            let ts_sec = (rec.ingress_time_nanos / 1_000_000_000) as u32;
             fast_write_ip(out, rec.peer_ip);
-            out.push(b':');
-            fast_write_u64(out, rec.peer_port as u64);
             out.extend_from_slice(TEXT_OPEN_BRACKET);
-            fast_write_iso8601_utc(out, rec.timestamp_sec);
+            fast_write_iso8601_utc(out, ts_sec);
             out.extend_from_slice(TEXT_CLOSE_BRACKET_QUOTE);
 
             match downstream_protocol {
                 WireProtocol::H1 | WireProtocol::H2 | WireProtocol::H3 => {
                     out.extend_from_slice(method.as_str().as_bytes());
                     out.push(b' ');
-                    if !rec.path().is_empty() {
-                        out.extend_from_slice(rec.path().as_bytes());
+                    if !rec.url().is_empty() {
+                        out.extend_from_slice(rec.url().as_bytes());
                         out.push(b' ');
                     }
                     out.extend_from_slice(downstream_protocol.as_str().as_bytes());
@@ -68,7 +77,7 @@ pub fn format_text_records(
                     out.extend_from_slice(TEXT_PIPE);
                     out.extend_from_slice(rec.pipe_name().as_bytes());
                     out.extend_from_slice(TEXT_PATH);
-                    out.extend_from_slice(rec.path().as_bytes());
+                    out.extend_from_slice(rec.url().as_bytes());
                     out.extend_from_slice(TEXT_ROUTE);
                     velda_router::with_route_bytes(rec.route_id, |bytes| {
                         out.extend_from_slice(bytes);
@@ -87,8 +96,8 @@ pub fn format_text_records(
                 }
                 WireProtocol::GrpcTcp | WireProtocol::GrpcUdp => {
                     out.extend_from_slice(TEXT_POST);
-                    if !rec.path().is_empty() {
-                        out.extend_from_slice(rec.path().as_bytes());
+                    if !rec.url().is_empty() {
+                        out.extend_from_slice(rec.url().as_bytes());
                         out.push(b' ');
                     }
                     out.extend_from_slice(downstream_protocol.as_str().as_bytes());
@@ -101,7 +110,7 @@ pub fn format_text_records(
                     out.extend_from_slice(TEXT_PIPE);
                     out.extend_from_slice(rec.pipe_name().as_bytes());
                     out.extend_from_slice(TEXT_PATH);
-                    out.extend_from_slice(rec.path().as_bytes());
+                    out.extend_from_slice(rec.url().as_bytes());
                     out.extend_from_slice(TEXT_GRPC_STATUS);
                     out.extend_from_slice(grpc_st.as_str().as_bytes());
                     out.extend_from_slice(TEXT_MSGS);
@@ -152,29 +161,39 @@ pub fn format_text_records(
 }
 
 /// Formats batches of [`AccessLogRecord`] into Standard Common Log Format (CLF) directly into `out`.
-pub fn format_clf_records(
-    batches: &[Arc<[AccessLogRecord]>],
-    total_recs: usize,
-    out: &mut Vec<u8>,
-) {
+pub fn format_clf_records(batches: &[LogBatch], total_recs: usize, out: &mut Vec<u8>) {
     out.reserve(total_recs * 160);
 
     for batch in batches {
-        for rec in batch.iter() {
+        let recs = batch.as_ref();
+        for (idx, rec) in recs.iter().enumerate() {
+            #[cfg(target_arch = "x86_64")]
+            if idx + 4 < recs.len() {
+                unsafe {
+                    use core::arch::x86_64::*;
+                    let next_rec =
+                        recs.get_unchecked(idx + 4) as *const AccessLogRecord as *const i8;
+                    _mm_prefetch(next_rec, _MM_HINT_T1);
+                    _mm_prefetch(next_rec.add(64), _MM_HINT_T1);
+                    _mm_prefetch(next_rec.add(128), _MM_HINT_T1);
+                    _mm_prefetch(next_rec.add(192), _MM_HINT_T1);
+                }
+            }
             let downstream_protocol = rec.downstream_protocol();
             let method = rec.method;
 
+            let ts_sec = (rec.ingress_time_nanos / 1_000_000_000) as u32;
             fast_write_ip(out, rec.peer_ip);
             out.extend_from_slice(CLF_PREFIX);
-            fast_write_iso8601_utc(out, rec.timestamp_sec);
+            fast_write_iso8601_utc(out, ts_sec);
             out.extend_from_slice(TEXT_CLOSE_BRACKET_QUOTE);
 
             match downstream_protocol {
                 WireProtocol::H1 | WireProtocol::H2 | WireProtocol::H3 => {
                     out.extend_from_slice(method.as_str().as_bytes());
                     out.push(b' ');
-                    if !rec.path().is_empty() {
-                        out.extend_from_slice(rec.path().as_bytes());
+                    if !rec.url().is_empty() {
+                        out.extend_from_slice(rec.url().as_bytes());
                         out.push(b' ');
                     }
                     out.extend_from_slice(downstream_protocol.as_str().as_bytes());
@@ -186,8 +205,8 @@ pub fn format_clf_records(
                 }
                 WireProtocol::GrpcTcp | WireProtocol::GrpcUdp => {
                     out.extend_from_slice(TEXT_POST);
-                    if !rec.path().is_empty() {
-                        out.extend_from_slice(rec.path().as_bytes());
+                    if !rec.url().is_empty() {
+                        out.extend_from_slice(rec.url().as_bytes());
                         out.push(b' ');
                     }
                     out.extend_from_slice(downstream_protocol.as_str().as_bytes());

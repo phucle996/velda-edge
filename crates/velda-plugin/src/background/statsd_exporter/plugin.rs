@@ -233,7 +233,7 @@ mod tests {
     use velda_observability::StreamCompletion;
 
     #[tokio::test]
-    async fn test_statsd_exporter_emits_deltas_without_idle_counter_inflation() {
+    async fn test_statsd_delta_no_idle_inflation() {
         let rx_sock = UdpSocket::bind("127.0.0.1:0").await.unwrap();
         let rx_addr = rx_sock.local_addr().unwrap();
 
@@ -241,7 +241,7 @@ mod tests {
         store.record_stream_start(velda_core::PipeKind::BufferedH1H1);
         store.record_stream_completion(
             velda_core::PipeKind::BufferedH1H1,
-            StreamCompletion::new(200, 128, 256, Duration::from_millis(2), None),
+            StreamCompletion::new(200, 128, 256, 2_000_000, 0),
         );
 
         let config = StatsdExporterConfig {

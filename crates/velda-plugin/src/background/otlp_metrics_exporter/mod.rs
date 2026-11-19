@@ -2,7 +2,6 @@
 
 pub mod config;
 pub mod json;
-pub mod lut;
 pub mod plugin;
 pub mod proto;
 

@@ -10,44 +10,7 @@ use velda_core::PipeKind;
 use velda_observability::{MetricsStore, StreamCompletion};
 use velda_plugin::background::BackgroundPlugin;
 use velda_plugin::background::statsd_exporter::dialect::{StatsdDialect, format_statsd_snapshot};
-use velda_plugin::background::statsd_exporter::lut::{fast_write_i64, fast_write_u64};
 use velda_plugin::background::statsd_exporter::{StatsdExporterConfig, StatsdExporterPlugin};
-
-#[test]
-fn test_fast_integer_ascii_serialization() {
-    let mut buf = Vec::new();
-
-    fast_write_u64(&mut buf, 0);
-    assert_eq!(&buf, b"0");
-
-    buf.clear();
-    fast_write_u64(&mut buf, 9);
-    assert_eq!(&buf, b"9");
-
-    buf.clear();
-    fast_write_u64(&mut buf, 42);
-    assert_eq!(&buf, b"42");
-
-    buf.clear();
-    fast_write_u64(&mut buf, 1234567890);
-    assert_eq!(&buf, b"1234567890");
-
-    buf.clear();
-    fast_write_u64(&mut buf, u64::MAX);
-    assert_eq!(&buf, format!("{}", u64::MAX).as_bytes());
-
-    buf.clear();
-    fast_write_i64(&mut buf, -99);
-    assert_eq!(&buf, b"-99");
-
-    buf.clear();
-    fast_write_i64(&mut buf, 0);
-    assert_eq!(&buf, b"0");
-
-    buf.clear();
-    fast_write_i64(&mut buf, 100);
-    assert_eq!(&buf, b"100");
-}
 
 #[test]
 fn test_dogstatsd_formatting_and_tags() {
@@ -57,7 +20,7 @@ fn test_dogstatsd_formatting_and_tags() {
     store.record_stream_start(PipeKind::BufferedH1H1);
     store.record_stream_completion(
         PipeKind::BufferedH1H1,
-        StreamCompletion::new(200, 1024, 2048, Duration::from_millis(15), None),
+        StreamCompletion::new(200, 1024, 2048, 15_000_000, 0),
     );
 
     let snapshot = store.snapshot();
@@ -104,13 +67,13 @@ fn test_dogstatsd_formatting_and_tags() {
 }
 
 #[test]
-fn test_standard_statsd_formatting_dot_notation() {
+fn test_standard_statsd_format() {
     let store = MetricsStore::new();
 
     store.record_stream_start(PipeKind::ServerStreamH2H2);
     store.record_stream_completion(
         PipeKind::ServerStreamH2H2,
-        StreamCompletion::new(503, 500, 1500, Duration::from_millis(2), None),
+        StreamCompletion::new(503, 500, 1500, 2_000_000, 0),
     );
 
     let snapshot = store.snapshot();
@@ -177,7 +140,7 @@ fn test_mtu_safe_packet_chunking() {
 }
 
 #[tokio::test]
-async fn test_end_to_end_statsd_exporter_push_to_udp_socket() {
+async fn test_statsd_udp_push_e2e() {
     // 1. Bind mock UDP receiver socket on ephemeral port
     let receiver_socket = UdpSocket::bind("127.0.0.1:0").await.unwrap();
     let receiver_addr: SocketAddr = receiver_socket.local_addr().unwrap();
@@ -187,7 +150,7 @@ async fn test_end_to_end_statsd_exporter_push_to_udp_socket() {
     store.record_stream_start(PipeKind::BufferedH1H1);
     store.record_stream_completion(
         PipeKind::BufferedH1H1,
-        StreamCompletion::new(200, 4096, 8192, Duration::from_millis(5), None),
+        StreamCompletion::new(200, 4096, 8192, 5_000_000, 0),
     );
 
     // 3. Configure and instantiate plugin
@@ -240,7 +203,7 @@ async fn test_end_to_end_statsd_exporter_push_to_udp_socket() {
 }
 
 #[tokio::test]
-async fn test_sendmmsg_vectorized_batch_transmission() {
+async fn test_sendmmsg_batch_tx() {
     use velda_plugin::background::statsd_exporter::transport::StatsdTransport;
 
     // 1. Mock UDP Receiver

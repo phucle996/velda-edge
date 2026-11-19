@@ -17,7 +17,7 @@ use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::TcpListener;
 use tokio::sync::watch;
 use velda_core::{CompletionReason, GrpcStatus, HttpMethod, PipeKind};
-use velda_observability::{AccessLogRecord, LogStore};
+use velda_observability::{AccessLogRecord, LogBatch, LogStore};
 
 use velda_plugin::background::BackgroundPlugin;
 use velda_plugin::background::loki_log_shipper::json::LokiJsonFormatter;
@@ -26,68 +26,83 @@ use velda_plugin::background::loki_log_shipper::proto::{
 };
 use velda_plugin::background::loki_log_shipper::{LokiLogShipperConfig, LokiLogShipperPlugin};
 
+fn parse_ip(s: &str) -> std::net::IpAddr {
+    if let Ok(addr) = s.parse::<std::net::SocketAddr>() {
+        addr.ip()
+    } else {
+        s.parse::<std::net::IpAddr>()
+            .expect("valid ip or socket addr")
+    }
+}
+
 fn create_sample_http_record(id: u64, ts: u32, ip_str: &str) -> AccessLogRecord {
-    AccessLogRecord::from_scalars(
-        id,
-        ts,
-        320,
-        ip_str.parse().unwrap(),
-        Some("10.0.0.1:8080".parse().unwrap()),
-        128,
-        512,
-        200,
-        1,
-        0,
-        PipeKind::BufferedH2H1,
-        CompletionReason::Complete,
-        HttpMethod::Get,
-        GrpcStatus::NonGrpc,
-        b"curl/8.6.0",
-    )
+    let mut rec = AccessLogRecord::zeroed();
+    rec.request_id = id;
+    rec.ingress_time_nanos = (ts as u64) * 1_000_000_000;
+    rec.duration_ns = 320;
+    rec.peer_ip = velda_core::lut::ip::encode_ip_u128(parse_ip(ip_str));
+    rec.upstream_ip = velda_core::lut::ip::encode_upstream_ip_u32("10.0.0.1".parse().unwrap());
+    rec.upstream_port = 8080;
+    rec.bytes_rx = 128;
+    rec.bytes_tx = 512;
+    rec.status_code = 200;
+    rec.route_id = 1;
+    rec.pipe = PipeKind::BufferedH2H1;
+    rec.completion = CompletionReason::Complete;
+    rec.method = HttpMethod::Get;
+    rec.grpc_status = GrpcStatus::NonGrpc;
+    let (fam, os, ver) = velda_core::lut::classify_user_agent(b"curl/8.6.0");
+    rec.ua_family = fam;
+    rec.ua_os = os;
+    rec.ua_major_version = ver;
+    rec
 }
 
 fn create_sample_grpc_record(id: u64, ts: u32, ip_str: &str) -> AccessLogRecord {
-    AccessLogRecord::from_scalars(
-        id,
-        ts,
-        890,
-        ip_str.parse().unwrap(),
-        Some("10.0.0.2:9090".parse().unwrap()),
-        64,
-        256,
-        200,
-        2,
-        4,
-        PipeKind::DuplexGrpcTcpTcp,
-        CompletionReason::Complete,
-        HttpMethod::Post,
-        GrpcStatus::Ok,
-        b"grpc-go/1.64.0",
-    )
+    let mut rec = AccessLogRecord::zeroed();
+    rec.request_id = id;
+    rec.ingress_time_nanos = (ts as u64) * 1_000_000_000;
+    rec.duration_ns = 890;
+    rec.peer_ip = velda_core::lut::ip::encode_ip_u128(parse_ip(ip_str));
+    rec.upstream_ip = velda_core::lut::ip::encode_upstream_ip_u32("10.0.0.2".parse().unwrap());
+    rec.upstream_port = 9090;
+    rec.bytes_rx = 64;
+    rec.bytes_tx = 256;
+    rec.status_code = 200;
+    rec.route_id = 2;
+    rec.rpc_msgs_or_flags = 4;
+    rec.pipe = PipeKind::DuplexGrpcTcpTcp;
+    rec.completion = CompletionReason::Complete;
+    rec.method = HttpMethod::Post;
+    rec.grpc_status = GrpcStatus::Ok;
+    let (fam, os, ver) = velda_core::lut::classify_user_agent(b"grpc-go/1.64.0");
+    rec.ua_family = fam;
+    rec.ua_os = os;
+    rec.ua_major_version = ver;
+    rec
 }
 
 fn create_sample_raw_record(id: u64, ts: u32) -> AccessLogRecord {
-    AccessLogRecord::from_scalars(
-        id,
-        ts,
-        1200,
-        "192.168.1.30:50002".parse().unwrap(),
-        Some("10.0.0.3:7000".parse().unwrap()),
-        1024,
-        2048,
-        0,
-        3,
-        0,
-        PipeKind::TcpTcp,
-        CompletionReason::Complete,
-        HttpMethod::Get,
-        GrpcStatus::NonGrpc,
-        b"",
-    )
+    let mut rec = AccessLogRecord::zeroed();
+    rec.request_id = id;
+    rec.ingress_time_nanos = (ts as u64) * 1_000_000_000;
+    rec.duration_ns = 1200;
+    rec.peer_ip = velda_core::lut::ip::encode_ip_u128("192.168.1.30".parse().unwrap());
+    rec.upstream_ip = velda_core::lut::ip::encode_upstream_ip_u32("10.0.0.3".parse().unwrap());
+    rec.upstream_port = 7000;
+    rec.bytes_rx = 1024;
+    rec.bytes_tx = 2048;
+    rec.status_code = 0;
+    rec.route_id = 3;
+    rec.pipe = PipeKind::TcpTcp;
+    rec.completion = CompletionReason::Complete;
+    rec.method = HttpMethod::Get;
+    rec.grpc_status = GrpcStatus::NonGrpc;
+    rec
 }
 
 #[tokio::test]
-async fn test_loki_log_shipper_multi_protocol_end_to_end() {
+async fn test_loki_multi_protocol_e2e() {
     let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
     let addr = listener.local_addr().unwrap();
 
@@ -161,11 +176,11 @@ async fn test_loki_log_shipper_multi_protocol_end_to_end() {
     assert!(raw_req.contains("grpc_status=OK"));
 
     // Verify 32-character lowercase hex Request ID:
-    assert!(raw_req.contains("request_id=0000000065ec8781aaaabbbbccccdddd"));
-    assert!(raw_req.contains("request_id=0000000065ec87821111222233334444"));
+    assert!(raw_req.contains("request_id=17bb23f0e185ca00aaaabbbbccccdddd"));
+    assert!(raw_req.contains("request_id=17bb23f11d2094001111222233334444"));
 
     // Verify IPv6 zero-compression:
-    assert!(raw_req.contains("client=::1:50001"));
+    assert!(raw_req.contains("client=::1"));
 }
 
 #[tokio::test]
@@ -293,9 +308,9 @@ async fn test_loki_log_shipper_grpc_end_to_end() {
     assert!(
         stream0.entries[0]
             .line
-            .contains("request_id=0000000065ec878a5555666677778888")
+            .contains("request_id=17bb23f2f9f6e4005555666677778888")
     );
-    assert!(stream0.entries[0].line.contains("client=10.1.2.3:4433"));
+    assert!(stream0.entries[0].line.contains("client=10.1.2.3"));
 
     let stream1 = &push.streams[1];
     assert!(stream1.labels.contains("protocol=\"raw\""));
@@ -303,18 +318,18 @@ async fn test_loki_log_shipper_grpc_end_to_end() {
     assert!(
         stream1.entries[0]
             .line
-            .contains("request_id=0000000065ec8794123456789abcdef0")
+            .contains("request_id=17bb23f54e02c800123456789abcdef0")
     );
 }
 
 #[test]
-fn test_loki_json_formatter_scratch_zero_alloc() {
+fn test_loki_json_zero_alloc() {
     let mut labels = HashMap::new();
     labels.insert("tier".to_string(), "edge".to_string());
     let mut formatter = LokiJsonFormatter::new("svc", &labels);
 
     let rec = create_sample_http_record(0x1122_3344_5566_7788, 1_710_000_000, "127.0.0.1:80");
-    let batch = vec![Arc::from(vec![rec])];
+    let batch = vec![LogBatch::from_arc(Arc::from(vec![rec]))];
     let mut out = Vec::new();
 
     // Cycle 1
@@ -329,7 +344,7 @@ fn test_loki_json_formatter_scratch_zero_alloc() {
 }
 
 #[test]
-fn test_loki_proto_wire_formatter_decodes_cleanly() {
+fn test_loki_proto_decode() {
     let mut labels = HashMap::new();
     labels.insert("env".to_string(), "prod".to_string());
     let proto_labels = LokiProtoLabels::new("bench-svc", &labels);
@@ -338,7 +353,7 @@ fn test_loki_proto_wire_formatter_decodes_cleanly() {
     let rec2 = create_sample_grpc_record(0x2222_2222_2222_2222, 1_710_000_002, "192.168.1.2:90");
     let rec3 = create_sample_raw_record(0x3333_3333_3333_3333, 1_710_000_003);
 
-    let batches = vec![Arc::from(vec![rec1, rec2, rec3])];
+    let batches = vec![LogBatch::from_arc(Arc::from(vec![rec1, rec2, rec3]))];
     let mut wire_out = Vec::new();
 
     let n = format_loki_records_proto(&batches, &proto_labels, &mut wire_out);

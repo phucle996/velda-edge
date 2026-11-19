@@ -6,8 +6,6 @@
 //! 3. Extreme edge values (0, 1, u64::MAX, negative numbers for active gauges).
 //! 4. Stress stability across 10,000 snapshot cycles with zero memory leaks.
 
-use std::time::Duration;
-
 use velda_core::lut::PipeKind;
 use velda_observability::{MetricsSnapshot, MetricsStore, StreamCompletion};
 use velda_plugin::background::statsd_exporter::dialect::{
@@ -23,31 +21,16 @@ fn populate_all_pipeline_slots(store: &MetricsStore) {
         }
 
         // Record completions across status categories and durations (each ends 1 stream)
-        store.record_stream_completion(
-            pipe,
-            StreamCompletion::new(200, 100, 200, Duration::from_micros(500), None),
-        );
-        store.record_stream_completion(
-            pipe,
-            StreamCompletion::new(301, 150, 250, Duration::from_millis(3), None),
-        );
-        store.record_stream_completion(
-            pipe,
-            StreamCompletion::new(404, 200, 300, Duration::from_millis(8), None),
-        );
-        store.record_stream_completion(
-            pipe,
-            StreamCompletion::new(503, 250, 350, Duration::from_millis(25), None),
-        );
-        store.record_stream_completion(
-            pipe,
-            StreamCompletion::new(999, 300, 400, Duration::from_millis(150), None),
-        );
+        store.record_stream_completion(pipe, StreamCompletion::new(200, 100, 200, 500_000, 0));
+        store.record_stream_completion(pipe, StreamCompletion::new(301, 150, 250, 3_000_000, 0));
+        store.record_stream_completion(pipe, StreamCompletion::new(404, 200, 300, 8_000_000, 0));
+        store.record_stream_completion(pipe, StreamCompletion::new(503, 250, 350, 25_000_000, 0));
+        store.record_stream_completion(pipe, StreamCompletion::new(999, 300, 400, 150_000_000, 0));
     }
 }
 
 #[test]
-fn test_chaos_all_64_pipeline_slots_dogstatsd() {
+fn test_chaos_slots_dogstatsd() {
     let store = MetricsStore::new();
     populate_all_pipeline_slots(&store);
     let snapshot = store.snapshot();
@@ -82,8 +65,8 @@ fn test_chaos_all_64_pipeline_slots_dogstatsd() {
 
     // Verify all 64 combinations have their specific tags
     for &pipe in &PipeKind::ALL {
-        let d = pipe.downstream().as_str();
-        let u = pipe.upstream().as_str();
+        let d = pipe.downstream_protocol().as_str();
+        let u = pipe.upstream_protocol().as_str();
         let p = pipe.strategy_str();
 
         let expected_tag = format!("#downstream:{d},upstream:{u},pipe:{p}");
@@ -116,7 +99,7 @@ fn test_chaos_all_64_pipeline_slots_dogstatsd() {
 }
 
 #[test]
-fn test_chaos_all_64_pipeline_slots_standard() {
+fn test_chaos_slots_standard() {
     let store = MetricsStore::new();
     populate_all_pipeline_slots(&store);
     let snapshot = store.snapshot();
@@ -154,8 +137,8 @@ fn test_chaos_all_64_pipeline_slots_standard() {
 
     // Verify all 64 combinations have their specific dot notation paths
     for &pipe in &PipeKind::ALL {
-        let d = pipe.downstream().as_str();
-        let u = pipe.upstream().as_str();
+        let d = pipe.downstream_protocol().as_str();
+        let u = pipe.upstream_protocol().as_str();
         let p = pipe.strategy_str();
 
         let expected_2xx = format!("velda_chaos.requests.{d}.{u}.{p}.2xx:1|c\n");
@@ -174,7 +157,7 @@ fn test_chaos_all_64_pipeline_slots_standard() {
 }
 
 #[test]
-fn test_chaos_mtu_boundaries_no_split_no_loss() {
+fn test_chaos_mtu_boundaries() {
     let store = MetricsStore::new();
     populate_all_pipeline_slots(&store);
     let snapshot = store.snapshot();
@@ -256,7 +239,7 @@ fn test_chaos_mtu_boundaries_no_split_no_loss() {
 #[test]
 fn test_chaos_extreme_boundary_values() {
     let mut snapshot = MetricsSnapshot {
-        captured_at: std::time::Instant::now(),
+        captured_at_nanos: velda_core::clock::now_unix_nanos(),
         pipelines: Vec::new(),
         global: velda_observability::GlobalSnapshot {
             connections_total: u64::MAX,
@@ -368,7 +351,7 @@ fn test_chaos_extreme_boundary_values() {
 }
 
 #[test]
-fn test_chaos_stress_10000_records_zero_leak() {
+fn test_chaos_stress_10k() {
     let store = MetricsStore::new();
     populate_all_pipeline_slots(&store);
     let snapshot = store.snapshot();

@@ -31,9 +31,8 @@
 //! └────────────────────────────────────────────────────────────────────────────────────────┘
 //! ```
 
-use std::sync::Arc;
-use velda_core::{GrpcStatus, HttpMethod, UaFamily, UaOs, WireProtocol};
-use velda_observability::AccessLogRecord;
+use velda_core::GrpcStatus;
+use velda_observability::{AccessLogRecord, LogBatch};
 
 /// Canonical OpenTelemetry Schema URL byte constant (zero heap allocation).
 pub const OTLP_SCHEMA_URL: &[u8] = b"https://opentelemetry.io/schemas/1.26.0";
@@ -102,44 +101,34 @@ const PRE_DURATION_NS: &[u8] = b"\x32\x00\x0a\x0bduration_ns\x12\x00\x18";
 const PRE_RESP_BODY_SIZE: &[u8] = b"\x32\x00\x0a\x17http.response.body.size\x12\x00\x18";
 const PRE_REQ_BODY_SIZE: &[u8] = b"\x32\x00\x0a\x16http.request.body.size\x12\x00\x18";
 const PRE_ROUTE_ID: &[u8] = b"\x32\x00\x0a\x0evelda.route_id\x12\x00\x18";
-const PRE_CLIENT_PORT: &[u8] = b"\x32\x00\x0a\x0bclient.port\x12\x00\x18";
 const PRE_UA_MAJOR: &[u8] = b"\x32\x00\x0a\x18user_agent.major_version\x12\x00\x18";
 
 // Pre-baked Protobuf StringValue attribute prefix for client.address:
 // Format: [0x32, kv_len_placeholder, 0x0A, 0x0E, "client.address", 0x12, any_val_len_placeholder, 0x0A, str_len_placeholder]
 const PRE_CLIENT_ADDR: &[u8] = b"\x32\x00\x0a\x0eclient.address\x12\x00\x0a\x00";
 
-/// Fast division-free IPv4 and zero-alloc IPv6 formatting directly into stack buffer.
+/// Upper bound of one raw-stamped LogRecord (worst-case enum names, IPv6, 10-byte varints).
+/// Verified by `test_max_log_record_fits_reserve`; the 2-byte length backpatch also caps it at 16 KiB.
+const MAX_LOG_RECORD_BYTES: usize = 1024;
+
+/// Ultra-fast raw pointer stamping of a Protobuf string KeyValue attribute directly into output stream.
 #[inline(always)]
-fn format_ip_to_slice(ip: u128, buf: &mut [u8; 40]) -> usize {
-    if (ip >> 48) == 0 && ((ip >> 32) & 0xFFFF) == 0xFFFF {
-        let ip_u32 = ip as u32;
-        let octets = ip_u32.to_be_bytes();
-        let mut idx = 0;
-        for (i, &oct) in octets.iter().enumerate() {
-            if i > 0 {
-                buf[idx] = b'.';
-                idx += 1;
-            }
-            if oct < 10 {
-                buf[idx] = b'0' + oct;
-                idx += 1;
-            } else if oct < 100 {
-                let rem = oct as usize * 2;
-                buf[idx] = super::super::lut::DIGIT_PAIRS[rem];
-                buf[idx + 1] = super::super::lut::DIGIT_PAIRS[rem + 1];
-                idx += 2;
-            } else {
-                buf[idx] = b'0' + oct / 100;
-                let rem = (oct % 100) as usize * 2;
-                buf[idx + 1] = super::super::lut::DIGIT_PAIRS[rem];
-                buf[idx + 2] = super::super::lut::DIGIT_PAIRS[rem + 1];
-                idx += 3;
-            }
-        }
-        idx
-    } else {
-        super::super::lut::format_ipv6_to_slice(ip, buf)
+unsafe fn stamp_str_attribute(p: *mut u8, key_wire_bytes: &[u8], s: &[u8]) -> *mut u8 {
+    unsafe {
+        let s_len = s.len();
+        let any_val_len = 2 + s_len;
+        let kv_len = key_wire_bytes.len() + 2 + any_val_len;
+
+        *p = 0x32; // Tag 6 (KeyValue attribute)
+        *p.add(1) = kv_len as u8;
+        core::ptr::copy_nonoverlapping(key_wire_bytes.as_ptr(), p.add(2), key_wire_bytes.len());
+        let cur = p.add(2 + key_wire_bytes.len());
+        *cur = 0x12; // Tag 2 (value)
+        *cur.add(1) = any_val_len as u8;
+        *cur.add(2) = 0x0A; // Tag 1 (string_value)
+        *cur.add(3) = s_len as u8;
+        core::ptr::copy_nonoverlapping(s.as_ptr(), cur.add(4), s_len);
+        cur.add(4 + s_len)
     }
 }
 
@@ -187,8 +176,7 @@ unsafe fn stamp_ip_attribute(p: *mut u8, peer_ip: u128) -> *mut u8 {
         let str_len_ptr = p.add(21);
         let ip_dest = p.add(22);
 
-        let mut ip_buf = [0u8; 40];
-        let ip_len = format_ip_to_slice(peer_ip, &mut ip_buf);
+        let (ip_buf, ip_len) = velda_core::lut::ip::format_ip_bytes(peer_ip);
         core::ptr::copy_nonoverlapping(ip_buf.as_ptr(), ip_dest, ip_len);
 
         *kv_len_ptr = (20 + ip_len) as u8;
@@ -203,18 +191,10 @@ unsafe fn stamp_ip_attribute(p: *mut u8, peer_ip: u128) -> *mut u8 {
 pub struct OtlpProtoWireEnvelope {
     pub resource_wire: Vec<u8>,
     pub scope_wire: Vec<u8>,
-    // Pre-baked static attribute wire slices
-    downstream_protocol_attrs: [Vec<u8>; 7],
-    upstream_protocol_attrs: [Vec<u8>; 7],
-    method_attrs: [Vec<u8>; 10],
-    grpc_attrs: [Vec<u8>; 18],
-    ua_fam_attrs: [Vec<u8>; 34],
-    ua_os_attrs: [Vec<u8>; 8],
 }
 
 impl OtlpProtoWireEnvelope {
-    /// Constructs a new wire envelope, pre-baking static Resource, Scope, schema URL,
-    /// and enum attribute wire bytes once at startup.
+    /// Constructs a new wire envelope, pre-baking static Resource, Scope, and schema URL.
     pub fn new(service_name: &str) -> Self {
         let mut resource_payload = Vec::new();
         write_str_attribute(
@@ -266,110 +246,20 @@ impl OtlpProtoWireEnvelope {
         write_varint(&mut scope_wire, OTLP_SCHEMA_URL.len() as u64);
         scope_wire.extend_from_slice(OTLP_SCHEMA_URL);
 
-        // Static attribute tables (LogRecord field 6 = 0x32):
-        let mut downstream_protocol_attrs: [Vec<u8>; 7] = Default::default();
-        let mut upstream_protocol_attrs: [Vec<u8>; 7] = Default::default();
-        for i in 0..7 {
-            let p = WireProtocol::from_u8(i as u8);
-            let mut down_buf = Vec::new();
-            write_str_attribute(
-                &mut down_buf,
-                0x32,
-                b"\x0a\x13downstream_protocol",
-                p.as_str().as_bytes(),
-            );
-            downstream_protocol_attrs[i] = down_buf;
-
-            let mut up_buf = Vec::new();
-            write_str_attribute(
-                &mut up_buf,
-                0x32,
-                b"\x0a\x11upstream_protocol",
-                p.as_str().as_bytes(),
-            );
-            upstream_protocol_attrs[i] = up_buf;
-        }
-
-        let mut method_attrs: [Vec<u8>; 10] = Default::default();
-        for (i, slot) in method_attrs.iter_mut().enumerate() {
-            let m = HttpMethod::from_u8(i as u8);
-            let mut buf = Vec::new();
-            write_str_attribute(
-                &mut buf,
-                0x32,
-                b"\x0a\x13http.request.method",
-                m.as_str().as_bytes(),
-            );
-            *slot = buf;
-        }
-
-        let mut grpc_attrs: [Vec<u8>; 18] = Default::default();
-        for (i, slot) in grpc_attrs.iter_mut().enumerate() {
-            let g = if i <= 16 {
-                GrpcStatus::from_u8(i as u8)
-            } else {
-                GrpcStatus::NonGrpc
-            };
-            let mut buf = Vec::new();
-            write_str_attribute(
-                &mut buf,
-                0x32,
-                b"\x0a\x14rpc.grpc.status_code",
-                g.as_str().as_bytes(),
-            );
-            *slot = buf;
-        }
-
-        let mut ua_fam_attrs: [Vec<u8>; 34] = core::array::from_fn(|_| Vec::new());
-        for (i, slot) in ua_fam_attrs.iter_mut().enumerate() {
-            let u = if i <= 32 {
-                UaFamily::from_u8(i as u8)
-            } else {
-                UaFamily::Custom
-            };
-            let mut buf = Vec::new();
-            write_str_attribute(
-                &mut buf,
-                0x32,
-                b"\x0a\x11user_agent.family",
-                u.as_str().as_bytes(),
-            );
-            *slot = buf;
-        }
-
-        let mut ua_os_attrs: [Vec<u8>; 8] = Default::default();
-        for (i, slot) in ua_os_attrs.iter_mut().enumerate() {
-            let o = UaOs::from_u8(i as u8);
-            let mut buf = Vec::new();
-            write_str_attribute(
-                &mut buf,
-                0x32,
-                b"\x0a\x0duser_agent.os",
-                o.as_str().as_bytes(),
-            );
-            *slot = buf;
-        }
-
         Self {
             resource_wire,
             scope_wire,
-            downstream_protocol_attrs,
-            upstream_protocol_attrs,
-            method_attrs,
-            grpc_attrs,
-            ua_fam_attrs,
-            ua_os_attrs,
         }
     }
 
     /// Serializes a single [`AccessLogRecord`] directly into `out` with pre-baked wire skeleton and SIMD stamping.
     #[inline(always)]
     pub fn encode_log_record_wire(&self, rec: &AccessLogRecord, out: &mut Vec<u8>) {
-        out.reserve(600);
+        out.reserve(MAX_LOG_RECORD_BYTES);
 
         let grpc_st = rec.grpc_status;
-        let ts_nano = (rec.timestamp_sec as u64).saturating_mul(1_000_000_000);
-        let req_hi = rec.timestamp_sec as u64;
+        let ts_nano = rec.ingress_time_nanos;
+        let req_hi = rec.ingress_time_nanos;
         let req_lo = rec.request_id;
 
         unsafe {
@@ -416,43 +306,30 @@ impl OtlpProtoWireEnvelope {
             p = p.add(skeleton.len());
 
             // 3. Stamping request_id: exactly 32 lowercase hex characters via SSSE3 PSHUFB SIMD
-            let hex_bytes = super::super::lut::format_hex32_bytes(req_hi, req_lo);
+            let hex_bytes = velda_core::request_id::format_hex32_bytes(req_hi, req_lo);
             core::ptr::copy_nonoverlapping(hex_bytes.as_ptr(), p, 32);
             p = p.add(32);
 
             // 4. Attribute 1 & 2: downstream_protocol & upstream_protocol
-            let down_idx = (rec.downstream_protocol() as usize).min(6);
-            let down_slice = &self.downstream_protocol_attrs[down_idx];
-            core::ptr::copy_nonoverlapping(down_slice.as_ptr(), p, down_slice.len());
-            p = p.add(down_slice.len());
-
-            let up_idx = (rec.upstream_protocol() as usize).min(6);
-            let up_slice = &self.upstream_protocol_attrs[up_idx];
-            core::ptr::copy_nonoverlapping(up_slice.as_ptr(), p, up_slice.len());
-            p = p.add(up_slice.len());
+            p = stamp_str_attribute(
+                p,
+                b"\x0a\x13downstream_protocol",
+                rec.downstream_protocol().as_bytes(),
+            );
+            p = stamp_str_attribute(
+                p,
+                b"\x0a\x11upstream_protocol",
+                rec.upstream_protocol().as_bytes(),
+            );
 
             // 5. Attribute 2: http.request.method
-            let method_idx = if (rec.method as usize) < 10 {
-                rec.method as usize
-            } else {
-                0
-            };
-            let method_slice = &self.method_attrs[method_idx];
-            core::ptr::copy_nonoverlapping(method_slice.as_ptr(), p, method_slice.len());
-            p = p.add(method_slice.len());
+            p = stamp_str_attribute(p, b"\x0a\x13http.request.method", rec.method.as_bytes());
 
             // 6. Attribute 3: http.response.status_code
             p = stamp_int_attribute(p, PRE_STATUS_CODE, rec.status_code as u64);
 
             // 7. Attribute 4: rpc.grpc.status_code
-            let grpc_idx = if (rec.grpc_status as usize) <= 16 {
-                rec.grpc_status as usize
-            } else {
-                17
-            };
-            let grpc_slice = &self.grpc_attrs[grpc_idx];
-            core::ptr::copy_nonoverlapping(grpc_slice.as_ptr(), p, grpc_slice.len());
-            p = p.add(grpc_slice.len());
+            p = stamp_str_attribute(p, b"\x0a\x14rpc.grpc.status_code", grpc_st.as_bytes());
 
             // 8. Attribute 5: duration_ns
             p = stamp_int_attribute(p, PRE_DURATION_NS, rec.duration_ns);
@@ -469,31 +346,14 @@ impl OtlpProtoWireEnvelope {
             // 12. Attribute 9: client.address
             p = stamp_ip_attribute(p, rec.peer_ip);
 
-            // 13. Attribute 10: client.port
-            p = stamp_int_attribute(p, PRE_CLIENT_PORT, rec.peer_port as u64);
-
-            // 14. Attribute 11: user_agent.family
-            let ua_fam_idx = if (rec.ua_family as usize) <= 32 {
-                rec.ua_family as usize
-            } else {
-                33
-            };
-            let ua_fam_slice = &self.ua_fam_attrs[ua_fam_idx];
-            core::ptr::copy_nonoverlapping(ua_fam_slice.as_ptr(), p, ua_fam_slice.len());
-            p = p.add(ua_fam_slice.len());
+            // 13. Attribute 10: user_agent.family
+            p = stamp_str_attribute(p, b"\x0a\x11user_agent.family", rec.ua_family.as_bytes());
 
             // 15. Attribute 12: user_agent.major_version
             p = stamp_int_attribute(p, PRE_UA_MAJOR, rec.ua_major_version as u64);
 
             // 16. Attribute 13: user_agent.os
-            let ua_os_idx = if (rec.ua_os as usize) <= 7 {
-                rec.ua_os as usize
-            } else {
-                0
-            };
-            let ua_os_slice = &self.ua_os_attrs[ua_os_idx];
-            core::ptr::copy_nonoverlapping(ua_os_slice.as_ptr(), p, ua_os_slice.len());
-            p = p.add(ua_os_slice.len());
+            p = stamp_str_attribute(p, b"\x0a\x0duser_agent.os", rec.ua_os.as_bytes());
 
             // 17. Backpatch length of LogRecord:
             let rec_len = p as usize - start_rec as usize;
@@ -509,7 +369,7 @@ impl OtlpProtoWireEnvelope {
     #[inline(always)]
     pub fn format_records_wire(
         &self,
-        batches: &[Arc<[AccessLogRecord]>],
+        batches: &[LogBatch],
         records_buf: &mut Vec<u8>,
         out: &mut Vec<u8>,
     ) -> usize {
@@ -524,7 +384,20 @@ impl OtlpProtoWireEnvelope {
         records_buf.reserve(total_recs * 480);
 
         for batch in batches {
-            for rec in batch.iter() {
+            let recs = batch.as_ref();
+            for (idx, rec) in recs.iter().enumerate() {
+                #[cfg(target_arch = "x86_64")]
+                if idx + 4 < recs.len() {
+                    unsafe {
+                        use core::arch::x86_64::*;
+                        let next_rec =
+                            recs.get_unchecked(idx + 4) as *const AccessLogRecord as *const i8;
+                        _mm_prefetch(next_rec, _MM_HINT_T1);
+                        _mm_prefetch(next_rec.add(64), _MM_HINT_T1);
+                        _mm_prefetch(next_rec.add(128), _MM_HINT_T1);
+                        _mm_prefetch(next_rec.add(192), _MM_HINT_T1);
+                    }
+                }
                 self.encode_log_record_wire(rec, records_buf);
             }
         }
@@ -552,30 +425,33 @@ mod tests {
     use super::super::model::{ExportLogsServiceRequest, any_value};
     use super::*;
     use prost::Message;
-    use velda_core::{CompletionReason, PipeKind};
+    use std::sync::Arc;
+    use velda_core::{CompletionReason, HttpMethod, PipeKind};
 
     #[test]
     fn test_otlp_proto_wire_template() {
         let envelope = OtlpProtoWireEnvelope::new("edge-prod");
-        let rec = AccessLogRecord::from_scalars(
-            0x4bf9_2f35_77b3_4da6,
-            1_710_000_000,
-            2500,
-            "192.168.1.50:12345".parse().unwrap(),
-            Some("10.0.0.10:8080".parse().unwrap()),
-            100,
-            200,
-            200,
-            1,
-            0,
-            PipeKind::BufferedH1H1,
-            CompletionReason::Complete,
-            HttpMethod::Get,
-            GrpcStatus::NonGrpc,
-            b"curl/8.6.0",
-        );
+        let mut rec = AccessLogRecord::zeroed();
+        rec.request_id = 0x4bf9_2f35_77b3_4da6;
+        rec.ingress_time_nanos = 1_710_000_000_000_000_000;
+        rec.duration_ns = 2500;
+        rec.peer_ip = velda_core::lut::ip::encode_ip_u128("192.168.1.50".parse().unwrap());
+        rec.upstream_ip = velda_core::lut::ip::encode_upstream_ip_u32("10.0.0.10".parse().unwrap());
+        rec.upstream_port = 8080;
+        rec.bytes_rx = 100;
+        rec.bytes_tx = 200;
+        rec.status_code = 200;
+        rec.route_id = 1;
+        rec.pipe = PipeKind::BufferedH1H1;
+        rec.completion = CompletionReason::Complete;
+        rec.method = HttpMethod::Get;
+        rec.grpc_status = GrpcStatus::NonGrpc;
+        let (fam, os, ver) = velda_core::lut::classify_user_agent(b"curl/8.6.0");
+        rec.ua_family = fam;
+        rec.ua_os = os;
+        rec.ua_major_version = ver;
 
-        let batches = vec![Arc::from(vec![rec])];
+        let batches = vec![LogBatch::from_arc(Arc::from(vec![rec]))];
         let mut records_buf = Vec::new();
         let mut out = Vec::new();
 
@@ -599,11 +475,8 @@ mod tests {
         let log_rec = &scope_logs.log_records[0];
 
         // Verify timestamps
-        assert_eq!(log_rec.time_unix_nano, 1_710_000_000 * 1_000_000_000);
-        assert_eq!(
-            log_rec.observed_time_unix_nano,
-            1_710_000_000 * 1_000_000_000
-        );
+        assert_eq!(log_rec.time_unix_nano, 1_710_000_000_000_000_000);
+        assert_eq!(log_rec.observed_time_unix_nano, 1_710_000_000_000_000_000);
 
         // Verify body is static "HTTP access log"
         assert_eq!(
@@ -614,7 +487,7 @@ mod tests {
         );
 
         // Verify attributes
-        assert_eq!(log_rec.attributes.len(), 15);
+        assert_eq!(log_rec.attributes.len(), 14);
         assert_eq!(log_rec.attributes[0].key, "request_id");
         assert_eq!(log_rec.attributes[1].key, "downstream_protocol");
         assert_eq!(log_rec.attributes[2].key, "upstream_protocol");
@@ -624,7 +497,7 @@ mod tests {
             .and_then(|v| v.value.as_ref())
         {
             assert_eq!(s.len(), 32);
-            assert_eq!(s, "0000000065ec87804bf92f3577b34da6");
+            assert_eq!(s, "17bb23f0a5eb00004bf92f3577b34da6");
         } else {
             panic!("request_id attribute is not string");
         }
@@ -655,47 +528,72 @@ mod tests {
         );
         assert_eq!(off_rec.severity_number, 9);
         assert_eq!(off_rec.severity_text, "INFO");
-        assert_eq!(off_rec.attributes.len(), 15);
+        assert_eq!(off_rec.attributes.len(), 14);
     }
 
     #[test]
-    fn test_otlp_proto_wire_warn_and_error_severity_official() {
+    fn test_max_log_record_fits_reserve() {
         let envelope = OtlpProtoWireEnvelope::new("edge-prod");
-        let warn_rec = AccessLogRecord::from_scalars(
-            1,
-            1_710_000_000,
-            100,
-            "127.0.0.1:1000".parse().unwrap(),
-            None,
-            0,
-            0,
-            404,
-            1,
-            0,
-            PipeKind::BufferedH1H1,
-            CompletionReason::Complete,
-            HttpMethod::Get,
-            GrpcStatus::NonGrpc,
-            b"curl/8.6.0",
+        let mut rec = AccessLogRecord::zeroed();
+        rec.request_id = u64::MAX;
+        rec.ingress_time_nanos = u64::MAX;
+        rec.duration_ns = u64::MAX;
+        rec.peer_ip = 0x2001_0db8_85a3_1234_5678_8a2e_0370_7334;
+        rec.bytes_rx = u32::MAX;
+        rec.bytes_tx = u32::MAX;
+        rec.status_code = u16::MAX;
+        rec.route_id = u16::MAX;
+        rec.ua_major_version = u16::MAX;
+        rec.pipe = PipeKind::ServerStreamGrpcUdpUdp;
+        rec.grpc_status = GrpcStatus::FailedPrecondition;
+        rec.method = HttpMethod::Options;
+        rec.ua_family = velda_core::UaFamily::ALL[velda_core::UaFamily::COUNT - 1];
+
+        let mut out = Vec::new();
+        envelope.encode_log_record_wire(&rec, &mut out);
+        assert!(
+            out.len() < MAX_LOG_RECORD_BYTES,
+            "worst case {} B",
+            out.len()
         );
-        let err_rec = AccessLogRecord::from_scalars(
-            2,
-            1_710_000_001,
-            200,
-            "127.0.0.1:1001".parse().unwrap(),
-            None,
-            0,
-            0,
-            200,
-            2,
-            0,
-            PipeKind::BufferedGrpcTcpTcp,
-            CompletionReason::UpstreamError,
-            HttpMethod::Post,
-            GrpcStatus::Unimplemented,
-            b"grpc-go/1.64.0",
-        );
-        let batches = vec![Arc::from(vec![warn_rec, err_rec])];
+        assert!(out.len() < 16 * 1024);
+    }
+
+    #[test]
+    fn test_otlp_proto_severity() {
+        let envelope = OtlpProtoWireEnvelope::new("edge-prod");
+        let mut warn_rec = AccessLogRecord::zeroed();
+        warn_rec.request_id = 1;
+        warn_rec.ingress_time_nanos = 1_710_000_000;
+        warn_rec.duration_ns = 100;
+        warn_rec.peer_ip = velda_core::lut::ip::encode_ip_u128("127.0.0.1".parse().unwrap());
+        warn_rec.status_code = 404;
+        warn_rec.route_id = 1;
+        warn_rec.pipe = PipeKind::BufferedH1H1;
+        warn_rec.completion = CompletionReason::Complete;
+        warn_rec.method = HttpMethod::Get;
+        warn_rec.grpc_status = GrpcStatus::NonGrpc;
+        let (fam, os, ver) = velda_core::lut::classify_user_agent(b"curl/8.6.0");
+        warn_rec.ua_family = fam;
+        warn_rec.ua_os = os;
+        warn_rec.ua_major_version = ver;
+
+        let mut err_rec = AccessLogRecord::zeroed();
+        err_rec.request_id = 2;
+        err_rec.ingress_time_nanos = 1_710_000_001;
+        err_rec.duration_ns = 200;
+        err_rec.peer_ip = velda_core::lut::ip::encode_ip_u128("127.0.0.1".parse().unwrap());
+        err_rec.status_code = 200;
+        err_rec.route_id = 2;
+        err_rec.pipe = PipeKind::BufferedGrpcTcpTcp;
+        err_rec.completion = CompletionReason::UpstreamError;
+        err_rec.method = HttpMethod::Post;
+        err_rec.grpc_status = GrpcStatus::Unimplemented;
+        let (fam, os, ver) = velda_core::lut::classify_user_agent(b"grpc-go/1.64.0");
+        err_rec.ua_family = fam;
+        err_rec.ua_os = os;
+        err_rec.ua_major_version = ver;
+        let batches = vec![LogBatch::from_arc(Arc::from(vec![warn_rec, err_rec]))];
         let mut records_buf = Vec::new();
         let mut out = Vec::new();
         let count = envelope.format_records_wire(&batches, &mut records_buf, &mut out);

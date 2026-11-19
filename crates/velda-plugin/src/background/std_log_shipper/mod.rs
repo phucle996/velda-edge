@@ -6,7 +6,6 @@
 
 pub mod config;
 pub mod format;
-pub mod lut;
 pub mod plugin;
 pub mod sink;
 

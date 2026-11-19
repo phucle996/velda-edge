@@ -5,7 +5,7 @@
 //! over persistent HTTP/1.1 Keep-Alive (`/loki/api/v1/push`) or HTTP/2 gRPC (`/logproto.Pusher/Push`).
 //!
 //! # Architecture Subsystems
-//! - [`lut`]: Hardware-optimized lookup tables, SIMD hex32, division-free integer formatting, and RFC 5952 zero-alloc IP formatters.
+//! - [`wire`]: Hardware-optimized wire formatters, SIMD hex32, division-free integer conversions, and RFC 5952 zero-alloc IP formatters.
 //! - [`json`]: Multi-stream pre-baked JSON templates, persistent scratch buffers (0 allocs), and persistent HTTP/1.1 client.
 //! - [`proto`]: Direct Protobuf wire format serializer, Prometheus string syntax labels, and persistent HTTP/2 gRPC client.
 //! - [`config`]: Explicit configuration definition.
@@ -13,7 +13,6 @@
 
 pub mod config;
 pub mod json;
-pub mod lut;
 pub mod plugin;
 pub mod proto;
 

@@ -82,8 +82,8 @@ impl OtlpProtoTemplate {
         let mut request_datapoints = Vec::with_capacity(PipeKind::COUNT * 5);
         let mut req_marker_idx = 0;
         for &pipe in &PipeKind::ALL {
-            let downstream_str = pipe.downstream().as_str();
-            let upstream_str = pipe.upstream().as_str();
+            let downstream_str = pipe.downstream_protocol().as_str();
+            let upstream_str = pipe.upstream_protocol().as_str();
             let pipe_str = pipe.strategy_str();
 
             let classes = ["2xx", "3xx", "4xx", "5xx", "other"];
@@ -123,8 +123,8 @@ impl OtlpProtoTemplate {
         for (slot_idx, &pipe) in PipeKind::ALL.iter().enumerate() {
             active_datapoints.push(NumberDataPoint {
                 attributes: vec![
-                    KeyValue::new_string("downstream", pipe.downstream().as_str()),
-                    KeyValue::new_string("upstream", pipe.upstream().as_str()),
+                    KeyValue::new_string("downstream", pipe.downstream_protocol().as_str()),
+                    KeyValue::new_string("upstream", pipe.upstream_protocol().as_str()),
                     KeyValue::new_string("pipe", pipe.strategy_str()),
                 ],
                 start_time_unix_nano: 0,
@@ -151,8 +151,8 @@ impl OtlpProtoTemplate {
         for (slot_idx, &pipe) in PipeKind::ALL.iter().enumerate() {
             rx_datapoints.push(NumberDataPoint {
                 attributes: vec![
-                    KeyValue::new_string("downstream", pipe.downstream().as_str()),
-                    KeyValue::new_string("upstream", pipe.upstream().as_str()),
+                    KeyValue::new_string("downstream", pipe.downstream_protocol().as_str()),
+                    KeyValue::new_string("upstream", pipe.upstream_protocol().as_str()),
                     KeyValue::new_string("pipe", pipe.strategy_str()),
                 ],
                 start_time_unix_nano: 0,
@@ -162,8 +162,8 @@ impl OtlpProtoTemplate {
             });
             tx_datapoints.push(NumberDataPoint {
                 attributes: vec![
-                    KeyValue::new_string("downstream", pipe.downstream().as_str()),
-                    KeyValue::new_string("upstream", pipe.upstream().as_str()),
+                    KeyValue::new_string("downstream", pipe.downstream_protocol().as_str()),
+                    KeyValue::new_string("upstream", pipe.upstream_protocol().as_str()),
                     KeyValue::new_string("pipe", pipe.strategy_str()),
                 ],
                 start_time_unix_nano: 0,
@@ -328,10 +328,11 @@ impl OtlpProtoTemplate {
         buf.extend_from_slice(&self.base_wire);
         let buf_slice = buf.as_mut_slice();
 
-        let now_nanos = std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .map(|d| d.as_nanos() as u64)
-            .unwrap_or(0);
+        let now_nanos = if snapshot.captured_at_nanos > 0 {
+            snapshot.captured_at_nanos
+        } else {
+            velda_core::clock::now_unix_nanos()
+        };
         let now_bytes = now_nanos.to_le_bytes();
 
         // 1. Fill all 288 timestamp slots in-place

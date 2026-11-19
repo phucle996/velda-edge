@@ -31,8 +31,8 @@
 use std::sync::LazyLock;
 use velda_observability::{MetricsSnapshot, TOTAL_PIPELINE_SLOTS};
 
-use super::lut::{fast_write_i64, fast_write_u64};
 use crate::error::PluginError;
+use velda_core::lut::decimal::{fast_write_i64, fast_write_u64};
 
 // ============================================================================
 // Static Metric Family Documentation & Type Headers

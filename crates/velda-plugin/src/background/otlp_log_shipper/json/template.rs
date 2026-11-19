@@ -28,11 +28,12 @@
 //! └──────────────────────────────────────────────────────────────────────────────────────────────┘
 //! ```
 
-use std::sync::Arc;
 use velda_core::GrpcStatus;
-use velda_observability::AccessLogRecord;
+use velda_observability::{AccessLogRecord, LogBatch};
 
-use super::super::lut::{fast_write_hex32, fast_write_ip, fast_write_ts_nano, fast_write_u64};
+use velda_core::lut::decimal::fast_write_u64;
+use velda_core::lut::ip::fast_write_ip;
+use velda_core::request_id::fast_write_hex32;
 
 /// Canonical OpenTelemetry Schema URL byte constant (zero heap allocation).
 pub const OTLP_SCHEMA_URL: &[u8] = b"https://opentelemetry.io/schemas/1.26.0";
@@ -83,7 +84,6 @@ const OTLP_K11: &[u8] = b"\"}},{\"key\":\"http.response.body.size\",\"value\":{\
 const OTLP_K12: &[u8] = b"\"}},{\"key\":\"http.request.body.size\",\"value\":{\"intValue\":\"";
 const OTLP_K13: &[u8] = b"\"}},{\"key\":\"velda.route_id\",\"value\":{\"intValue\":\"";
 const OTLP_K14: &[u8] = b"\"}},{\"key\":\"client.address\",\"value\":{\"stringValue\":\"";
-const OTLP_K15: &[u8] = b"\"}},{\"key\":\"client.port\",\"value\":{\"intValue\":\"";
 const OTLP_K16: &[u8] = b"\"}},{\"key\":\"user_agent.family\",\"value\":{\"stringValue\":\"";
 const OTLP_K17: &[u8] = b"\"}},{\"key\":\"user_agent.major_version\",\"value\":{\"intValue\":\"";
 const OTLP_K18: &[u8] = b"\"}},{\"key\":\"user_agent.os\",\"value\":{\"stringValue\":\"";
@@ -93,7 +93,7 @@ const OTLP_REC_END: &[u8] = b"\"}}]}";
 ///
 /// Pre-reserves capacity to guarantee 0 heap reallocations during formatting.
 pub fn format_otlp_records_json(
-    batches: &[Arc<[AccessLogRecord]>],
+    batches: &[LogBatch],
     envelope: &OtlpJsonEnvelope,
     out: &mut Vec<u8>,
 ) -> usize {
@@ -109,7 +109,20 @@ pub fn format_otlp_records_json(
     let mut total_records = 0usize;
 
     for batch in batches {
-        for rec in batch.iter() {
+        let recs = batch.as_ref();
+        for (idx, rec) in recs.iter().enumerate() {
+            #[cfg(target_arch = "x86_64")]
+            if idx + 4 < recs.len() {
+                unsafe {
+                    use core::arch::x86_64::*;
+                    let next_rec =
+                        recs.get_unchecked(idx + 4) as *const AccessLogRecord as *const i8;
+                    _mm_prefetch(next_rec, _MM_HINT_T1);
+                    _mm_prefetch(next_rec.add(64), _MM_HINT_T1);
+                    _mm_prefetch(next_rec.add(128), _MM_HINT_T1);
+                    _mm_prefetch(next_rec.add(192), _MM_HINT_T1);
+                }
+            }
             if total_records == 0 {
                 out.extend_from_slice(&envelope.prefix);
             } else {
@@ -125,12 +138,12 @@ pub fn format_otlp_records_json(
             let ua_os = rec.ua_os;
 
             // Reconstruct full 128-bit RequestId: (high 64-bit timestamp, low 64-bit entropy)
-            let req_hi = rec.timestamp_sec as u64;
+            let req_hi = rec.ingress_time_nanos;
             let req_lo = rec.request_id;
 
             // 1. Static header & timestamp
             out.extend_from_slice(OTLP_K0);
-            fast_write_ts_nano(out, rec.timestamp_sec);
+            fast_write_u64(out, rec.ingress_time_nanos);
 
             // 2. Pre-baked Severity, static Body ("HTTP access log"), and request_id attribute prefix
             if rec.status_code >= 500
@@ -187,10 +200,6 @@ pub fn format_otlp_records_json(
             out.extend_from_slice(OTLP_K14);
             fast_write_ip(out, rec.peer_ip);
 
-            // Attr: client.port
-            out.extend_from_slice(OTLP_K15);
-            fast_write_u64(out, rec.peer_port as u64);
-
             // Attr: user_agent.family
             out.extend_from_slice(OTLP_K16);
             out.extend_from_slice(ua_fam.as_str().as_bytes());
@@ -217,29 +226,30 @@ pub fn format_otlp_records_json(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::sync::Arc;
     use velda_core::{CompletionReason, GrpcStatus, HttpMethod, PipeKind};
 
     #[test]
-    fn test_format_otlp_records_json_schema_and_req_id() {
+    fn test_otlp_json_schema() {
         let envelope = OtlpJsonEnvelope::new("edge-test");
-        let rec = AccessLogRecord::from_scalars(
-            0x4bf9_2f35_77b3_4da6,
-            1_710_000_000,
-            1500,
-            "192.168.1.50:8080".parse().unwrap(),
-            None,
-            100,
-            200,
-            200,
-            1,
-            0,
-            PipeKind::BufferedH1H1,
-            CompletionReason::Complete,
-            HttpMethod::Get,
-            GrpcStatus::NonGrpc,
-            b"curl/8.6.0",
-        );
-        let batches = vec![Arc::from(vec![rec])];
+        let mut rec = AccessLogRecord::zeroed();
+        rec.request_id = 0x4bf9_2f35_77b3_4da6;
+        rec.ingress_time_nanos = 1_710_000_000_000_000_000;
+        rec.duration_ns = 1500;
+        rec.peer_ip = velda_core::lut::ip::encode_ip_u128("192.168.1.50".parse().unwrap());
+        rec.bytes_rx = 100;
+        rec.bytes_tx = 200;
+        rec.status_code = 200;
+        rec.route_id = 1;
+        rec.pipe = PipeKind::BufferedH1H1;
+        rec.completion = CompletionReason::Complete;
+        rec.method = HttpMethod::Get;
+        rec.grpc_status = GrpcStatus::NonGrpc;
+        let (fam, os, ver) = velda_core::lut::classify_user_agent(b"curl/8.6.0");
+        rec.ua_family = fam;
+        rec.ua_os = os;
+        rec.ua_major_version = ver;
+        let batches = vec![LogBatch::from_arc(Arc::from(vec![rec]))];
         let mut out = Vec::new();
         let count = format_otlp_records_json(&batches, &envelope, &mut out);
         assert_eq!(count, 1);
@@ -252,7 +262,7 @@ mod tests {
             json_str.contains("\"client.address\",\"value\":{\"stringValue\":\"192.168.1.50\"}")
         );
         // 32-char hex check
-        assert!(json_str.contains("0000000065ec87804bf92f3577b34da6"));
+        assert!(json_str.contains("17bb23f0a5eb00004bf92f3577b34da6"));
 
         // Anti-circular check: deserialize OTLP/JSON via official opentelemetry-proto serde schema
         let official: opentelemetry_proto::tonic::collector::logs::v1::ExportLogsServiceRequest =
@@ -260,7 +270,7 @@ mod tests {
                 "OTLP JSON must deserialize cleanly into official opentelemetry-proto schema",
             );
         let off_rec = &official.resource_logs[0].scope_logs[0].log_records[0];
-        assert_eq!(off_rec.attributes.len(), 15);
+        assert_eq!(off_rec.attributes.len(), 14);
         assert_eq!(off_rec.severity_number, 9);
     }
 }

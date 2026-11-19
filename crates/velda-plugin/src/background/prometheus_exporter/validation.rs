@@ -324,7 +324,7 @@ mod tests {
     }
 
     #[test]
-    fn test_prometheus_exporter_missing_mandatory_blocks() {
+    fn test_prom_missing_blocks() {
         // Missing "auth" block
         let bad_json = serde_json::json!({
             "listen": "0.0.0.0:9090",
@@ -344,7 +344,7 @@ mod tests {
     }
 
     #[test]
-    fn test_prometheus_exporter_tls_and_auth_variants() {
+    fn test_prom_tls_and_auth() {
         // 1. https with tls mode none -> fail
         let mut cfg = serde_json::json!({
             "listen": "0.0.0.0:9090",

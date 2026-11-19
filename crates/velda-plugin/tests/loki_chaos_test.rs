@@ -14,7 +14,7 @@ use std::sync::Arc;
 use prost::Message;
 use serde_json::Value;
 use velda_core::{CompletionReason, GrpcStatus, HttpMethod, PipeKind, WireProtocol};
-use velda_observability::AccessLogRecord;
+use velda_observability::{AccessLogRecord, LogBatch};
 
 use velda_plugin::background::loki_log_shipper::json::{
     LokiJsonFormatter, LokiStreamTemplate, format_loki_push_payload,
@@ -33,23 +33,26 @@ fn build_record(
     grpc_status: GrpcStatus,
 ) -> AccessLogRecord {
     let peer: SocketAddr = peer_str.parse().expect("Valid socket address");
-    AccessLogRecord::from_scalars(
-        id,
-        ts,
-        320,
-        peer,
-        Some("10.0.0.1:8080".parse().unwrap()),
-        128,
-        512,
-        200,
-        1,
-        0,
-        PipeKind::from_protocols(proto as u8, proto as u8, 0),
-        CompletionReason::Complete,
-        method,
-        grpc_status,
-        b"velda-test-agent/1.0",
-    )
+    let mut rec = AccessLogRecord::zeroed();
+    rec.request_id = id;
+    rec.ingress_time_nanos = (ts as u64) * 1_000_000_000;
+    rec.duration_ns = 320;
+    rec.peer_ip = velda_core::lut::ip::encode_ip_u128(peer.ip());
+    rec.upstream_ip = velda_core::lut::ip::encode_upstream_ip_u32("10.0.0.1".parse().unwrap());
+    rec.upstream_port = 8080;
+    rec.bytes_rx = 128;
+    rec.bytes_tx = 512;
+    rec.status_code = 200;
+    rec.route_id = 1;
+    rec.pipe = PipeKind::from_protocols(proto as u8, proto as u8, 0);
+    rec.completion = CompletionReason::Complete;
+    rec.method = method;
+    rec.grpc_status = grpc_status;
+    let (fam, os, ver) = velda_core::lut::classify_user_agent(b"velda-test-agent/1.0");
+    rec.ua_family = fam;
+    rec.ua_os = os;
+    rec.ua_major_version = ver;
+    rec
 }
 
 // ============================================================================
@@ -83,7 +86,7 @@ fn test_chaos_request_id_boundaries() {
             HttpMethod::Get,
             GrpcStatus::NonGrpc,
         );
-        let batches = vec![Arc::from(vec![rec])];
+        let batches = vec![LogBatch::from_arc(Arc::from(vec![rec]))];
 
         // 1.1 JSON Formatting
         let mut json_buf = Vec::new();
@@ -97,7 +100,7 @@ fn test_chaos_request_id_boundaries() {
             .expect("Log line string in JSON values");
 
         // Expected 32-character lowercase hex Request ID
-        let expected_hex = format!("{:016x}{:016x}", ts as u64, id);
+        let expected_hex = format!("{:016x}{:016x}", (ts as u64) * 1_000_000_000, id);
         assert_eq!(expected_hex.len(), 32);
         assert!(
             expected_hex
@@ -130,24 +133,24 @@ fn test_chaos_request_id_boundaries() {
 // 2. Hỗn Loạn Địa Chỉ IP (RFC 4291 & RFC 5952)
 // ============================================================================
 #[test]
-fn test_chaos_ip_addresses_rfc4291_and_rfc5952() {
+fn test_chaos_ip_formatting() {
     let test_cases: Vec<(&str, &str)> = vec![
         // IPv4 extreme boundaries
-        ("0.0.0.0:0", "client=0.0.0.0:0"),
-        ("255.255.255.255:65535", "client=255.255.255.255:65535"),
-        ("127.0.0.1:80", "client=127.0.0.1:80"),
-        ("10.0.0.1:8080", "client=10.0.0.1:8080"),
-        ("192.168.1.1:443", "client=192.168.1.1:443"),
+        ("0.0.0.0:0", "client=0.0.0.0"),
+        ("255.255.255.255:65535", "client=255.255.255.255"),
+        ("127.0.0.1:80", "client=127.0.0.1"),
+        ("10.0.0.1:8080", "client=10.0.0.1"),
+        ("192.168.1.1:443", "client=192.168.1.1"),
         // IPv6 RFC 5952 compression scenarios
-        ("[::1]:5000", "client=::1:5000"),
-        ("[::]:80", "client=:::80"),
-        ("[2001:0:0:1:0:0:0:1]:8080", "client=2001:0:0:1::1:8080"),
+        ("[::1]:5000", "client=::1"),
+        ("[::]:80", "client=::"),
+        ("[2001:0:0:1:0:0:0:1]:8080", "client=2001:0:0:1::1"),
         (
             "[2001:db8:85a3:8d3:1319:8a2e:370:7348]:443",
-            "client=2001:db8:85a3:8d3:1319:8a2e:370:7348:443",
+            "client=2001:db8:85a3:8d3:1319:8a2e:370:7348",
         ),
-        ("[fe80::1]:22", "client=fe80::1:22"),
-        ("[2001:db8::]:9090", "client=2001:db8:::9090"),
+        ("[fe80::1]:22", "client=fe80::1"),
+        ("[2001:db8::]:9090", "client=2001:db8::"),
     ];
 
     let mut labels = HashMap::new();
@@ -164,7 +167,7 @@ fn test_chaos_ip_addresses_rfc4291_and_rfc5952() {
             HttpMethod::Get,
             GrpcStatus::NonGrpc,
         );
-        let batches = vec![Arc::from(vec![rec])];
+        let batches = vec![LogBatch::from_arc(Arc::from(vec![rec]))];
 
         // JSON check
         let mut json_out = Vec::new();
@@ -192,7 +195,7 @@ fn test_chaos_ip_addresses_rfc4291_and_rfc5952() {
 // 3. Tổ Hợp Protocol & 3 Stream Buckets (http, grpc, raw)
 // ============================================================================
 #[test]
-fn test_chaos_protocol_combinations_multi_stream_partitioning() {
+fn test_chaos_stream_partitioning() {
     let protocols = [
         (WireProtocol::H1, "http"),
         (WireProtocol::H2, "http"),
@@ -227,7 +230,7 @@ fn test_chaos_protocol_combinations_multi_stream_partitioning() {
     }
     assert_eq!(records.len(), 700);
 
-    let batches = vec![Arc::from(records)];
+    let batches = vec![LogBatch::from_arc(Arc::from(records))];
 
     let mut labels = HashMap::new();
     labels.insert("env".to_string(), "chaos".to_string());
@@ -312,7 +315,7 @@ fn test_chaos_protocol_combinations_multi_stream_partitioning() {
 // 4. Xác Minh Round-Trip Giải Mã & Cú Pháp Toàn Diện
 // ============================================================================
 #[test]
-fn test_chaos_round_trip_decoding_and_syntax_validation() {
+fn test_chaos_roundtrip_decode() {
     let mut labels = HashMap::new();
     labels.insert("environment".to_string(), "prod-us-east".to_string());
     labels.insert("tier".to_string(), "edge-gateway".to_string());
@@ -372,7 +375,7 @@ fn test_chaos_round_trip_decoding_and_syntax_validation() {
         ));
     }
 
-    let batches = vec![Arc::from(records)];
+    let batches = vec![LogBatch::from_arc(Arc::from(records))];
 
     // 4.1 format_loki_push_payload (Thread-local scratch path)
     let mut standalone_json = Vec::new();
@@ -445,7 +448,7 @@ fn test_chaos_round_trip_decoding_and_syntax_validation() {
 // 5. Stress Test Scratch Buffers (10,000 Records Across 100 Cycles)
 // ============================================================================
 #[test]
-fn test_chaos_stress_scratch_buffers_10k_records() {
+fn test_chaos_stress_10k() {
     let mut labels = HashMap::new();
     labels.insert("stress".to_string(), "10k".to_string());
 
@@ -478,7 +481,7 @@ fn test_chaos_stress_scratch_buffers_10k_records() {
             ));
         }
 
-        let batches = vec![Arc::from(cycle_records)];
+        let batches = vec![LogBatch::from_arc(Arc::from(cycle_records))];
 
         // JSON Cycle
         let n_json = json_formatter.format_batches(&batches, &mut json_out);

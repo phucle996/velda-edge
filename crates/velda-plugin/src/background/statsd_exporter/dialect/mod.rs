@@ -14,7 +14,7 @@ pub use dogstatsd::DogStatsdTemplate;
 pub use standard::StandardTemplate;
 use velda_observability::MetricsSnapshot;
 
-use crate::background::statsd_exporter::lut::{
+use velda_core::lut::decimal::{
     fast_write_i64, fast_write_i64_slice, fast_write_u64, fast_write_u64_slice,
 };
 

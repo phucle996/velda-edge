@@ -30,12 +30,9 @@
 //!  4. buf.extend_from_slice(&ROOT_FOOTER);
 //! ```
 
-use std::time::{SystemTime, UNIX_EPOCH};
-
 use velda_core::lut::PipeKind;
+use velda_core::lut::decimal::{fast_format_ts_19digits_simd, fast_write_i64, fast_write_u64};
 use velda_observability::MetricsSnapshot;
-
-use super::super::lut::{fast_format_ts_19digits_simd, fast_write_i64, fast_write_u64};
 
 const METRIC1_TO_METRIC2: &[u8] = b"]}},{\"name\":\"velda.active_streams\",\"description\":\"Number of streams actively in-flight\",\"unit\":\"1\",\"gauge\":{\"dataPoints\":[";
 const METRIC2_TO_METRIC3: &[u8] = b"]}},{\"name\":\"velda.bytes_received_total\",\"description\":\"Total bytes received from downstream clients\",\"unit\":\"By\",\"sum\":{\"aggregationTemporality\":2,\"isMonotonic\":true,\"dataPoints\":[";
@@ -74,8 +71,8 @@ impl OtlpJsonTemplate {
         // 1. Pre-bake 320 requests tails (64 slots * 5 status classes)
         let mut req_tails = Vec::with_capacity(PipeKind::COUNT * 5);
         for &pipe in &PipeKind::ALL {
-            let down = pipe.downstream().as_str();
-            let up = pipe.upstream().as_str();
+            let down = pipe.downstream_protocol().as_str();
+            let up = pipe.upstream_protocol().as_str();
             let strat = pipe.strategy_str();
             let classes = ["2xx", "3xx", "4xx", "5xx", "other"];
             for class in classes {
@@ -100,8 +97,8 @@ impl OtlpJsonTemplate {
         // 2. Pre-bake 64 active streams tails
         let mut active_tails = Vec::with_capacity(PipeKind::COUNT);
         for &pipe in &PipeKind::ALL {
-            let down = pipe.downstream().as_str();
-            let up = pipe.upstream().as_str();
+            let down = pipe.downstream_protocol().as_str();
+            let up = pipe.upstream_protocol().as_str();
             let strat = pipe.strategy_str();
             let mut tail = Vec::with_capacity(200);
             tail.extend_from_slice(
@@ -120,8 +117,8 @@ impl OtlpJsonTemplate {
         let mut rx_tails = Vec::with_capacity(PipeKind::COUNT);
         let mut tx_tails = Vec::with_capacity(PipeKind::COUNT);
         for &pipe in &PipeKind::ALL {
-            let down = pipe.downstream().as_str();
-            let up = pipe.upstream().as_str();
+            let down = pipe.downstream_protocol().as_str();
+            let up = pipe.upstream_protocol().as_str();
             let strat = pipe.strategy_str();
             let mut tail = Vec::with_capacity(200);
             tail.extend_from_slice(
@@ -151,10 +148,11 @@ impl OtlpJsonTemplate {
         buf.clear();
         buf.reserve(64 * 1024);
 
-        let now_nanos = SystemTime::now()
-            .duration_since(UNIX_EPOCH)
-            .map(|d| d.as_nanos())
-            .unwrap_or(0);
+        let now_nanos = if snapshot.captured_at_nanos > 0 {
+            snapshot.captured_at_nanos as u128
+        } else {
+            velda_core::clock::now_unix_nanos() as u128
+        };
 
         let mut ts_bytes = [0u8; 19];
         fast_format_ts_19digits_simd(now_nanos, &mut ts_bytes);

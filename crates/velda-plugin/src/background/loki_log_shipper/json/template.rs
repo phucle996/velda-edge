@@ -31,14 +31,41 @@
 
 use std::cell::RefCell;
 use std::collections::HashMap;
-use std::sync::Arc;
 
 use velda_core::WireProtocol;
-use velda_observability::AccessLogRecord;
+use velda_observability::{AccessLogRecord, LogBatch};
 
-use super::super::lut::{
-    fast_write_hex32, fast_write_ip, fast_write_ipv4, fast_write_ts_nano, fast_write_u64,
-};
+use velda_core::lut::decimal::fast_write_u64;
+use velda_core::lut::ip::{fast_write_ip, fast_write_ipv4};
+use velda_core::request_id::fast_write_hex32;
+
+#[inline]
+fn write_json_escaped(out: &mut Vec<u8>, s: &[u8]) {
+    const HEX: &[u8; 16] = b"0123456789abcdef";
+    let mut start = 0;
+    for (i, &b) in s.iter().enumerate() {
+        let escaped = match b {
+            b'"' | b'\\' => {
+                out.extend_from_slice(&s[start..i]);
+                out.push(b'\\');
+                out.push(b);
+                true
+            }
+            0x00..=0x1F => {
+                out.extend_from_slice(&s[start..i]);
+                out.extend_from_slice(b"\\u00");
+                out.push(HEX[(b >> 4) as usize]);
+                out.push(HEX[(b & 0x0f) as usize]);
+                true
+            }
+            _ => false,
+        };
+        if escaped {
+            start = i + 1;
+        }
+    }
+    out.extend_from_slice(&s[start..]);
+}
 
 /// Pre-baked static stream headers for Grafana Loki Push API partitioned by protocol family.
 #[derive(Debug, Clone)]
@@ -117,11 +144,7 @@ impl LokiJsonFormatter {
     /// Grafana Loki JSON push payload, reusing persistent internal scratch buffers.
     ///
     /// Guarantees 0 heap allocations during formatting.
-    pub fn format_batches(
-        &mut self,
-        batches: &[Arc<[AccessLogRecord]>],
-        out: &mut Vec<u8>,
-    ) -> usize {
+    pub fn format_batches(&mut self, batches: &[LogBatch], out: &mut Vec<u8>) -> usize {
         out.clear();
         self.http_values.clear();
         self.grpc_values.clear();
@@ -130,7 +153,20 @@ impl LokiJsonFormatter {
         let mut total_records = 0usize;
 
         for batch in batches {
-            for rec in batch.iter() {
+            let recs = batch.as_ref();
+            for (idx, rec) in recs.iter().enumerate() {
+                #[cfg(target_arch = "x86_64")]
+                if idx + 4 < recs.len() {
+                    unsafe {
+                        use core::arch::x86_64::*;
+                        let next_rec =
+                            recs.get_unchecked(idx + 4) as *const AccessLogRecord as *const i8;
+                        _mm_prefetch(next_rec, _MM_HINT_T1);
+                        _mm_prefetch(next_rec.add(64), _MM_HINT_T1);
+                        _mm_prefetch(next_rec.add(128), _MM_HINT_T1);
+                        _mm_prefetch(next_rec.add(192), _MM_HINT_T1);
+                    }
+                }
                 total_records += 1;
                 let downstream_protocol = rec.downstream_protocol();
                 let completion = rec.completion;
@@ -145,11 +181,11 @@ impl LokiJsonFormatter {
                         let ua_os = rec.ua_os;
 
                         self.http_values.extend_from_slice(b"[\"");
-                        fast_write_ts_nano(&mut self.http_values, rec.timestamp_sec);
+                        fast_write_u64(&mut self.http_values, rec.ingress_time_nanos);
                         self.http_values.extend_from_slice(b"\",\"request_id=");
                         fast_write_hex32(
                             &mut self.http_values,
-                            rec.timestamp_sec as u64,
+                            rec.ingress_time_nanos,
                             rec.request_id,
                         );
                         self.http_values.extend_from_slice(b" pipe=");
@@ -159,7 +195,7 @@ impl LokiJsonFormatter {
                         self.http_values
                             .extend_from_slice(method.as_str().as_bytes());
                         self.http_values.extend_from_slice(b" url=");
-                        self.http_values.extend_from_slice(rec.url().as_bytes());
+                        write_json_escaped(&mut self.http_values, rec.url().as_bytes());
                         self.http_values.extend_from_slice(b" route=");
                         velda_router::with_route_bytes(rec.route_id, |bytes| {
                             self.http_values.extend_from_slice(bytes);
@@ -174,8 +210,6 @@ impl LokiJsonFormatter {
                         fast_write_u64(&mut self.http_values, rec.bytes_tx as u64);
                         self.http_values.extend_from_slice(b" client=");
                         fast_write_ip(&mut self.http_values, rec.peer_ip);
-                        self.http_values.push(b':');
-                        fast_write_u64(&mut self.http_values, rec.peer_port as u64);
                         self.http_values.extend_from_slice(b" endpoint=");
                         fast_write_ipv4(&mut self.http_values, rec.upstream_ip);
                         self.http_values.push(b':');
@@ -201,18 +235,18 @@ impl LokiJsonFormatter {
                         let ua_fam = rec.ua_family;
 
                         self.grpc_values.extend_from_slice(b"[\"");
-                        fast_write_ts_nano(&mut self.grpc_values, rec.timestamp_sec);
+                        fast_write_u64(&mut self.grpc_values, rec.ingress_time_nanos);
                         self.grpc_values.extend_from_slice(b"\",\"request_id=");
                         fast_write_hex32(
                             &mut self.grpc_values,
-                            rec.timestamp_sec as u64,
+                            rec.ingress_time_nanos,
                             rec.request_id,
                         );
                         self.grpc_values.extend_from_slice(b" pipe=");
                         self.grpc_values
                             .extend_from_slice(rec.pipe_name().as_bytes());
                         self.grpc_values.extend_from_slice(b" method=POST url=");
-                        self.grpc_values.extend_from_slice(rec.url().as_bytes());
+                        write_json_escaped(&mut self.grpc_values, rec.url().as_bytes());
                         self.grpc_values.extend_from_slice(b" route=");
                         velda_router::with_route_bytes(rec.route_id, |bytes| {
                             self.grpc_values.extend_from_slice(bytes);
@@ -232,8 +266,6 @@ impl LokiJsonFormatter {
                         fast_write_u64(&mut self.grpc_values, rec.bytes_tx as u64);
                         self.grpc_values.extend_from_slice(b" client=");
                         fast_write_ip(&mut self.grpc_values, rec.peer_ip);
-                        self.grpc_values.push(b':');
-                        fast_write_u64(&mut self.grpc_values, rec.peer_port as u64);
                         self.grpc_values.extend_from_slice(b" endpoint=");
                         fast_write_ipv4(&mut self.grpc_values, rec.upstream_ip);
                         self.grpc_values.push(b':');
@@ -253,11 +285,11 @@ impl LokiJsonFormatter {
                             self.raw_values.push(b',');
                         }
                         self.raw_values.extend_from_slice(b"[\"");
-                        fast_write_ts_nano(&mut self.raw_values, rec.timestamp_sec);
+                        fast_write_u64(&mut self.raw_values, rec.ingress_time_nanos);
                         self.raw_values.extend_from_slice(b"\",\"request_id=");
                         fast_write_hex32(
                             &mut self.raw_values,
-                            rec.timestamp_sec as u64,
+                            rec.ingress_time_nanos,
                             rec.request_id,
                         );
                         self.raw_values.extend_from_slice(b" pipe=");
@@ -275,8 +307,6 @@ impl LokiJsonFormatter {
                         fast_write_u64(&mut self.raw_values, rec.bytes_tx as u64);
                         self.raw_values.extend_from_slice(b" client=");
                         fast_write_ip(&mut self.raw_values, rec.peer_ip);
-                        self.raw_values.push(b':');
-                        fast_write_u64(&mut self.raw_values, rec.peer_port as u64);
                         self.raw_values.extend_from_slice(b" endpoint=");
                         fast_write_ipv4(&mut self.raw_values, rec.upstream_ip);
                         self.raw_values.push(b':');
@@ -341,7 +371,7 @@ thread_local! {
 /// Uses thread-local persistent scratch buffers to guarantee 0 heap allocations
 /// even when called outside of [`LokiJsonFormatter`].
 pub fn format_loki_push_payload(
-    batches: &[Arc<[AccessLogRecord]>],
+    batches: &[LogBatch],
     template: &LokiStreamTemplate,
     out: &mut Vec<u8>,
 ) -> usize {
@@ -357,7 +387,20 @@ pub fn format_loki_push_payload(
         let mut total_records = 0usize;
 
         for batch in batches {
-            for rec in batch.iter() {
+            let recs = batch.as_ref();
+            for (idx, rec) in recs.iter().enumerate() {
+                #[cfg(target_arch = "x86_64")]
+                if idx + 4 < recs.len() {
+                    unsafe {
+                        use core::arch::x86_64::*;
+                        let next_rec =
+                            recs.get_unchecked(idx + 4) as *const AccessLogRecord as *const i8;
+                        _mm_prefetch(next_rec, _MM_HINT_T1);
+                        _mm_prefetch(next_rec.add(64), _MM_HINT_T1);
+                        _mm_prefetch(next_rec.add(128), _MM_HINT_T1);
+                        _mm_prefetch(next_rec.add(192), _MM_HINT_T1);
+                    }
+                }
                 total_records += 1;
                 let downstream_protocol = rec.downstream_protocol();
                 let completion = rec.completion;
@@ -372,9 +415,9 @@ pub fn format_loki_push_payload(
                         let ua_os = rec.ua_os;
 
                         http_values.extend_from_slice(b"[\"");
-                        fast_write_ts_nano(http_values, rec.timestamp_sec);
+                        fast_write_u64(http_values, rec.ingress_time_nanos);
                         http_values.extend_from_slice(b"\",\"request_id=");
-                        fast_write_hex32(http_values, rec.timestamp_sec as u64, rec.request_id);
+                        fast_write_hex32(http_values, rec.ingress_time_nanos, rec.request_id);
                         http_values.extend_from_slice(b" pipe=");
                         http_values.extend_from_slice(rec.pipe_name().as_bytes());
                         http_values.extend_from_slice(b" method=");
@@ -391,8 +434,6 @@ pub fn format_loki_push_payload(
                         fast_write_u64(http_values, rec.bytes_tx as u64);
                         http_values.extend_from_slice(b" client=");
                         fast_write_ip(http_values, rec.peer_ip);
-                        http_values.push(b':');
-                        fast_write_u64(http_values, rec.peer_port as u64);
                         http_values.extend_from_slice(b" endpoint=");
                         fast_write_ipv4(http_values, rec.upstream_ip);
                         http_values.push(b':');
@@ -415,9 +456,9 @@ pub fn format_loki_push_payload(
                         let ua_fam = rec.ua_family;
 
                         grpc_values.extend_from_slice(b"[\"");
-                        fast_write_ts_nano(grpc_values, rec.timestamp_sec);
+                        fast_write_u64(grpc_values, rec.ingress_time_nanos);
                         grpc_values.extend_from_slice(b"\",\"request_id=");
-                        fast_write_hex32(grpc_values, rec.timestamp_sec as u64, rec.request_id);
+                        fast_write_hex32(grpc_values, rec.ingress_time_nanos, rec.request_id);
                         grpc_values.extend_from_slice(b" pipe=");
                         grpc_values.extend_from_slice(rec.pipe_name().as_bytes());
                         grpc_values.extend_from_slice(b" grpc_status=");
@@ -436,8 +477,6 @@ pub fn format_loki_push_payload(
                         fast_write_u64(grpc_values, rec.rpc_msgs_or_flags as u64);
                         grpc_values.extend_from_slice(b" client=");
                         fast_write_ip(grpc_values, rec.peer_ip);
-                        grpc_values.push(b':');
-                        fast_write_u64(grpc_values, rec.peer_port as u64);
                         grpc_values.extend_from_slice(b" endpoint=");
                         fast_write_ipv4(grpc_values, rec.upstream_ip);
                         grpc_values.push(b':');
@@ -455,9 +494,9 @@ pub fn format_loki_push_payload(
                             raw_values.push(b',');
                         }
                         raw_values.extend_from_slice(b"[\"");
-                        fast_write_ts_nano(raw_values, rec.timestamp_sec);
+                        fast_write_u64(raw_values, rec.ingress_time_nanos);
                         raw_values.extend_from_slice(b"\",\"request_id=");
-                        fast_write_hex32(raw_values, rec.timestamp_sec as u64, rec.request_id);
+                        fast_write_hex32(raw_values, rec.ingress_time_nanos, rec.request_id);
                         raw_values.extend_from_slice(b" pipe=");
                         raw_values.extend_from_slice(rec.pipe_name().as_bytes());
                         raw_values.extend_from_slice(b" duration_ns=");
@@ -468,8 +507,6 @@ pub fn format_loki_push_payload(
                         fast_write_u64(raw_values, rec.bytes_tx as u64);
                         raw_values.extend_from_slice(b" client=");
                         fast_write_ip(raw_values, rec.peer_ip);
-                        raw_values.push(b':');
-                        fast_write_u64(raw_values, rec.peer_port as u64);
                         raw_values.extend_from_slice(b" endpoint=");
                         fast_write_ipv4(raw_values, rec.upstream_ip);
                         raw_values.push(b':');
@@ -531,43 +568,52 @@ mod tests {
         labels.insert("env".to_string(), "prod".to_string());
         let mut formatter = LokiJsonFormatter::new("test-service", &labels);
 
-        let http_rec = AccessLogRecord::from_scalars(
-            0xaaaa_bbbb_cccc_dddd,
-            1_710_000_001,
-            320,
-            "192.168.1.10:50000".parse().unwrap(),
-            Some("10.0.0.1:8080".parse().unwrap()),
-            128,
-            512,
-            200,
-            1,
-            0,
-            PipeKind::BufferedH2H1,
-            CompletionReason::Complete,
-            HttpMethod::Get,
-            GrpcStatus::NonGrpc,
-            b"curl/8.6.0",
-        );
+        let mut http_rec = AccessLogRecord::zeroed();
+        http_rec.request_id = 0xaaaa_bbbb_cccc_dddd;
+        http_rec.ingress_time_nanos = 1_710_000_001_123_456_789;
+        http_rec.duration_ns = 320;
+        http_rec.peer_ip = velda_core::lut::ip::encode_ip_u128("192.168.1.10".parse().unwrap());
+        http_rec.upstream_ip =
+            velda_core::lut::ip::encode_upstream_ip_u32("10.0.0.1".parse().unwrap());
+        http_rec.upstream_port = 8080;
+        http_rec.bytes_rx = 128;
+        http_rec.bytes_tx = 512;
+        http_rec.status_code = 200;
+        http_rec.route_id = 1;
+        http_rec.pipe = PipeKind::BufferedH2H1;
+        http_rec.completion = CompletionReason::Complete;
+        http_rec.method = HttpMethod::Get;
+        http_rec.grpc_status = GrpcStatus::NonGrpc;
+        let (fam, os, ver) = velda_core::lut::classify_user_agent(b"curl/8.6.0");
+        http_rec.ua_family = fam;
+        http_rec.ua_os = os;
+        http_rec.ua_major_version = ver;
 
-        let grpc_rec = AccessLogRecord::from_scalars(
-            0x1111_2222_3333_4444,
-            1_710_000_002,
-            890,
-            "[::1]:50001".parse().unwrap(),
-            Some("10.0.0.2:9090".parse().unwrap()),
-            64,
-            256,
-            200,
-            2,
-            4,
-            PipeKind::DuplexGrpcTcpTcp,
-            CompletionReason::Complete,
-            HttpMethod::Post,
-            GrpcStatus::Ok,
-            b"grpc-go/1.64.0",
-        );
+        let mut grpc_rec = AccessLogRecord::zeroed();
+        grpc_rec.request_id = 0x1111_2222_3333_4444;
+        grpc_rec.ingress_time_nanos = 1_710_000_002_987_654_321;
+        grpc_rec.duration_ns = 890;
+        grpc_rec.peer_ip = velda_core::lut::ip::encode_ip_u128("::1".parse().unwrap());
+        grpc_rec.upstream_ip =
+            velda_core::lut::ip::encode_upstream_ip_u32("10.0.0.2".parse().unwrap());
+        grpc_rec.upstream_port = 9090;
+        grpc_rec.bytes_rx = 64;
+        grpc_rec.bytes_tx = 256;
+        grpc_rec.status_code = 200;
+        grpc_rec.route_id = 2;
+        grpc_rec.rpc_msgs_or_flags = 4;
+        grpc_rec.pipe = PipeKind::DuplexGrpcTcpTcp;
+        grpc_rec.completion = CompletionReason::Complete;
+        grpc_rec.method = HttpMethod::Post;
+        grpc_rec.grpc_status = GrpcStatus::Ok;
+        let (fam, os, ver) = velda_core::lut::classify_user_agent(b"grpc-go/1.64.0");
+        grpc_rec.ua_family = fam;
+        grpc_rec.ua_os = os;
+        grpc_rec.ua_major_version = ver;
 
-        let batches = vec![Arc::from(vec![http_rec, grpc_rec])];
+        let batches = vec![LogBatch::from_arc(std::sync::Arc::from(vec![
+            http_rec, grpc_rec,
+        ]))];
         let mut out = Vec::new();
         let count = formatter.format_batches(&batches, &mut out);
         assert_eq!(count, 2);
@@ -579,20 +625,26 @@ mod tests {
         assert!(json_str.contains("\"protocol\":\"grpc\""));
         assert!(json_str.contains("\"env\":\"prod\""));
 
-        // Verify full 32-hex request_id: timestamp_sec (1_710_000_001 = 0x0000000065ec8781) + entropy
-        assert!(json_str.contains("request_id=0000000065ec8781aaaabbbbccccdddd"));
-        assert!(json_str.contains("request_id=0000000065ec87821111222233334444"));
+        // Verify full 32-hex request_id: ingress_time_nanos + entropy
+        assert!(
+            json_str
+                .contains("[\"1710000001123456789\",\"request_id=17bb23f0e8e19715aaaabbbbccccdddd")
+        );
+        assert!(
+            json_str
+                .contains("[\"1710000002987654321\",\"request_id=17bb23f157fefcb11111222233334444")
+        );
 
         // Verify RFC 5952 IPv6 compression
-        assert!(json_str.contains("client=::1:50001"));
-        assert!(json_str.contains("client=192.168.1.10:50000"));
+        assert!(json_str.contains("client=::1"));
+        assert!(json_str.contains("client=192.168.1.10"));
     }
 
     #[test]
-    fn test_format_loki_push_payload_empty_batch() {
+    fn test_loki_json_empty_batch() {
         let template = LokiStreamTemplate::new("test", &HashMap::new());
         let mut out = Vec::new();
-        let batches: Vec<Arc<[AccessLogRecord]>> = Vec::new();
+        let batches: Vec<LogBatch> = Vec::new();
         let count = format_loki_push_payload(&batches, &template, &mut out);
         assert_eq!(count, 0);
         assert!(out.is_empty());

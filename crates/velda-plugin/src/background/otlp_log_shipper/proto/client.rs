@@ -397,7 +397,7 @@ mod tests {
     use tokio::net::TcpListener;
 
     #[tokio::test]
-    async fn test_otlp_logs_grpc_rejects_trailers_only_error() {
+    async fn test_otlp_grpc_trailers_error() {
         let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
         let addr = listener.local_addr().unwrap();
 

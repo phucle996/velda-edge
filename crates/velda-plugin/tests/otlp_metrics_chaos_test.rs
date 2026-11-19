@@ -269,7 +269,7 @@ fn test_otlp_metrics_boundary_values() {
 // 4. STRESS TEST: 1,000 CONTINUOUS CYCLES & MEMORY STABILITY
 // ============================================================================
 #[test]
-fn test_otlp_metrics_stress_1000_cycles_memory_stability() {
+fn test_otlp_metrics_stress_1k() {
     let store = Arc::new(MetricsStore::new());
     let mut proto_template = OtlpProtoTemplate::new("velda-stress-service");
     let json_template = OtlpJsonTemplate::new("velda-stress-service");
@@ -292,11 +292,7 @@ fn test_otlp_metrics_stress_1000_cycles_memory_stability() {
         let slot = store.slot_on_core(cycle % 4, PipeKind::BufferedH1H1);
         slot.stream_started();
         slot.record_completion(&velda_observability::StreamCompletion::new(
-            200,
-            128,
-            256,
-            std::time::Duration::from_micros(500),
-            None,
+            200, 128, 256, 500_000, 0,
         ));
 
         let snapshot = store.snapshot();

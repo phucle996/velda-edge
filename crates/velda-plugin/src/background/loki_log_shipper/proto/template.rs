@@ -31,12 +31,13 @@
 //! ```
 
 use std::collections::HashMap;
-use std::sync::Arc;
 
 use velda_core::WireProtocol;
-use velda_observability::AccessLogRecord;
+use velda_observability::{AccessLogRecord, LogBatch};
 
-use super::super::lut::{fast_write_hex32, fast_write_ip, fast_write_ipv4, fast_write_u64};
+use velda_core::lut::decimal::fast_write_u64;
+use velda_core::lut::ip::{fast_write_ip, fast_write_ipv4};
+use velda_core::request_id::fast_write_hex32;
 
 /// Fast inline varint encoding for u64.
 #[inline(always)]
@@ -145,11 +146,7 @@ impl LokiProtoFormatter {
     /// `logproto.PushRequest` wire payload.
     ///
     /// Guarantees 0 heap allocations during export flush cycle.
-    pub fn format_batches(
-        &mut self,
-        batches: &[Arc<[AccessLogRecord]>],
-        out: &mut Vec<u8>,
-    ) -> usize {
+    pub fn format_batches(&mut self, batches: &[LogBatch], out: &mut Vec<u8>) -> usize {
         out.clear();
         self.http_entries_buf.clear();
         self.grpc_entries_buf.clear();
@@ -158,11 +155,25 @@ impl LokiProtoFormatter {
         let mut total_records = 0usize;
 
         for batch in batches {
-            for rec in batch.iter() {
+            let recs = batch.as_ref();
+            for (idx, rec) in recs.iter().enumerate() {
+                #[cfg(target_arch = "x86_64")]
+                if idx + 4 < recs.len() {
+                    unsafe {
+                        use core::arch::x86_64::*;
+                        let next_rec =
+                            recs.get_unchecked(idx + 4) as *const AccessLogRecord as *const i8;
+                        _mm_prefetch(next_rec, _MM_HINT_T1);
+                        _mm_prefetch(next_rec.add(64), _MM_HINT_T1);
+                        _mm_prefetch(next_rec.add(128), _MM_HINT_T1);
+                        _mm_prefetch(next_rec.add(192), _MM_HINT_T1);
+                    }
+                }
                 total_records += 1;
                 let downstream_protocol = rec.downstream_protocol();
                 let completion = rec.completion;
-                let seconds = rec.timestamp_sec as i64;
+                let seconds = (rec.ingress_time_nanos / 1_000_000_000) as i64;
+                let nanos = (rec.ingress_time_nanos % 1_000_000_000) as i32;
 
                 self.line_buf.clear();
 
@@ -175,7 +186,7 @@ impl LokiProtoFormatter {
                         self.line_buf.extend_from_slice(b"request_id=");
                         fast_write_hex32(
                             &mut self.line_buf,
-                            rec.timestamp_sec as u64,
+                            rec.ingress_time_nanos,
                             rec.request_id,
                         );
                         self.line_buf.extend_from_slice(b" pipe=");
@@ -198,8 +209,6 @@ impl LokiProtoFormatter {
                         fast_write_u64(&mut self.line_buf, rec.bytes_tx as u64);
                         self.line_buf.extend_from_slice(b" client=");
                         fast_write_ip(&mut self.line_buf, rec.peer_ip);
-                        self.line_buf.push(b':');
-                        fast_write_u64(&mut self.line_buf, rec.peer_port as u64);
                         self.line_buf.extend_from_slice(b" endpoint=");
                         fast_write_ipv4(&mut self.line_buf, rec.upstream_ip);
                         self.line_buf.push(b':');
@@ -217,7 +226,7 @@ impl LokiProtoFormatter {
                         Self::encode_entry_into(
                             &mut self.http_entries_buf,
                             seconds,
-                            0,
+                            nanos,
                             &self.line_buf,
                         );
                     }
@@ -228,7 +237,7 @@ impl LokiProtoFormatter {
                         self.line_buf.extend_from_slice(b"request_id=");
                         fast_write_hex32(
                             &mut self.line_buf,
-                            rec.timestamp_sec as u64,
+                            rec.ingress_time_nanos,
                             rec.request_id,
                         );
                         self.line_buf.extend_from_slice(b" pipe=");
@@ -253,8 +262,6 @@ impl LokiProtoFormatter {
                         fast_write_u64(&mut self.line_buf, rec.bytes_tx as u64);
                         self.line_buf.extend_from_slice(b" client=");
                         fast_write_ip(&mut self.line_buf, rec.peer_ip);
-                        self.line_buf.push(b':');
-                        fast_write_u64(&mut self.line_buf, rec.peer_port as u64);
                         self.line_buf.extend_from_slice(b" endpoint=");
                         fast_write_ipv4(&mut self.line_buf, rec.upstream_ip);
                         self.line_buf.push(b':');
@@ -270,7 +277,7 @@ impl LokiProtoFormatter {
                         Self::encode_entry_into(
                             &mut self.grpc_entries_buf,
                             seconds,
-                            0,
+                            nanos,
                             &self.line_buf,
                         );
                     }
@@ -278,7 +285,7 @@ impl LokiProtoFormatter {
                         self.line_buf.extend_from_slice(b"request_id=");
                         fast_write_hex32(
                             &mut self.line_buf,
-                            rec.timestamp_sec as u64,
+                            rec.ingress_time_nanos,
                             rec.request_id,
                         );
                         self.line_buf.extend_from_slice(b" pipe=");
@@ -295,8 +302,6 @@ impl LokiProtoFormatter {
                         fast_write_u64(&mut self.line_buf, rec.bytes_tx as u64);
                         self.line_buf.extend_from_slice(b" client=");
                         fast_write_ip(&mut self.line_buf, rec.peer_ip);
-                        self.line_buf.push(b':');
-                        fast_write_u64(&mut self.line_buf, rec.peer_port as u64);
                         self.line_buf.extend_from_slice(b" endpoint=");
                         fast_write_ipv4(&mut self.line_buf, rec.upstream_ip);
                         self.line_buf.push(b':');
@@ -308,7 +313,7 @@ impl LokiProtoFormatter {
                         Self::encode_entry_into(
                             &mut self.raw_entries_buf,
                             seconds,
-                            0,
+                            nanos,
                             &self.line_buf,
                         );
                     }
@@ -396,7 +401,7 @@ impl LokiProtoFormatter {
 
 /// Standalone formatting helper for Grafana Loki PushRequest wire format.
 pub fn format_loki_records_proto(
-    batches: &[Arc<[AccessLogRecord]>],
+    batches: &[LogBatch],
     labels: &LokiProtoLabels,
     out: &mut Vec<u8>,
 ) -> usize {
@@ -409,51 +414,59 @@ mod tests {
     use super::super::model::PushRequest;
     use super::*;
     use prost::Message;
+    use std::sync::Arc;
     use velda_core::{CompletionReason, GrpcStatus, HttpMethod, PipeKind};
 
     #[test]
-    fn test_proto_wire_formatter_decodes_cleanly() {
+    fn test_loki_proto_decode() {
         let mut labels = HashMap::new();
         labels.insert("env".to_string(), "staging".to_string());
         let mut formatter = LokiProtoFormatter::new("my-service", &labels);
 
-        let http_rec = AccessLogRecord::from_scalars(
-            0xaaaa_bbbb_cccc_dddd,
-            1_710_000_001,
-            320,
-            "192.168.1.10:50000".parse().unwrap(),
-            Some("10.0.0.1:8080".parse().unwrap()),
-            128,
-            512,
-            200,
-            1,
-            0,
-            PipeKind::BufferedH2H1,
-            CompletionReason::Complete,
-            HttpMethod::Get,
-            GrpcStatus::NonGrpc,
-            b"curl/8.6.0",
-        );
+        let mut http_rec = AccessLogRecord::zeroed();
+        http_rec.request_id = 0xaaaa_bbbb_cccc_dddd;
+        http_rec.ingress_time_nanos = 1_710_000_001_123_456_789;
+        http_rec.duration_ns = 320;
+        http_rec.peer_ip = velda_core::lut::ip::encode_ip_u128("192.168.1.10".parse().unwrap());
+        http_rec.upstream_ip =
+            velda_core::lut::ip::encode_upstream_ip_u32("10.0.0.1".parse().unwrap());
+        http_rec.upstream_port = 8080;
+        http_rec.bytes_rx = 128;
+        http_rec.bytes_tx = 512;
+        http_rec.status_code = 200;
+        http_rec.route_id = 1;
+        http_rec.pipe = PipeKind::BufferedH2H1;
+        http_rec.completion = CompletionReason::Complete;
+        http_rec.method = HttpMethod::Get;
+        http_rec.grpc_status = GrpcStatus::NonGrpc;
+        let (fam, os, ver) = velda_core::lut::classify_user_agent(b"curl/8.6.0");
+        http_rec.ua_family = fam;
+        http_rec.ua_os = os;
+        http_rec.ua_major_version = ver;
 
-        let grpc_rec = AccessLogRecord::from_scalars(
-            0x1111_2222_3333_4444,
-            1_710_000_002,
-            890,
-            "[::1]:50001".parse().unwrap(),
-            Some("10.0.0.2:9090".parse().unwrap()),
-            64,
-            256,
-            200,
-            2,
-            4,
-            PipeKind::DuplexGrpcTcpTcp,
-            CompletionReason::Complete,
-            HttpMethod::Post,
-            GrpcStatus::Ok,
-            b"grpc-go/1.64.0",
-        );
+        let mut grpc_rec = AccessLogRecord::zeroed();
+        grpc_rec.request_id = 0x1111_2222_3333_4444;
+        grpc_rec.ingress_time_nanos = 1_710_000_002_987_654_321;
+        grpc_rec.duration_ns = 890;
+        grpc_rec.peer_ip = velda_core::lut::ip::encode_ip_u128("::1".parse().unwrap());
+        grpc_rec.upstream_ip =
+            velda_core::lut::ip::encode_upstream_ip_u32("10.0.0.2".parse().unwrap());
+        grpc_rec.upstream_port = 9090;
+        grpc_rec.bytes_rx = 64;
+        grpc_rec.bytes_tx = 256;
+        grpc_rec.status_code = 200;
+        grpc_rec.route_id = 2;
+        grpc_rec.rpc_msgs_or_flags = 4;
+        grpc_rec.pipe = PipeKind::DuplexGrpcTcpTcp;
+        grpc_rec.completion = CompletionReason::Complete;
+        grpc_rec.method = HttpMethod::Post;
+        grpc_rec.grpc_status = GrpcStatus::Ok;
+        let (fam, os, ver) = velda_core::lut::classify_user_agent(b"grpc-go/1.64.0");
+        grpc_rec.ua_family = fam;
+        grpc_rec.ua_os = os;
+        grpc_rec.ua_major_version = ver;
 
-        let batches = vec![Arc::from(vec![http_rec, grpc_rec])];
+        let batches = vec![LogBatch::from_arc(Arc::from(vec![http_rec, grpc_rec]))];
         let mut wire_out = Vec::new();
         let count = formatter.format_batches(&batches, &mut wire_out);
         assert_eq!(count, 2);
@@ -472,11 +485,12 @@ mod tests {
         assert_eq!(s0.entries.len(), 1);
         let e0 = &s0.entries[0];
         assert_eq!(e0.timestamp.as_ref().unwrap().seconds, 1_710_000_001);
+        assert_eq!(e0.timestamp.as_ref().unwrap().nanos, 123_456_789);
         assert!(
             e0.line
-                .contains("request_id=0000000065ec8781aaaabbbbccccdddd")
+                .contains("request_id=17bb23f0e8e19715aaaabbbbccccdddd")
         );
-        assert!(e0.line.contains("client=192.168.1.10:50000"));
+        assert!(e0.line.contains("client=192.168.1.10"));
 
         // Verify Stream 2 (gRPC)
         let s1 = &decoded.streams[1];
@@ -487,11 +501,12 @@ mod tests {
         assert_eq!(s1.entries.len(), 1);
         let e1 = &s1.entries[0];
         assert_eq!(e1.timestamp.as_ref().unwrap().seconds, 1_710_000_002);
+        assert_eq!(e1.timestamp.as_ref().unwrap().nanos, 987_654_321);
         assert!(
             e1.line
-                .contains("request_id=0000000065ec87821111222233334444")
+                .contains("request_id=17bb23f157fefcb11111222233334444")
         );
-        assert!(e1.line.contains("client=::1:50001"));
+        assert!(e1.line.contains("client=::1"));
         assert!(e1.line.contains("grpc_status=OK"));
     }
 }

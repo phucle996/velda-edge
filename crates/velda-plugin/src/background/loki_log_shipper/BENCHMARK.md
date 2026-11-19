@@ -287,8 +287,8 @@ To provide actionable root-cause analysis without metric bloat, the measurement 
 | :--- | :--- | :---: | :--- |
 | `tcp_sendmsg` / `ip_output` | Linux Kernel Network Stack | *[TBD %]* | Kernel Syscall |
 | `velda_plugin::loki_log_shipper::proto::LokiProtoFormatter::format_records_wire` | Shipper Logic | *[TBD %]* | User Hot Path |
-| `velda_plugin::loki_log_shipper::lut::format_hex32_bytes` | Shipper Logic (SIMD) | *[TBD %]* | User Hot Path |
-| `velda_plugin::loki_log_shipper::lut::fast_write_u64` | Shipper Logic (LUT) | *[TBD %]* | User Hot Path |
+| `velda_plugin::loki_log_shipper::wire::format_hex32_bytes` | Shipper Logic (SIMD) | *[TBD %]* | User Hot Path |
+| `velda_plugin::loki_log_shipper::wire::fast_write_u64` | Shipper Logic (Decimal) | *[TBD %]* | User Hot Path |
 | `tokio::time::driver::Wheel::poll` | Async Runtime | *[TBD %]* | Runtime Scheduler |
 | `__rust_alloc` / `je_malloc` | Memory Allocator | **0.00%** | Allocator Invariant |
 | `pthread_mutex_lock` / `futex` | Synchronization Primitive | **0.00%** | Lock-Free Invariant |

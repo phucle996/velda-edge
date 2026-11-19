@@ -105,7 +105,6 @@ async fn trace_exporter_e2e() {
         span.start_time_unix_nano = 1_000_000_000 + i * 1_000_000;
         span.end_time_unix_nano = 1_000_000_000 + (i + 1) * 1_000_000;
         span.status_code = 200;
-        span.otlp_status = 1;
         span.route_id = 1;
         span.trace_id = [1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16];
         span.span_id = [0, 0, 0, 0, 0, 0, 0, i as u8];

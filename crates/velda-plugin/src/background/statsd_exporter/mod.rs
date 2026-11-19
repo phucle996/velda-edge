@@ -2,7 +2,6 @@
 
 pub mod config;
 pub mod dialect;
-pub mod lut;
 pub mod plugin;
 pub mod transport;
 

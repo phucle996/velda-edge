@@ -16,7 +16,7 @@ use std::sync::Arc;
 use velda_core::{
     CompletionReason, GrpcStatus, HttpMethod, PipeKind, UaFamily, UaOs, WireProtocol,
 };
-use velda_observability::{AccessLogRecord, encode_ip_u128};
+use velda_observability::{AccessLogRecord, LogBatch, encode_ip_u128};
 use velda_plugin::background::std_log_shipper::config::TargetStream;
 use velda_plugin::background::std_log_shipper::format::format_std_log_payload;
 use velda_plugin::background::std_log_shipper::sink::StdLogSink;
@@ -28,7 +28,7 @@ fn build_chaos_record(
     timestamp_sec: u32,
     duration_ns: u64,
     peer_ip: u128,
-    peer_port: u16,
+    _peer_port: u16,
     upstream_ip: u32,
     upstream_port: u16,
     bytes_rx: u32,
@@ -46,13 +46,12 @@ fn build_chaos_record(
 ) -> AccessLogRecord {
     AccessLogRecord {
         request_id,
-        timestamp_sec,
+        ingress_time_nanos: (timestamp_sec as u64) * 1_000_000_000,
         duration_ns,
         peer_ip,
         bytes_rx,
         bytes_tx,
         upstream_ip,
-        peer_port,
         upstream_port,
         status_code,
         route_id,
@@ -65,7 +64,7 @@ fn build_chaos_record(
         ua_family,
         ua_os,
         url_len: 0,
-        url_bytes: [0; 188],
+        url_bytes: [0; 186],
     }
 }
 
@@ -73,7 +72,7 @@ fn build_chaos_record(
 // 1. Biên Cực Trị Request ID (Boundaries & Bit Patterns)
 // ============================================================================
 #[test]
-fn test_chaos_request_id_boundaries_and_bit_patterns() {
+fn test_chaos_req_id_bounds() {
     let test_ids: &[(u32, u64)] = &[
         (0, 0),
         (0, 1),
@@ -112,7 +111,7 @@ fn test_chaos_request_id_boundaries_and_bit_patterns() {
         ));
     }
 
-    let batches = vec![Arc::from(records.as_slice())];
+    let batches = vec![LogBatch::from_arc(Arc::from(records.as_slice()))];
     let mut json_out = Vec::new();
     let count = format_std_log_payload(&batches, "json", &mut json_out);
     assert_eq!(count, test_ids.len());
@@ -133,8 +132,8 @@ fn test_chaos_request_id_boundaries_and_bit_patterns() {
             "Request ID must be exactly 32 hex chars for ts={ts}, req_id={req_id}"
         );
 
-        // Verify exact lowercase hex match: hi (timestamp) + lo (request_id)
-        let expected_hex = format!("{:016x}{:016x}", ts, req_id);
+        // Verify exact lowercase hex match: hi (ingress_time_nanos) + lo (request_id)
+        let expected_hex = format!("{:016x}{:016x}", (ts as u64) * 1_000_000_000, req_id);
         assert_eq!(
             req_id_str, expected_hex,
             "Hex mismatch for ts={ts:#x}, req_id={req_id:#x}"
@@ -146,7 +145,7 @@ fn test_chaos_request_id_boundaries_and_bit_patterns() {
 // 2. Biên Cực Trị Timestamps & Duration & Counters
 // ============================================================================
 #[test]
-fn test_chaos_timestamps_duration_and_counters() {
+fn test_chaos_ts_and_counters() {
     let test_matrix: &[(u32, u64, u32, u32, u16, u16, u16)] = &[
         // (ts, dur_ns, rx, tx, status, route_id, msgs)
         (0, 0, 0, 0, 0, u16::MAX, 0),
@@ -197,7 +196,7 @@ fn test_chaos_timestamps_duration_and_counters() {
         ));
     }
 
-    let batches = vec![Arc::from(records.as_slice())];
+    let batches = vec![LogBatch::from_arc(Arc::from(records.as_slice()))];
     let mut json_out = Vec::new();
     format_std_log_payload(&batches, "json", &mut json_out);
 
@@ -222,62 +221,62 @@ fn test_chaos_timestamps_duration_and_counters() {
 fn test_chaos_ip_addresses_rfc4291_rfc5952() {
     let test_ips: &[(IpAddr, u16, &str)] = &[
         // IPv4
-        (IpAddr::V4(Ipv4Addr::new(0, 0, 0, 0)), 0, "0.0.0.0:0"),
+        (IpAddr::V4(Ipv4Addr::new(0, 0, 0, 0)), 0, "0.0.0.0"),
         (
             IpAddr::V4(Ipv4Addr::new(255, 255, 255, 255)),
             65535,
-            "255.255.255.255:65535",
+            "255.255.255.255",
         ),
-        (IpAddr::V4(Ipv4Addr::new(127, 0, 0, 1)), 80, "127.0.0.1:80"),
-        (IpAddr::V4(Ipv4Addr::new(10, 0, 0, 1)), 443, "10.0.0.1:443"),
+        (IpAddr::V4(Ipv4Addr::new(127, 0, 0, 1)), 80, "127.0.0.1"),
+        (IpAddr::V4(Ipv4Addr::new(10, 0, 0, 1)), 443, "10.0.0.1"),
         (
             IpAddr::V4(Ipv4Addr::new(192, 168, 1, 50)),
             8080,
-            "192.168.1.50:8080",
+            "192.168.1.50",
         ),
         // IPv6 RFC 5952
-        (IpAddr::V6(Ipv6Addr::LOCALHOST), 50001, "::1:50001"),
-        (IpAddr::V6(Ipv6Addr::UNSPECIFIED), 8080, ":::8080"),
+        (IpAddr::V6(Ipv6Addr::LOCALHOST), 50001, "::1"),
+        (IpAddr::V6(Ipv6Addr::UNSPECIFIED), 8080, "::"),
         (
             IpAddr::V6("2001:db8::1".parse().unwrap()),
             443,
-            "2001:db8::1:443",
+            "2001:db8::1",
         ),
         // Multiple zero runs: 2001:0:0:1:0:0:0:1 -> compress longest (second) run -> 2001:0:0:1::1
         (
             IpAddr::V6("2001:0:0:1:0:0:0:1".parse().unwrap()),
             8080,
-            "2001:0:0:1::1:8080",
+            "2001:0:0:1::1",
         ),
         // Equal zero runs tie: 2001:0:0:1:2:0:0:1 -> compress first run -> 2001::1:2:0:0:1
         (
             IpAddr::V6("2001:0:0:1:2:0:0:1".parse().unwrap()),
             80,
-            "2001::1:2:0:0:1:80",
+            "2001::1:2:0:0:1",
         ),
         // Leading zero run: ::1:2:3:4
         (
             IpAddr::V6("0:0:0:0:1:2:3:4".parse().unwrap()),
             80,
-            "::1:2:3:4:80",
+            "::1:2:3:4",
         ),
         // Trailing zero run: 2001:db8:1:2::
         (
             IpAddr::V6("2001:db8:1:2:0:0:0:0".parse().unwrap()),
             80,
-            "2001:db8:1:2:::80",
+            "2001:db8:1:2::",
         ),
         // Full 8 hextets, no zeros
         (
             IpAddr::V6("2001:db8:85a3:8d3:1319:8a2e:370:7348".parse().unwrap()),
             443,
-            "2001:db8:85a3:8d3:1319:8a2e:370:7348:443",
+            "2001:db8:85a3:8d3:1319:8a2e:370:7348",
         ),
         // Single zero (must NOT compress per RFC 5952 section 4.2.2)
         (
             IpAddr::V6("2001:db8:0:1:2:3:4:5".parse().unwrap()),
             80,
-            "2001:db8:0:1:2:3:4:5:80",
+            "2001:db8:0:1:2:3:4:5",
         ),
     ];
 
@@ -306,7 +305,7 @@ fn test_chaos_ip_addresses_rfc4291_rfc5952() {
         ));
     }
 
-    let batches = vec![Arc::from(records.as_slice())];
+    let batches = vec![LogBatch::from_arc(Arc::from(records.as_slice()))];
 
     // 1. JSON Round-Trip Verification
     let mut json_out = Vec::new();
@@ -343,7 +342,7 @@ fn test_chaos_ip_addresses_rfc4291_rfc5952() {
 // 4. Tổ Hợp Status Code & Protocols Combinatorial Matrix
 // ============================================================================
 #[test]
-fn test_chaos_combinatorial_protocols_and_statuses() {
+fn test_chaos_protocol_matrix() {
     let all_protocols = [
         WireProtocol::H1,
         WireProtocol::H2,
@@ -442,7 +441,7 @@ fn test_chaos_combinatorial_protocols_and_statuses() {
         }
     }
 
-    let batches = vec![Arc::from(records.as_slice())];
+    let batches = vec![LogBatch::from_arc(Arc::from(records.as_slice()))];
 
     // 1. JSON Verification: ALL lines must parse strictly with serde_json
     let mut json_buf = Vec::new();
@@ -502,7 +501,7 @@ fn test_chaos_combinatorial_protocols_and_statuses() {
 // 5. Xác Minh Cú Pháp 100% (Round-Trip Schema & Key Completeness)
 // ============================================================================
 #[test]
-fn test_chaos_syntax_roundtrip_parsing_all_18_keys() {
+fn test_chaos_syntax_roundtrip() {
     let mut routes = vec!["unmatched"; 77];
     routes.push("api-upload");
     let catalog = velda_router::RouteCatalog::build(routes);
@@ -533,7 +532,7 @@ fn test_chaos_syntax_roundtrip_parsing_all_18_keys() {
     rec.url_len = p_len;
     rec.url_bytes = p_bytes;
 
-    let batches = vec![Arc::from(vec![rec])];
+    let batches = vec![LogBatch::from_arc(Arc::from(vec![rec]))];
     let mut out = Vec::new();
     format_std_log_payload(&batches, "json", &mut out);
 
@@ -568,7 +567,7 @@ fn test_chaos_syntax_roundtrip_parsing_all_18_keys() {
 
     assert_eq!(
         v["request_id"].as_str().unwrap(),
-        "0000000065f428a0deadbeefcafebabe"
+        "17bceaaff84e4000deadbeefcafebabe"
     );
     assert_eq!(v["timestamp_epoch_sec"].as_u64().unwrap(), 1_710_500_000);
     assert_eq!(v["duration_ns"].as_u64().unwrap(), 12345);
@@ -579,10 +578,7 @@ fn test_chaos_syntax_roundtrip_parsing_all_18_keys() {
     assert_eq!(v["status"].as_u64().unwrap(), 201);
     assert_eq!(v["bytes_rx"].as_u64().unwrap(), 5000);
     assert_eq!(v["bytes_tx"].as_u64().unwrap(), 10000);
-    assert_eq!(
-        v["client"].as_str().unwrap(),
-        "2001:db8::8a2e:370:7334:54321"
-    );
+    assert_eq!(v["client"].as_str().unwrap(), "2001:db8::8a2e:370:7334");
     assert_eq!(v["endpoint"].as_str().unwrap(), "192.168.1.2:9090");
     assert_eq!(v["user_agent"].as_str().unwrap(), "firefox/125");
     assert_eq!(v["client_os"].as_str().unwrap(), "macos");
@@ -593,7 +589,7 @@ fn test_chaos_syntax_roundtrip_parsing_all_18_keys() {
 // 6. Stress Testing Persistent File Sink (10,000 Records Across Batches)
 // ============================================================================
 #[tokio::test]
-async fn test_chaos_persistent_file_sink_stress_10000_records() {
+async fn test_chaos_file_sink_10k() {
     let temp_dir = tempfile::tempdir().unwrap();
     let file_path = temp_dir.path().join("chaos_stress_10k.log");
     let target = TargetStream::File(file_path.clone());
@@ -640,7 +636,7 @@ async fn test_chaos_persistent_file_sink_stress_10000_records() {
             ));
         }
 
-        let batches = vec![Arc::from(records.as_slice())];
+        let batches = vec![LogBatch::from_arc(Arc::from(records.as_slice()))];
         let n = format_std_log_payload(&batches, "json", &mut out_buf);
         assert_eq!(n, RECORDS_PER_BATCH);
 
@@ -664,20 +660,20 @@ async fn test_chaos_persistent_file_sink_stress_10000_records() {
         serde_json::from_str(lines[0]).expect("First line must parse JSON");
     assert_eq!(
         first["request_id"].as_str().unwrap(),
-        "0000000065ec87810000000000000001"
+        "17bb23f0e185ca000000000000000001"
     );
 
     let mid: serde_json::Value =
         serde_json::from_str(lines[5000]).expect("Mid line must parse JSON");
     assert_eq!(
         mid["request_id"].as_str().unwrap(),
-        "0000000065ec9b090000000000001389"
+        "17bb287d08bf1a000000000000001389"
     );
 
     let last: serde_json::Value =
         serde_json::from_str(lines[TOTAL_RECORDS - 1]).expect("Last line must parse JSON");
     assert_eq!(
         last["request_id"].as_str().unwrap(),
-        "0000000065ecae900000000000002710"
+        "17bb2d08f45da0000000000000002710"
     );
 }

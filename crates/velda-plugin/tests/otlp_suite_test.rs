@@ -14,7 +14,7 @@ use prost::Message;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::TcpListener;
 use velda_core::{CompletionReason, GrpcStatus, HttpMethod, PipeKind};
-use velda_observability::{AccessLogRecord, MetricsStore};
+use velda_observability::{AccessLogRecord, LogBatch, MetricsStore};
 use velda_plugin::OutboundTlsConfig;
 
 use velda_plugin::background::otlp_log_shipper::json::{
@@ -90,7 +90,7 @@ async fn spawn_mock_collector(
 }
 
 #[tokio::test]
-async fn test_otlp_metrics_persistent_connection_reuse() {
+async fn test_otlp_metrics_conn_reuse() {
     let (url, conns, reqs, _shutdown) = spawn_mock_collector("/v1/metrics").await;
 
     let mut client = OtlpMetricsClient::new(
@@ -204,43 +204,47 @@ async fn test_otlp_log_shipper_batching_and_send() {
     )
     .expect("Client initialized");
 
-    let rec1 = AccessLogRecord::from_scalars(
-        0x4bf9_2f35_77b3_4da6,
-        1_710_000_000,
-        2500,
-        "192.168.1.50:12345".parse().unwrap(),
-        Some("10.0.0.10:8080".parse().unwrap()),
-        100,
-        200,
-        200,
-        1,
-        0,
-        PipeKind::BufferedH1H1,
-        CompletionReason::Complete,
-        HttpMethod::Get,
-        GrpcStatus::NonGrpc,
-        b"curl/8.6.0",
-    );
+    let mut rec1 = AccessLogRecord::zeroed();
+    rec1.request_id = 0x4bf9_2f35_77b3_4da6;
+    rec1.ingress_time_nanos = 1_710_000_000;
+    rec1.duration_ns = 2500;
+    rec1.peer_ip = velda_core::lut::ip::encode_ip_u128("192.168.1.50".parse().unwrap());
+    rec1.upstream_ip = velda_core::lut::ip::encode_upstream_ip_u32("10.0.0.10".parse().unwrap());
+    rec1.upstream_port = 8080;
+    rec1.bytes_rx = 100;
+    rec1.bytes_tx = 200;
+    rec1.status_code = 200;
+    rec1.route_id = 1;
+    rec1.pipe = PipeKind::BufferedH1H1;
+    rec1.completion = CompletionReason::Complete;
+    rec1.method = HttpMethod::Get;
+    rec1.grpc_status = GrpcStatus::NonGrpc;
+    let (fam, os, ver) = velda_core::lut::classify_user_agent(b"curl/8.6.0");
+    rec1.ua_family = fam;
+    rec1.ua_os = os;
+    rec1.ua_major_version = ver;
 
-    let rec2 = AccessLogRecord::from_scalars(
-        0x5fb3_97be_34d2_3b0f,
-        1_710_000_001,
-        15200,
-        "192.168.1.51:12346".parse().unwrap(),
-        Some("10.0.0.11:8080".parse().unwrap()),
-        200,
-        500,
-        500,
-        2,
-        0,
-        PipeKind::BufferedH1H1,
-        CompletionReason::Complete,
-        HttpMethod::Post,
-        GrpcStatus::NonGrpc,
-        b"curl/8.6.0",
-    );
+    let mut rec2 = AccessLogRecord::zeroed();
+    rec2.request_id = 0x5fb3_97be_34d2_3b0f;
+    rec2.ingress_time_nanos = 1_710_000_001;
+    rec2.duration_ns = 15200;
+    rec2.peer_ip = velda_core::lut::ip::encode_ip_u128("192.168.1.51".parse().unwrap());
+    rec2.upstream_ip = velda_core::lut::ip::encode_upstream_ip_u32("10.0.0.11".parse().unwrap());
+    rec2.upstream_port = 8080;
+    rec2.bytes_rx = 200;
+    rec2.bytes_tx = 500;
+    rec2.status_code = 500;
+    rec2.route_id = 2;
+    rec2.pipe = PipeKind::BufferedH1H1;
+    rec2.completion = CompletionReason::Complete;
+    rec2.method = HttpMethod::Post;
+    rec2.grpc_status = GrpcStatus::NonGrpc;
+    let (fam, os, ver) = velda_core::lut::classify_user_agent(b"curl/8.6.0");
+    rec2.ua_family = fam;
+    rec2.ua_os = os;
+    rec2.ua_major_version = ver;
 
-    let batches = vec![Arc::from(vec![rec1, rec2])];
+    let batches = vec![LogBatch::from_arc(Arc::from(vec![rec1, rec2]))];
     let envelope = OtlpJsonEnvelope::new("test-edge");
     let mut payload = Vec::with_capacity(1024);
     format_otlp_records_json(&batches, &envelope, &mut payload);
@@ -348,25 +352,27 @@ async fn test_otlp_logs_grpc_export() {
     let (logs_endpoint, logs_count, _logs_shutdown) =
         spawn_mock_grpc_collector(OtlpLogsGrpcClient::RPC_PATH).await;
 
-    let rec = AccessLogRecord::from_scalars(
-        0x4bf9_2f35_77b3_4da6,
-        1_729_579_200,
-        2100,
-        "127.0.0.1:12345".parse().unwrap(),
-        Some("10.0.0.1:80".parse().unwrap()),
-        150,
-        300,
-        200,
-        1,
-        0,
-        PipeKind::BufferedH2H2,
-        CompletionReason::Complete,
-        HttpMethod::Post,
-        GrpcStatus::NonGrpc,
-        b"curl/8.6.0",
-    );
+    let mut rec = AccessLogRecord::zeroed();
+    rec.request_id = 0x4bf9_2f35_77b3_4da6;
+    rec.ingress_time_nanos = 1_729_579_200;
+    rec.duration_ns = 2100;
+    rec.peer_ip = velda_core::lut::ip::encode_ip_u128("127.0.0.1".parse().unwrap());
+    rec.upstream_ip = velda_core::lut::ip::encode_upstream_ip_u32("10.0.0.1".parse().unwrap());
+    rec.upstream_port = 80;
+    rec.bytes_rx = 150;
+    rec.bytes_tx = 300;
+    rec.status_code = 200;
+    rec.route_id = 1;
+    rec.pipe = PipeKind::BufferedH2H2;
+    rec.completion = CompletionReason::Complete;
+    rec.method = HttpMethod::Post;
+    rec.grpc_status = GrpcStatus::NonGrpc;
+    let (fam, os, ver) = velda_core::lut::classify_user_agent(b"curl/8.6.0");
+    rec.ua_family = fam;
+    rec.ua_os = os;
+    rec.ua_major_version = ver;
 
-    let batches = vec![Arc::from(vec![rec])];
+    let batches = vec![LogBatch::from_arc(Arc::from(vec![rec]))];
     let (req, _) = format_otlp_records_proto(&batches, "pay-service");
     let mut log_proto_bytes = Vec::new();
     req.encode(&mut log_proto_bytes).unwrap();

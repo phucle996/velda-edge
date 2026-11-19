@@ -28,9 +28,9 @@ use super::validation::PrometheusExporterConfig;
 use velda_observability::MetricsStore;
 use velda_tls::ServerTlsConfig;
 
-use super::lut::fast_write_u64_slice;
 use super::template::PrometheusTemplate;
 use crate::error::PluginError;
+use velda_core::lut::decimal::fast_write_u64_slice;
 
 // ============================================================================
 // Zero-Allocation Scratch Buffer Pool

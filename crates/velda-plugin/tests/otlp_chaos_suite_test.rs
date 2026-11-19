@@ -14,14 +14,14 @@
 
 use prost::Message;
 use std::sync::Arc;
+use velda_core::request_id::format_hex32_bytes;
 use velda_core::{
     CompletionReason, GrpcStatus, HttpMethod, PipeKind, UaFamily, UaOs, WireProtocol,
 };
-use velda_observability::AccessLogRecord;
+use velda_observability::{AccessLogRecord, LogBatch};
 use velda_plugin::background::otlp_log_shipper::json::{
     OtlpJsonEnvelope, format_otlp_records_json,
 };
-use velda_plugin::background::otlp_log_shipper::lut::format_hex32_bytes;
 use velda_plugin::background::otlp_log_shipper::proto::{
     ExportLogsServiceRequest, OtlpProtoWireEnvelope, any_value,
 };
@@ -39,20 +39,19 @@ fn make_record(
     rx: u32,
     route: u16,
     ip: u128,
-    port: u16,
+    _port: u16,
     ua_fam: UaFamily,
     ua_major: u16,
     ua_os: UaOs,
 ) -> AccessLogRecord {
     AccessLogRecord {
         request_id: req_id,
-        timestamp_sec: ts_sec,
+        ingress_time_nanos: (ts_sec as u64).saturating_mul(1_000_000_000),
         duration_ns: dur_ns,
         peer_ip: ip,
         bytes_rx: rx,
         bytes_tx: tx,
         upstream_ip: 0,
-        peer_port: port,
         upstream_port: 0,
         status_code: status,
         route_id: route,
@@ -73,7 +72,7 @@ fn make_record(
         ua_family: ua_fam,
         ua_os,
         url_len: 0,
-        url_bytes: [0; 188],
+        url_bytes: [0; 186],
     }
 }
 
@@ -98,7 +97,7 @@ fn ipv6_to_u128(segs: [u16; 8]) -> u128 {
 // 1. KỊCH BẢN 1: BIÊN CỰC TRỊ REQUEST ID & TIMESTAMPS
 // ============================================================================
 #[test]
-fn test_otlp_chaos_request_id_and_timestamps() {
+fn test_otlp_chaos_ids_and_ts() {
     let wire_env = OtlpProtoWireEnvelope::new("velda-chaos-service");
     let json_env = OtlpJsonEnvelope::new("velda-chaos-service");
 
@@ -123,8 +122,9 @@ fn test_otlp_chaos_request_id_and_timestamps() {
     for &req_id in &req_ids {
         for &ts_sec in &timestamps {
             // Reference 32 lowercase hex check
-            let expected_hex = format!("{:016x}{:016x}", ts_sec as u64, req_id);
-            let sim_hex = format_hex32_bytes(ts_sec as u64, req_id);
+            let expected_ts_nano = (ts_sec as u64).saturating_mul(1_000_000_000);
+            let expected_hex = format!("{:016x}{:016x}", expected_ts_nano, req_id);
+            let sim_hex = format_hex32_bytes(expected_ts_nano, req_id);
             assert_eq!(
                 std::str::from_utf8(&sim_hex).unwrap(),
                 expected_hex,
@@ -150,7 +150,7 @@ fn test_otlp_chaos_request_id_and_timestamps() {
             );
 
             // A. Test Protobuf Direct Wire Encoding & Round-Trip
-            let batch: Arc<[AccessLogRecord]> = Arc::from(vec![rec]);
+            let batch = LogBatch::from_arc(Arc::from(vec![rec]));
             let mut records_buf = Vec::new();
             let mut out = Vec::new();
             let count = wire_env.format_records_wire(
@@ -260,7 +260,7 @@ fn test_otlp_chaos_ip_addresses_and_ports() {
         );
 
         // A. Protobuf Round-Trip
-        let batch: Arc<[AccessLogRecord]> = Arc::from(vec![rec]);
+        let batch = LogBatch::from_arc(Arc::from(vec![rec]));
         let mut records_buf = Vec::new();
         let mut out = Vec::new();
         wire_env.format_records_wire(std::slice::from_ref(&batch), &mut records_buf, &mut out);
@@ -280,18 +280,6 @@ fn test_otlp_chaos_ip_addresses_and_ports() {
             panic!("Expected StringValue for client.address");
         }
 
-        // Attribute 11: client.port
-        assert_eq!(log_rec.attributes[11].key, "client.port");
-        if let Some(any_value::Value::IntValue(p)) = log_rec.attributes[11]
-            .value
-            .as_ref()
-            .and_then(|v| v.value.as_ref())
-        {
-            assert_eq!(*p, port as i64);
-        } else {
-            panic!("Expected IntValue for client.port");
-        }
-
         // B. JSON Round-Trip
         let mut json_out = Vec::new();
         format_otlp_records_json(&[batch], &json_env, &mut json_out);
@@ -299,7 +287,6 @@ fn test_otlp_chaos_ip_addresses_and_ports() {
         let parsed: serde_json::Value = serde_json::from_slice(&json_out).unwrap();
         let j_attrs = &parsed["resourceLogs"][0]["scopeLogs"][0]["logRecords"][0]["attributes"];
         assert_eq!(j_attrs[10]["value"]["stringValue"], expected_ip_str);
-        assert_eq!(j_attrs[11]["value"]["intValue"], port.to_string());
     }
 }
 
@@ -307,7 +294,7 @@ fn test_otlp_chaos_ip_addresses_and_ports() {
 // 3. KỊCH BẢN 3: TỔ HỢP TRẠNG THÁI & MÃ LỖI (STATUS CODE & SEVERITY MAPPINGS)
 // ============================================================================
 #[test]
-fn test_otlp_chaos_status_codes_and_severity_mappings() {
+fn test_otlp_chaos_severity() {
     let wire_env = OtlpProtoWireEnvelope::new("velda-severity-chaos");
     let json_env = OtlpJsonEnvelope::new("velda-severity-chaos");
 
@@ -361,7 +348,7 @@ fn test_otlp_chaos_status_codes_and_severity_mappings() {
             );
 
             // A. Protobuf Validation
-            let batch: Arc<[AccessLogRecord]> = Arc::from(vec![rec]);
+            let batch = LogBatch::from_arc(Arc::from(vec![rec]));
             let mut records_buf = Vec::new();
             let mut out = Vec::new();
             wire_env.format_records_wire(std::slice::from_ref(&batch), &mut records_buf, &mut out);
@@ -418,7 +405,7 @@ fn test_otlp_chaos_status_codes_and_severity_mappings() {
 // 4. KỊCH BẢN 4: BIÊN CỰC TRỊ VARINT & ĐỘ DÀI PAYLOAD
 // ============================================================================
 #[test]
-fn test_otlp_chaos_varint_and_payload_boundaries() {
+fn test_otlp_chaos_varint_bounds() {
     let wire_env = OtlpProtoWireEnvelope::new("velda-varint-chaos");
     let json_env = OtlpJsonEnvelope::new("velda-varint-chaos");
 
@@ -468,7 +455,7 @@ fn test_otlp_chaos_varint_and_payload_boundaries() {
                 );
 
                 // Protobuf Round-Trip
-                let batch: Arc<[AccessLogRecord]> = Arc::from(vec![rec]);
+                let batch = LogBatch::from_arc(Arc::from(vec![rec]));
                 let mut records_buf = Vec::new();
                 let mut out = Vec::new();
                 wire_env.format_records_wire(
@@ -523,7 +510,7 @@ fn test_otlp_chaos_varint_and_payload_boundaries() {
 // 5. KỊCH BẢN 5: TỔ HỢP PROTOCOL, METHOD, UA FAMILIES, VÀ OS
 // ============================================================================
 #[test]
-fn test_otlp_chaos_protocol_method_ua_combinations() {
+fn test_otlp_chaos_protocol_matrix() {
     let wire_env = OtlpProtoWireEnvelope::new("velda-combo-chaos");
     let json_env = OtlpJsonEnvelope::new("velda-combo-chaos");
 
@@ -598,7 +585,7 @@ fn test_otlp_chaos_protocol_method_ua_combinations() {
                         ua_os,
                     );
 
-                    let batch: Arc<[AccessLogRecord]> = Arc::from(vec![rec]);
+                    let batch = LogBatch::from_arc(Arc::from(vec![rec]));
                     let mut records_buf = Vec::new();
                     let mut out = Vec::new();
                     wire_env.format_records_wire(
@@ -620,9 +607,9 @@ fn test_otlp_chaos_protocol_method_ua_combinations() {
                         log_rec.attributes[3].value.as_ref().unwrap().value.as_ref(),
                         Some(&any_value::Value::StringValue(method.as_str().to_string()))
                     );
-                    // UA family (attr 12)
+                    // UA family (attr 11)
                     assert_eq!(
-                        log_rec.attributes[12]
+                        log_rec.attributes[11]
                             .value
                             .as_ref()
                             .unwrap()
@@ -630,9 +617,9 @@ fn test_otlp_chaos_protocol_method_ua_combinations() {
                             .as_ref(),
                         Some(&any_value::Value::StringValue(ua_fam.as_str().to_string()))
                     );
-                    // UA OS (attr 14)
+                    // UA OS (attr 13)
                     assert_eq!(
-                        log_rec.attributes[14]
+                        log_rec.attributes[13]
                             .value
                             .as_ref()
                             .unwrap()
@@ -649,8 +636,8 @@ fn test_otlp_chaos_protocol_method_ua_combinations() {
                         &parsed["resourceLogs"][0]["scopeLogs"][0]["logRecords"][0]["attributes"];
                     assert_eq!(j_attrs[1]["value"]["stringValue"], proto.as_str());
                     assert_eq!(j_attrs[3]["value"]["stringValue"], method.as_str());
-                    assert_eq!(j_attrs[12]["value"]["stringValue"], ua_fam.as_str());
-                    assert_eq!(j_attrs[14]["value"]["stringValue"], ua_os.as_str());
+                    assert_eq!(j_attrs[11]["value"]["stringValue"], ua_fam.as_str());
+                    assert_eq!(j_attrs[13]["value"]["stringValue"], ua_os.as_str());
                 }
             }
         }
@@ -672,9 +659,12 @@ fn test_otlp_chaos_batch_sizes_and_stress() {
     assert_eq!(count, 0);
     assert!(out.is_empty());
 
-    let empty_arc: Arc<[AccessLogRecord]> = Arc::from(vec![]);
-    let count2 =
-        wire_env.format_records_wire(std::slice::from_ref(&empty_arc), &mut records_buf, &mut out);
+    let empty_batch = LogBatch::from_arc(Arc::from(vec![]));
+    let count2 = wire_env.format_records_wire(
+        std::slice::from_ref(&empty_batch),
+        &mut records_buf,
+        &mut out,
+    );
     assert_eq!(count2, 0);
     assert!(out.is_empty());
 
@@ -683,7 +673,7 @@ fn test_otlp_chaos_batch_sizes_and_stress() {
     assert_eq!(j_count, 0);
     assert!(json_out.is_empty());
 
-    let j_count2 = format_otlp_records_json(&[empty_arc], &json_env, &mut json_out);
+    let j_count2 = format_otlp_records_json(&[empty_batch], &json_env, &mut json_out);
     assert_eq!(j_count2, 0);
     assert!(json_out.is_empty());
 
@@ -748,9 +738,9 @@ fn test_otlp_chaos_batch_sizes_and_stress() {
     }
 
     // Split into 4 chunks (simulating 4 frontline cores flushing simultaneously)
-    let chunks: Vec<Arc<[AccessLogRecord]>> = large_batch
+    let chunks: Vec<LogBatch> = large_batch
         .chunks(2500)
-        .map(|c| Arc::from(c.to_vec()))
+        .map(|c| LogBatch::from_arc(Arc::from(c.to_vec())))
         .collect();
 
     // Protobuf Stress Format & Decode
@@ -840,8 +830,8 @@ fn test_otlp_chaos_rdtsc_cycle_stability() {
         ));
     }
 
-    let batch_arc: Arc<[AccessLogRecord]> = Arc::from(chaos_batch);
-    let slices = [batch_arc];
+    let batch = LogBatch::from_arc(Arc::from(chaos_batch));
+    let slices = [batch];
 
     let mut records_buf = Vec::new();
     let mut out_proto = Vec::new();

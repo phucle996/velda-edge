@@ -10,11 +10,11 @@
 //!   OpenTelemetry log records.
 
 use prost::Message;
-use std::sync::Arc;
 use velda_core::GrpcStatus;
-use velda_observability::AccessLogRecord;
+use velda_observability::{AccessLogRecord, LogBatch};
 
-use super::super::lut::{fast_write_hex32, fast_write_ip};
+use velda_core::lut::ip::fast_write_ip;
+use velda_core::request_id::fast_write_hex32;
 
 /// Root export request for OpenTelemetry Logs Service.
 #[derive(Clone, PartialEq, Message)]
@@ -175,7 +175,6 @@ impl LogRecord {
                     value: Some(any_value::Value::StringValue(ip_str)),
                 }),
             },
-            KeyValue::int("client.port", 0),
             KeyValue::string("user_agent.family", "Unknown"),
             KeyValue::int("user_agent.major_version", 0),
             KeyValue::string("user_agent.os", "Unknown"),
@@ -205,9 +204,9 @@ impl LogRecord {
         let grpc_st = rec.grpc_status;
         let ua_fam = rec.ua_family;
         let ua_os = rec.ua_os;
-        let ts_nano = (rec.timestamp_sec as u64).saturating_mul(1_000_000_000);
+        let ts_nano = rec.ingress_time_nanos;
 
-        let req_hi = rec.timestamp_sec as u64;
+        let req_hi = rec.ingress_time_nanos;
         let req_lo = rec.request_id;
 
         let (severity_num, severity_txt) = if rec.status_code >= 500
@@ -251,7 +250,7 @@ impl LogRecord {
         self.span_id.clear();
 
         // Attribute updates
-        if self.attributes.len() >= 15 {
+        if self.attributes.len() >= 14 {
             // request_id attribute (32-character hex string):
             if let Some(AnyValue {
                 value: Some(any_value::Value::StringValue(ref mut s_req)),
@@ -339,15 +338,8 @@ impl LogRecord {
             }
 
             if let Some(AnyValue {
-                value: Some(any_value::Value::IntValue(ref mut v)),
-            }) = self.attributes[11].value
-            {
-                *v = rec.peer_port as i64;
-            }
-
-            if let Some(AnyValue {
                 value: Some(any_value::Value::StringValue(ref mut s)),
-            }) = self.attributes[12].value
+            }) = self.attributes[11].value
             {
                 s.clear();
                 s.push_str(ua_fam.as_str());
@@ -355,14 +347,14 @@ impl LogRecord {
 
             if let Some(AnyValue {
                 value: Some(any_value::Value::IntValue(ref mut v)),
-            }) = self.attributes[13].value
+            }) = self.attributes[12].value
             {
                 *v = rec.ua_major_version as i64;
             }
 
             if let Some(AnyValue {
                 value: Some(any_value::Value::StringValue(ref mut s)),
-            }) = self.attributes[14].value
+            }) = self.attributes[13].value
             {
                 s.clear();
                 s.push_str(ua_os.as_str());
@@ -373,14 +365,27 @@ impl LogRecord {
 
 /// Helper to format batches of [`AccessLogRecord`] into a Prost `ExportLogsServiceRequest`.
 pub fn format_otlp_records_proto(
-    batches: &[Arc<[AccessLogRecord]>],
+    batches: &[LogBatch],
     service_name: &str,
 ) -> (ExportLogsServiceRequest, usize) {
     let total_recs: usize = batches.iter().map(|b| b.len()).sum();
     let mut log_records = Vec::with_capacity(total_recs);
 
     for batch in batches {
-        for rec in batch.iter() {
+        let recs = batch.as_ref();
+        for (idx, rec) in recs.iter().enumerate() {
+            #[cfg(target_arch = "x86_64")]
+            if idx + 4 < recs.len() {
+                unsafe {
+                    use core::arch::x86_64::*;
+                    let next_rec =
+                        recs.get_unchecked(idx + 4) as *const AccessLogRecord as *const i8;
+                    _mm_prefetch(next_rec, _MM_HINT_T1);
+                    _mm_prefetch(next_rec.add(64), _MM_HINT_T1);
+                    _mm_prefetch(next_rec.add(128), _MM_HINT_T1);
+                    _mm_prefetch(next_rec.add(192), _MM_HINT_T1);
+                }
+            }
             let mut item = LogRecord::template();
             item.populate_from_record(rec);
             log_records.push(item);

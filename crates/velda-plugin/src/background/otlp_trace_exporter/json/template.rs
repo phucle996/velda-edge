@@ -53,12 +53,20 @@ impl OtlpTraceJsonEnvelope {
     }
 
     fn format_single_span_json(record: &SpanRecord, buf: &mut String, itoa_buf: &mut itoa::Buffer) {
+        const HEX_CHARS: &[u8; 16] = b"0123456789abcdef";
+
         let mut trace_hex = [0u8; 32];
-        record.format_trace_id(&mut trace_hex);
+        for (i, &b) in record.trace_id.iter().enumerate() {
+            trace_hex[i * 2] = HEX_CHARS[(b >> 4) as usize];
+            trace_hex[i * 2 + 1] = HEX_CHARS[(b & 0x0f) as usize];
+        }
         let trace_str = unsafe { std::str::from_utf8_unchecked(&trace_hex) };
 
         let mut span_hex = [0u8; 16];
-        record.format_span_id(&mut span_hex);
+        for (i, &b) in record.span_id.iter().enumerate() {
+            span_hex[i * 2] = HEX_CHARS[(b >> 4) as usize];
+            span_hex[i * 2 + 1] = HEX_CHARS[(b & 0x0f) as usize];
+        }
         let span_str = unsafe { std::str::from_utf8_unchecked(&span_hex) };
 
         buf.push_str("{\"traceId\":\"");
@@ -68,7 +76,7 @@ impl OtlpTraceJsonEnvelope {
         buf.push('"');
 
         buf.push_str(",\"name\":\"");
-        buf.push_str(record.method_str());
+        buf.push_str(record.method.as_str());
         buf.push(' ');
         velda_router::with_route_bytes(record.route_id, |route_bytes| {
             if let Ok(p) = std::str::from_utf8(route_bytes) {
@@ -82,11 +90,11 @@ impl OtlpTraceJsonEnvelope {
         buf.push_str(",\"endTimeUnixNano\":");
         buf.push_str(itoa_buf.format(record.end_time_unix_nano));
         buf.push_str(",\"status\":{\"code\":");
-        buf.push_str(itoa_buf.format(record.otlp_status));
+        buf.push_str(if record.status_code < 400 { "1" } else { "2" });
         buf.push_str("},\"attributes\":[{\"key\":\"http.status_code\",\"value\":{\"intValue\":");
         buf.push_str(itoa_buf.format(record.status_code));
         buf.push_str("}},{\"key\":\"http.method\",\"value\":{\"stringValue\":\"");
-        buf.push_str(record.method_str());
+        buf.push_str(record.method.as_str());
         buf.push_str("\"}},{\"key\":\"http.target\",\"value\":{\"stringValue\":\"");
         velda_router::with_route_bytes(record.route_id, |route_bytes| {
             if let Ok(p) = std::str::from_utf8(route_bytes) {
@@ -115,9 +123,10 @@ impl OtlpTraceJsonEnvelope {
             buf.push_str("\"}}");
         }
 
-        if record.ip_kind != 0 {
+        if record.client_ip != 0 {
             buf.push_str(",{\"key\":\"net.peer.ip\",\"value\":{\"stringValue\":\"");
-            record.format_client_ip(buf);
+            let (bytes, len) = velda_core::lut::ip::format_ip_bytes(record.client_ip);
+            buf.push_str(unsafe { std::str::from_utf8_unchecked(&bytes[..len]) });
             buf.push_str("\"}}");
         }
 
@@ -136,12 +145,10 @@ mod tests {
         span.start_time_unix_nano = 1_700_000_000_000_000_000;
         span.end_time_unix_nano = 1_700_000_000_015_000_000;
         span.status_code = 200;
-        span.otlp_status = 1;
         span.route_id = velda_core::UNMATCHED_ROUTE_ID;
-        span.method = 1; // GET
-        span.span_kind = 2; // SERVER
-        span.ip_kind = 4;
-        span.client_ip = [192, 168, 1, 10];
+        span.method = velda_core::HttpMethod::Get;
+        span.client_ip =
+            velda_core::lut::ip::encode_ipv4_u128(u32::from_be_bytes([192, 168, 1, 10]));
         span.trace_id = [1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16];
         span.span_id = [10, 20, 30, 40, 50, 60, 70, 80];
 

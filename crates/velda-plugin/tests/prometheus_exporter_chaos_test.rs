@@ -13,7 +13,6 @@ use tokio::net::TcpStream;
 use tokio::sync::watch;
 
 use velda_observability::{MetricsStore, PipelineSnapshot, TOTAL_PIPELINE_SLOTS};
-use velda_plugin::background::prometheus_exporter::lut::DIGIT_PAIRS;
 use velda_plugin::background::prometheus_exporter::server::BufferPool;
 use velda_plugin::background::prometheus_exporter::server::PrometheusExporter;
 use velda_plugin::background::prometheus_exporter::template::PrometheusTemplate;
@@ -35,7 +34,7 @@ fn free_local_addr() -> String {
 // ============================================================================
 
 #[test]
-fn test_chaos_all_36_pipeline_slots_boundary_values() {
+fn test_chaos_pipeline_slots_bounds() {
     let template = PrometheusTemplate::new();
 
     // Test with extreme boundary values
@@ -231,7 +230,7 @@ fn test_openmetrics_text_syntax_compliance() {
 // ============================================================================
 
 #[tokio::test]
-async fn test_chaos_semaphore_concurrency_burst_protection() {
+async fn test_chaos_concurrency_burst() {
     let addr = free_local_addr();
     let store = Arc::new(MetricsStore::new());
 
@@ -337,7 +336,7 @@ async fn test_chaos_semaphore_concurrency_burst_protection() {
 // ============================================================================
 
 #[test]
-fn test_chaos_continuous_stress_1000_cycles_memory_stability() {
+fn test_chaos_stress_1k() {
     let store = MetricsStore::new();
     let template = PrometheusTemplate::new();
     let initial_pool_cap = 64 * 1024;
@@ -373,23 +372,4 @@ fn test_chaos_continuous_stress_1000_cycles_memory_stability() {
         "Buffer capacity must remain strictly bounded under 256KB across 1,000 cycles (actual: {})",
         sample_buf.capacity()
     );
-}
-
-#[test]
-fn test_lut_digit_pairs_integrity() {
-    assert_eq!(DIGIT_PAIRS.len(), 200);
-    for i in 0..100 {
-        let expected_tens = b'0' + (i / 10) as u8;
-        let expected_ones = b'0' + (i % 10) as u8;
-        assert_eq!(
-            DIGIT_PAIRS[i * 2],
-            expected_tens,
-            "Digit pair tens mismatch for {i}"
-        );
-        assert_eq!(
-            DIGIT_PAIRS[i * 2 + 1],
-            expected_ones,
-            "Digit pair ones mismatch for {i}"
-        );
-    }
 }
