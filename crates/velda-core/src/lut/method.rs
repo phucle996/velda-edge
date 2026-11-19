@@ -1,10 +1,22 @@
 //! Canonical HTTP method variants and branchless lookup tables (`velda-core::lut::method`).
 //!
-//! Encodes standard HTTP request methods into a flat `u8` discriminant.
+//! ```text
+//! ┌─────────────────────────────────────────────────────────────────────────────────────────┐
+//! │                        HTTP_METHOD_NAMES (160 B L1D RESIDENT)                           │
+//! ├───────────────────────┬───────────────┬────────────────┬───────────────┬────────────────┤
+//! │ LUT Subsystem         │ Value Range   │ Variants Count │ Memory (L1D)  │ O(1) Mechanics │
+//! ├───────────────────────┼───────────────┼────────────────┼───────────────┼────────────────┤
+//! │ HttpMethod            │ 0..=9         │ 10 variants    │ 160 bytes     │ Direct Index   │
+//! └───────────────────────┴───────────────┴────────────────┴───────────────┴────────────────┘
 //!
-//! Follows the architectural invariant of Velda Edge:
-//! - 100% dense (0..=9), resident in L1 Data Cache ($10 \times 16\text{B} = 160\text{B}$).
-//! - Branchless length-and-leading-bytes classification without string allocation or byte-by-byte loops.
+//!   Inbound Method Bytes ──► [ Match Length & 4B Word ]
+//!                                    │
+//!                                    ▼
+//!                           HttpMethod (u8: 0..=9)
+//!                                    │
+//!                                    ▼
+//!                          HTTP_METHOD_NAMES[u8] ──► &'static str / &[u8]
+//! ```
 
 use serde::{Deserialize, Serialize};
 
@@ -86,6 +98,12 @@ impl HttpMethod {
     #[inline(always)]
     pub const fn as_str(self) -> &'static str {
         HTTP_METHOD_NAMES[self as usize]
+    }
+
+    /// Resolves the canonical uppercase ASCII method byte slice via O(1) direct array indexing.
+    #[inline(always)]
+    pub const fn as_bytes(self) -> &'static [u8] {
+        HTTP_METHOD_NAMES[self as usize].as_bytes()
     }
 
     /// Fast length-and-leading-bytes method classifier converting an ASCII byte slice into [`HttpMethod`].

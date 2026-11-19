@@ -1,12 +1,28 @@
 //! Finite User-Agent & OS classification and lookup tables (`velda-core::lut::user_agent`).
 //!
-//! Encodes arbitrary User-Agent client identity into a compact 4-byte scalar representation
-//! `(UaFamily: u8, UaOs: u8, ua_major_version: u16)`.
+//! ```text
+//! ┌─────────────────────────────────────────────────────────────────────────────────────────┐
+//! │                   UA_FAMILY_NAMES & UA_OS_NAMES (672 B L1D RESIDENT)                    │
+//! ├───────────────────────┬───────────────┬────────────────┬───────────────┬────────────────┤
+//! │ LUT Subsystem         │ Value Range   │ Variants Count │ Memory (L1D)  │ O(1) Mechanics │
+//! ├───────────────────────┼───────────────┼────────────────┼───────────────┼────────────────┤
+//! │ UaFamily              │ 0..=33        │ 34 variants    │ 544 bytes     │ Direct Index   │
+//! │ UaOs                  │ 0..=7         │  8 variants    │ 128 bytes     │ Direct Index   │
+//! ├───────────────────────┴───────────────┴────────────────┼───────────────┴────────────────┤
+//! │ Total User-Agent Metadata Footprint:                   │ 672 bytes                      │
+//! └────────────────────────────────────────────────────────┴────────────────────────────────┘
 //!
-//! Follows the architectural invariant of Velda Edge:
-//! - 100% dense: `UaFamily` (0..=33, $34 \times 16\text{B} = 544\text{B}$), `UaOs` (0..=7, $8 \times 16\text{B} = 128\text{B}$).
-//! - Resident in CPU L1 Data Cache (total 672B).
-//! - Eliminates sparse `255` sentinels, enabling O(1) branchless array indexing.
+//!   User-Agent Header Bytes ──► classify_user_agent()
+//!                                       │
+//!                                       ▼ (Pack into 4-byte scalar)
+//!                 ┌─────────────────────┼─────────────────────┐
+//!                 ▼                     ▼                     ▼
+//!          UaFamily (u8)             UaOs (u8)       ua_major_version (u16)
+//!                 │                     │
+//!                 ▼                     ▼
+//!        UA_FAMILY_NAMES[u8]       UA_OS_NAMES[u8]
+//!        ("chrome", "curl", ...)   ("linux", "macos", ...)
+//! ```
 
 use serde::{Deserialize, Serialize};
 
@@ -195,6 +211,12 @@ impl UaFamily {
         UA_FAMILY_NAMES[self as usize]
     }
 
+    /// Resolves the canonical kebab-case ASCII byte slice via O(1) direct array indexing.
+    #[inline(always)]
+    pub const fn as_bytes(self) -> &'static [u8] {
+        UA_FAMILY_NAMES[self as usize].as_bytes()
+    }
+
     /// Returns `true` if this family represents an interactive human web browser.
     #[inline(always)]
     pub const fn is_browser(self) -> bool {
@@ -312,6 +334,12 @@ impl UaOs {
     #[inline(always)]
     pub const fn as_str(self) -> &'static str {
         UA_OS_NAMES[self as usize]
+    }
+
+    /// Resolves the canonical kebab-case ASCII byte slice via O(1) direct array indexing.
+    #[inline(always)]
+    pub const fn as_bytes(self) -> &'static [u8] {
+        UA_OS_NAMES[self as usize].as_bytes()
     }
 
     /// Returns `true` if this environment represents a mobile platform (Android or iOS).

@@ -1,7 +1,24 @@
 //! Compile-Time Static Early Rejection Codebook & Metadata (`velda-core::lut::reject`).
 //!
-//! Provides dense, L1D cache-resident $\mathcal{O}(1)$ lookup tables for early rejection status codes,
-//! static ASCII response bodies, and Content-Length string literals.
+//! ```text
+//! ┌─────────────────────────────────────────────────────────────────────────────────────────┐
+//! │                       REJECT_STATIC_METAS (544 B L1D RESIDENT)                          │
+//! ├───────────────────────┬───────────────┬────────────────┬───────────────┬────────────────┤
+//! │ LUT Subsystem         │ Value Range   │ Variants Count │ Memory (L1D)  │ O(1) Mechanics │
+//! ├───────────────────────┼───────────────┼────────────────┼───────────────┼────────────────┤
+//! │ RejectReason          │ 0..=16        │ 17 variants    │ 544 bytes     │ Direct Index   │
+//! └───────────────────────┴───────────────┴────────────────┴───────────────┴────────────────┘
+//!
+//!   Early Rejection Trigger ──► RejectReason (u8: 0..=16)
+//!   (RateLimit / Auth / WAF)             │
+//!                                        ▼
+//!                              REJECT_STATIC_METAS[u8]
+//!                                        │
+//!              ┌─────────────────────────┼─────────────────────────┐
+//!              ▼                         ▼                         ▼
+//!     status: StatusCode       content_len_str: &str       body: &'static [u8]
+//!     (400, 401, 403, 429)     ("17", "22", ...)           ("429 Too Many Requests\n")
+//! ```
 
 use http::StatusCode;
 

@@ -1,11 +1,26 @@
 //! Canonical edge pipeline execution variants (`velda-core::lut::pipe`).
 //!
-//! Encodes the complete physical forwarding pipeline path (downstream generation, upstream generation,
-//! and streaming pipe strategy) as a single flat `u8` discriminant.
+//! ```text
+//! ┌─────────────────────────────────────────────────────────────────────────────────────────┐
+//! │                           PIPE_NAMES (1,024 B L1D RESIDENT)                             │
+//! ├───────────────────────┬───────────────┬────────────────┬───────────────┬────────────────┤
+//! │ LUT Subsystem         │ Value Range   │ Variants Count │ Memory (L1D)  │ O(1) Mechanics │
+//! ├───────────────────────┼───────────────┼────────────────┼───────────────┼────────────────┤
+//! │ PipeKind              │ 0..=63        │ 64 variants    │ 1,024 bytes   │ Direct Index   │
+//! └───────────────────────┴───────────────┴────────────────┴───────────────┴────────────────┘
 //!
-//! Follows the architectural invariant of Velda Edge:
-//! - Frontline hot path workers emit a single compile-time integer constant (1 byte `mov`).
-//! - Shadow workers and log shippers perform O(1) direct array indexing without branch prediction overhead.
+//!   Downstream Ingress        Pipe Strategy        Upstream Protocol
+//!   (H1 / H2 / H3 / Grpc / L4) ──► (Buffered / ──► (H1 / H2 / H3 / Grpc / L4)
+//!                                   ServerStream /
+//!                                   ClientStream /
+//!                                   Duplex)
+//!                                      │
+//!                                      ▼
+//!                              PipeKind (u8: 0..=63)
+//!                                      │
+//!                                      ▼
+//!                             PIPE_NAMES[u8] ──► &'static str / &[u8]
+//! ```
 
 use serde::{Deserialize, Serialize};
 
@@ -282,6 +297,12 @@ impl PipeKind {
         PIPE_NAMES[self as usize]
     }
 
+    /// Resolves the static ASCII pipe identifier byte slice via O(1) table lookup.
+    #[inline(always)]
+    pub const fn as_bytes(self) -> &'static [u8] {
+        PIPE_NAMES[self as usize].as_bytes()
+    }
+
     /// Converts a raw `u8` discriminant into a typed [`PipeKind`] if valid (0..=63).
     ///
     /// Returns `Some(PipeKind)` for valid discriminants, or `None` if out of bounds.
@@ -329,12 +350,6 @@ impl PipeKind {
         }
     }
 
-    /// Returns the downstream wire protocol variant (alias for `downstream_protocol`).
-    #[inline(always)]
-    pub const fn downstream(self) -> WireProtocol {
-        self.downstream_protocol()
-    }
-
     /// Returns the upstream wire protocol variant.
     #[inline(always)]
     pub const fn upstream_protocol(self) -> WireProtocol {
@@ -364,24 +379,6 @@ impl PipeKind {
             62 | 63 => WireProtocol::RawUdp,
             _ => WireProtocol::H1,
         }
-    }
-
-    /// Returns the upstream wire protocol variant (alias for `upstream_protocol`).
-    #[inline(always)]
-    pub const fn upstream(self) -> WireProtocol {
-        self.upstream_protocol()
-    }
-
-    /// Returns the downstream protocol discriminant as raw `u8` (0: H1, 1: H2, 2: H3, 3: GrpcTcp, 4: GrpcUdp, 5: RawTcp, 6: RawUdp).
-    #[inline(always)]
-    pub const fn downstream_protocol_u8(self) -> u8 {
-        self.downstream_protocol() as u8
-    }
-
-    /// Returns the upstream protocol discriminant as raw `u8` (0: H1, 1: H2, 2: H3, 3: GrpcTcp, 4: GrpcUdp, 5: RawTcp, 6: RawUdp).
-    #[inline(always)]
-    pub const fn upstream_protocol_u8(self) -> u8 {
-        self.upstream_protocol() as u8
     }
 
     /// Returns the streaming pipe strategy (0: Buffered, 1: ServerStream, 2: ClientStream, 3: Duplex).

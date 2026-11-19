@@ -1,4 +1,4 @@
-//! W3C TraceContext Request ID Generator & Thread-Local Pool (`velda_core::request_id`).
+//! W3C TraceContext Request ID Generator & Thread-Local Entropy Pool (`velda_core::request_id`).
 //!
 //! ```text
 //! ┌───────────────────────────────────┬───────────────────────────────────┐
@@ -6,11 +6,9 @@
 //! │ Unix Epoch Nanoseconds (Hex 0..16)│ SplitMix64 [WorkerId ^ SeqCounter]│
 //! └───────────────────────────────────┴───────────────────────────────────┘
 //!
-//!   next_request_id() ──► Thread-Local Pool (Capacity = 64, Low Watermark = 16)
-//!                             │
-//!             ┌───────────────┴───────────────┐
-//!             ▼ [Active Batch]                ▼ [Second Rollover]
-//!        Pop Entry (~1ns)              In-Place Prefix Patch (Hex 0..16)
+//!   Ingress Intake ──► clock::now_unix_nanos() ──┐
+//!                                                ▼
+//!   Thread-Local Entropy Pool ──► Pop Token ──► Assemble RequestId & HeaderValue
 //! ```
 
 use std::cell::RefCell;
@@ -20,16 +18,15 @@ use http::HeaderValue;
 
 use crate::types::RequestId;
 
-/// Maximum number of pre-generated request IDs cached in the thread-local pool.
+/// Maximum number of pre-generated entropy tokens cached in the thread-local pool.
 pub const ID_POOL_CAPACITY: usize = 64;
 
-/// Low watermark threshold. When available IDs fall below this count, a batch refill is triggered.
+/// Low watermark threshold. When available tokens fall below this count, a batch refill is triggered.
 pub const ID_POOL_LOW_WATERMARK: usize = 16;
 
-/// 128-bit vector register hex formatter: unpacks 16 nibbles and translates to ASCII in a single 128-bit store.
 #[cfg(target_arch = "x86_64")]
 #[inline]
-fn format_hex_16_128(val: u64, out: &mut [u8; 16]) {
+fn format_hex_16_simd(val: u64, out: &mut [u8; 16]) {
     use core::arch::x86_64::*;
     let be = val.to_be_bytes();
     unsafe {
@@ -48,10 +45,9 @@ fn format_hex_16_128(val: u64, out: &mut [u8; 16]) {
     }
 }
 
-/// 128-bit NEON vector register hex formatter.
 #[cfg(target_arch = "aarch64")]
 #[inline]
-fn format_hex_16_128(val: u64, out: &mut [u8; 16]) {
+fn format_hex_16_simd(val: u64, out: &mut [u8; 16]) {
     use core::arch::aarch64::*;
     let be = val.to_be_bytes();
     unsafe {
@@ -67,18 +63,15 @@ fn format_hex_16_128(val: u64, out: &mut [u8; 16]) {
     }
 }
 
-/// 64-bit SWAR branchless hex formatter: converts 8 nibbles at a time inside 64-bit integer registers.
 #[cfg(any(test, not(any(target_arch = "x86_64", target_arch = "aarch64"))))]
 #[inline]
-fn format_hex_16_64(val: u64, out: &mut [u8; 16]) {
+fn format_hex_16_swar(val: u64, out: &mut [u8; 16]) {
     #[inline(always)]
     fn swar_u32_to_hex8(x: u32) -> u64 {
-        // Spread 8 nibbles of `x` (big-endian order) into 8 bytes of a u64
         let mut v = x.to_be() as u64;
         v = ((v & 0x0000_0000_FFFF_0000) << 16) | (v & 0x0000_0000_0000_FFFF);
         v = ((v & 0x0000_FF00_0000_FF00) << 8) | (v & 0x0000_00FF_0000_00FF);
         v = ((v & 0x00F0_00F0_00F0_00F0) >> 4) | ((v & 0x000F_000F_000F_000F) << 8);
-        // Now each byte holds a nibble (0..15) in big-endian byte order on little-endian
         let mask = ((v + 0x0606_0606_0606_0606) >> 4) & 0x0101_0101_0101_0101;
         v + 0x3030_3030_3030_3030 + mask * (b'a' - 10 - b'0') as u64
     }
@@ -89,29 +82,49 @@ fn format_hex_16_64(val: u64, out: &mut [u8; 16]) {
 }
 
 /// Encodes a 64-bit unsigned integer into 16 lowercase hex ASCII bytes.
-///
-/// Uses SSE2 on x86_64 or NEON on AArch64 (single vector register unpack + store),
-/// with branchless 64-bit SWAR fallback. Completely eliminates indirect function pointer overhead.
 #[inline(always)]
 pub fn format_hex_16(val: u64, out: &mut [u8; 16]) {
     #[cfg(target_arch = "x86_64")]
     {
-        format_hex_16_128(val, out);
+        format_hex_16_simd(val, out);
     }
     #[cfg(target_arch = "aarch64")]
     {
-        format_hex_16_128(val, out);
+        format_hex_16_simd(val, out);
     }
     #[cfg(not(any(target_arch = "x86_64", target_arch = "aarch64")))]
     {
-        format_hex_16_64(val, out);
+        format_hex_16_swar(val, out);
     }
 }
 
-/// High-performance 64-bit bijective entropy mixer (SplitMix64).
-///
-/// Maps `(worker_id, seq)` to a distinct, high-entropy 64-bit integer
-/// with zero collisions and zero runs of consecutive zeros.
+/// Formats a 128-bit RequestId (`(high_64, low_64)`) into an exact 32-character lowercase hex string.
+#[inline(always)]
+pub fn format_hex32_bytes(hi: u64, lo: u64) -> [u8; 32] {
+    let mut out = [0u8; 32];
+    format_hex_16(hi, (&mut out[0..16]).try_into().unwrap());
+    format_hex_16(lo, (&mut out[16..32]).try_into().unwrap());
+    out
+}
+
+/// Appends a 128-bit RequestId as exactly 32 lowercase hex characters into `buf`.
+#[inline(always)]
+pub fn fast_write_hex32(buf: &mut Vec<u8>, hi: u64, lo: u64) {
+    let bytes = format_hex32_bytes(hi, lo);
+    buf.extend_from_slice(&bytes);
+}
+
+/// Stamps a 128-bit RequestId into a pre-allocated template slice at `offset`.
+#[inline(always)]
+pub fn stamp_hex32_at(slice: &mut [u8], offset: usize, hi: u64, lo: u64) {
+    let hex = format_hex32_bytes(hi, lo);
+    debug_assert!(offset + 32 <= slice.len());
+    unsafe {
+        core::ptr::copy_nonoverlapping(hex.as_ptr(), slice.as_mut_ptr().add(offset), 32);
+    }
+}
+
+/// 64-bit bijective entropy mixer (SplitMix64) combining worker ID and sequence counter.
 #[inline(always)]
 pub fn mix_entropy(worker_id: u16, seq: u64) -> u64 {
     let w = ((worker_id as u64) ^ 0x517c_c1b7_2722_0a95).rotate_left(17);
@@ -121,131 +134,88 @@ pub fn mix_entropy(worker_id: u16, seq: u64) -> u64 {
     z ^ (z >> 31)
 }
 
-/// Pre-computed request ID entry held in the pool.
+/// Pre-generated entropy suffix token held in the thread-local pool.
+///
+/// Contains entropy and its pre-formatted 16-character lowercase hex ASCII string.
+/// Completely independent of time: tokens never expire or rot.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-struct PoolEntry {
-    /// High 64 bits representing Unix epoch timestamp in nanoseconds.
-    timestamp: u64,
-    /// Low 64 bits representing bijective worker ID and sequence entropy.
-    entropy: u64,
-    /// Pre-formatted 32-character lowercase hex ASCII string.
-    hex: [u8; 32],
+pub struct EntropyToken {
+    pub entropy: u64,
+    pub suffix_hex: [u8; 16],
 }
 
-/// Thread-local pool for amortized, zero-allocation W3C Request ID generation.
+impl EntropyToken {
+    pub const ZERO: Self = Self {
+        entropy: 0,
+        suffix_hex: *b"0000000000000000",
+    };
+}
+
+/// Thread-local pool for pre-generating entropy suffix tokens.
 pub struct RequestIdPool {
     worker_id: u16,
     sequence: u64,
-    batch_epoch_sec: u64,
-    prefix_hex: [u8; 16],
-    entries: Vec<PoolEntry>,
+    count: usize,
+    tokens: [EntropyToken; ID_POOL_CAPACITY],
 }
 
 impl RequestIdPool {
     /// Creates a new `RequestIdPool` bound to a specific worker thread.
     pub fn new(worker_id: u16) -> Self {
-        let initial_sec = crate::clock::coarse_sec();
-        let initial_nanos = crate::clock::now_unix_nanos();
-        let mut prefix_hex = [0u8; 16];
-        format_hex_16(initial_nanos, &mut prefix_hex);
-
         let mut pool = Self {
             worker_id,
             sequence: 0,
-            batch_epoch_sec: initial_sec,
-            prefix_hex,
-            entries: Vec::with_capacity(ID_POOL_CAPACITY),
+            count: 0,
+            tokens: [EntropyToken::ZERO; ID_POOL_CAPACITY],
         };
         pool.refill();
         pool
     }
 
-    /// In-place batch refill up to [`ID_POOL_CAPACITY`].
+    /// Batch refills pre-computed entropy tokens up to [`ID_POOL_CAPACITY`].
     #[inline]
     fn refill(&mut self) {
-        let needed = ID_POOL_CAPACITY.saturating_sub(self.entries.len());
-        let base_nanos = crate::clock::now_unix_nanos();
-        for i in 0..needed {
-            let timestamp = base_nanos.wrapping_add(i as u64);
+        while self.count < ID_POOL_CAPACITY {
             let seq = self.sequence;
             self.sequence = self.sequence.wrapping_add(1);
             let entropy = mix_entropy(self.worker_id, seq);
-
-            let mut hex = [0u8; 32];
-            // Part 1: Nanosecond timestamp prefix (16 bytes)
-            format_hex_16(timestamp, (&mut hex[0..16]).try_into().unwrap());
-            // Part 2: High-entropy suffix (16 bytes)
-            let suffix_slice: &mut [u8; 16] = (&mut hex[16..32]).try_into().unwrap();
-            format_hex_16(entropy, suffix_slice);
-
-            self.entries.push(PoolEntry {
-                timestamp,
+            let mut suffix_hex = [0u8; 16];
+            format_hex_16(entropy, &mut suffix_hex);
+            self.tokens[self.count] = EntropyToken {
                 entropy,
-                hex,
-            });
+                suffix_hex,
+            };
+            self.count += 1;
         }
     }
 
-    /// Retrieves the next available Request ID with sub-microsecond in-place timestamp patching.
-    ///
-    /// # Performance
-    /// - Normal hot path: ~1-2 nanoseconds (array pop + bitwise OR).
-    /// - Idle rollover (> 1s): ~3-5 nanoseconds (in-place 16-byte memory patch of L1 cache entries).
+    /// Retrieves the next Request ID assembled with the given ingress timestamp in nanoseconds.
     #[inline]
-    pub fn next_id(&mut self) -> (RequestId, HeaderValue) {
-        let now_sec = crate::clock::coarse_sec();
-
-        // Check if second has rolled over (due to idle time > 1s)
-        if now_sec != self.batch_epoch_sec {
-            self.batch_epoch_sec = now_sec;
-            let now_nanos = crate::clock::now_unix_nanos();
-            format_hex_16(now_nanos, &mut self.prefix_hex);
-
-            // Two-Part Decoupled Assembly: Patch the first 16 hex bytes in place.
-            // Preserves pre-allocated entropy and sequence numbers in the suffix!
-            for entry in &mut self.entries {
-                entry.timestamp = now_nanos;
-                entry.hex[0..16].copy_from_slice(&self.prefix_hex);
-            }
-        }
-
-        // Trigger batch refill if pool dipped below low watermark
-        if self.entries.len() < ID_POOL_LOW_WATERMARK {
+    pub fn next_id(&mut self, ingress_nanos: u64) -> (RequestId, HeaderValue) {
+        if self.count < ID_POOL_LOW_WATERMARK {
             self.refill();
         }
 
-        let entry = self.entries.pop().unwrap_or_else(|| {
-            // Extreme edge-case fallback if capacity is 0
-            let timestamp = crate::clock::now_unix_nanos();
-            let seq = self.sequence;
-            self.sequence = self.sequence.wrapping_add(1);
-            let entropy = mix_entropy(self.worker_id, seq);
-            let mut hex = [0u8; 32];
-            format_hex_16(timestamp, (&mut hex[0..16]).try_into().unwrap());
-            let suffix_slice: &mut [u8; 16] = (&mut hex[16..32]).try_into().unwrap();
-            format_hex_16(entropy, suffix_slice);
-            PoolEntry {
-                timestamp,
-                entropy,
-                hex,
-            }
-        });
+        self.count -= 1;
+        let token = self.tokens[self.count];
 
-        // Construct 128-bit typed RequestId
-        let raw_u128 = ((entry.timestamp as u128) << 64) | (entry.entropy as u128);
+        let raw_u128 = ((ingress_nanos as u128) << 64) | (token.entropy as u128);
         let request_id = RequestId::new(raw_u128);
 
-        // Construct HeaderValue from verified ASCII hex slice (0 heap alloc)
-        let header_value = HeaderValue::from_bytes(&entry.hex)
+        let mut hex = [0u8; 32];
+        format_hex_16(ingress_nanos, (&mut hex[0..16]).try_into().unwrap());
+        hex[16..32].copy_from_slice(&token.suffix_hex);
+
+        let header_value = HeaderValue::from_bytes(&hex)
             .unwrap_or_else(|_| HeaderValue::from_static("00000000000000000000000000000000"));
 
         (request_id, header_value)
     }
 
-    /// Returns the current number of cached IDs in the pool (useful for testing).
+    /// Returns the current number of cached tokens in the pool.
     #[inline(always)]
     pub fn available(&self) -> usize {
-        self.entries.len()
+        self.count
     }
 }
 
@@ -257,12 +227,11 @@ thread_local! {
     );
 }
 
-/// Generates the next unique W3C-compliant Request ID and its corresponding HTTP [`HeaderValue`].
-///
-/// Executes in ~1-2ns on the request serving hot path via thread-local pre-generation.
+/// Generates the next unique W3C-compliant Request ID and its HTTP [`HeaderValue`]
+/// using the supplied ingress hardware timestamp in nanoseconds.
 #[inline(always)]
-pub fn next_request_id() -> (RequestId, HeaderValue) {
-    LOCAL_POOL.with(|pool| pool.borrow_mut().next_id())
+pub fn next_request_id(ingress_nanos: u64) -> (RequestId, HeaderValue) {
+    LOCAL_POOL.with(|pool| pool.borrow_mut().next_id(ingress_nanos))
 }
 
 #[cfg(test)]
@@ -277,11 +246,11 @@ mod tests {
         for &val in &[0u64, 0x0123456789abcdef, 0xfedcba9876543210, u64::MAX] {
             let expected = format!("{val:016x}");
             let mut out_dispatch = [0u8; 16];
-            let mut out_64 = [0u8; 16];
+            let mut out_swar = [0u8; 16];
             format_hex_16(val, &mut out_dispatch);
-            format_hex_16_64(val, &mut out_64);
+            format_hex_16_swar(val, &mut out_swar);
             assert_eq!(&out_dispatch, expected.as_bytes());
-            assert_eq!(&out_64, expected.as_bytes());
+            assert_eq!(&out_swar, expected.as_bytes());
         }
     }
 
@@ -290,50 +259,25 @@ mod tests {
         let mut pool = RequestIdPool::new(42);
         assert_eq!(pool.available(), ID_POOL_CAPACITY);
 
-        // Pop 50 items (exceeding low watermark of 16)
         for _ in 0..50 {
-            let (req_id, header_val) = pool.next_id();
+            let (req_id, header_val) = pool.next_id(1_710_000_000_123_456_789);
             assert_eq!(header_val.as_bytes().len(), 32);
             assert_eq!(req_id.to_string().len(), 32);
             assert_eq!(req_id.to_string().as_bytes(), header_val.as_bytes());
         }
 
-        // Pool must have automatically refilled when dropping below 16
         assert!(pool.available() >= ID_POOL_LOW_WATERMARK);
     }
 
     #[test]
-    fn prefix_patching() {
+    fn deterministic_assembly() {
         let mut pool = RequestIdPool::new(7);
+        let ingress_nanos = 0x1234_5678_9abc_def0_u64;
+        let (id, header) = pool.next_id(ingress_nanos);
 
-        // Artificially simulate that pool entries were generated 10 seconds ago
-        let old_sec = crate::clock::coarse_sec().saturating_sub(10);
-        let old_nanos = crate::clock::now_unix_nanos().saturating_sub(10_000_000_000);
-        pool.batch_epoch_sec = old_sec;
-        format_hex_16(old_nanos, &mut pool.prefix_hex);
-        for entry in &mut pool.entries {
-            entry.timestamp = old_nanos;
-            entry.hex[0..16].copy_from_slice(&pool.prefix_hex);
-        }
-
-        // The top entry waiting in the pool currently has old prefix and unique suffix
-        let expected_suffix = std::str::from_utf8(&pool.entries.last().unwrap().hex[16..32])
-            .unwrap()
-            .to_string();
-        let old_prefix = std::str::from_utf8(&pool.entries.last().unwrap().hex[0..16])
-            .unwrap()
-            .to_string();
-
-        // Calling next_id() detects that 10s has passed, patches prefix to current sec,
-        // and returns the entry preserving the exact same suffix!
-        let (_id, val) = pool.next_id();
-        let new_prefix = val.to_str().unwrap()[0..16].to_string();
-        let new_suffix = val.to_str().unwrap()[16..32].to_string();
-
-        // 1. Prefix must be updated to current second
-        assert_ne!(old_prefix, new_prefix);
-        // 2. Suffix (entropy/sequence) must be strictly preserved without regeneration
-        assert_eq!(expected_suffix, new_suffix);
+        assert_eq!(id.timestamp_nanos(), ingress_nanos);
+        let header_str = header.to_str().unwrap();
+        assert!(header_str.starts_with("123456789abcdef0"));
     }
 
     #[test]
@@ -348,7 +292,8 @@ mod tests {
             handles.push(thread::spawn(move || {
                 let mut local_ids = Vec::with_capacity(IDS_PER_THREAD);
                 for _ in 0..IDS_PER_THREAD {
-                    let (id, header) = next_request_id();
+                    let nanos = crate::clock::now_unix_nanos();
+                    let (id, header) = next_request_id(nanos);
                     local_ids.push((id, header.to_str().unwrap().to_string()));
                 }
 
@@ -366,5 +311,21 @@ mod tests {
 
         let total = generated_ids.lock().unwrap().len();
         assert_eq!(total, THREADS * IDS_PER_THREAD);
+    }
+
+    #[test]
+    fn test_format_hex32_bytes() {
+        let hi = 0x4bf9_2f35_77b3_4da6_u64;
+        let lo = 0xa3ce_929d_0e0e_4736_u64;
+        let bytes = format_hex32_bytes(hi, lo);
+        assert_eq!(&bytes, b"4bf92f3577b34da6a3ce929d0e0e4736");
+
+        let mut buf = Vec::new();
+        fast_write_hex32(&mut buf, hi, lo);
+        assert_eq!(buf, b"4bf92f3577b34da6a3ce929d0e0e4736");
+
+        let mut slice = [0u8; 40];
+        stamp_hex32_at(&mut slice, 4, hi, lo);
+        assert_eq!(&slice[4..36], b"4bf92f3577b34da6a3ce929d0e0e4736");
     }
 }

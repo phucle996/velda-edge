@@ -182,16 +182,16 @@ pub struct L7Request {
     /// Request body.
     pub body: Body,
 
-    /// Ingress timestamp snapshot (Unix epoch seconds) captured once at ingress.
+    /// Ingress timestamp snapshot (Unix epoch nanoseconds) captured once at ingress from hardware clock.
     /// Used by auth, rate limiting, and quota plugins to eliminate redundant clock reads.
-    pub ingress_time_sec: u64,
+    pub ingress_time_nanos: u64,
 
     /// Mutable strongly-typed state accumulated throughout the request lifecycle.
     pub state: RequestState,
 }
 
 impl L7Request {
-    /// Creates a new HTTP request from components, capturing the current coarse time snapshot.
+    /// Creates a new HTTP request from components, capturing the hardware time snapshot.
     #[inline]
     pub fn new(
         method: Method,
@@ -200,15 +200,23 @@ impl L7Request {
         headers: impl Into<HeaderWorkspace>,
         body: Body,
     ) -> Self {
+        let headers = headers.into();
+        let ingress_time_nanos = headers.ingress_time_nanos;
         Self {
             method,
             uri,
             version,
-            headers: headers.into(),
+            headers,
             body,
-            ingress_time_sec: crate::clock::coarse_sec(),
+            ingress_time_nanos,
             state: RequestState::default(),
         }
+    }
+
+    /// Returns the ingress timestamp in Unix epoch seconds.
+    #[inline(always)]
+    pub fn ingress_time_sec(&self) -> u64 {
+        self.ingress_time_nanos / 1_000_000_000
     }
 
     /// Attaches explicit request lifecycle state.

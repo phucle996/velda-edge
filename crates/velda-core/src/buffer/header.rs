@@ -10,7 +10,6 @@
 //!   16-byte register entries are materialized into the [`HeaderMap`] in a single pass.
 
 use std::cell::RefCell;
-use std::net::{IpAddr, Ipv4Addr, Ipv6Addr};
 use std::ops::Deref;
 
 use http::HeaderMap;
@@ -222,41 +221,12 @@ impl NumericHeaderEntry {
                 })
             }
             NumericFmt::Ipv4 => {
-                let octets = Ipv4Addr::from(self.raw as u32).octets();
-                let mut buf = [0u8; 15];
-                let mut pos = 0usize;
-                for (i, &oct) in octets.iter().enumerate() {
-                    if i > 0 {
-                        buf[pos] = b'.';
-                        pos += 1;
-                    }
-                    let n = oct as usize;
-                    if n < 10 {
-                        buf[pos] = DIGITS_1[n];
-                        pos += 1;
-                    } else if n < 100 {
-                        let idx = (n - 10) * 2;
-                        buf[pos] = DIGITS_2[idx];
-                        buf[pos + 1] = DIGITS_2[idx + 1];
-                        pos += 2;
-                    } else {
-                        let idx = (n - 100) * 3;
-                        buf[pos] = DIGITS_3[idx];
-                        buf[pos + 1] = DIGITS_3[idx + 1];
-                        buf[pos + 2] = DIGITS_3[idx + 2];
-                        pos += 3;
-                    }
-                }
-                HeaderValue::from_bytes(&buf[..pos])
+                let (buf, len) = crate::lut::ip::format_ipv4_bytes(self.raw as u32);
+                HeaderValue::from_bytes(&buf[..len])
                     .unwrap_or_else(|_| HeaderValue::from_static("0.0.0.0"))
             }
             NumericFmt::Ipv6 => {
-                use std::io::Write;
-                let v6 = Ipv6Addr::from(self.raw);
-                let mut buf = [0u8; 46];
-                let mut cursor = std::io::Cursor::new(&mut buf[..]);
-                let _ = write!(cursor, "{v6}");
-                let len = cursor.position() as usize;
+                let (buf, len) = crate::lut::ip::format_ipv6_bytes(self.raw);
                 HeaderValue::from_bytes(&buf[..len])
                     .unwrap_or_else(|_| HeaderValue::from_static("::"))
             }
@@ -277,7 +247,7 @@ impl NumericHeaderEntry {
 pub struct HeaderWorkspace {
     headers: HeaderMap,
     pub request_id_raw: u128,
-    pub ingress_time_sec: u64,
+    pub ingress_time_nanos: u64,
     numeric_entries: [Option<NumericHeaderEntry>; MAX_NUMERIC_HEADERS],
     pub numeric_len: u8,
     bypass_keys: [Option<HeaderName>; MAX_BYPASS_HEADERS],
@@ -289,18 +259,25 @@ impl HeaderWorkspace {
     pub const X_REQUEST_ID: HeaderName = X_REQUEST_ID;
     pub const DEFAULT_CAPACITY: usize = 32;
 
+    /// Returns the ingress timestamp in Unix epoch seconds.
+    #[inline(always)]
+    pub fn ingress_time_sec(&self) -> u64 {
+        self.ingress_time_nanos / 1_000_000_000
+    }
+
     /// Creates and pre-warms a header workspace with specified initial bucket capacity.
     pub fn new(capacity: usize) -> Self {
         let mut headers = HeaderMap::with_capacity(capacity);
         headers.reserve(capacity);
-        let (id, req_id) = crate::request_id::next_request_id();
+        let ingress_time_nanos = crate::clock::now_unix_nanos();
+        let (id, req_id) = crate::request_id::next_request_id(ingress_time_nanos);
         headers.insert(X_REQUEST_ID, req_id);
         let mut bypass_keys = [const { None }; MAX_BYPASS_HEADERS];
         bypass_keys[0] = Some(X_REQUEST_ID);
         Self {
             headers,
             request_id_raw: id.0,
-            ingress_time_sec: crate::clock::coarse_sec(),
+            ingress_time_nanos,
             numeric_entries: [const { None }; MAX_NUMERIC_HEADERS],
             numeric_len: 0,
             bypass_keys,
@@ -313,6 +290,11 @@ impl HeaderWorkspace {
     #[inline]
     pub fn with_request_id(req_id: HeaderValue, capacity: usize) -> Self {
         let raw = parse_hex_128(req_id.as_bytes()).unwrap_or(0);
+        let ingress_time_nanos = if raw != 0 {
+            (raw >> 64) as u64
+        } else {
+            crate::clock::now_unix_nanos()
+        };
         let mut headers = HeaderMap::with_capacity(capacity);
         headers.reserve(capacity);
         headers.insert(X_REQUEST_ID, req_id);
@@ -321,7 +303,7 @@ impl HeaderWorkspace {
         Self {
             headers,
             request_id_raw: raw,
-            ingress_time_sec: crate::clock::coarse_sec(),
+            ingress_time_nanos,
             numeric_entries: [const { None }; MAX_NUMERIC_HEADERS],
             numeric_len: 0,
             bypass_keys,
@@ -334,19 +316,26 @@ impl HeaderWorkspace {
     #[inline]
     pub fn from_headers(mut headers: HeaderMap) -> Self {
         let cap = headers.capacity().max(Self::DEFAULT_CAPACITY);
-        let raw = if let Some(existing) = headers.get(&X_REQUEST_ID) {
-            parse_hex_128(existing.as_bytes()).unwrap_or(0)
+        let now_nanos = crate::clock::now_unix_nanos();
+        let (raw, ingress_time_nanos) = if let Some(existing) = headers.get(&X_REQUEST_ID) {
+            let parsed = parse_hex_128(existing.as_bytes()).unwrap_or(0);
+            let nanos = if parsed != 0 {
+                (parsed >> 64) as u64
+            } else {
+                now_nanos
+            };
+            (parsed, nanos)
         } else {
-            let (id, req_id) = crate::request_id::next_request_id();
+            let (id, req_id) = crate::request_id::next_request_id(now_nanos);
             headers.insert(X_REQUEST_ID, req_id);
-            id.0
+            (id.0, now_nanos)
         };
         let mut bypass_keys = [const { None }; MAX_BYPASS_HEADERS];
         bypass_keys[0] = Some(X_REQUEST_ID);
         Self {
             headers,
             request_id_raw: raw,
-            ingress_time_sec: crate::clock::coarse_sec(),
+            ingress_time_nanos,
             numeric_entries: [const { None }; MAX_NUMERIC_HEADERS],
             numeric_len: 0,
             bypass_keys,
@@ -516,32 +505,30 @@ impl HeaderWorkspace {
     }
 
     #[inline(always)]
-    pub fn set_ip(&mut self, name: HeaderName, ip: IpAddr) {
-        match ip {
-            IpAddr::V4(v4) => self.push_numeric(
-                name,
-                u32::from(v4) as u128,
-                NumericFmt::Ipv4,
-                NumericOp::Set,
-            ),
-            IpAddr::V6(v6) => {
-                self.push_numeric(name, u128::from(v6), NumericFmt::Ipv6, NumericOp::Set)
-            }
+    pub fn set_ip(&mut self, name: HeaderName, ip: u128) {
+        self.set_ip_u128(name, ip);
+    }
+
+    #[inline(always)]
+    pub fn append_ip(&mut self, name: HeaderName, ip: u128) {
+        self.append_ip_u128(name, ip);
+    }
+
+    #[inline(always)]
+    pub fn set_ip_u128(&mut self, name: HeaderName, ip: u128) {
+        if let Some(v4) = crate::lut::ip::is_ipv4_mapped_u128(ip) {
+            self.push_numeric(name, v4 as u128, NumericFmt::Ipv4, NumericOp::Set);
+        } else {
+            self.push_numeric(name, ip, NumericFmt::Ipv6, NumericOp::Set);
         }
     }
 
     #[inline(always)]
-    pub fn append_ip(&mut self, name: HeaderName, ip: IpAddr) {
-        match ip {
-            IpAddr::V4(v4) => self.push_numeric(
-                name,
-                u32::from(v4) as u128,
-                NumericFmt::Ipv4,
-                NumericOp::Append,
-            ),
-            IpAddr::V6(v6) => {
-                self.push_numeric(name, u128::from(v6), NumericFmt::Ipv6, NumericOp::Append)
-            }
+    pub fn append_ip_u128(&mut self, name: HeaderName, ip: u128) {
+        if let Some(v4) = crate::lut::ip::is_ipv4_mapped_u128(ip) {
+            self.push_numeric(name, v4 as u128, NumericFmt::Ipv4, NumericOp::Append);
+        } else {
+            self.push_numeric(name, ip, NumericFmt::Ipv6, NumericOp::Append);
         }
     }
 
@@ -608,14 +595,14 @@ impl HeaderWorkspace {
         parse_hex_128(self.headers.get(name)?.as_bytes())
     }
 
-    /// Reads a header as a binary [`IpAddr`] via 64-bit integer key lookup or wire bytes.
+    /// Reads a header as an RFC 4291 `u128` IP integer via 64-bit integer key lookup or zero-allocation wire byte parsing.
     #[inline]
-    pub fn get_ip<K: AsHeaderName>(&self, name: K) -> Option<IpAddr> {
+    pub fn get_ip_u128<K: AsHeaderName>(&self, name: K) -> Option<u128> {
         let key = header_key(name.as_str().as_bytes());
         if let Some((raw, fmt)) = self.get_raw_by_key(key) {
             return match fmt {
-                NumericFmt::Ipv4 => Some(IpAddr::V4(Ipv4Addr::from(raw as u32))),
-                NumericFmt::Ipv6 => Some(IpAddr::V6(Ipv6Addr::from(raw))),
+                NumericFmt::Ipv4 => Some(crate::lut::ip::encode_ipv4_u128(raw as u32)),
+                NumericFmt::Ipv6 => Some(raw),
                 _ => None,
             };
         }
@@ -624,10 +611,7 @@ impl HeaderWorkspace {
             Some(idx) => &bytes[..idx],
             None => bytes,
         };
-        std::str::from_utf8(first.trim_ascii())
-            .ok()?
-            .parse::<IpAddr>()
-            .ok()
+        crate::lut::ip::parse_ip_u128(first.trim_ascii())
     }
 
     /// Batch-renders all pending 16-byte register mutations into the underlying [`HeaderMap`].
@@ -893,9 +877,10 @@ impl HeaderWorkspace {
     pub fn take(&mut self) -> HeaderMap {
         self.render();
         self.bypass_keys = [const { None }; MAX_BYPASS_HEADERS];
-        let (id, req_id) = crate::request_id::next_request_id();
+        let ingress_nanos = crate::clock::now_unix_nanos();
+        let (id, req_id) = crate::request_id::next_request_id(ingress_nanos);
         self.request_id_raw = id.0;
-        self.ingress_time_sec = crate::clock::coarse_sec();
+        self.ingress_time_nanos = ingress_nanos;
         self.bypass_keys[0] = Some(X_REQUEST_ID);
         self.bypass_len = 1;
         let mut new_map = HeaderMap::with_capacity(self.initial_capacity);
@@ -909,9 +894,10 @@ impl HeaderWorkspace {
             self.numeric_entries[i] = None;
         }
         self.numeric_len = 0;
-        let (id, req_id) = crate::request_id::next_request_id();
+        let ingress_nanos = crate::clock::now_unix_nanos();
+        let (id, req_id) = crate::request_id::next_request_id(ingress_nanos);
         self.request_id_raw = id.0;
-        self.ingress_time_sec = crate::clock::coarse_sec();
+        self.ingress_time_nanos = ingress_nanos;
         self.bypass_keys = [const { None }; MAX_BYPASS_HEADERS];
         self.bypass_keys[0] = Some(X_REQUEST_ID);
         self.bypass_len = 1;
@@ -1001,7 +987,8 @@ mod tests {
         let mut ws = HeaderWorkspace::new(32);
         assert!(ws.capacity() >= 32);
         assert_ne!(ws.request_id_raw, 0);
-        assert!(ws.ingress_time_sec > 1_700_000_000);
+        assert!(ws.ingress_time_nanos > 1_700_000_000_000_000_000);
+        assert!(ws.ingress_time_sec() > 1_700_000_000);
 
         ws.insert(CONTENT_TYPE, HeaderValue::from_static("application/json"));
         ws.insert(AUTHORIZATION, HeaderValue::from_static("Bearer token123"));
@@ -1017,7 +1004,7 @@ mod tests {
     fn test_header_workspace_arithmetic_defer_and_batch_render() {
         let mut ws = HeaderWorkspace::new(32);
         let req_id_u128 = ws.request_id_raw;
-        let ts = ws.ingress_time_sec;
+        let ts = ws.ingress_time_sec();
 
         let h_limit = HeaderName::from_static("x-ratelimit-limit");
         let h_rem = HeaderName::from_static("x-ratelimit-remaining");
@@ -1026,11 +1013,12 @@ mod tests {
         let h_ip = HeaderName::from_static("x-real-ip");
         let h_ts = HeaderName::from_static("x-edge-ts");
 
+        let ip_v4 = crate::lut::ip::encode_ipv4_u128(0x0A18_0005);
         ws.set_u64(h_limit.clone(), 100);
         ws.set_u64(h_rem.clone(), 99);
         ws.set_u64(h_status.clone(), 200);
         ws.set_hex128(h_trace.clone(), req_id_u128);
-        ws.set_ip(h_ip.clone(), IpAddr::V4(Ipv4Addr::new(10, 24, 0, 5)));
+        ws.set_ip(h_ip.clone(), ip_v4);
         ws.set_u64(h_ts.clone(), ts);
 
         assert_eq!(ws.numeric_len, 6);
@@ -1038,10 +1026,7 @@ mod tests {
         assert_eq!(ws.get_u64(&h_rem), Some(99));
         assert_eq!(ws.get_u64(&h_status), Some(200));
         assert_eq!(ws.get_hex128(&h_trace), Some(req_id_u128));
-        assert_eq!(
-            ws.get_ip(&h_ip),
-            Some(IpAddr::V4(Ipv4Addr::new(10, 24, 0, 5)))
-        );
+        assert_eq!(ws.get_ip_u128(&h_ip), Some(ip_v4));
         assert_eq!(ws.get_u64(&h_ts), Some(ts));
         assert!(ws.contains_key(&h_limit));
 
@@ -1052,11 +1037,14 @@ mod tests {
         assert_eq!(ws.get(&h_status).unwrap(), "200");
         assert_eq!(ws.get(&h_trace).unwrap(), ws.request_id());
         assert_eq!(ws.get(&h_ip).unwrap(), "10.24.0.5");
+        assert_eq!(ws.get_ip_u128(&h_ip), Some(ip_v4));
         assert_eq!(ws.get(&h_ts).unwrap(), &ts.to_string());
 
-        ws.set_ip(h_ip.clone(), IpAddr::V6(Ipv6Addr::LOCALHOST));
+        ws.set_ip(h_ip.clone(), 1);
+        assert_eq!(ws.get_ip_u128(&h_ip), Some(1));
         ws.render();
         assert_eq!(ws.get(&h_ip).unwrap(), "::1");
+        assert_eq!(ws.get_ip_u128(&h_ip), Some(1));
 
         const KEY_PROTO: u64 = header_key(b"x-forwarded-proto");
         let h_proto = HeaderName::from_static("x-forwarded-proto");

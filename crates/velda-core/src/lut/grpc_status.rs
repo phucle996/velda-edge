@@ -1,10 +1,21 @@
 //! Canonical gRPC status code variants and branchless lookup tables (`velda-core::lut::grpc_status`).
 //!
-//! Encodes standard wire `grpc-status` codes (0..=16) plus a discrete non-gRPC sentinel into a flat `u8`.
+//! ```text
+//! ┌─────────────────────────────────────────────────────────────────────────────────────────┐
+//! │                        GRPC_STATUS_NAMES (288 B L1D RESIDENT)                           │
+//! ├───────────────────────┬───────────────┬────────────────┬───────────────┬────────────────┤
+//! │ LUT Subsystem         │ Value Range   │ Variants Count │ Memory (L1D)  │ O(1) Mechanics │
+//! ├───────────────────────┼───────────────┼────────────────┼───────────────┼────────────────┤
+//! │ GrpcStatus            │ 0..=17        │ 18 variants    │ 288 bytes     │ Direct Index   │
+//! └───────────────────────┴───────────────┴────────────────┴───────────────┴────────────────┘
 //!
-//! Follows the architectural invariant of Velda Edge:
-//! - 100% dense (0..=17), resident in L1 Data Cache ($18 \times 16\text{B} = 288\text{B}$).
-//! - Eliminates sparse `255` gaps, allowing pure O(1) array indexing without branch prediction overhead.
+//!   gRPC Trailers / Ingress Error ──► GrpcStatus (u8: 0..=17)
+//!   (RFC 7807 / gRPC Wire Codes)              │
+//!                                             ├──────────────────────────┐
+//!                                             ▼                          ▼
+//!                                   GRPC_STATUS_NAMES[u8]      GRPC_STATUS_CODE_STRINGS[u8]
+//!                                   ("OK", "CANCELLED", ...)   ("0", "1", "16", "17")
+//! ```
 
 use http::StatusCode;
 use http::header::{CONTENT_TYPE, HeaderMap, HeaderValue};
@@ -143,6 +154,12 @@ impl GrpcStatus {
     #[inline(always)]
     pub const fn as_str(self) -> &'static str {
         GRPC_STATUS_NAMES[self as usize]
+    }
+
+    /// Resolves the canonical uppercase ASCII status byte slice via O(1) direct array indexing.
+    #[inline(always)]
+    pub const fn as_bytes(self) -> &'static [u8] {
+        GRPC_STATUS_NAMES[self as usize].as_bytes()
     }
 
     /// Returns the integer code value (0..=17).

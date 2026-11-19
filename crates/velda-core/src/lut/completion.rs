@@ -1,9 +1,19 @@
 //! Canonical stream completion reason variants and lookup tables (`velda-core::lut::completion`).
 //!
-//! Encodes how a request or stream lifecycle finished into a flat `u8`.
+//! ```text
+//! ┌─────────────────────────────────────────────────────────────────────────────────────────┐
+//! │                    COMPLETION_REASON_NAMES (80 B L1D RESIDENT)                          │
+//! ├───────────────────────┬───────────────┬────────────────┬───────────────┬────────────────┤
+//! │ LUT Subsystem         │ Value Range   │ Variants Count │ Memory (L1D)  │ O(1) Mechanics │
+//! ├───────────────────────┼───────────────┼────────────────┼───────────────┼────────────────┤
+//! │ CompletionReason      │ 0..=4         │ 5 variants     │ 80 bytes      │ Direct Index   │
+//! └───────────────────────┴───────────────┴────────────────┴───────────────┴────────────────┘
 //!
-//! Follows the architectural invariant of Velda Edge:
-//! - 100% dense (0..=4), resident in L1 Data Cache ($5 \times 16\text{B} = 80\text{B}$).
+//!   Stream Termination Event ──► CompletionReason (u8: 0..=4)
+//!   (Complete / ClientCancel /             │
+//!    UpstreamError / Timeout /             ▼
+//!    Rejected)                   COMPLETION_REASON_NAMES[u8] ──► &'static str / &[u8]
+//! ```
 
 use serde::{Deserialize, Serialize};
 
@@ -74,6 +84,12 @@ impl CompletionReason {
     #[inline(always)]
     pub const fn as_str(self) -> &'static str {
         COMPLETION_REASON_NAMES[self as usize]
+    }
+
+    /// Resolves the canonical snake_case ASCII byte slice via O(1) direct array indexing.
+    #[inline(always)]
+    pub const fn as_bytes(self) -> &'static [u8] {
+        COMPLETION_REASON_NAMES[self as usize].as_bytes()
     }
 
     /// Returns `true` if the stream completed normally without premature client or upstream abortion.

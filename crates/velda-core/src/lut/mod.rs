@@ -16,11 +16,14 @@
 //! │ HttpMethod            │ 0..=9         │ 10             │   160 bytes   │ METHOD_NAMES   │
 //! │ WireProtocol          │ 0..=6         │  7             │   112 bytes   │ PROTOCOL_NAMES │
 //! │ GrpcStatus            │ 0..=17        │ 18             │   288 bytes   │ STATUS_NAMES   │
-//! │ CompletionReason      │ 0..=3         │  4             │    64 bytes   │ REASON_NAMES   │
+//! │ CompletionReason      │ 0..=4         │  5             │    80 bytes   │ REASON_NAMES   │
 //! │ UaFamily              │ 0..=33        │ 34             │   544 bytes   │ UA_FAM_NAMES   │
 //! │ UaOs                  │ 0..=7         │  8             │   128 bytes   │ UA_OS_NAMES    │
+//! │ OctetTable (IPv4)     │ 0..=255       │ 256            │ 1,024 bytes   │ OCTET_TABLE    │
+//! │ HexOctetTable (IPv6)  │ 0..=255       │ 256            │   512 bytes   │ HEX_OCTET_TABLE│
+//! │ DecimalPairs (Itoa)   │ 00..=99       │ 100            │   200 bytes   │ DIGIT_PAIRS    │
 //! ├───────────────────────┴───────────────┴────────────────┼───────────────┴────────────────┤
-//! │ Total Memory Resident in CPU L1 Data Cache:            │ ~2,320 bytes (< 5% of 32KB L1) │
+//! │ Total Memory Resident in CPU L1 Data Cache:            │ ~4,056 bytes (< 13% of 32KB L1)│
 //! └────────────────────────────────────────────────────────┴────────────────────────────────┘
 //! ```
 //!
@@ -35,7 +38,9 @@
 //!    All enums are `#[repr(u8)]`, `Copy`, `Eq`, `Hash`, zero-pointer, zero-allocation data structures.
 
 pub mod completion;
+pub mod decimal;
 pub mod grpc_status;
+pub mod ip;
 pub mod method;
 pub mod pipe;
 pub mod protocol;
@@ -44,6 +49,10 @@ pub mod user_agent;
 
 pub use completion::{COMPLETION_REASON_NAMES, CompletionReason};
 pub use grpc_status::{GRPC_STATUS_CODE_STRINGS, GRPC_STATUS_NAMES, GrpcStatus};
+pub use ip::{
+    encode_ip_u128, encode_ipv4_u128, encode_upstream_ip_u32, fast_write_ip, format_ip_bytes,
+    is_ipv4_mapped_u128, parse_ip_u128, parse_ipv4_bytes, parse_ipv6_u128,
+};
 pub use method::{HTTP_METHOD_NAMES, HttpMethod};
 pub use pipe::{PIPE_NAMES, PipeKind};
 pub use protocol::{WIRE_PROTOCOL_FAMILIES, WIRE_PROTOCOL_NAMES, WireProtocol};

@@ -1,10 +1,21 @@
 //! Canonical wire protocol variants and lookup tables (`velda-core::lut::protocol`).
 //!
-//! Encodes the physical transport and application wire protocol framing into a flat `u8`.
+//! ```text
+//! ┌─────────────────────────────────────────────────────────────────────────────────────────┐
+//! │                       WIRE_PROTOCOL_NAMES (112 B L1D RESIDENT)                          │
+//! ├───────────────────────┬───────────────┬────────────────┬───────────────┬────────────────┤
+//! │ LUT Subsystem         │ Value Range   │ Variants Count │ Memory (L1D)  │ O(1) Mechanics │
+//! ├───────────────────────┼───────────────┼────────────────┼───────────────┼────────────────┤
+//! │ WireProtocol          │ 0..=6         │ 7 variants     │ 112 bytes     │ Direct Index   │
+//! └───────────────────────┴───────────────┴────────────────┴───────────────┴────────────────┘
 //!
-//! Follows the architectural invariant of Velda Edge:
-//! - Unifies downstream ingress protocols and upstream egress protocols under a single vocabulary.
-//! - 100% dense (0..=6), resident in L1 Data Cache ($7 \times 16\text{B} = 112\text{B}$).
+//!   Transport Framing ──► WireProtocol (u8: 0..=6)
+//!   (TCP / UDP / QUIC)           │
+//!                                ├──────────────────────────┐
+//!                                ▼                          ▼
+//!                      WIRE_PROTOCOL_NAMES[u8]     WIRE_PROTOCOL_FAMILIES[u8]
+//!                      ("h1", "h2", "h3", ...)     ("http", "grpc", "raw")
+//! ```
 
 use serde::{Deserialize, Serialize};
 
@@ -84,6 +95,12 @@ impl WireProtocol {
     #[inline(always)]
     pub const fn as_str(self) -> &'static str {
         WIRE_PROTOCOL_NAMES[self as usize]
+    }
+
+    /// Resolves the canonical wire protocol ASCII byte slice via O(1) direct array indexing.
+    #[inline(always)]
+    pub const fn as_bytes(self) -> &'static [u8] {
+        WIRE_PROTOCOL_NAMES[self as usize].as_bytes()
     }
 
     /// Resolves the coarse protocol family (`"http"`, `"grpc"`, `"raw"`) via O(1) direct array indexing.

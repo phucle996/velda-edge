@@ -1,34 +1,23 @@
-//! Unified High-Performance Clock Subsystem for Velda Data Plane (`velda_core::clock`).
+//! Dual-Tier Clock Subsystem for Velda Data Plane (`velda_core::clock`).
 //!
 //! ```text
 //! ┌─────────────────────────────────────────────────────────────────────────────────────────┐
 //! │                                    velda_core::clock                                    │
 //! ├─────────────────────────────────────────────────────────────────────────────────────────┤
-//! │ 1. COARSE CLOCK (100ms Jitter, ~0.5ns L1D Read)                                         │
-//! │                                                                                         │
-//! │   Linux Kernel vDSO                                                                     │
-//! │          │                                                                              │
-//! │          ▼ (Every 100ms on SCHED_IDLE)                                                  │
-//! │   [ velda-clock Thread ] ──► Atomic Store ──► [ COARSE_SECS: AtomicU64 ]                │
-//! │                                                      │                                  │
-//! │                                                      ▼ Single ALU MOV (~0.5ns)          │
-//! │                                              coarse_sec() -> u64                        │
-//! │                                          (Cache TTL, Rate Limit, Timeout)               │
+//! │ 1. HARDWARE CLOCK (True Nanoseconds, Monotonic Anchor)                                  │
+//! │    now_unix_nanos() -> u64                                                              │
+//! │    instant_to_unix_nanos(Instant) -> u64                                                │
+//! │    Scope: Request Lifecycle (Arrival time, duration_ns, RequestId, Logs, Tracing)       │
 //! ├─────────────────────────────────────────────────────────────────────────────────────────┤
-//! │ 2. PRECISION HARDWARE ANCHOR (Zero-Syscall, True Nanoseconds)                           │
-//! │                                                                                         │
-//! │   [ System Boot / OnceLock ] ──► SystemTime::now() + Instant::now() ──► EpochAnchor     │
-//! │                                                                             │           │
-//! │   CPU Silicon (Hardware TSC)                                                │           │
-//! │          │                                                                  │           │
-//! │          ▼ rdtsc (~10 CPU cycles)                                           │           │
-//! │   req_start: Instant ────────► [ base_nanos + (req_start - base_instant) ] ◄┘           │
-//! │                                                     │                                   │
-//! │                                                     ▼ Math: ADD/SUB (~1-2ns)            │
-//! │                                          instant_to_unix_nanos()                        │
-//! │                                        (SpanRecord, OTel Traces, Logs)                  │
+//! │ 2. COARSE CLOCK (Unix Epoch Seconds, Relaxed Atomic Load)                               │
+//! │    coarse_sec() -> u64                                                                  │
+//! │    Scope: Logistics & Background (Cache TTL, Session Expiry, Pool Timeout, Rate Limit)  │
 //! └─────────────────────────────────────────────────────────────────────────────────────────┘
 //! ```
+//!
+//! # Architectural Invariant
+//! - Strict domain separation: Hardware Clock owns request lifecycle; Coarse Clock owns infrastructure logistics.
+//! - Coarse seconds are never scaled or multiplied to represent nanoseconds.
 
 use std::sync::Once;
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -47,7 +36,7 @@ struct EpochAnchor {
 
 static ANCHOR: std::sync::OnceLock<EpochAnchor> = std::sync::OnceLock::new();
 
-/// Initializes the background clock worker (updating coarse seconds every 100ms on SCHED_IDLE).
+/// Initializes the background clock worker (updating coarse seconds periodically on SCHED_IDLE).
 pub fn init_clock() {
     CLOCK_INIT.call_once(|| {
         let sys_now = SystemTime::now()
@@ -78,10 +67,9 @@ pub fn init_clock() {
     });
 }
 
-/// Returns current Unix epoch time in integer seconds (~0.5ns, relaxed atomic load).
+/// Returns current Unix epoch time in integer seconds via atomic load.
 ///
-/// If background clock thread is active, this executes in a single L1D atomic load.
-/// Otherwise falls back transparently to `SystemTime::now()`.
+/// Falls back to `SystemTime::now()` if background worker is not yet started.
 #[inline(always)]
 pub fn coarse_sec() -> u64 {
     let sec = COARSE_SECS.load(Ordering::Relaxed);
@@ -95,10 +83,7 @@ pub fn coarse_sec() -> u64 {
     }
 }
 
-/// Converts a hardware monotonic [`Instant`] to a true nanosecond Unix Epoch timestamp.
-///
-/// Executes in ~1-2ns with zero syscalls and zero VDSO calls, computing:
-/// `base_unix_nanos + (instant - base_instant)`.
+/// Converts a hardware monotonic [`Instant`] to an absolute Unix Epoch nanosecond timestamp.
 #[inline(always)]
 pub fn instant_to_unix_nanos(instant: Instant) -> u64 {
     let anchor = ANCHOR.get_or_init(|| {
@@ -121,7 +106,7 @@ pub fn instant_to_unix_nanos(instant: Instant) -> u64 {
     }
 }
 
-/// Returns current Unix Epoch time in true nanoseconds (~10ns, zero syscalls).
+/// Returns current Unix Epoch time in nanoseconds derived from hardware monotonic clock.
 #[inline(always)]
 pub fn now_unix_nanos() -> u64 {
     instant_to_unix_nanos(Instant::now())
@@ -151,7 +136,7 @@ mod tests {
         assert!(nano2 > nano1);
 
         let delta = nano2 - nano1;
-        assert!(delta >= 1_500_000); // At least 1.5ms
+        assert!(delta >= 1_500_000);
     }
 
     #[test]

@@ -150,8 +150,11 @@ pub struct RequestState {
     /// Unique identifier for this request.
     pub request_id: RequestId,
 
-    /// Client IP address resolved authoritatively at Ingress.
-    pub client_ip: Option<std::net::IpAddr>,
+    /// Ingress arrival timestamp in nanoseconds from hardware clock.
+    pub ingress_time_nanos: u64,
+
+    /// Client IP address encoded as RFC 4291 `u128` integer (`0` if unset).
+    pub client_ip: u128,
 
     /// Route selected by the router.
     pub route: Option<RouteId>,
@@ -173,9 +176,11 @@ impl RequestState {
     /// Creates a new request state.
     #[inline]
     pub fn new(request_id: RequestId) -> Self {
+        let ingress_time_nanos = request_id.timestamp_nanos();
         Self {
             request_id,
-            client_ip: None,
+            ingress_time_nanos,
+            client_ip: 0,
             route: None,
             upstream: None,
             routed: false,
@@ -184,10 +189,17 @@ impl RequestState {
         }
     }
 
-    /// Stores the client IP address.
+    /// Attaches an explicit ingress timestamp in nanoseconds.
     #[inline(always)]
-    pub fn set_client_ip(&mut self, ip: std::net::IpAddr) {
-        self.client_ip = Some(ip);
+    pub fn with_ingress_time(mut self, ingress_time_nanos: u64) -> Self {
+        self.ingress_time_nanos = ingress_time_nanos;
+        self
+    }
+
+    /// Returns the ingress timestamp in Unix epoch seconds.
+    #[inline(always)]
+    pub fn ingress_time_sec(&self) -> u64 {
+        self.ingress_time_nanos / 1_000_000_000
     }
 
     /// Stores the route selected by the router.

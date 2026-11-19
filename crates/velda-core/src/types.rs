@@ -47,12 +47,7 @@ impl RequestId {
     /// Formats the RequestId as a canonical 32-character lowercase hex string.
     #[inline(always)]
     pub fn to_hex_bytes(self) -> [u8; 32] {
-        let mut hex = [0u8; 32];
-        let high: &mut [u8; 16] = (&mut hex[0..16]).try_into().unwrap();
-        crate::request_id::format_hex_16(self.timestamp_nanos(), high);
-        let low: &mut [u8; 16] = (&mut hex[16..32]).try_into().unwrap();
-        crate::request_id::format_hex_16(self.entropy(), low);
-        hex
+        crate::request_id::format_hex32_bytes(self.timestamp_nanos(), self.entropy())
     }
 }
 
