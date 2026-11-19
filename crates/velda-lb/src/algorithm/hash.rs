@@ -1,7 +1,5 @@
 //! Modulo-based IP Hash and Generic Request Attribute Hash load balancing.
 
-use std::net::SocketAddr;
-
 use crate::LoadBalancer;
 use crate::context::SelectionContext;
 use velda_core::Endpoint;
@@ -51,24 +49,14 @@ impl IpHash {
         Self
     }
 
-    /// Computes a 64-bit hash from a [`SocketAddr`] directly in integer registers without byte loops.
+    /// Computes a 64-bit hash from an RFC 4291 `u128` IP address directly in integer registers.
     #[inline]
-    pub fn hash_socket_addr(addr: SocketAddr) -> u64 {
-        match addr {
-            SocketAddr::V4(v4) => {
-                let ip = u32::from_be_bytes(v4.ip().octets()) as u64;
-                let h = (FNV_OFFSET ^ ip).wrapping_mul(FNV_PRIME);
-                h ^ (h >> 32)
-            }
-            SocketAddr::V6(v6) => {
-                let octets = v6.ip().octets();
-                let hi = u64::from_be_bytes(octets[0..8].try_into().unwrap());
-                let lo = u64::from_be_bytes(octets[8..16].try_into().unwrap());
-                let h = (FNV_OFFSET ^ hi).wrapping_mul(FNV_PRIME) ^ lo;
-                let h = h.wrapping_mul(FNV_PRIME);
-                h ^ (h >> 32)
-            }
-        }
+    pub fn hash_ip_u128(ip: u128) -> u64 {
+        let hi = (ip >> 64) as u64;
+        let lo = ip as u64;
+        let h = (FNV_OFFSET ^ hi).wrapping_mul(FNV_PRIME) ^ lo;
+        let h = h.wrapping_mul(FNV_PRIME);
+        h ^ (h >> 32)
     }
 }
 
@@ -85,7 +73,7 @@ impl LoadBalancer for IpHash {
         let hash_val = if let Some(key) = ctx.hash_key {
             key
         } else if let Some(client_ip) = ctx.client_ip {
-            Self::hash_socket_addr(client_ip)
+            Self::hash_ip_u128(client_ip)
         } else if let Some(bytes) = ctx.hash_bytes {
             fnv1a_hash(bytes)
         } else {
@@ -140,6 +128,7 @@ impl LoadBalancer for GenericHash {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::net::SocketAddr;
 
     #[test]
     fn test_ip_hash_consistency() {
@@ -154,7 +143,7 @@ mod tests {
         ];
 
         let balancer = IpHash::new();
-        let client_ip: SocketAddr = "192.168.1.100:44321".parse().unwrap();
+        let client_ip = velda_core::lut::ip::encode_ipv4_u128(0xC0A8_0164);
         let ctx = SelectionContext::with_client_ip(client_ip);
 
         let initial_choice = balancer.select(&endpoints, &ctx).unwrap().address;

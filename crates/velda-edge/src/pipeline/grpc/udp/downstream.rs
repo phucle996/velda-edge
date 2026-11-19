@@ -58,6 +58,8 @@ pub async fn handle_grpc_udp(
         let _ = socket.send_to(&pkt.payload, pkt.peer).await;
     }
 
+    let peer_ip = velda_core::lut::ip::encode_ip_u128(peer.ip());
+
     // 2. Process complete gRPC requests concurrently without blocking other datagrams
     for req_event in requests {
         let socket = socket.clone();
@@ -77,7 +79,7 @@ pub async fn handle_grpc_udp(
             // [INGRESS W3C REQUEST ID]
             // Authoritative W3C Request ID is already stamped at QPACK decode into Slot 0.
             let mut req = req_event.request;
-            req.state.client_ip = Some(peer.ip());
+            req.state.client_ip = peer_ip;
             let req_id_header = req.headers.request_id().clone();
 
             let mut stream =
@@ -107,12 +109,12 @@ pub async fn handle_grpc_udp(
 /// Supports both native gRPC over UDP and cross-transport bridge to gRPC over TCP.
 pub async fn process_grpc_udp_request(
     mut req: L7Request,
-    peer: SocketAddr,
+    _peer: SocketAddr,
     listener_id: &str,
     config: &GrpcConfig,
     runtime: &SharedRuntime,
 ) -> L7Response {
-    let req_start = std::time::Instant::now();
+    let ingress_nanos = req.ingress_time_nanos;
     let (log_url_len, log_url_bytes) = {
         let host = velda_http3::server::header::extract_host(&req.headers, &req.uri);
         velda_observability::AccessLogRecord::encode_url(true, host, req.path())
@@ -125,19 +127,19 @@ pub async fn process_grpc_udp_request(
 
     // [PHYSICAL WIRE CEILING: MAX_WIRE_HEADERS = 1024]
     if req.headers.len() > velda_core::buffer::MAX_WIRE_HEADERS {
+        let duration_ns = velda_core::clock::now_unix_nanos().saturating_sub(ingress_nanos);
         global_metrics().record_early_completion(
             PipeKind::BufferedGrpcUdpUdp,
-            StreamCompletion::new(200, 0, 0, req_start.elapsed(), None),
+            StreamCompletion::new(200, 0, 0, duration_ns, 0),
         );
         global_log_store().emit(&velda_observability::AccessLogRecord {
             request_id: req.state.request_id.entropy(),
-            timestamp_sec: req.state.request_id.timestamp_secs() as u32,
-            duration_ns: req_start.elapsed().as_nanos().min(u64::MAX as u128) as u64,
-            peer_ip: velda_observability::encode_ip_u128(peer.ip()),
+            ingress_time_nanos: ingress_nanos,
+            duration_ns,
+            peer_ip: req.state.client_ip,
             bytes_rx: 0,
             bytes_tx: 0,
             upstream_ip: 0,
-            peer_port: peer.port(),
             upstream_port: 0,
             status_code: 200,
             route_id: velda_core::UNMATCHED_ROUTE_ID,
@@ -163,19 +165,19 @@ pub async fn process_grpc_udp_request(
         .or_else(|| req.uri.authority().map(|a| a.as_str()));
 
     let Some(grpc_req) = GrpcRouteRequest::from_path(req.path(), authority) else {
+        let duration_ns = velda_core::clock::now_unix_nanos().saturating_sub(ingress_nanos);
         global_metrics().record_early_completion(
             PipeKind::BufferedGrpcUdpUdp,
-            StreamCompletion::new(200, 0, 0, req_start.elapsed(), None),
+            StreamCompletion::new(200, 0, 0, duration_ns, 0),
         );
         global_log_store().emit(&velda_observability::AccessLogRecord {
             request_id: req.state.request_id.entropy(),
-            timestamp_sec: req.state.request_id.timestamp_secs() as u32,
-            duration_ns: req_start.elapsed().as_nanos().min(u64::MAX as u128) as u64,
-            peer_ip: velda_observability::encode_ip_u128(peer.ip()),
+            ingress_time_nanos: ingress_nanos,
+            duration_ns,
+            peer_ip: req.state.client_ip,
             bytes_rx: 0,
             bytes_tx: 0,
             upstream_ip: 0,
-            peer_port: peer.port(),
             upstream_port: 0,
             status_code: 200,
             route_id: velda_core::UNMATCHED_ROUTE_ID,
@@ -195,19 +197,19 @@ pub async fn process_grpc_udp_request(
 
     let rt = runtime.load();
     let Some(route) = rt.router.route_grpc(listener_id, &grpc_req) else {
+        let duration_ns = velda_core::clock::now_unix_nanos().saturating_sub(ingress_nanos);
         global_metrics().record_early_completion(
             PipeKind::BufferedGrpcUdpUdp,
-            StreamCompletion::new(200, 0, 0, req_start.elapsed(), None),
+            StreamCompletion::new(200, 0, 0, duration_ns, 0),
         );
         global_log_store().emit(&velda_observability::AccessLogRecord {
             request_id: req.state.request_id.entropy(),
-            timestamp_sec: req.state.request_id.timestamp_secs() as u32,
-            duration_ns: req_start.elapsed().as_nanos().min(u64::MAX as u128) as u64,
-            peer_ip: velda_observability::encode_ip_u128(peer.ip()),
+            ingress_time_nanos: ingress_nanos,
+            duration_ns,
+            peer_ip: req.state.client_ip,
             bytes_rx: 0,
             bytes_tx: 0,
             upstream_ip: 0,
-            peer_port: peer.port(),
             upstream_port: 0,
             status_code: 200,
             route_id: velda_core::UNMATCHED_ROUTE_ID,
@@ -268,19 +270,20 @@ pub async fn process_grpc_udp_request(
                         headers: req.headers,
                         body: velda_core::Body::Empty,
                     };
+                    let duration_ns =
+                        velda_core::clock::now_unix_nanos().saturating_sub(ingress_nanos);
                     global_metrics().record_early_completion(
                         PipeKind::BufferedGrpcUdpUdp,
-                        StreamCompletion::new(200, 0, 0, req_start.elapsed(), None),
+                        StreamCompletion::new(200, 0, 0, duration_ns, 0),
                     );
                     global_log_store().emit(&velda_observability::AccessLogRecord {
                         request_id: req.state.request_id.entropy(),
-                        timestamp_sec: req.state.request_id.timestamp_secs() as u32,
-                        duration_ns: req_start.elapsed().as_nanos().min(u64::MAX as u128) as u64,
-                        peer_ip: velda_observability::encode_ip_u128(peer.ip()),
+                        ingress_time_nanos: ingress_nanos,
+                        duration_ns,
+                        peer_ip: req.state.client_ip,
                         bytes_rx: 0,
                         bytes_tx: 0,
                         upstream_ip: 0,
-                        peer_port: peer.port(),
                         upstream_port: 0,
                         status_code: 200,
                         route_id: route.id.0,
@@ -333,19 +336,20 @@ pub async fn process_grpc_udp_request(
                         headers: req.headers,
                         body: velda_core::Body::Empty,
                     };
+                    let duration_ns =
+                        velda_core::clock::now_unix_nanos().saturating_sub(ingress_nanos);
                     global_metrics().record_early_completion(
                         PipeKind::BufferedGrpcUdpUdp,
-                        StreamCompletion::new(200, 0, 0, req_start.elapsed(), None),
+                        StreamCompletion::new(200, 0, 0, duration_ns, 0),
                     );
                     global_log_store().emit(&velda_observability::AccessLogRecord {
                         request_id: req.state.request_id.entropy(),
-                        timestamp_sec: req.state.request_id.timestamp_secs() as u32,
-                        duration_ns: req_start.elapsed().as_nanos().min(u64::MAX as u128) as u64,
-                        peer_ip: velda_observability::encode_ip_u128(peer.ip()),
+                        ingress_time_nanos: ingress_nanos,
+                        duration_ns,
+                        peer_ip: req.state.client_ip,
                         bytes_rx: 0,
                         bytes_tx: 0,
                         upstream_ip: 0,
-                        peer_port: peer.port(),
                         upstream_port: 0,
                         status_code: 200,
                         route_id: route.id.0,
@@ -372,7 +376,7 @@ pub async fn process_grpc_udp_request(
             if let Some(post_hooks) = &plan.post_response_hooks {
                 velda_plugin::run_post_response_plugins(post_hooks, &req.headers, &mut resp);
             }
-            let duration = req_start.elapsed();
+            let duration_ns = velda_core::clock::now_unix_nanos().saturating_sub(ingress_nanos);
             let bytes_rx = req.body.len() as u64;
             let bytes_tx = resp.body.len() as u64;
             let status_code = resp.status.as_u16();
@@ -385,17 +389,16 @@ pub async fn process_grpc_udp_request(
                 .unwrap_or(velda_core::GrpcStatus::Ok);
             global_metrics().record_early_completion(
                 PipeKind::BufferedGrpcUdpUdp,
-                StreamCompletion::new(status_code, bytes_rx, bytes_tx, duration, None),
+                StreamCompletion::new(status_code, bytes_rx, bytes_tx, duration_ns, 0),
             );
             global_log_store().emit(&velda_observability::AccessLogRecord {
                 request_id: req.state.request_id.entropy(),
-                timestamp_sec: req.state.request_id.timestamp_secs() as u32,
-                duration_ns: duration.as_nanos().min(u64::MAX as u128) as u64,
-                peer_ip: velda_observability::encode_ip_u128(peer.ip()),
+                ingress_time_nanos: ingress_nanos,
+                duration_ns,
+                peer_ip: req.state.client_ip,
                 bytes_rx: bytes_rx.min(u32::MAX as u64) as u32,
                 bytes_tx: bytes_tx.min(u32::MAX as u64) as u32,
                 upstream_ip: 0,
-                peer_port: peer.port(),
                 upstream_port: 0,
                 status_code,
                 route_id: route.id.0,
@@ -415,19 +418,19 @@ pub async fn process_grpc_udp_request(
     }
 
     let Some(upstream_target) = rt.upstreams.grpc.get(target_upstream) else {
+        let duration_ns = velda_core::clock::now_unix_nanos().saturating_sub(ingress_nanos);
         global_metrics().record_early_completion(
             PipeKind::BufferedGrpcUdpUdp,
-            StreamCompletion::new(200, 0, 0, req_start.elapsed(), None),
+            StreamCompletion::new(200, 0, 0, duration_ns, 0),
         );
         global_log_store().emit(&velda_observability::AccessLogRecord {
             request_id: req.state.request_id.entropy(),
-            timestamp_sec: req.state.request_id.timestamp_secs() as u32,
-            duration_ns: req_start.elapsed().as_nanos().min(u64::MAX as u128) as u64,
-            peer_ip: velda_observability::encode_ip_u128(peer.ip()),
+            ingress_time_nanos: ingress_nanos,
+            duration_ns,
+            peer_ip: req.state.client_ip,
             bytes_rx: 0,
             bytes_tx: 0,
             upstream_ip: 0,
-            peer_port: peer.port(),
             upstream_port: 0,
             status_code: 200,
             route_id: route.id.0,
@@ -454,19 +457,19 @@ pub async fn process_grpc_udp_request(
             overload = ?overload_lvl,
             "Shedding gRPC UDP request due to memory saturation"
         );
+        let duration_ns = velda_core::clock::now_unix_nanos().saturating_sub(ingress_nanos);
         global_metrics().record_early_completion(
             PipeKind::BufferedGrpcUdpUdp,
-            StreamCompletion::new(200, 0, 0, req_start.elapsed(), None),
+            StreamCompletion::new(200, 0, 0, duration_ns, 0),
         );
         global_log_store().emit(&velda_observability::AccessLogRecord {
             request_id: req.state.request_id.entropy(),
-            timestamp_sec: req.state.request_id.timestamp_secs() as u32,
-            duration_ns: req_start.elapsed().as_nanos().min(u64::MAX as u128) as u64,
-            peer_ip: velda_observability::encode_ip_u128(peer.ip()),
+            ingress_time_nanos: ingress_nanos,
+            duration_ns,
+            peer_ip: req.state.client_ip,
             bytes_rx: 0,
             bytes_tx: 0,
             upstream_ip: 0,
-            peer_port: peer.port(),
             upstream_port: 0,
             status_code: 200,
             route_id: route.id.0,
@@ -609,7 +612,7 @@ pub async fn process_grpc_udp_request(
         velda_plugin::run_post_response_plugins(post_hooks, &req.headers, &mut resp);
     }
 
-    let duration = req_start.elapsed();
+    let duration_ns = velda_core::clock::now_unix_nanos().saturating_sub(ingress_nanos);
     let bytes_rx = req.body.len() as u64;
     let bytes_tx = resp.body.len() as u64;
     let status_code = resp.status.as_u16();
@@ -630,18 +633,17 @@ pub async fn process_grpc_udp_request(
 
     global_metrics().record_stream_completion(
         pipe_kind,
-        StreamCompletion::new(status_code, bytes_rx, bytes_tx, duration, None),
+        StreamCompletion::new(status_code, bytes_rx, bytes_tx, duration_ns, 0),
     );
 
     global_log_store().emit(&velda_observability::AccessLogRecord {
         request_id: req.state.request_id.entropy(),
-        timestamp_sec: req.state.request_id.timestamp_secs() as u32,
-        duration_ns: duration.as_nanos().min(u64::MAX as u128) as u64,
-        peer_ip: velda_observability::encode_ip_u128(peer.ip()),
+        ingress_time_nanos: ingress_nanos,
+        duration_ns,
+        peer_ip: req.state.client_ip,
         bytes_rx: bytes_rx.min(u32::MAX as u64) as u32,
         bytes_tx: bytes_tx.min(u32::MAX as u64) as u32,
         upstream_ip,
-        peer_port: peer.port(),
         upstream_port,
         status_code,
         route_id: route.id.0,

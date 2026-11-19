@@ -14,8 +14,8 @@ pub struct SelectionContext<'a> {
     /// (e.g. Client IP hash, Header value hash, Cookie hash, Request Path hash).
     pub hash_key: Option<u64>,
 
-    /// Client peer socket address for direct IP-based hashing.
-    pub client_ip: Option<SocketAddr>,
+    /// Client peer IP address encoded as RFC 4291 `u128` integer for direct IP-based hashing.
+    pub client_ip: Option<u128>,
 
     /// Raw byte slice for direct on-the-fly hashing without heap allocation.
     pub hash_bytes: Option<&'a [u8]>,
@@ -54,9 +54,9 @@ impl<'a> SelectionContext<'a> {
         }
     }
 
-    /// Creates a context with the client IP address.
+    /// Creates a context with the client IP address encoded as an RFC 4291 `u128` integer.
     #[inline]
-    pub const fn with_client_ip(client_ip: SocketAddr) -> Self {
+    pub const fn with_client_ip(client_ip: u128) -> Self {
         Self {
             hash_key: None,
             client_ip: Some(client_ip),

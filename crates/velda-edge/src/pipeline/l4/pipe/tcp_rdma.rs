@@ -46,8 +46,8 @@ pub async fn serve(
         "Proxying L4 TCP stream to RDMA kernel-bypass upstream via zero-copy arena"
     );
 
-    let started = std::time::Instant::now();
-    let (request_id, _) = velda_core::request_id::next_request_id();
+    let ingress_nanos = velda_core::clock::now_unix_nanos();
+    let (request_id, _) = velda_core::request_id::next_request_id(ingress_nanos);
     let emit_log = |upstream_addr: Option<SocketAddr>,
                     rx: u64,
                     tx: u64,
@@ -62,13 +62,12 @@ pub async fn serve(
             .unwrap_or((0, 0));
         velda_observability::global_log_store().emit(&velda_observability::AccessLogRecord {
             request_id: request_id.entropy(),
-            timestamp_sec: request_id.timestamp_secs() as u32,
-            duration_ns: started.elapsed().as_nanos().min(u64::MAX as u128) as u64,
+            ingress_time_nanos: ingress_nanos,
+            duration_ns: velda_core::clock::now_unix_nanos().saturating_sub(ingress_nanos),
             peer_ip: velda_observability::encode_ip_u128(peer.ip()),
             bytes_rx: rx.min(u32::MAX as u64) as u32,
             bytes_tx: tx.min(u32::MAX as u64) as u32,
             upstream_ip,
-            peer_port: peer.port(),
             upstream_port,
             status_code: 0,
             route_id: route_id.0,
@@ -81,7 +80,7 @@ pub async fn serve(
             ua_family: velda_core::UaFamily::None,
             ua_os: velda_core::UaOs::Unknown,
             url_len: 0,
-            url_bytes: [0; 188],
+            url_bytes: [0; 186],
         });
     };
 

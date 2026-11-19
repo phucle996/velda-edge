@@ -101,10 +101,11 @@ use crate::runtime::pipeline::{TcpPipeline, UdpPipeline};
 pub struct DownstreamMeta {
     pub listener_id: Arc<str>,
     pub peer: SocketAddr,
+    pub peer_ip: u128,
     pub local_addr: SocketAddr,
     pub is_tls: bool,
     pub client_ip_header: http::HeaderValue,
-    pub client_port_header: http::HeaderValue,
+    pub listener_port_header: http::HeaderValue,
     pub alt_svc_header: Option<http::HeaderValue>,
     pub slab_pool: Arc<velda_core::buffer::PayloadSlabPool>,
 }
@@ -148,9 +149,11 @@ impl DownstreamMeta {
         alt_svc_header: Option<http::HeaderValue>,
         buffer_pool: &velda_core::buffer::ShardedBufferPool,
     ) -> Self {
-        let client_ip_header = http::HeaderValue::from_str(&peer.ip().to_string())
+        let peer_ip = velda_core::lut::ip::encode_ip_u128(peer.ip());
+        let (ip_buf, ip_len) = velda_core::lut::ip::format_ip_bytes(peer_ip);
+        let client_ip_header = http::HeaderValue::from_bytes(&ip_buf[..ip_len])
             .unwrap_or_else(|_| http::HeaderValue::from_static("127.0.0.1"));
-        let client_port_header = http::HeaderValue::from(local_addr.port());
+        let listener_port_header = http::HeaderValue::from(local_addr.port());
         let slab_pool = Arc::clone(
             &buffer_pool
                 .core_pool(velda_connection_pool::current_thread_lane())
@@ -159,10 +162,11 @@ impl DownstreamMeta {
         Self {
             listener_id,
             peer,
+            peer_ip,
             local_addr,
             is_tls,
             client_ip_header,
-            client_port_header,
+            listener_port_header,
             alt_svc_header,
             slab_pool,
         }

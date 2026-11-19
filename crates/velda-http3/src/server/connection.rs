@@ -470,20 +470,24 @@ impl Http3Engine {
                                 return;
                             }
                             // [INGRESS W3C REQUEST ID GENERATION]
-                            // Authoritatively generate W3C Request ID at QPACK decode boundary (~1-2ns).
+                            // Authoritatively generate W3C Request ID at QPACK decode boundary.
                             // Overwrite any client-supplied x-request-id in-place so HeaderWorkspace::from_headers
                             // preserves it directly in Slot 0 without double ID generation.
-                            let (_id, req_id) = velda_core::request_id::next_request_id();
+                            let ingress_nanos = velda_core::clock::now_unix_nanos();
+                            let (_id, req_id) =
+                                velda_core::request_id::next_request_id(ingress_nanos);
                             decoded
                                 .headers
                                 .insert(velda_core::buffer::X_REQUEST_ID, req_id);
-                            let req = L7Request::new(
+                            let mut req = L7Request::new(
                                 decoded.method.unwrap_or(http::Method::GET),
                                 decoded.uri.unwrap_or_else(|| http::Uri::from_static("/")),
                                 http::Version::HTTP_3,
                                 decoded.headers,
                                 Body::Empty,
                             );
+                            req.ingress_time_nanos = ingress_nanos;
+                            req.state.ingress_time_nanos = ingress_nanos;
                             slot.request = Some(req);
                         }
                         Err(e) => {

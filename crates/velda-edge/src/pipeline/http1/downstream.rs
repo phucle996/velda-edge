@@ -145,31 +145,32 @@ pub async fn run_http1_loop<IO>(
                     timeout_ms = config.header_read_timeout_ms,
                     "HTTP/1.1 request head read timed out (Slowloris protection)"
                 );
-                let (req_id, req_id_header) = velda_core::request_id::next_request_id();
+                let ingress_nanos = velda_core::clock::now_unix_nanos();
+                let (req_id, req_id_header) =
+                    velda_core::request_id::next_request_id(ingress_nanos);
                 conn.set_request_id(Some(req_id_header));
                 conn.mark_close();
                 let _ = conn.send_early_error(StatusCode::REQUEST_TIMEOUT).await;
-                let timeout_dur = std::time::Duration::from_millis(config.header_read_timeout_ms);
+                let timeout_ns = config.header_read_timeout_ms.saturating_mul(1_000_000);
                 global_metrics().record_early_completion(
                     PipeKind::BufferedH1H1,
                     StreamCompletion::new(
                         StatusCode::REQUEST_TIMEOUT.as_u16(),
                         0,
                         conn.last_bytes_tx,
-                        timeout_dur,
-                        None,
+                        timeout_ns,
+                        0,
                     ),
                 );
                 velda_observability::global_log_store().emit(
                     &velda_observability::AccessLogRecord {
                         request_id: req_id.entropy(),
-                        timestamp_sec: req_id.timestamp_secs() as u32,
-                        duration_ns: timeout_dur.as_nanos().min(u64::MAX as u128) as u64,
-                        peer_ip: velda_observability::encode_ip_u128(meta.peer.ip()),
+                        ingress_time_nanos: ingress_nanos,
+                        duration_ns: timeout_ns,
+                        peer_ip: meta.peer_ip,
                         bytes_rx: 0,
                         bytes_tx: conn.last_bytes_tx.min(u32::MAX as u64) as u32,
                         upstream_ip: 0,
-                        peer_port: meta.peer.port(),
                         upstream_port: 0,
                         status_code: StatusCode::REQUEST_TIMEOUT.as_u16(),
                         route_id: velda_core::UNMATCHED_ROUTE_ID,
@@ -182,7 +183,7 @@ pub async fn run_http1_loop<IO>(
                         ua_family: velda_core::UaFamily::None,
                         ua_os: velda_core::UaOs::Unknown,
                         url_len: 0,
-                        url_bytes: [0; 188],
+                        url_bytes: [0; 186],
                     },
                 );
                 conn.lingering_close().await;
@@ -197,30 +198,26 @@ pub async fn run_http1_loop<IO>(
                     Http1Error::PayloadTooLarge(_) => StatusCode::PAYLOAD_TOO_LARGE,
                     _ => StatusCode::BAD_REQUEST,
                 };
-                let (req_id, req_id_header) = velda_core::request_id::next_request_id();
+                let ingress_nanos = velda_core::clock::now_unix_nanos();
+                let (req_id, req_id_header) =
+                    velda_core::request_id::next_request_id(ingress_nanos);
                 conn.set_request_id(Some(req_id_header));
                 conn.mark_close();
                 let _ = conn.send_early_error(status).await;
+                let duration_ns = velda_core::clock::now_unix_nanos().saturating_sub(ingress_nanos);
                 global_metrics().record_early_completion(
                     PipeKind::BufferedH1H1,
-                    StreamCompletion::new(
-                        status.as_u16(),
-                        0,
-                        conn.last_bytes_tx,
-                        std::time::Duration::ZERO,
-                        None,
-                    ),
+                    StreamCompletion::new(status.as_u16(), 0, conn.last_bytes_tx, duration_ns, 0),
                 );
                 velda_observability::global_log_store().emit(
                     &velda_observability::AccessLogRecord {
                         request_id: req_id.entropy(),
-                        timestamp_sec: req_id.timestamp_secs() as u32,
-                        duration_ns: 0,
-                        peer_ip: velda_observability::encode_ip_u128(meta.peer.ip()),
+                        ingress_time_nanos: ingress_nanos,
+                        duration_ns,
+                        peer_ip: meta.peer_ip,
                         bytes_rx: 0,
                         bytes_tx: conn.last_bytes_tx.min(u32::MAX as u64) as u32,
                         upstream_ip: 0,
-                        peer_port: meta.peer.port(),
                         upstream_port: 0,
                         status_code: status.as_u16(),
                         route_id: velda_core::UNMATCHED_ROUTE_ID,
@@ -233,7 +230,7 @@ pub async fn run_http1_loop<IO>(
                         ua_family: velda_core::UaFamily::None,
                         ua_os: velda_core::UaOs::Unknown,
                         url_len: 0,
-                        url_bytes: [0; 188],
+                        url_bytes: [0; 186],
                     },
                 );
                 conn.lingering_close().await;
@@ -247,12 +244,12 @@ pub async fn run_http1_loop<IO>(
             conn.mark_close();
         }
         let rt = runtime.load();
-        let req_start = std::time::Instant::now();
+        let ingress_nanos = velda_core::clock::now_unix_nanos();
 
         // [INGRESS W3C REQUEST ID GENERATION]
-        // Authoritatively generate W3C Request ID from thread-local pool (~1-2ns).
+        // Authoritatively generate W3C Request ID from thread-local pool.
         // Overwrite any client-supplied x-request-id to enforce zero-trust Edge boundary.
-        let (request_id, req_id_header) = velda_core::request_id::next_request_id();
+        let (request_id, req_id_header) = velda_core::request_id::next_request_id(ingress_nanos);
         conn.set_request_id(Some(req_id_header.clone()));
         let mut req_head = req_head;
         req_head.headers.insert(X_REQUEST_ID, req_id_header.clone());
@@ -282,26 +279,25 @@ pub async fn run_http1_loop<IO>(
             );
             conn.mark_close();
             let _ = conn.send_early_error(StatusCode::FORBIDDEN).await;
-            let elapsed = req_start.elapsed();
+            let duration_ns = velda_core::clock::now_unix_nanos().saturating_sub(ingress_nanos);
             global_metrics().record_early_completion(
                 PipeKind::BufferedH1H1,
                 StreamCompletion::new(
                     StatusCode::FORBIDDEN.as_u16(),
                     0,
                     conn.last_bytes_tx,
-                    elapsed,
-                    None,
+                    duration_ns,
+                    0,
                 ),
             );
             velda_observability::global_log_store().emit(&velda_observability::AccessLogRecord {
                 request_id: request_id.entropy(),
-                timestamp_sec: request_id.timestamp_secs() as u32,
-                duration_ns: elapsed.as_nanos().min(u64::MAX as u128) as u64,
-                peer_ip: velda_observability::encode_ip_u128(meta.peer.ip()),
+                ingress_time_nanos: ingress_nanos,
+                duration_ns,
+                peer_ip: meta.peer_ip,
                 bytes_rx: 0,
                 bytes_tx: conn.last_bytes_tx.min(u32::MAX as u64) as u32,
                 upstream_ip: 0,
-                peer_port: meta.peer.port(),
                 upstream_port: 0,
                 status_code: StatusCode::FORBIDDEN.as_u16(),
                 route_id: velda_core::UNMATCHED_ROUTE_ID,
@@ -329,26 +325,25 @@ pub async fn run_http1_loop<IO>(
             );
             conn.mark_close();
             let _ = conn.send_early_error(StatusCode::BAD_REQUEST).await;
-            let elapsed = req_start.elapsed();
+            let duration_ns = velda_core::clock::now_unix_nanos().saturating_sub(ingress_nanos);
             global_metrics().record_early_completion(
                 PipeKind::BufferedH1H1,
                 StreamCompletion::new(
                     StatusCode::BAD_REQUEST.as_u16(),
                     0,
                     conn.last_bytes_tx,
-                    elapsed,
-                    None,
+                    duration_ns,
+                    0,
                 ),
             );
             velda_observability::global_log_store().emit(&velda_observability::AccessLogRecord {
                 request_id: request_id.entropy(),
-                timestamp_sec: request_id.timestamp_secs() as u32,
-                duration_ns: elapsed.as_nanos().min(u64::MAX as u128) as u64,
-                peer_ip: velda_observability::encode_ip_u128(meta.peer.ip()),
+                ingress_time_nanos: ingress_nanos,
+                duration_ns,
+                peer_ip: meta.peer_ip,
                 bytes_rx: 0,
                 bytes_tx: conn.last_bytes_tx.min(u32::MAX as u64) as u32,
                 upstream_ip: 0,
-                peer_port: meta.peer.port(),
                 upstream_port: 0,
                 status_code: StatusCode::BAD_REQUEST.as_u16(),
                 route_id: velda_core::UNMATCHED_ROUTE_ID,
@@ -373,7 +368,7 @@ pub async fn run_http1_loop<IO>(
             &mut req_head.headers,
             &req_head.uri,
             &meta.client_ip_header,
-            &meta.client_port_header,
+            &meta.listener_port_header,
             meta.is_tls,
         );
 
@@ -402,26 +397,25 @@ pub async fn run_http1_loop<IO>(
             );
             conn.mark_close();
             let _ = conn.send_early_error(StatusCode::NOT_FOUND).await;
-            let elapsed = req_start.elapsed();
+            let duration_ns = velda_core::clock::now_unix_nanos().saturating_sub(ingress_nanos);
             global_metrics().record_early_completion(
                 PipeKind::BufferedH1H1,
                 StreamCompletion::new(
                     StatusCode::NOT_FOUND.as_u16(),
                     0,
                     conn.last_bytes_tx,
-                    elapsed,
-                    None,
+                    duration_ns,
+                    0,
                 ),
             );
             velda_observability::global_log_store().emit(&velda_observability::AccessLogRecord {
                 request_id: request_id.entropy(),
-                timestamp_sec: request_id.timestamp_secs() as u32,
-                duration_ns: elapsed.as_nanos().min(u64::MAX as u128) as u64,
-                peer_ip: velda_observability::encode_ip_u128(meta.peer.ip()),
+                ingress_time_nanos: ingress_nanos,
+                duration_ns,
+                peer_ip: meta.peer_ip,
                 bytes_rx: 0,
                 bytes_tx: conn.last_bytes_tx.min(u32::MAX as u64) as u32,
                 upstream_ip: 0,
-                peer_port: meta.peer.port(),
                 upstream_port: 0,
                 status_code: StatusCode::NOT_FOUND.as_u16(),
                 route_id: velda_core::UNMATCHED_ROUTE_ID,
@@ -464,7 +458,7 @@ pub async fn run_http1_loop<IO>(
                     velda_core::Body::Empty,
                 );
                 l7_req.state.request_id = request_id;
-                l7_req.state.client_ip = Some(meta.peer.ip());
+                l7_req.state.client_ip = meta.peer_ip;
 
                 if let Some(hooks) = &plan.pre_route_hooks {
                     let mut action = velda_plugin::run_pre_route_plugins(hooks, &mut l7_req);
@@ -505,21 +499,27 @@ pub async fn run_http1_loop<IO>(
                                 conn.mark_close();
                             }
                             let _ = conn.send_response(&server_resp).await;
-                            let elapsed = req_start.elapsed();
+                            let duration_ns =
+                                velda_core::clock::now_unix_nanos().saturating_sub(ingress_nanos);
                             global_metrics().record_early_completion(
                                 PipeKind::BufferedH1H1,
-                                StreamCompletion::new(status, 0, conn.last_bytes_tx, elapsed, None),
+                                StreamCompletion::new(
+                                    status,
+                                    0,
+                                    conn.last_bytes_tx,
+                                    duration_ns,
+                                    0,
+                                ),
                             );
                             velda_observability::global_log_store().emit(
                                 &velda_observability::AccessLogRecord {
                                     request_id: request_id.entropy(),
-                                    timestamp_sec: request_id.timestamp_secs() as u32,
-                                    duration_ns: elapsed.as_nanos().min(u64::MAX as u128) as u64,
-                                    peer_ip: velda_observability::encode_ip_u128(meta.peer.ip()),
+                                    ingress_time_nanos: ingress_nanos,
+                                    duration_ns,
+                                    peer_ip: l7_req.state.client_ip,
                                     bytes_rx: 0,
                                     bytes_tx: conn.last_bytes_tx.min(u32::MAX as u64) as u32,
                                     upstream_ip: 0,
-                                    peer_port: meta.peer.port(),
                                     upstream_port: 0,
                                     status_code: status,
                                     route_id: route.id.0,
@@ -591,21 +591,27 @@ pub async fn run_http1_loop<IO>(
                                 conn.mark_close();
                             }
                             let _ = conn.send_response(&server_resp).await;
-                            let elapsed = req_start.elapsed();
+                            let duration_ns =
+                                velda_core::clock::now_unix_nanos().saturating_sub(ingress_nanos);
                             global_metrics().record_early_completion(
                                 PipeKind::BufferedH1H1,
-                                StreamCompletion::new(status, 0, conn.last_bytes_tx, elapsed, None),
+                                StreamCompletion::new(
+                                    status,
+                                    0,
+                                    conn.last_bytes_tx,
+                                    duration_ns,
+                                    0,
+                                ),
                             );
                             velda_observability::global_log_store().emit(
                                 &velda_observability::AccessLogRecord {
                                     request_id: request_id.entropy(),
-                                    timestamp_sec: request_id.timestamp_secs() as u32,
-                                    duration_ns: elapsed.as_nanos().min(u64::MAX as u128) as u64,
-                                    peer_ip: velda_observability::encode_ip_u128(meta.peer.ip()),
+                                    ingress_time_nanos: ingress_nanos,
+                                    duration_ns,
+                                    peer_ip: l7_req.state.client_ip,
                                     bytes_rx: 0,
                                     bytes_tx: conn.last_bytes_tx.min(u32::MAX as u64) as u32,
                                     upstream_ip: 0,
-                                    peer_port: meta.peer.port(),
                                     upstream_port: 0,
                                     status_code: status,
                                     route_id: route.id.0,
@@ -657,21 +663,21 @@ pub async fn run_http1_loop<IO>(
                         conn.mark_close();
                     }
                     let _ = conn.send_response(&server_resp).await;
-                    let elapsed = req_start.elapsed();
+                    let duration_ns =
+                        velda_core::clock::now_unix_nanos().saturating_sub(ingress_nanos);
                     global_metrics().record_early_completion(
                         PipeKind::BufferedH1H1,
-                        StreamCompletion::new(status, 0, conn.last_bytes_tx, elapsed, None),
+                        StreamCompletion::new(status, 0, conn.last_bytes_tx, duration_ns, 0),
                     );
                     velda_observability::global_log_store().emit(
                         &velda_observability::AccessLogRecord {
                             request_id: request_id.entropy(),
-                            timestamp_sec: request_id.timestamp_secs() as u32,
-                            duration_ns: elapsed.as_nanos().min(u64::MAX as u128) as u64,
-                            peer_ip: velda_observability::encode_ip_u128(meta.peer.ip()),
+                            ingress_time_nanos: ingress_nanos,
+                            duration_ns,
+                            peer_ip: l7_req.state.client_ip,
                             bytes_rx: 0,
                             bytes_tx: conn.last_bytes_tx.min(u32::MAX as u64) as u32,
                             upstream_ip: 0,
-                            peer_port: meta.peer.port(),
                             upstream_port: 0,
                             status_code: status,
                             route_id: route.id.0,
@@ -722,26 +728,25 @@ pub async fn run_http1_loop<IO>(
             );
             conn.mark_close();
             let _ = conn.send_early_error(StatusCode::SERVICE_UNAVAILABLE).await;
-            let elapsed = req_start.elapsed();
+            let duration_ns = velda_core::clock::now_unix_nanos().saturating_sub(ingress_nanos);
             global_metrics().record_early_completion(
                 PipeKind::BufferedH1H1,
                 StreamCompletion::new(
                     StatusCode::SERVICE_UNAVAILABLE.as_u16(),
                     0,
                     conn.last_bytes_tx,
-                    elapsed,
-                    None,
+                    duration_ns,
+                    0,
                 ),
             );
             velda_observability::global_log_store().emit(&velda_observability::AccessLogRecord {
                 request_id: request_id.entropy(),
-                timestamp_sec: request_id.timestamp_secs() as u32,
-                duration_ns: elapsed.as_nanos().min(u64::MAX as u128) as u64,
-                peer_ip: velda_observability::encode_ip_u128(meta.peer.ip()),
+                ingress_time_nanos: ingress_nanos,
+                duration_ns,
+                peer_ip: meta.peer_ip,
                 bytes_rx: 0,
                 bytes_tx: conn.last_bytes_tx.min(u32::MAX as u64) as u32,
                 upstream_ip: 0,
-                peer_port: meta.peer.port(),
                 upstream_port: 0,
                 status_code: StatusCode::SERVICE_UNAVAILABLE.as_u16(),
                 route_id: route.id.0,
@@ -771,26 +776,25 @@ pub async fn run_http1_loop<IO>(
             );
             conn.mark_close();
             let _ = conn.send_early_error(StatusCode::TOO_MANY_REQUESTS).await;
-            let elapsed = req_start.elapsed();
+            let duration_ns = velda_core::clock::now_unix_nanos().saturating_sub(ingress_nanos);
             global_metrics().record_early_completion(
                 PipeKind::BufferedH1H1,
                 StreamCompletion::new(
                     StatusCode::TOO_MANY_REQUESTS.as_u16(),
                     0,
                     conn.last_bytes_tx,
-                    elapsed,
-                    None,
+                    duration_ns,
+                    0,
                 ),
             );
             velda_observability::global_log_store().emit(&velda_observability::AccessLogRecord {
                 request_id: request_id.entropy(),
-                timestamp_sec: request_id.timestamp_secs() as u32,
-                duration_ns: elapsed.as_nanos().min(u64::MAX as u128) as u64,
-                peer_ip: velda_observability::encode_ip_u128(meta.peer.ip()),
+                ingress_time_nanos: ingress_nanos,
+                duration_ns,
+                peer_ip: meta.peer_ip,
                 bytes_rx: 0,
                 bytes_tx: conn.last_bytes_tx.min(u32::MAX as u64) as u32,
                 upstream_ip: 0,
-                peer_port: meta.peer.port(),
                 upstream_port: 0,
                 status_code: StatusCode::TOO_MANY_REQUESTS.as_u16(),
                 route_id: route.id.0,
@@ -998,26 +1002,25 @@ pub async fn run_http1_loop<IO>(
             Err(_) => velda_core::CompletionReason::UpstreamError,
         };
 
-        let elapsed = req_start.elapsed();
+        let duration_ns = velda_core::clock::now_unix_nanos().saturating_sub(ingress_nanos);
         global_metrics().record_stream_completion(
             pipe_kind,
             StreamCompletion::new(
                 final_status,
                 conn.last_bytes_rx,
                 conn.last_bytes_tx,
-                elapsed,
-                None,
+                duration_ns,
+                0,
             ),
         );
         velda_observability::global_log_store().emit(&velda_observability::AccessLogRecord {
             request_id: request_id.entropy(),
-            timestamp_sec: request_id.timestamp_secs() as u32,
-            duration_ns: elapsed.as_nanos().min(u64::MAX as u128) as u64,
-            peer_ip: velda_observability::encode_ip_u128(meta.peer.ip()),
+            ingress_time_nanos: ingress_nanos,
+            duration_ns,
+            peer_ip: meta.peer_ip,
             bytes_rx: conn.last_bytes_rx.min(u32::MAX as u64) as u32,
             bytes_tx: conn.last_bytes_tx.min(u32::MAX as u64) as u32,
             upstream_ip,
-            peer_port: meta.peer.port(),
             upstream_port,
             status_code: final_status,
             route_id: route.id.0,
@@ -1033,22 +1036,20 @@ pub async fn run_http1_loop<IO>(
             url_bytes: log_url_bytes,
         });
 
-        let dur_nanos = elapsed.as_nanos().min(u64::MAX as u128) as u64;
-        let start_nano = velda_core::clock::instant_to_unix_nanos(req_start);
-        let end_nano = start_nano.saturating_add(dur_nanos);
-        velda_observability::global_trace_store().emit(
-            &velda_observability::SpanRecord::new_root_span(
-                request_id.0,
-                request_id.entropy(),
-                start_nano,
-                end_nano,
-                final_status,
-                log_method,
-                meta.peer.ip(),
-                route.id.0,
-                target_upstream.0,
-            ),
-        );
+        let start_nano = ingress_nanos;
+        let end_nano = ingress_nanos.saturating_add(duration_ns);
+        velda_observability::global_trace_store().emit(&velda_observability::SpanRecord {
+            client_ip: meta.peer_ip,
+            trace_id: request_id.0.to_be_bytes(),
+            start_time_unix_nano: start_nano,
+            end_time_unix_nano: end_nano,
+            span_id: request_id.entropy().to_be_bytes(),
+            route_id: route.id.0,
+            upstream_id: target_upstream.0,
+            status_code: final_status,
+            method: log_method,
+            flags: 1,
+        });
 
         if pipe_result.is_err() {
             conn.lingering_close().await;

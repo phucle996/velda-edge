@@ -156,7 +156,7 @@ async fn dispatch_grpc_tcp_request_stream(
     config: &GrpcConfig,
     runtime: &SharedRuntime,
 ) {
-    let req_start = std::time::Instant::now();
+    let ingress_nanos = velda_core::clock::now_unix_nanos();
     let authority = server_stream.parts.uri.authority().map(|a| a.as_str());
     let path = server_stream.parts.uri.path();
     let (log_url_len, log_url_bytes) =
@@ -170,24 +170,24 @@ async fn dispatch_grpc_tcp_request_stream(
 
     // [PHYSICAL WIRE CEILING: MAX_WIRE_HEADERS = 1024]
     if server_stream.parts.headers.len() > velda_core::buffer::MAX_WIRE_HEADERS {
-        let (request_id, _) = velda_core::request_id::next_request_id();
+        let (request_id, _) = velda_core::request_id::next_request_id(ingress_nanos);
         let _ = server_stream.respond.send_trailers_only(
             GrpcStatus::ResourceExhausted,
             Some("too many request headers"),
         );
+        let duration_ns = velda_core::clock::now_unix_nanos().saturating_sub(ingress_nanos);
         global_metrics().record_early_completion(
             PipeKind::BufferedGrpcTcpTcp,
-            StreamCompletion::new(200, 0, 0, req_start.elapsed(), None),
+            StreamCompletion::new(200, 0, 0, duration_ns, 0),
         );
         global_log_store().emit(&velda_observability::AccessLogRecord {
             request_id: request_id.entropy(),
-            timestamp_sec: request_id.timestamp_secs() as u32,
-            duration_ns: req_start.elapsed().as_nanos().min(u64::MAX as u128) as u64,
-            peer_ip: velda_observability::encode_ip_u128(meta.peer.ip()),
+            ingress_time_nanos: ingress_nanos,
+            duration_ns,
+            peer_ip: meta.peer_ip,
             bytes_rx: 0,
             bytes_tx: 0,
             upstream_ip: 0,
-            peer_port: meta.peer.port(),
             upstream_port: 0,
             status_code: 200,
             route_id: velda_core::UNMATCHED_ROUTE_ID,
@@ -206,9 +206,9 @@ async fn dispatch_grpc_tcp_request_stream(
     }
 
     // [INGRESS W3C REQUEST ID GENERATION]
-    // Authoritatively generate W3C Request ID from thread-local pool (~1-2ns).
+    // Authoritatively generate W3C Request ID from thread-local pool.
     // Overwrite any client-supplied x-request-id to enforce zero-trust Edge boundary.
-    let (request_id, req_id_header) = velda_core::request_id::next_request_id();
+    let (request_id, req_id_header) = velda_core::request_id::next_request_id(ingress_nanos);
     server_stream
         .parts
         .headers
@@ -224,19 +224,19 @@ async fn dispatch_grpc_tcp_request_stream(
             GrpcStatus::Unimplemented,
             Some("no route matched for empty path"),
         );
+        let duration_ns = velda_core::clock::now_unix_nanos().saturating_sub(ingress_nanos);
         global_metrics().record_early_completion(
             PipeKind::BufferedGrpcTcpTcp,
-            StreamCompletion::new(200, 0, 0, req_start.elapsed(), None),
+            StreamCompletion::new(200, 0, 0, duration_ns, 0),
         );
         global_log_store().emit(&velda_observability::AccessLogRecord {
             request_id: request_id.entropy(),
-            timestamp_sec: request_id.timestamp_secs() as u32,
-            duration_ns: req_start.elapsed().as_nanos().min(u64::MAX as u128) as u64,
-            peer_ip: velda_observability::encode_ip_u128(meta.peer.ip()),
+            ingress_time_nanos: ingress_nanos,
+            duration_ns,
+            peer_ip: meta.peer_ip,
             bytes_rx: 0,
             bytes_tx: 0,
             upstream_ip: 0,
-            peer_port: meta.peer.port(),
             upstream_port: 0,
             status_code: 200,
             route_id: velda_core::UNMATCHED_ROUTE_ID,
@@ -260,19 +260,19 @@ async fn dispatch_grpc_tcp_request_stream(
             GrpcStatus::Unimplemented,
             Some("no route matched for service"),
         );
+        let duration_ns = velda_core::clock::now_unix_nanos().saturating_sub(ingress_nanos);
         global_metrics().record_early_completion(
             PipeKind::BufferedGrpcTcpTcp,
-            StreamCompletion::new(200, 0, 0, req_start.elapsed(), None),
+            StreamCompletion::new(200, 0, 0, duration_ns, 0),
         );
         global_log_store().emit(&velda_observability::AccessLogRecord {
             request_id: request_id.entropy(),
-            timestamp_sec: request_id.timestamp_secs() as u32,
-            duration_ns: req_start.elapsed().as_nanos().min(u64::MAX as u128) as u64,
-            peer_ip: velda_observability::encode_ip_u128(meta.peer.ip()),
+            ingress_time_nanos: ingress_nanos,
+            duration_ns,
+            peer_ip: meta.peer_ip,
             bytes_rx: 0,
             bytes_tx: 0,
             upstream_ip: 0,
-            peer_port: meta.peer.port(),
             upstream_port: 0,
             status_code: 200,
             route_id: velda_core::UNMATCHED_ROUTE_ID,
@@ -315,7 +315,7 @@ async fn dispatch_grpc_tcp_request_stream(
                 velda_core::Body::Empty,
             );
             l7_req.state.request_id = request_id;
-            l7_req.state.client_ip = Some(meta.peer.ip());
+            l7_req.state.client_ip = meta.peer_ip;
 
             if let Some(hooks) = &plan.pre_route_hooks {
                 let mut action = velda_plugin::run_pre_route_plugins(hooks, &mut l7_req);
@@ -351,20 +351,20 @@ async fn dispatch_grpc_tcp_request_stream(
                         if let Ok(r) = builder.body(()) {
                             let _ = server_stream.respond.send_response(r, true);
                         }
+                        let duration_ns =
+                            velda_core::clock::now_unix_nanos().saturating_sub(ingress_nanos);
                         global_metrics().record_early_completion(
                             PipeKind::BufferedGrpcTcpTcp,
-                            StreamCompletion::new(200, 0, 0, req_start.elapsed(), None),
+                            StreamCompletion::new(200, 0, 0, duration_ns, 0),
                         );
                         global_log_store().emit(&velda_observability::AccessLogRecord {
                             request_id: request_id.entropy(),
-                            timestamp_sec: request_id.timestamp_secs() as u32,
-                            duration_ns: req_start.elapsed().as_nanos().min(u64::MAX as u128)
-                                as u64,
-                            peer_ip: velda_observability::encode_ip_u128(meta.peer.ip()),
+                            ingress_time_nanos: ingress_nanos,
+                            duration_ns,
+                            peer_ip: l7_req.state.client_ip,
                             bytes_rx: 0,
                             bytes_tx: 0,
                             upstream_ip: 0,
-                            peer_port: meta.peer.port(),
                             upstream_port: 0,
                             status_code: 200,
                             route_id: route.id.0,
@@ -425,20 +425,20 @@ async fn dispatch_grpc_tcp_request_stream(
                         if let Ok(r) = builder.body(()) {
                             let _ = server_stream.respond.send_response(r, true);
                         }
+                        let duration_ns =
+                            velda_core::clock::now_unix_nanos().saturating_sub(ingress_nanos);
                         global_metrics().record_early_completion(
                             PipeKind::BufferedGrpcTcpTcp,
-                            StreamCompletion::new(200, 0, 0, req_start.elapsed(), None),
+                            StreamCompletion::new(200, 0, 0, duration_ns, 0),
                         );
                         global_log_store().emit(&velda_observability::AccessLogRecord {
                             request_id: request_id.entropy(),
-                            timestamp_sec: request_id.timestamp_secs() as u32,
-                            duration_ns: req_start.elapsed().as_nanos().min(u64::MAX as u128)
-                                as u64,
-                            peer_ip: velda_observability::encode_ip_u128(meta.peer.ip()),
+                            ingress_time_nanos: ingress_nanos,
+                            duration_ns,
+                            peer_ip: l7_req.state.client_ip,
                             bytes_rx: 0,
                             bytes_tx: 0,
                             upstream_ip: 0,
-                            peer_port: meta.peer.port(),
                             upstream_port: 0,
                             status_code: 200,
                             route_id: route.id.0,
@@ -493,19 +493,19 @@ async fn dispatch_grpc_tcp_request_stream(
         let _ = server_stream
             .respond
             .send_trailers_only(GrpcStatus::Unavailable, Some("upstream not configured"));
+        let duration_ns = velda_core::clock::now_unix_nanos().saturating_sub(ingress_nanos);
         global_metrics().record_early_completion(
             PipeKind::BufferedGrpcTcpTcp,
-            StreamCompletion::new(200, 0, 0, req_start.elapsed(), None),
+            StreamCompletion::new(200, 0, 0, duration_ns, 0),
         );
         global_log_store().emit(&velda_observability::AccessLogRecord {
             request_id: request_id.entropy(),
-            timestamp_sec: request_id.timestamp_secs() as u32,
-            duration_ns: req_start.elapsed().as_nanos().min(u64::MAX as u128) as u64,
-            peer_ip: velda_observability::encode_ip_u128(meta.peer.ip()),
+            ingress_time_nanos: ingress_nanos,
+            duration_ns,
+            peer_ip: meta.peer_ip,
             bytes_rx: 0,
             bytes_tx: 0,
             upstream_ip: 0,
-            peer_port: meta.peer.port(),
             upstream_port: 0,
             status_code: 200,
             route_id: route.id.0,
@@ -535,19 +535,19 @@ async fn dispatch_grpc_tcp_request_stream(
         let _ = server_stream
             .respond
             .send_trailers_only(GrpcStatus::ResourceExhausted, Some("resource exhausted"));
+        let duration_ns = velda_core::clock::now_unix_nanos().saturating_sub(ingress_nanos);
         global_metrics().record_early_completion(
             PipeKind::BufferedGrpcTcpTcp,
-            StreamCompletion::new(200, 0, 0, req_start.elapsed(), None),
+            StreamCompletion::new(200, 0, 0, duration_ns, 0),
         );
         global_log_store().emit(&velda_observability::AccessLogRecord {
             request_id: request_id.entropy(),
-            timestamp_sec: request_id.timestamp_secs() as u32,
-            duration_ns: req_start.elapsed().as_nanos().min(u64::MAX as u128) as u64,
-            peer_ip: velda_observability::encode_ip_u128(meta.peer.ip()),
+            ingress_time_nanos: ingress_nanos,
+            duration_ns,
+            peer_ip: meta.peer_ip,
             bytes_rx: 0,
             bytes_tx: 0,
             upstream_ip: 0,
-            peer_port: meta.peer.port(),
             upstream_port: 0,
             status_code: 200,
             route_id: route.id.0,
@@ -670,7 +670,7 @@ async fn dispatch_grpc_tcp_request_stream(
         },
     };
 
-    let duration = req_start.elapsed();
+    let duration_ns = velda_core::clock::now_unix_nanos().saturating_sub(ingress_nanos);
     let (upstream_ip, upstream_port) = match outcome.upstream_addr {
         Some(addr) => (
             velda_observability::encode_upstream_ip_u32(addr.ip()),
@@ -685,20 +685,19 @@ async fn dispatch_grpc_tcp_request_stream(
             outcome.status_code,
             outcome.bytes_rx,
             outcome.bytes_tx,
-            duration,
-            None,
+            duration_ns,
+            0,
         ),
     );
 
     global_log_store().emit(&velda_observability::AccessLogRecord {
         request_id: request_id.entropy(),
-        timestamp_sec: request_id.timestamp_secs() as u32,
-        duration_ns: duration.as_nanos().min(u64::MAX as u128) as u64,
-        peer_ip: velda_observability::encode_ip_u128(meta.peer.ip()),
+        ingress_time_nanos: ingress_nanos,
+        duration_ns,
+        peer_ip: meta.peer_ip,
         bytes_rx: outcome.bytes_rx.min(u32::MAX as u64) as u32,
         bytes_tx: outcome.bytes_tx.min(u32::MAX as u64) as u32,
         upstream_ip,
-        peer_port: meta.peer.port(),
         upstream_port,
         status_code: outcome.status_code,
         route_id: route.id.0,

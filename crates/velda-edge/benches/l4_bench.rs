@@ -950,7 +950,9 @@ async fn bench_l4_udp_game_affinity_and_nat_rebinding() {
                         // Create new session with LB affinity selection
                         let selection_ctx = match token {
                             Some(tok) => SelectionContext::with_hash(tok),
-                            None => SelectionContext::with_client_ip(client_addr),
+                            None => SelectionContext::with_client_ip(
+                                velda_core::lut::ip::encode_ip_u128(client_addr.ip()),
+                            ),
                         };
 
                         if let Some(target_addr) = up.select_target_with_context(&selection_ctx)

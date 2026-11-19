@@ -19,7 +19,7 @@ pub fn enrich_headers_cached(
     headers: &mut HeaderMap,
     uri: &Uri,
     client_ip: &HeaderValue,
-    client_port: &HeaderValue,
+    listener_port: &HeaderValue,
     is_tls: bool,
 ) {
     let proto = if is_tls { "https" } else { "http" };
@@ -47,7 +47,7 @@ pub fn enrich_headers_cached(
     );
     headers.insert(
         HeaderName::from_static("x-forwarded-port"),
-        client_port.clone(),
+        listener_port.clone(),
     );
 
     let host_hdr = headers.get(http::header::HOST).cloned();

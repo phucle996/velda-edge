@@ -200,11 +200,12 @@ pub async fn serve(
     let udp_idle_timeout = route.udp_idle_timeout;
     let route_id = route.id;
     let upstream_id = route.upstream_id;
+    let client_ip = velda_core::lut::ip::encode_ip_u128(client_addr.ip());
     // Step 1: Resolve physical backend target endpoint using load balancer context.
     // Uses token hash affinity if available; falls back to client IP affinity.
     let selection_ctx = match token {
         Some(tok) => velda_lb::SelectionContext::with_hash(tok),
-        None => velda_lb::SelectionContext::with_client_ip(client_addr),
+        None => velda_lb::SelectionContext::with_client_ip(client_ip),
     };
 
     let Some(target_addr) = upstream.select_target_with_context(&selection_ctx) else {
@@ -227,8 +228,8 @@ pub async fn serve(
             peer = %client_addr,
             "Forwarding UDP datagram unidirectionally"
         );
-        let (request_id, _) = velda_core::request_id::next_request_id();
-        let started = std::time::Instant::now();
+        let ingress_nanos = velda_core::clock::now_unix_nanos();
+        let (request_id, _) = velda_core::request_id::next_request_id(ingress_nanos);
         let completion = match downstream_socket.send_to(&initial_bytes, target_addr).await {
             Ok(_) => velda_core::CompletionReason::Complete,
             Err(e) => {
@@ -244,13 +245,12 @@ pub async fn serve(
         };
         velda_observability::global_log_store().emit(&velda_observability::AccessLogRecord {
             request_id: request_id.entropy(),
-            timestamp_sec: request_id.timestamp_secs() as u32,
-            duration_ns: started.elapsed().as_nanos().min(u64::MAX as u128) as u64,
-            peer_ip: velda_observability::encode_ip_u128(client_addr.ip()),
+            ingress_time_nanos: ingress_nanos,
+            duration_ns: velda_core::clock::now_unix_nanos().saturating_sub(ingress_nanos),
+            peer_ip: client_ip,
             bytes_rx: initial_bytes.len().min(u32::MAX as usize) as u32,
             bytes_tx: 0,
             upstream_ip: velda_observability::encode_upstream_ip_u32(target_addr.ip()),
-            peer_port: client_addr.port(),
             upstream_port: target_addr.port(),
             status_code: 0,
             route_id: route_id.0,
@@ -263,7 +263,7 @@ pub async fn serve(
             ua_family: velda_core::UaFamily::None,
             ua_os: velda_core::UaOs::Unknown,
             url_len: 0,
-            url_bytes: [0; 188],
+            url_bytes: [0; 186],
         });
         return;
     }
@@ -309,21 +309,20 @@ pub async fn serve(
 
     // Step 5: Spawn background session worker driving bidirectional packet pumping.
     tokio::spawn(async move {
-        let started = std::time::Instant::now();
-        let (request_id, _) = velda_core::request_id::next_request_id();
+        let ingress_nanos = velda_core::clock::now_unix_nanos();
+        let (request_id, _) = velda_core::request_id::next_request_id(ingress_nanos);
         let emit_log = |peer: std::net::SocketAddr,
                         rx: u64,
                         tx: u64,
                         completion: velda_core::CompletionReason| {
             velda_observability::global_log_store().emit(&velda_observability::AccessLogRecord {
                 request_id: request_id.entropy(),
-                timestamp_sec: request_id.timestamp_secs() as u32,
-                duration_ns: started.elapsed().as_nanos().min(u64::MAX as u128) as u64,
+                ingress_time_nanos: ingress_nanos,
+                duration_ns: velda_core::clock::now_unix_nanos().saturating_sub(ingress_nanos),
                 peer_ip: velda_observability::encode_ip_u128(peer.ip()),
                 bytes_rx: rx.min(u32::MAX as u64) as u32,
                 bytes_tx: tx.min(u32::MAX as u64) as u32,
                 upstream_ip: velda_observability::encode_upstream_ip_u32(target_addr.ip()),
-                peer_port: peer.port(),
                 upstream_port: target_addr.port(),
                 status_code: 0,
                 route_id: route_id.0,
@@ -336,7 +335,7 @@ pub async fn serve(
                 ua_family: velda_core::UaFamily::None,
                 ua_os: velda_core::UaOs::Unknown,
                 url_len: 0,
-                url_bytes: [0; 188],
+                url_bytes: [0; 186],
             });
         };
         // Step 5a: Open accelerated kernel UDP socket connected to upstream target.

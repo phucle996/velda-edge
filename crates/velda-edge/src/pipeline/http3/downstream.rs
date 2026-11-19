@@ -173,6 +173,8 @@ pub async fn handle_http3_udp(
         );
     }
 
+    let peer_ip = velda_core::lut::ip::encode_ip_u128(peer.ip());
+
     // 2. Process complete L7 requests concurrently without blocking other datagrams
     for req_event in requests {
         let worker = worker.clone();
@@ -183,7 +185,7 @@ pub async fn handle_http3_udp(
             // [INGRESS W3C REQUEST ID]
             // Authoritative W3C Request ID is already stamped at QPACK decode into Slot 0.
             let mut req = req_event.request;
-            req.state.client_ip = Some(peer.ip());
+            req.state.client_ip = peer_ip;
             let req_id_header = req.headers.request_id().clone();
             let (log_url_len, log_url_bytes) = {
                 let host = velda_http3::server::header::extract_host(&req.headers, &req.uri);
@@ -229,27 +231,28 @@ pub async fn handle_http3_udp(
                         Some(&req_id_header),
                     ))
                     .await;
+                let duration_ns =
+                    velda_core::clock::now_unix_nanos().saturating_sub(req.ingress_time_nanos);
                 global_metrics().record_early_completion(
                     PipeKind::BufferedH3H1,
                     StreamCompletion::new(
                         StatusCode::TOO_EARLY.as_u16(),
                         req.body.len() as u64,
                         0,
-                        std::time::Duration::ZERO,
-                        None,
+                        duration_ns,
+                        0,
                     ),
                 );
                 let log_method = velda_core::HttpMethod::from_bytes(req.method.as_str().as_bytes());
                 velda_observability::global_log_store().emit(
                     &velda_observability::AccessLogRecord {
                         request_id: req.state.request_id.entropy(),
-                        timestamp_sec: req.state.request_id.timestamp_secs() as u32,
-                        duration_ns: 0,
-                        peer_ip: velda_observability::encode_ip_u128(peer.ip()),
+                        ingress_time_nanos: req.ingress_time_nanos,
+                        duration_ns,
+                        peer_ip: req.state.client_ip,
                         bytes_rx: req.body.len() as u32,
                         bytes_tx: 0,
                         upstream_ip: 0,
-                        peer_port: peer.port(),
                         upstream_port: 0,
                         status_code: StatusCode::TOO_EARLY.as_u16(),
                         route_id: velda_core::UNMATCHED_ROUTE_ID,
@@ -280,27 +283,28 @@ pub async fn handle_http3_udp(
                         Some(&req_id_header),
                     ))
                     .await;
+                let duration_ns =
+                    velda_core::clock::now_unix_nanos().saturating_sub(req.ingress_time_nanos);
                 global_metrics().record_early_completion(
                     PipeKind::BufferedH3H1,
                     StreamCompletion::new(
                         StatusCode::BAD_REQUEST.as_u16(),
                         req.body.len() as u64,
                         0,
-                        std::time::Duration::ZERO,
-                        None,
+                        duration_ns,
+                        0,
                     ),
                 );
                 let log_method = velda_core::HttpMethod::from_bytes(req.method.as_str().as_bytes());
                 velda_observability::global_log_store().emit(
                     &velda_observability::AccessLogRecord {
                         request_id: req.state.request_id.entropy(),
-                        timestamp_sec: req.state.request_id.timestamp_secs() as u32,
-                        duration_ns: 0,
-                        peer_ip: velda_observability::encode_ip_u128(peer.ip()),
+                        ingress_time_nanos: req.ingress_time_nanos,
+                        duration_ns,
+                        peer_ip: req.state.client_ip,
                         bytes_rx: req.body.len() as u32,
                         bytes_tx: 0,
                         upstream_ip: 0,
-                        peer_port: peer.port(),
                         upstream_port: 0,
                         status_code: StatusCode::BAD_REQUEST.as_u16(),
                         route_id: velda_core::UNMATCHED_ROUTE_ID,
@@ -326,7 +330,7 @@ pub async fn handle_http3_udp(
                 local_addr,
             );
 
-            process_http3_request(req, peer, &lid, &runtime, responder).await;
+            process_http3_request(req, &lid, &runtime, responder).await;
         });
     }
 }
@@ -334,12 +338,11 @@ pub async fn handle_http3_udp(
 /// Dispatches an HTTP/3 request through `Http3Router` and forwards to upstream backend.
 async fn process_http3_request(
     mut req: L7Request,
-    peer: std::net::SocketAddr,
     listener_id: &str,
     runtime: &SharedRuntime,
     responder: super::engine::Http3Responder,
 ) {
-    let req_start = std::time::Instant::now();
+    let ingress_nanos = req.ingress_time_nanos;
     let host = velda_http3::server::header::extract_host(&req.headers, &req.uri);
     let mut http_req = Http3RouteRequest::new(req.path());
     if let Some(h) = host {
@@ -376,26 +379,25 @@ async fn process_http3_request(
                 Some(req.headers.request_id()),
             ))
             .await;
-        let elapsed = req_start.elapsed();
+        let duration_ns = velda_core::clock::now_unix_nanos().saturating_sub(ingress_nanos);
         global_metrics().record_early_completion(
             PipeKind::BufferedH3H1,
             StreamCompletion::new(
                 StatusCode::NOT_FOUND.as_u16(),
                 req.body.len() as u64,
                 0,
-                elapsed,
-                None,
+                duration_ns,
+                0,
             ),
         );
         velda_observability::global_log_store().emit(&velda_observability::AccessLogRecord {
             request_id: req.state.request_id.entropy(),
-            timestamp_sec: req.state.request_id.timestamp_secs() as u32,
-            duration_ns: elapsed.as_nanos().min(u64::MAX as u128) as u64,
-            peer_ip: velda_observability::encode_ip_u128(peer.ip()),
+            ingress_time_nanos: ingress_nanos,
+            duration_ns,
+            peer_ip: req.state.client_ip,
             bytes_rx: req.body.len() as u32,
             bytes_tx: 0,
             upstream_ip: 0,
-            peer_port: peer.port(),
             upstream_port: 0,
             status_code: StatusCode::NOT_FOUND.as_u16(),
             route_id: velda_core::UNMATCHED_ROUTE_ID,
@@ -457,27 +459,27 @@ async fn process_http3_request(
                     let status = resp.status.as_u16();
                     let bytes_tx = resp.body.len() as u64;
                     let _ = responder.send_response(resp).await;
-                    let elapsed = req_start.elapsed();
+                    let duration_ns =
+                        velda_core::clock::now_unix_nanos().saturating_sub(ingress_nanos);
                     global_metrics().record_early_completion(
                         PipeKind::BufferedH3H1,
                         StreamCompletion::new(
                             status,
                             req.body.len() as u64,
                             bytes_tx,
-                            elapsed,
-                            None,
+                            duration_ns,
+                            0,
                         ),
                     );
                     velda_observability::global_log_store().emit(
                         &velda_observability::AccessLogRecord {
                             request_id: req.state.request_id.entropy(),
-                            timestamp_sec: req.state.request_id.timestamp_secs() as u32,
-                            duration_ns: elapsed.as_nanos().min(u64::MAX as u128) as u64,
-                            peer_ip: velda_observability::encode_ip_u128(peer.ip()),
+                            ingress_time_nanos: ingress_nanos,
+                            duration_ns,
+                            peer_ip: req.state.client_ip,
                             bytes_rx: req.body.len() as u32,
                             bytes_tx: bytes_tx.min(u32::MAX as u64) as u32,
                             upstream_ip: 0,
-                            peer_port: peer.port(),
                             upstream_port: 0,
                             status_code: status,
                             route_id: route.id.0,
@@ -532,27 +534,27 @@ async fn process_http3_request(
                     let status = resp.status.as_u16();
                     let bytes_tx = resp.body.len() as u64;
                     let _ = responder.send_response(resp).await;
-                    let elapsed = req_start.elapsed();
+                    let duration_ns =
+                        velda_core::clock::now_unix_nanos().saturating_sub(ingress_nanos);
                     global_metrics().record_early_completion(
                         PipeKind::BufferedH3H1,
                         StreamCompletion::new(
                             status,
                             req.body.len() as u64,
                             bytes_tx,
-                            elapsed,
-                            None,
+                            duration_ns,
+                            0,
                         ),
                     );
                     velda_observability::global_log_store().emit(
                         &velda_observability::AccessLogRecord {
                             request_id: req.state.request_id.entropy(),
-                            timestamp_sec: req.state.request_id.timestamp_secs() as u32,
-                            duration_ns: elapsed.as_nanos().min(u64::MAX as u128) as u64,
-                            peer_ip: velda_observability::encode_ip_u128(peer.ip()),
+                            ingress_time_nanos: ingress_nanos,
+                            duration_ns,
+                            peer_ip: req.state.client_ip,
                             bytes_rx: req.body.len() as u32,
                             bytes_tx: bytes_tx.min(u32::MAX as u64) as u32,
                             upstream_ip: 0,
-                            peer_port: peer.port(),
                             upstream_port: 0,
                             status_code: status,
                             route_id: route.id.0,
@@ -591,20 +593,19 @@ async fn process_http3_request(
             let status = resp.status.as_u16();
             let bytes_tx = resp.body.len() as u64;
             let _ = responder.send_response(resp).await;
-            let elapsed = req_start.elapsed();
+            let duration_ns = velda_core::clock::now_unix_nanos().saturating_sub(ingress_nanos);
             global_metrics().record_early_completion(
                 PipeKind::BufferedH3H1,
-                StreamCompletion::new(status, req.body.len() as u64, bytes_tx, elapsed, None),
+                StreamCompletion::new(status, req.body.len() as u64, bytes_tx, duration_ns, 0),
             );
             velda_observability::global_log_store().emit(&velda_observability::AccessLogRecord {
                 request_id: req.state.request_id.entropy(),
-                timestamp_sec: req.state.request_id.timestamp_secs() as u32,
-                duration_ns: elapsed.as_nanos().min(u64::MAX as u128) as u64,
-                peer_ip: velda_observability::encode_ip_u128(peer.ip()),
+                ingress_time_nanos: ingress_nanos,
+                duration_ns,
+                peer_ip: req.state.client_ip,
                 bytes_rx: req.body.len() as u32,
                 bytes_tx: bytes_tx.min(u32::MAX as u64) as u32,
                 upstream_ip: 0,
-                peer_port: peer.port(),
                 upstream_port: 0,
                 status_code: status,
                 route_id: route.id.0,
@@ -648,26 +649,25 @@ async fn process_http3_request(
                 Some(req.headers.request_id()),
             ))
             .await;
-        let elapsed = req_start.elapsed();
+        let duration_ns = velda_core::clock::now_unix_nanos().saturating_sub(ingress_nanos);
         global_metrics().record_early_completion(
             PipeKind::BufferedH3H1,
             StreamCompletion::new(
                 StatusCode::SERVICE_UNAVAILABLE.as_u16(),
                 req.body.len() as u64,
                 0,
-                elapsed,
-                None,
+                duration_ns,
+                0,
             ),
         );
         velda_observability::global_log_store().emit(&velda_observability::AccessLogRecord {
             request_id: req.state.request_id.entropy(),
-            timestamp_sec: req.state.request_id.timestamp_secs() as u32,
-            duration_ns: elapsed.as_nanos().min(u64::MAX as u128) as u64,
-            peer_ip: velda_observability::encode_ip_u128(peer.ip()),
+            ingress_time_nanos: ingress_nanos,
+            duration_ns,
+            peer_ip: req.state.client_ip,
             bytes_rx: req.body.len() as u32,
             bytes_tx: 0,
             upstream_ip: 0,
-            peer_port: peer.port(),
             upstream_port: 0,
             status_code: StatusCode::SERVICE_UNAVAILABLE.as_u16(),
             route_id: route.id.0,
@@ -700,26 +700,25 @@ async fn process_http3_request(
                 Some(req.headers.request_id()),
             ))
             .await;
-        let elapsed = req_start.elapsed();
+        let duration_ns = velda_core::clock::now_unix_nanos().saturating_sub(ingress_nanos);
         global_metrics().record_early_completion(
             PipeKind::BufferedH3H1,
             StreamCompletion::new(
                 StatusCode::TOO_MANY_REQUESTS.as_u16(),
                 req.body.len() as u64,
                 0,
-                elapsed,
-                None,
+                duration_ns,
+                0,
             ),
         );
         velda_observability::global_log_store().emit(&velda_observability::AccessLogRecord {
             request_id: req.state.request_id.entropy(),
-            timestamp_sec: req.state.request_id.timestamp_secs() as u32,
-            duration_ns: elapsed.as_nanos().min(u64::MAX as u128) as u64,
-            peer_ip: velda_observability::encode_ip_u128(peer.ip()),
+            ingress_time_nanos: ingress_nanos,
+            duration_ns,
+            peer_ip: req.state.client_ip,
             bytes_rx: req.body.len() as u32,
             bytes_tx: 0,
             upstream_ip: 0,
-            peer_port: peer.port(),
             upstream_port: 0,
             status_code: StatusCode::TOO_MANY_REQUESTS.as_u16(),
             route_id: route.id.0,
@@ -951,15 +950,15 @@ async fn process_http3_request(
         },
     };
 
-    let elapsed = req_start.elapsed();
+    let duration_ns = velda_core::clock::now_unix_nanos().saturating_sub(ingress_nanos);
     global_metrics().record_stream_completion(
         pipe_kind,
         StreamCompletion::new(
             outcome.status_code,
             outcome.bytes_rx,
             outcome.bytes_tx,
-            elapsed,
-            None,
+            duration_ns,
+            0,
         ),
     );
     let (upstream_ip, upstream_port) = outcome
@@ -973,13 +972,12 @@ async fn process_http3_request(
         .unwrap_or((0, 0));
     velda_observability::global_log_store().emit(&velda_observability::AccessLogRecord {
         request_id: req.state.request_id.entropy(),
-        timestamp_sec: req.state.request_id.timestamp_secs() as u32,
-        duration_ns: elapsed.as_nanos().min(u64::MAX as u128) as u64,
-        peer_ip: velda_observability::encode_ip_u128(peer.ip()),
+        ingress_time_nanos: ingress_nanos,
+        duration_ns,
+        peer_ip: req.state.client_ip,
         bytes_rx: outcome.bytes_rx.min(u32::MAX as u64) as u32,
         bytes_tx: outcome.bytes_tx.min(u32::MAX as u64) as u32,
         upstream_ip,
-        peer_port: peer.port(),
         upstream_port,
         status_code: outcome.status_code,
         route_id: route.id.0,
