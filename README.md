@@ -164,22 +164,6 @@ cd ui && npm run build && cd ..
 
 ---
 
-## Performance Philosophy
-
-Velda Edge states its performance rules as invariants, and backs them with benchmarks rather than claims:
-
-| Invariant | Meaning |
-|---|---|
-| Wait-free snapshot reads | Serving threads read the runtime through an atomic pointer load. |
-| Zero heap allocation in serving | Hot-path structures are pre-sized and pre-compiled. |
-| No cross-core coordination on `acquire()` | Pool lanes are per-core; warming belongs to the shadow worker. |
-| Zero-downtime reload | Snapshots swap atomically; old generations drain naturally. |
-| Bounded background work | Every outbound or inbound background path has size, time and concurrency limits. |
-
-Per-plugin benchmark specifications are defined in the `BENCHMARK.md` file next to each plugin under `crates/velda-plugin/`. Metric cells marked `[TBD]` have not been measured yet.
-
----
-
 ## License
 
 Velda Edge is licensed under the **Apache License, Version 2.0** ([LICENSE](LICENSE) or http://www.apache.org/licenses/LICENSE-2.0).
