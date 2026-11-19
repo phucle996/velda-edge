@@ -1,38 +1,430 @@
-# Performance Benchmark (`consumer_quota`)
+# Performance Benchmark Report: Consumer Quota & Multi-Window Enforcement Plugin (`consumer_quota`)
 
-Production stress-test benchmark performed on Azure Infrastructure comparing Velda Edge against Kong Gateway 3.9.0 and Aurora API Gateway.
-
----
-
-## 1. Test Environment
-
-- **Gateway Node (VM1)**: Azure Standard D4s v5 (4 vCPUs AMD EPYC 7763, 16 GiB RAM), Ubuntu 24.04 LTS (Kernel 7.0.0-1017-azure).
-- **Client Generator (VM2)**: Azure Standard D4s v5 (4 vCPUs AMD EPYC 7763, 16 GiB RAM).
-- **Upstream Backend**: High-performance HTTP/1.1 echo server on VM2 (`172.16.0.5:8081`).
-- **Load Generation Tool**: `wrk -t4 -c100 -d10s --latency` (4 threads, 100 persistent connections, 10-second duration).
+Performance benchmark specification and evaluation framework for the `consumer_quota` plugin across **Velda Edge**, **Kong Gateway 3.9**, **Apache APISIX 3.10**, and **Envoy Proxy 1.31**.
 
 ---
 
-## 2. Benchmark Results Matrix
+## 1. Test Environment & Measurement Methodology
 
-| Architecture / Scenario | Throughput (RPS) | Avg Latency | P50 Latency | P99 Latency | Performance vs Raw |
-| :--- | :---: | :---: | :---: | :---: | :---: |
-| **Velda Edge (Raw Baseline)** | **33,983.6 req/s** | **3.03 ms** | **2.59 ms** | **9.64 ms** | **100.0%** (Baseline) |
-| **Velda Edge + Consumer Quota** | **32,840.2 req/s** | **3.14 ms** | **2.68 ms** | **10.12 ms** | **96.6%** (-3.4% overhead) |
-| **Velda Edge + Quota & Metering** | **32,192.7 req/s** | **3.28 ms** | **2.80 ms** | **11.30 ms** | **94.7%** (-5.3% overhead) |
-| **Aurora Gateway (Raw Baseline)** | 25,654.3 req/s | 4.00 ms | 3.37 ms | 11.35 ms | 75.5% of Velda Raw |
-| **Kong Gateway (Raw Baseline)** | 24,673.3 req/s | 4.16 ms | 3.35 ms | 11.74 ms | 72.6% of Velda Raw |
-| **Kong Gateway + Rate-Limiting** | 16,564.9 req/s | 6.44 ms | 5.63 ms | 23.56 ms | <span style="color:red">**-32.9% penalty**</span> |
+### 1.1 Production-Grade Hardware & Network Testbed
+
+*[TBD]*
 
 ---
 
-## 3. Analysis & Key Takeaways
+### 1.2 Standardized 5-Tier Metric Taxonomy
 
-1. **Near-Zero Degradation (-3.4%)**:
-   - Single-window consumer quota evaluation reduces raw proxy throughput by only **3.4%** (~1,143 RPS), with median latency increasing by just **90 microseconds**.
-2. **Double the Speed of Kong (+94.3%)**:
-   - Kong Gateway suffers severe degradation (-32.9%) under in-memory rate limiting due to OpenResty `lua_shared_dict` global spinlock contention.
-   - Velda Edge's lock-striped cacheline-aligned sharding enables it to outpace Kong by **+94.3%** under equivalent load.
-3. **P99 Stability**:
-   - Kong's P99 latency jumps from 11.74 ms to 23.56 ms due to LuaJIT garbage collection cycles.
-   - Velda Edge maintains rock-solid P99 latency (10.12 ms) with zero memory allocations on the hot path.
+All benchmark scenarios are evaluated across five standardized, non-abbreviated metric tiers:
+
+1. **Tier 1: Macro Network, L7 & Consumer Quota Delivery Metrics**:
+   - **Duration (seconds)**: Continuous execution duration of the benchmark session (standard 15.00 seconds).
+   - **Total Requests**: Total downstream requests successfully served.
+   - **Throughput (requests/second)**: Processing throughput rate.
+   - **Wire Bandwidth (Megabytes/second)**: Aggregate data transfer rate across the network interface.
+   - **Total Consumer Requests Evaluated**: Total requests evaluated against multi-window consumer quotas.
+   - **Quota Exceeded Drops (429)**: Total requests rejected due to exhausted hourly/daily/monthly quotas.
+   - **Quota Evaluation Throughput (requests/second)**: Rate of consumer identification, quota lookup, and deduction.
+   - **Mean Latency (milliseconds)**: Average time from request receipt to response completion.
+   - **Min Latency (milliseconds)**: Minimum recorded latency.
+   - **Median Latency P50 (milliseconds)**: 50th percentile response latency.
+   - **P75 Latency (milliseconds)**: 75th percentile response latency.
+   - **P90 Latency (milliseconds)**: 90th percentile response latency.
+   - **P99 Tail Latency (milliseconds)**: 99th percentile response latency.
+   - **P99.9 Tail Latency (milliseconds)**: 99.9th percentile deep tail latency.
+   - **Max Latency (milliseconds)**: Maximum recorded response latency.
+   - **Latency Standard Deviation (milliseconds)**: Jitter and dispersion of response latency.
+   - **Connect Time Average (milliseconds)**: Downstream connection handshake duration.
+   - **HTTP Status Code Distribution (2xx / 4xx / 5xx)**: Proportional breakdown of response status codes.
+   - **Success Rate (%)**: Percentage of requests successfully completed without connection resets or drops.
+2. **Tier 2: System Resource Footprint**:
+   - **Total CPU Utilization (% CPU)**: Normalized aggregate CPU utilization across all allocated processor cores.
+   - **User CPU (% User CPU)**: CPU time spent in userspace logic.
+   - **System / Kernel CPU (% System / Kernel CPU)**: CPU time spent in kernel syscalls and socket I/O.
+   - **SoftIRQ CPU (% SoftIRQ CPU)**: CPU time spent processing network interrupt handlers.
+   - **Frontline Worker 0 CPU (%)**: Core 0 request-serving worker CPU load.
+   - **Frontline Worker 1 CPU (%)**: Core 1 request-serving worker CPU load.
+   - **Shadow Logistics Worker CPU (%)**: Dedicated background worker CPU load running under `SCHED_IDLE`.
+   - **Peak Resident Set Size (Megabytes)**: Maximum non-swapped physical memory footprint (`VmHWM`).
+   - **RAM Usage (%)**: Percentage of total system memory consumed.
+   - **Heap Allocations per Request (Bytes / Count)**: Dynamic memory allocation rate on the serving hot-path.
+   - **Memory Leak Rate (Megabytes / minute)**: Long-term memory drift over sustained execution.
+3. **Tier 3: Micro Linux Kernel & OS Telemetry via `perf stat` & tracepoints**:
+   - **System Calls per Request (System Calls / Request)**: Average syscall overhead per request.
+   - **Context Switches per Request (Context Switches / Request)**: Average thread/process context switch rate.
+   - **Total System Calls**: Aggregate transitions into the Linux kernel.
+   - **Total Context Switches**: Aggregate involuntary and voluntary scheduler context switches.
+   - **Kernel Time (seconds)**: Total cumulative time spent inside the Linux kernel.
+   - **Futex Calls**: Number of user-space locking and synchronization sleep/wake syscalls.
+   - **Futex Percentage of Total System Calls (%)**: Ratio of futex contention syscalls to total syscalls.
+4. **Tier 4: Micro High-Performance Computing & CPU Hardware Counters via `perf stat`**:
+   - **Total CPU Instructions**: Aggregate retired machine instructions executed by the CPU.
+   - **Instructions per Request (Instructions / Request)**: Average retired instructions per request.
+   - **Total CPU Cycles**: Aggregate unhalted hardware clock cycles consumed.
+   - **Cycles per Request (Cycles / Request)**: Average CPU clock cycles consumed per request.
+   - **Instructions Per Cycle (IPC)**: Hardware instruction pipeline execution efficiency.
+   - **Total Branches**: Aggregate hardware conditional and unconditional branch instructions.
+   - **Branches per Request (Branches / Request)**: Average branch instructions per request.
+   - **Branch Mispredictions**: Hardware branch prediction misses.
+   - **Branch Misprediction Rate (%)**: Ratio of branch misses to total branches.
+   - **L1 Data Cache Miss Rate (%)**: Level 1 data cache miss ratio.
+   - **Last Level Cache Miss Rate (%)**: Level 3 (LLC) cache miss ratio.
+5. **Tier 5: Plugin-Specific Mechanics & Wire Efficiency**:
+   - **Consumer Quota Ledger Lookup & Increment Latency (nanoseconds)**: CPU cost to look up consumer ID in memory table and increment usage counter.
+   - **Multi-Window Time Interval Boundary Calculation Overhead (nanoseconds)**: Overhead to calculate hourly, daily, and monthly quota reset boundaries.
+   - **Quota Exhaustion 429 Response Generation Latency (nanoseconds)**: Duration to synthesize and transmit 429 Quota Exceeded response.
+   - **Consumer State Table Memory Allocation (bytes/consumer)**: Resident memory consumed per consumer tracking entry in RAM.
+   - **Atomic Quota Reduction Across Core Lanes Duration (nanoseconds)**: CPU overhead to synchronize multi-core quota consumption without lock pauses.
+   - **Quota Re-Sync Serialization to Shadow Worker Duration (microseconds)**: Time taken for shadow worker to snapshot and persist quota state.
+   - **Lock-Free Cache Hit Rate for Active Consumers (%)**: Percentage of consumer lookups served from L1 core-local memory cache.
+
+---
+
+## 2. Focused Benchmark Scenarios
+
+To focus directly on essential operational requirements, the evaluation framework defines five targeted scenarios:
+- **Scenario 01: Low-Rate Baseline Quota Verification (5,000 req/s)** — Measure added baseline latency overhead when checking consumer quotas and updating interval counters under light load.
+- **Scenario 02: Nominal Production Load with 5,000 Consumer Accounts (40,000 req/s)** — Evaluate sustained serving stability, tail latency, and resource footprint across 5,000 active consumer quota ledgers.
+- **Scenario 03: Peak Hot-Path Saturation Under Quota Enforcement (100,000+ req/s)** — Extreme stress testing to verify atomic quota deduction throughput and confirm non-blocking frontline worker guarantees.
+- **Scenario 04: Tiered Multi-Window Quota Evaluation (Hourly + Daily + Monthly Limits)** — Evaluate arithmetic evaluation overhead when enforcing multiple concurrent time windows per consumer.
+- **Scenario 05: Quota Depletion Flood (Immediate 429 Quota Exceeded Short-Circuit)** — Simulate exhausted quota traffic to verify immediate 429 short-circuit without upstream contact.
+
+---
+
+## 3. Detailed Benchmark Results
+
+---
+
+### Scenario 01: Low-Rate Baseline Quota Verification (5,000 req/s)
+- **Objective**: Determine baseline latency addition and CPU footprint when verifying consumer quotas under low concurrency.
+- **Execution Command**: `oha -z 15s -q 5000 -c 50 -H "X-Consumer-ID: corp_client_01" http://<gateway_host>:<port>/api/v1/ping`
+
+| Detailed Measurement Metric | **Velda Edge** (Rust 2024) | **Kong Gateway 3.9** (LuaJIT) | **Apache APISIX 3.10** (LuaJIT) | **Envoy Proxy 1.31** (C++) |
+| :--- | :---: | :---: | :---: | :---: |
+| **Duration (seconds)** | **15.00** | **15.00** | **15.00** | **15.00** |
+| **Total Requests** | *[TBD]* | *[TBD]* | *[TBD]* | *[TBD]* |
+| **Throughput (requests/second)** | *[TBD]* | *[TBD]* | *[TBD]* | *[TBD]* |
+| **Wire Bandwidth (Megabytes/second)** | *[TBD]* | *[TBD]* | *[TBD]* | *[TBD]* |
+| **Total Consumer Requests Evaluated** | *[TBD]* | *[TBD]* | *[TBD]* | *[TBD]* |
+| **Quota Exceeded Drops (429)** | *[TBD]* | *[TBD]* | *[TBD]* | *[TBD]* |
+| **Quota Evaluation Throughput (requests/second)** | *[TBD]* | *[TBD]* | *[TBD]* | *[TBD]* |
+| **Mean Latency (milliseconds)** | *[TBD]* | *[TBD]* | *[TBD]* | *[TBD]* |
+| **Min Latency (milliseconds)** | *[TBD]* | *[TBD]* | *[TBD]* | *[TBD]* |
+| **Median Latency P50 (milliseconds)** | *[TBD]* | *[TBD]* | *[TBD]* | *[TBD]* |
+| **P75 Latency (milliseconds)** | *[TBD]* | *[TBD]* | *[TBD]* | *[TBD]* |
+| **P90 Latency (milliseconds)** | *[TBD]* | *[TBD]* | *[TBD]* | *[TBD]* |
+| **P99 Tail Latency (milliseconds)** | *[TBD]* | *[TBD]* | *[TBD]* | *[TBD]* |
+| **P99.9 Tail Latency (milliseconds)** | *[TBD]* | *[TBD]* | *[TBD]* | *[TBD]* |
+| **Max Latency (milliseconds)** | *[TBD]* | *[TBD]* | *[TBD]* | *[TBD]* |
+| **Latency Standard Deviation (milliseconds)** | *[TBD]* | *[TBD]* | *[TBD]* | *[TBD]* |
+| **Connect Time Average (milliseconds)** | *[TBD]* | *[TBD]* | *[TBD]* | *[TBD]* |
+| **HTTP Status Code Distribution (2xx / 4xx / 5xx)** | *[TBD]* | *[TBD]* | *[TBD]* | *[TBD]* |
+| **Success Rate (%)** | *[TBD]* | *[TBD]* | *[TBD]* | *[TBD]* |
+| **Total CPU Utilization (% CPU)** | *[TBD]* | *[TBD]* | *[TBD]* | *[TBD]* |
+| **User CPU (% User CPU)** | *[TBD]* | *[TBD]* | *[TBD]* | *[TBD]* |
+| **System / Kernel CPU (% System / Kernel CPU)** | *[TBD]* | *[TBD]* | *[TBD]* | *[TBD]* |
+| **SoftIRQ CPU (% SoftIRQ CPU)** | *[TBD]* | *[TBD]* | *[TBD]* | *[TBD]* |
+| **Frontline Worker 0 CPU (%)** | *[TBD]* | *[TBD]* | *[TBD]* | *[TBD]* |
+| **Frontline Worker 1 CPU (%)** | *[TBD]* | *[TBD]* | *[TBD]* | *[TBD]* |
+| **Shadow Logistics Worker CPU (%)** | *[TBD]* | N/A | N/A | N/A |
+| **Peak Resident Set Size (Megabytes)** | *[TBD]* | *[TBD]* | *[TBD]* | *[TBD]* |
+| **RAM Usage (%)** | *[TBD]* | *[TBD]* | *[TBD]* | *[TBD]* |
+| **Heap Allocations per Request (Bytes / Count)** | *[TBD]* | *[TBD]* | *[TBD]* | *[TBD]* |
+| **Memory Leak Rate (Megabytes / minute)** | *[TBD]* | *[TBD]* | *[TBD]* | *[TBD]* |
+| **System Calls per Request (System Calls / Request)** | *[TBD]* | *[TBD]* | *[TBD]* | *[TBD]* |
+| **Context Switches per Request (Context Switches / Request)** | *[TBD]* | *[TBD]* | *[TBD]* | *[TBD]* |
+| **Total System Calls** | *[TBD]* | *[TBD]* | *[TBD]* | *[TBD]* |
+| **Total Context Switches** | *[TBD]* | *[TBD]* | *[TBD]* | *[TBD]* |
+| **Kernel Time (seconds)** | *[TBD]* | *[TBD]* | *[TBD]* | *[TBD]* |
+| **Futex Calls** | *[TBD]* | *[TBD]* | *[TBD]* | *[TBD]* |
+| **Futex Percentage of Total System Calls (%)** | *[TBD]* | *[TBD]* | *[TBD]* | *[TBD]* |
+| **Total CPU Instructions** | *[TBD]* | *[TBD]* | *[TBD]* | *[TBD]* |
+| **Instructions per Request (Instructions / Request)** | *[TBD]* | *[TBD]* | *[TBD]* | *[TBD]* |
+| **Total CPU Cycles** | *[TBD]* | *[TBD]* | *[TBD]* | *[TBD]* |
+| **Cycles per Request (Cycles / Request)** | *[TBD]* | *[TBD]* | *[TBD]* | *[TBD]* |
+| **Instructions Per Cycle (IPC)** | *[TBD]* | *[TBD]* | *[TBD]* | *[TBD]* |
+| **Total Branches** | *[TBD]* | *[TBD]* | *[TBD]* | *[TBD]* |
+| **Branches per Request (Branches / Request)** | *[TBD]* | *[TBD]* | *[TBD]* | *[TBD]* |
+| **Branch Mispredictions** | *[TBD]* | *[TBD]* | *[TBD]* | *[TBD]* |
+| **Branch Misprediction Rate (%)** | *[TBD]* | *[TBD]* | *[TBD]* | *[TBD]* |
+| **L1 Data Cache Miss Rate (%)** | *[TBD]* | *[TBD]* | *[TBD]* | *[TBD]* |
+| **Last Level Cache Miss Rate (%)** | *[TBD]* | *[TBD]* | *[TBD]* | *[TBD]* |
+| **Consumer Quota Ledger Lookup & Increment Latency (nanoseconds)** | *[TBD]* | *[TBD]* | *[TBD]* | *[TBD]* |
+| **Multi-Window Time Interval Boundary Calculation Overhead (nanoseconds)** | *[TBD]* | *[TBD]* | *[TBD]* | *[TBD]* |
+| **Quota Exhaustion 429 Response Generation Latency (nanoseconds)** | *[TBD]* | *[TBD]* | *[TBD]* | *[TBD]* |
+| **Consumer State Table Memory Allocation (bytes/consumer)** | *[TBD]* | *[TBD]* | *[TBD]* | *[TBD]* |
+| **Atomic Quota Reduction Across Core Lanes Duration (nanoseconds)** | *[TBD]* | *[TBD]* | *[TBD]* | *[TBD]* |
+| **Quota Re-Sync Serialization to Shadow Worker Duration (microseconds)** | *[TBD]* | *[TBD]* | *[TBD]* | *[TBD]* |
+| **Lock-Free Cache Hit Rate for Active Consumers (%)** | *[TBD]* | *[TBD]* | *[TBD]* | *[TBD]* |
+
+---
+
+### Scenario 02: Nominal Production Load with 5,000 Consumer Accounts (40,000 req/s)
+- **Objective**: Measure sustained throughput, latency profile, and resource consumption across large consumer datasets.
+- **Execution Command**: `oha -z 15s -q 40000 -c 100 -H "X-Consumer-ID: corp_client_42" http://<gateway_host>:<port>/api/v1/ping`
+
+| Detailed Measurement Metric | **Velda Edge** (Rust 2024) | **Kong Gateway 3.9** (LuaJIT) | **Apache APISIX 3.10** (LuaJIT) | **Envoy Proxy 1.31** (C++) |
+| :--- | :---: | :---: | :---: | :---: |
+| **Duration (seconds)** | **15.00** | **15.00** | **15.00** | **15.00** |
+| **Total Requests** | *[TBD]* | *[TBD]* | *[TBD]* | *[TBD]* |
+| **Throughput (requests/second)** | *[TBD]* | *[TBD]* | *[TBD]* | *[TBD]* |
+| **Wire Bandwidth (Megabytes/second)** | *[TBD]* | *[TBD]* | *[TBD]* | *[TBD]* |
+| **Total Consumer Requests Evaluated** | *[TBD]* | *[TBD]* | *[TBD]* | *[TBD]* |
+| **Quota Exceeded Drops (429)** | *[TBD]* | *[TBD]* | *[TBD]* | *[TBD]* |
+| **Quota Evaluation Throughput (requests/second)** | *[TBD]* | *[TBD]* | *[TBD]* | *[TBD]* |
+| **Mean Latency (milliseconds)** | *[TBD]* | *[TBD]* | *[TBD]* | *[TBD]* |
+| **Min Latency (milliseconds)** | *[TBD]* | *[TBD]* | *[TBD]* | *[TBD]* |
+| **Median Latency P50 (milliseconds)** | *[TBD]* | *[TBD]* | *[TBD]* | *[TBD]* |
+| **P75 Latency (milliseconds)** | *[TBD]* | *[TBD]* | *[TBD]* | *[TBD]* |
+| **P90 Latency (milliseconds)** | *[TBD]* | *[TBD]* | *[TBD]* | *[TBD]* |
+| **P99 Tail Latency (milliseconds)** | *[TBD]* | *[TBD]* | *[TBD]* | *[TBD]* |
+| **P99.9 Tail Latency (milliseconds)** | *[TBD]* | *[TBD]* | *[TBD]* | *[TBD]* |
+| **Max Latency (milliseconds)** | *[TBD]* | *[TBD]* | *[TBD]* | *[TBD]* |
+| **Latency Standard Deviation (milliseconds)** | *[TBD]* | *[TBD]* | *[TBD]* | *[TBD]* |
+| **Connect Time Average (milliseconds)** | *[TBD]* | *[TBD]* | *[TBD]* | *[TBD]* |
+| **HTTP Status Code Distribution (2xx / 4xx / 5xx)** | *[TBD]* | *[TBD]* | *[TBD]* | *[TBD]* |
+| **Success Rate (%)** | *[TBD]* | *[TBD]* | *[TBD]* | *[TBD]* |
+| **Total CPU Utilization (% CPU)** | *[TBD]* | *[TBD]* | *[TBD]* | *[TBD]* |
+| **User CPU (% User CPU)** | *[TBD]* | *[TBD]* | *[TBD]* | *[TBD]* |
+| **System / Kernel CPU (% System / Kernel CPU)** | *[TBD]* | *[TBD]* | *[TBD]* | *[TBD]* |
+| **SoftIRQ CPU (% SoftIRQ CPU)** | *[TBD]* | *[TBD]* | *[TBD]* | *[TBD]* |
+| **Frontline Worker 0 CPU (%)** | *[TBD]* | *[TBD]* | *[TBD]* | *[TBD]* |
+| **Frontline Worker 1 CPU (%)** | *[TBD]* | *[TBD]* | *[TBD]* | *[TBD]* |
+| **Shadow Logistics Worker CPU (%)** | *[TBD]* | N/A | N/A | N/A |
+| **Peak Resident Set Size (Megabytes)** | *[TBD]* | *[TBD]* | *[TBD]* | *[TBD]* |
+| **RAM Usage (%)** | *[TBD]* | *[TBD]* | *[TBD]* | *[TBD]* |
+| **Heap Allocations per Request (Bytes / Count)** | *[TBD]* | *[TBD]* | *[TBD]* | *[TBD]* |
+| **Memory Leak Rate (Megabytes / minute)** | *[TBD]* | *[TBD]* | *[TBD]* | *[TBD]* |
+| **System Calls per Request (System Calls / Request)** | *[TBD]* | *[TBD]* | *[TBD]* | *[TBD]* |
+| **Context Switches per Request (Context Switches / Request)** | *[TBD]* | *[TBD]* | *[TBD]* | *[TBD]* |
+| **Total System Calls** | *[TBD]* | *[TBD]* | *[TBD]* | *[TBD]* |
+| **Total Context Switches** | *[TBD]* | *[TBD]* | *[TBD]* | *[TBD]* |
+| **Kernel Time (seconds)** | *[TBD]* | *[TBD]* | *[TBD]* | *[TBD]* |
+| **Futex Calls** | *[TBD]* | *[TBD]* | *[TBD]* | *[TBD]* |
+| **Futex Percentage of Total System Calls (%)** | *[TBD]* | *[TBD]* | *[TBD]* | *[TBD]* |
+| **Total CPU Instructions** | *[TBD]* | *[TBD]* | *[TBD]* | *[TBD]* |
+| **Instructions per Request (Instructions / Request)** | *[TBD]* | *[TBD]* | *[TBD]* | *[TBD]* |
+| **Total CPU Cycles** | *[TBD]* | *[TBD]* | *[TBD]* | *[TBD]* |
+| **Cycles per Request (Cycles / Request)** | *[TBD]* | *[TBD]* | *[TBD]* | *[TBD]* |
+| **Instructions Per Cycle (IPC)** | *[TBD]* | *[TBD]* | *[TBD]* | *[TBD]* |
+| **Total Branches** | *[TBD]* | *[TBD]* | *[TBD]* | *[TBD]* |
+| **Branches per Request (Branches / Request)** | *[TBD]* | *[TBD]* | *[TBD]* | *[TBD]* |
+| **Branch Mispredictions** | *[TBD]* | *[TBD]* | *[TBD]* | *[TBD]* |
+| **Branch Misprediction Rate (%)** | *[TBD]* | *[TBD]* | *[TBD]* | *[TBD]* |
+| **L1 Data Cache Miss Rate (%)** | *[TBD]* | *[TBD]* | *[TBD]* | *[TBD]* |
+| **Last Level Cache Miss Rate (%)** | *[TBD]* | *[TBD]* | *[TBD]* | *[TBD]* |
+| **Consumer Quota Ledger Lookup & Increment Latency (nanoseconds)** | *[TBD]* | *[TBD]* | *[TBD]* | *[TBD]* |
+| **Multi-Window Time Interval Boundary Calculation Overhead (nanoseconds)** | *[TBD]* | *[TBD]* | *[TBD]* | *[TBD]* |
+| **Quota Exhaustion 429 Response Generation Latency (nanoseconds)** | *[TBD]* | *[TBD]* | *[TBD]* | *[TBD]* |
+| **Consumer State Table Memory Allocation (bytes/consumer)** | *[TBD]* | *[TBD]* | *[TBD]* | *[TBD]* |
+| **Atomic Quota Reduction Across Core Lanes Duration (nanoseconds)** | *[TBD]* | *[TBD]* | *[TBD]* | *[TBD]* |
+| **Quota Re-Sync Serialization to Shadow Worker Duration (microseconds)** | *[TBD]* | *[TBD]* | *[TBD]* | *[TBD]* |
+| **Lock-Free Cache Hit Rate for Active Consumers (%)** | *[TBD]* | *[TBD]* | *[TBD]* | *[TBD]* |
+
+---
+
+### Scenario 03: Peak Hot-Path Saturation Under Quota Enforcement (100,000+ req/s)
+- **Objective**: Confirm maximum possible throughput when enforcing quotas across heavy multi-core saturation.
+- **Execution Command**: `oha -z 15s -c 256 -H "X-Consumer-ID: corp_client_01" http://<gateway_host>:<port>/api/v1/ping`
+
+| Detailed Measurement Metric | **Velda Edge** (Rust 2024) | **Kong Gateway 3.9** (LuaJIT) | **Apache APISIX 3.10** (LuaJIT) | **Envoy Proxy 1.31** (C++) |
+| :--- | :---: | :---: | :---: | :---: |
+| **Duration (seconds)** | **15.00** | **15.00** | **15.00** | **15.00** |
+| **Total Requests** | *[TBD]* | *[TBD]* | *[TBD]* | *[TBD]* |
+| **Throughput (requests/second)** | *[TBD]* | *[TBD]* | *[TBD]* | *[TBD]* |
+| **Wire Bandwidth (Megabytes/second)** | *[TBD]* | *[TBD]* | *[TBD]* | *[TBD]* |
+| **Total Consumer Requests Evaluated** | *[TBD]* | *[TBD]* | *[TBD]* | *[TBD]* |
+| **Quota Exceeded Drops (429)** | *[TBD]* | *[TBD]* | *[TBD]* | *[TBD]* |
+| **Quota Evaluation Throughput (requests/second)** | *[TBD]* | *[TBD]* | *[TBD]* | *[TBD]* |
+| **Mean Latency (milliseconds)** | *[TBD]* | *[TBD]* | *[TBD]* | *[TBD]* |
+| **Min Latency (milliseconds)** | *[TBD]* | *[TBD]* | *[TBD]* | *[TBD]* |
+| **Median Latency P50 (milliseconds)** | *[TBD]* | *[TBD]* | *[TBD]* | *[TBD]* |
+| **P75 Latency (milliseconds)** | *[TBD]* | *[TBD]* | *[TBD]* | *[TBD]* |
+| **P90 Latency (milliseconds)** | *[TBD]* | *[TBD]* | *[TBD]* | *[TBD]* |
+| **P99 Tail Latency (milliseconds)** | *[TBD]* | *[TBD]* | *[TBD]* | *[TBD]* |
+| **P99.9 Tail Latency (milliseconds)** | *[TBD]* | *[TBD]* | *[TBD]* | *[TBD]* |
+| **Max Latency (milliseconds)** | *[TBD]* | *[TBD]* | *[TBD]* | *[TBD]* |
+| **Latency Standard Deviation (milliseconds)** | *[TBD]* | *[TBD]* | *[TBD]* | *[TBD]* |
+| **Connect Time Average (milliseconds)** | *[TBD]* | *[TBD]* | *[TBD]* | *[TBD]* |
+| **HTTP Status Code Distribution (2xx / 4xx / 5xx)** | *[TBD]* | *[TBD]* | *[TBD]* | *[TBD]* |
+| **Success Rate (%)** | *[TBD]* | *[TBD]* | *[TBD]* | *[TBD]* |
+| **Total CPU Utilization (% CPU)** | *[TBD]* | *[TBD]* | *[TBD]* | *[TBD]* |
+| **User CPU (% User CPU)** | *[TBD]* | *[TBD]* | *[TBD]* | *[TBD]* |
+| **System / Kernel CPU (% System / Kernel CPU)** | *[TBD]* | *[TBD]* | *[TBD]* | *[TBD]* |
+| **SoftIRQ CPU (% SoftIRQ CPU)** | *[TBD]* | *[TBD]* | *[TBD]* | *[TBD]* |
+| **Frontline Worker 0 CPU (%)** | *[TBD]* | *[TBD]* | *[TBD]* | *[TBD]* |
+| **Frontline Worker 1 CPU (%)** | *[TBD]* | *[TBD]* | *[TBD]* | *[TBD]* |
+| **Shadow Logistics Worker CPU (%)** | *[TBD]* | N/A | N/A | N/A |
+| **Peak Resident Set Size (Megabytes)** | *[TBD]* | *[TBD]* | *[TBD]* | *[TBD]* |
+| **RAM Usage (%)** | *[TBD]* | *[TBD]* | *[TBD]* | *[TBD]* |
+| **Heap Allocations per Request (Bytes / Count)** | *[TBD]* | *[TBD]* | *[TBD]* | *[TBD]* |
+| **Memory Leak Rate (Megabytes / minute)** | *[TBD]* | *[TBD]* | *[TBD]* | *[TBD]* |
+| **System Calls per Request (System Calls / Request)** | *[TBD]* | *[TBD]* | *[TBD]* | *[TBD]* |
+| **Context Switches per Request (Context Switches / Request)** | *[TBD]* | *[TBD]* | *[TBD]* | *[TBD]* |
+| **Total System Calls** | *[TBD]* | *[TBD]* | *[TBD]* | *[TBD]* |
+| **Total Context Switches** | *[TBD]* | *[TBD]* | *[TBD]* | *[TBD]* |
+| **Kernel Time (seconds)** | *[TBD]* | *[TBD]* | *[TBD]* | *[TBD]* |
+| **Futex Calls** | *[TBD]* | *[TBD]* | *[TBD]* | *[TBD]* |
+| **Futex Percentage of Total System Calls (%)** | *[TBD]* | *[TBD]* | *[TBD]* | *[TBD]* |
+| **Total CPU Instructions** | *[TBD]* | *[TBD]* | *[TBD]* | *[TBD]* |
+| **Instructions per Request (Instructions / Request)** | *[TBD]* | *[TBD]* | *[TBD]* | *[TBD]* |
+| **Total CPU Cycles** | *[TBD]* | *[TBD]* | *[TBD]* | *[TBD]* |
+| **Cycles per Request (Cycles / Request)** | *[TBD]* | *[TBD]* | *[TBD]* | *[TBD]* |
+| **Instructions Per Cycle (IPC)** | *[TBD]* | *[TBD]* | *[TBD]* | *[TBD]* |
+| **Total Branches** | *[TBD]* | *[TBD]* | *[TBD]* | *[TBD]* |
+| **Branches per Request (Branches / Request)** | *[TBD]* | *[TBD]* | *[TBD]* | *[TBD]* |
+| **Branch Mispredictions** | *[TBD]* | *[TBD]* | *[TBD]* | *[TBD]* |
+| **Branch Misprediction Rate (%)** | *[TBD]* | *[TBD]* | *[TBD]* | *[TBD]* |
+| **L1 Data Cache Miss Rate (%)** | *[TBD]* | *[TBD]* | *[TBD]* | *[TBD]* |
+| **Last Level Cache Miss Rate (%)** | *[TBD]* | *[TBD]* | *[TBD]* | *[TBD]* |
+| **Consumer Quota Ledger Lookup & Increment Latency (nanoseconds)** | *[TBD]* | *[TBD]* | *[TBD]* | *[TBD]* |
+| **Multi-Window Time Interval Boundary Calculation Overhead (nanoseconds)** | *[TBD]* | *[TBD]* | *[TBD]* | *[TBD]* |
+| **Quota Exhaustion 429 Response Generation Latency (nanoseconds)** | *[TBD]* | *[TBD]* | *[TBD]* | *[TBD]* |
+| **Consumer State Table Memory Allocation (bytes/consumer)** | *[TBD]* | *[TBD]* | *[TBD]* | *[TBD]* |
+| **Atomic Quota Reduction Across Core Lanes Duration (nanoseconds)** | *[TBD]* | *[TBD]* | *[TBD]* | *[TBD]* |
+| **Quota Re-Sync Serialization to Shadow Worker Duration (microseconds)** | *[TBD]* | *[TBD]* | *[TBD]* | *[TBD]* |
+| **Lock-Free Cache Hit Rate for Active Consumers (%)** | *[TBD]* | *[TBD]* | *[TBD]* | *[TBD]* |
+
+---
+
+### Scenario 04: Tiered Multi-Window Quota Evaluation (Hourly + Daily + Monthly Limits)
+- **Objective**: Measure multi-window boundary calculation latency under high-frequency request arrival.
+- **Execution Command**: `oha -z 15s -q 50000 -c 128 -H "X-Consumer-ID: corp_client_tiered" http://<gateway_host>:<port>/api/v1/ping`
+
+| Detailed Measurement Metric | **Velda Edge** (Rust 2024) | **Kong Gateway 3.9** (LuaJIT) | **Apache APISIX 3.10** (LuaJIT) | **Envoy Proxy 1.31** (C++) |
+| :--- | :---: | :---: | :---: | :---: |
+| **Duration (seconds)** | **15.00** | **15.00** | **15.00** | **15.00** |
+| **Total Requests** | *[TBD]* | *[TBD]* | *[TBD]* | *[TBD]* |
+| **Throughput (requests/second)** | *[TBD]* | *[TBD]* | *[TBD]* | *[TBD]* |
+| **Wire Bandwidth (Megabytes/second)** | *[TBD]* | *[TBD]* | *[TBD]* | *[TBD]* |
+| **Total Consumer Requests Evaluated** | *[TBD]* | *[TBD]* | *[TBD]* | *[TBD]* |
+| **Quota Exceeded Drops (429)** | *[TBD]* | *[TBD]* | *[TBD]* | *[TBD]* |
+| **Quota Evaluation Throughput (requests/second)** | *[TBD]* | *[TBD]* | *[TBD]* | *[TBD]* |
+| **Mean Latency (milliseconds)** | *[TBD]* | *[TBD]* | *[TBD]* | *[TBD]* |
+| **Min Latency (milliseconds)** | *[TBD]* | *[TBD]* | *[TBD]* | *[TBD]* |
+| **Median Latency P50 (milliseconds)** | *[TBD]* | *[TBD]* | *[TBD]* | *[TBD]* |
+| **P75 Latency (milliseconds)** | *[TBD]* | *[TBD]* | *[TBD]* | *[TBD]* |
+| **P90 Latency (milliseconds)** | *[TBD]* | *[TBD]* | *[TBD]* | *[TBD]* |
+| **P99 Tail Latency (milliseconds)** | *[TBD]* | *[TBD]* | *[TBD]* | *[TBD]* |
+| **P99.9 Tail Latency (milliseconds)** | *[TBD]* | *[TBD]* | *[TBD]* | *[TBD]* |
+| **Max Latency (milliseconds)** | *[TBD]* | *[TBD]* | *[TBD]* | *[TBD]* |
+| **Latency Standard Deviation (milliseconds)** | *[TBD]* | *[TBD]* | *[TBD]* | *[TBD]* |
+| **Connect Time Average (milliseconds)** | *[TBD]* | *[TBD]* | *[TBD]* | *[TBD]* |
+| **HTTP Status Code Distribution (2xx / 4xx / 5xx)** | *[TBD]* | *[TBD]* | *[TBD]* | *[TBD]* |
+| **Success Rate (%)** | *[TBD]* | *[TBD]* | *[TBD]* | *[TBD]* |
+| **Total CPU Utilization (% CPU)** | *[TBD]* | *[TBD]* | *[TBD]* | *[TBD]* |
+| **User CPU (% User CPU)** | *[TBD]* | *[TBD]* | *[TBD]* | *[TBD]* |
+| **System / Kernel CPU (% System / Kernel CPU)** | *[TBD]* | *[TBD]* | *[TBD]* | *[TBD]* |
+| **SoftIRQ CPU (% SoftIRQ CPU)** | *[TBD]* | *[TBD]* | *[TBD]* | *[TBD]* |
+| **Frontline Worker 0 CPU (%)** | *[TBD]* | *[TBD]* | *[TBD]* | *[TBD]* |
+| **Frontline Worker 1 CPU (%)** | *[TBD]* | *[TBD]* | *[TBD]* | *[TBD]* |
+| **Shadow Logistics Worker CPU (%)** | *[TBD]* | N/A | N/A | N/A |
+| **Peak Resident Set Size (Megabytes)** | *[TBD]* | *[TBD]* | *[TBD]* | *[TBD]* |
+| **RAM Usage (%)** | *[TBD]* | *[TBD]* | *[TBD]* | *[TBD]* |
+| **Heap Allocations per Request (Bytes / Count)** | *[TBD]* | *[TBD]* | *[TBD]* | *[TBD]* |
+| **Memory Leak Rate (Megabytes / minute)** | *[TBD]* | *[TBD]* | *[TBD]* | *[TBD]* |
+| **System Calls per Request (System Calls / Request)** | *[TBD]* | *[TBD]* | *[TBD]* | *[TBD]* |
+| **Context Switches per Request (Context Switches / Request)** | *[TBD]* | *[TBD]* | *[TBD]* | *[TBD]* |
+| **Total System Calls** | *[TBD]* | *[TBD]* | *[TBD]* | *[TBD]* |
+| **Total Context Switches** | *[TBD]* | *[TBD]* | *[TBD]* | *[TBD]* |
+| **Kernel Time (seconds)** | *[TBD]* | *[TBD]* | *[TBD]* | *[TBD]* |
+| **Futex Calls** | *[TBD]* | *[TBD]* | *[TBD]* | *[TBD]* |
+| **Futex Percentage of Total System Calls (%)** | *[TBD]* | *[TBD]* | *[TBD]* | *[TBD]* |
+| **Total CPU Instructions** | *[TBD]* | *[TBD]* | *[TBD]* | *[TBD]* |
+| **Instructions per Request (Instructions / Request)** | *[TBD]* | *[TBD]* | *[TBD]* | *[TBD]* |
+| **Total CPU Cycles** | *[TBD]* | *[TBD]* | *[TBD]* | *[TBD]* |
+| **Cycles per Request (Cycles / Request)** | *[TBD]* | *[TBD]* | *[TBD]* | *[TBD]* |
+| **Instructions Per Cycle (IPC)** | *[TBD]* | *[TBD]* | *[TBD]* | *[TBD]* |
+| **Total Branches** | *[TBD]* | *[TBD]* | *[TBD]* | *[TBD]* |
+| **Branches per Request (Branches / Request)** | *[TBD]* | *[TBD]* | *[TBD]* | *[TBD]* |
+| **Branch Mispredictions** | *[TBD]* | *[TBD]* | *[TBD]* | *[TBD]* |
+| **Branch Misprediction Rate (%)** | *[TBD]* | *[TBD]* | *[TBD]* | *[TBD]* |
+| **L1 Data Cache Miss Rate (%)** | *[TBD]* | *[TBD]* | *[TBD]* | *[TBD]* |
+| **Last Level Cache Miss Rate (%)** | *[TBD]* | *[TBD]* | *[TBD]* | *[TBD]* |
+| **Consumer Quota Ledger Lookup & Increment Latency (nanoseconds)** | *[TBD]* | *[TBD]* | *[TBD]* | *[TBD]* |
+| **Multi-Window Time Interval Boundary Calculation Overhead (nanoseconds)** | *[TBD]* | *[TBD]* | *[TBD]* | *[TBD]* |
+| **Quota Exhaustion 429 Response Generation Latency (nanoseconds)** | *[TBD]* | *[TBD]* | *[TBD]* | *[TBD]* |
+| **Consumer State Table Memory Allocation (bytes/consumer)** | *[TBD]* | *[TBD]* | *[TBD]* | *[TBD]* |
+| **Atomic Quota Reduction Across Core Lanes Duration (nanoseconds)** | *[TBD]* | *[TBD]* | *[TBD]* | *[TBD]* |
+| **Quota Re-Sync Serialization to Shadow Worker Duration (microseconds)** | *[TBD]* | *[TBD]* | *[TBD]* | *[TBD]* |
+| **Lock-Free Cache Hit Rate for Active Consumers (%)** | *[TBD]* | *[TBD]* | *[TBD]* | *[TBD]* |
+
+---
+
+### Scenario 05: Quota Depletion Flood (Immediate 429 Quota Exceeded Short-Circuit)
+- **Objective**: Confirm that depleted consumers are rejected at wire speed with flat tail latency and zero memory leaks.
+- **Execution Command**: `oha -z 15s -q 80000 -c 128 -H "X-Consumer-ID: corp_client_exhausted" http://<gateway_host>:<port>/api/v1/ping`
+
+| Detailed Measurement Metric | **Velda Edge** (Rust 2024) | **Kong Gateway 3.9** (LuaJIT) | **Apache APISIX 3.10** (LuaJIT) | **Envoy Proxy 1.31** (C++) |
+| :--- | :---: | :---: | :---: | :---: |
+| **Duration (seconds)** | **15.00** | **15.00** | **15.00** | **15.00** |
+| **Total Requests** | *[TBD]* | *[TBD]* | *[TBD]* | *[TBD]* |
+| **Throughput (requests/second)** | *[TBD]* | *[TBD]* | *[TBD]* | *[TBD]* |
+| **Wire Bandwidth (Megabytes/second)** | *[TBD]* | *[TBD]* | *[TBD]* | *[TBD]* |
+| **Total Consumer Requests Evaluated** | *[TBD]* | *[TBD]* | *[TBD]* | *[TBD]* |
+| **Quota Exceeded Drops (429)** | *[TBD]* | *[TBD]* | *[TBD]* | *[TBD]* |
+| **Quota Evaluation Throughput (requests/second)** | *[TBD]* | *[TBD]* | *[TBD]* | *[TBD]* |
+| **Mean Latency (milliseconds)** | *[TBD]* | *[TBD]* | *[TBD]* | *[TBD]* |
+| **Min Latency (milliseconds)** | *[TBD]* | *[TBD]* | *[TBD]* | *[TBD]* |
+| **Median Latency P50 (milliseconds)** | *[TBD]* | *[TBD]* | *[TBD]* | *[TBD]* |
+| **P75 Latency (milliseconds)** | *[TBD]* | *[TBD]* | *[TBD]* | *[TBD]* |
+| **P90 Latency (milliseconds)** | *[TBD]* | *[TBD]* | *[TBD]* | *[TBD]* |
+| **P99 Tail Latency (milliseconds)** | *[TBD]* | *[TBD]* | *[TBD]* | *[TBD]* |
+| **P99.9 Tail Latency (milliseconds)** | *[TBD]* | *[TBD]* | *[TBD]* | *[TBD]* |
+| **Max Latency (milliseconds)** | *[TBD]* | *[TBD]* | *[TBD]* | *[TBD]* |
+| **Latency Standard Deviation (milliseconds)** | *[TBD]* | *[TBD]* | *[TBD]* | *[TBD]* |
+| **Connect Time Average (milliseconds)** | *[TBD]* | *[TBD]* | *[TBD]* | *[TBD]* |
+| **HTTP Status Code Distribution (2xx / 4xx / 5xx)** | *[TBD]* | *[TBD]* | *[TBD]* | *[TBD]* |
+| **Success Rate (%)** | *[TBD]* | *[TBD]* | *[TBD]* | *[TBD]* |
+| **Total CPU Utilization (% CPU)** | *[TBD]* | *[TBD]* | *[TBD]* | *[TBD]* |
+| **User CPU (% User CPU)** | *[TBD]* | *[TBD]* | *[TBD]* | *[TBD]* |
+| **System / Kernel CPU (% System / Kernel CPU)** | *[TBD]* | *[TBD]* | *[TBD]* | *[TBD]* |
+| **SoftIRQ CPU (% SoftIRQ CPU)** | *[TBD]* | *[TBD]* | *[TBD]* | *[TBD]* |
+| **Frontline Worker 0 CPU (%)** | *[TBD]* | *[TBD]* | *[TBD]* | *[TBD]* |
+| **Frontline Worker 1 CPU (%)** | *[TBD]* | *[TBD]* | *[TBD]* | *[TBD]* |
+| **Shadow Logistics Worker CPU (%)** | *[TBD]* | N/A | N/A | N/A |
+| **Peak Resident Set Size (Megabytes)** | *[TBD]* | *[TBD]* | *[TBD]* | *[TBD]* |
+| **RAM Usage (%)** | *[TBD]* | *[TBD]* | *[TBD]* | *[TBD]* |
+| **Heap Allocations per Request (Bytes / Count)** | *[TBD]* | *[TBD]* | *[TBD]* | *[TBD]* |
+| **Memory Leak Rate (Megabytes / minute)** | *[TBD]* | *[TBD]* | *[TBD]* | *[TBD]* |
+| **System Calls per Request (System Calls / Request)** | *[TBD]* | *[TBD]* | *[TBD]* | *[TBD]* |
+| **Context Switches per Request (Context Switches / Request)** | *[TBD]* | *[TBD]* | *[TBD]* | *[TBD]* |
+| **Total System Calls** | *[TBD]* | *[TBD]* | *[TBD]* | *[TBD]* |
+| **Total Context Switches** | *[TBD]* | *[TBD]* | *[TBD]* | *[TBD]* |
+| **Kernel Time (seconds)** | *[TBD]* | *[TBD]* | *[TBD]* | *[TBD]* |
+| **Futex Calls** | *[TBD]* | *[TBD]* | *[TBD]* | *[TBD]* |
+| **Futex Percentage of Total System Calls (%)** | *[TBD]* | *[TBD]* | *[TBD]* | *[TBD]* |
+| **Total CPU Instructions** | *[TBD]* | *[TBD]* | *[TBD]* | *[TBD]* |
+| **Instructions per Request (Instructions / Request)** | *[TBD]* | *[TBD]* | *[TBD]* | *[TBD]* |
+| **Total CPU Cycles** | *[TBD]* | *[TBD]* | *[TBD]* | *[TBD]* |
+| **Cycles per Request (Cycles / Request)** | *[TBD]* | *[TBD]* | *[TBD]* | *[TBD]* |
+| **Instructions Per Cycle (IPC)** | *[TBD]* | *[TBD]* | *[TBD]* | *[TBD]* |
+| **Total Branches** | *[TBD]* | *[TBD]* | *[TBD]* | *[TBD]* |
+| **Branches per Request (Branches / Request)** | *[TBD]* | *[TBD]* | *[TBD]* | *[TBD]* |
+| **Branch Mispredictions** | *[TBD]* | *[TBD]* | *[TBD]* | *[TBD]* |
+| **Branch Misprediction Rate (%)** | *[TBD]* | *[TBD]* | *[TBD]* | *[TBD]* |
+| **L1 Data Cache Miss Rate (%)** | *[TBD]* | *[TBD]* | *[TBD]* | *[TBD]* |
+| **Last Level Cache Miss Rate (%)** | *[TBD]* | *[TBD]* | *[TBD]* | *[TBD]* |
+| **Consumer Quota Ledger Lookup & Increment Latency (nanoseconds)** | *[TBD]* | *[TBD]* | *[TBD]* | *[TBD]* |
+| **Multi-Window Time Interval Boundary Calculation Overhead (nanoseconds)** | *[TBD]* | *[TBD]* | *[TBD]* | *[TBD]* |
+| **Quota Exhaustion 429 Response Generation Latency (nanoseconds)** | *[TBD]* | *[TBD]* | *[TBD]* | *[TBD]* |
+| **Consumer State Table Memory Allocation (bytes/consumer)** | *[TBD]* | *[TBD]* | *[TBD]* | *[TBD]* |
+| **Atomic Quota Reduction Across Core Lanes Duration (nanoseconds)** | *[TBD]* | *[TBD]* | *[TBD]* | *[TBD]* |
+| **Quota Re-Sync Serialization to Shadow Worker Duration (microseconds)** | *[TBD]* | *[TBD]* | *[TBD]* | *[TBD]* |
+| **Lock-Free Cache Hit Rate for Active Consumers (%)** | *[TBD]* | *[TBD]* | *[TBD]* | *[TBD]* |
+
+---
+
+## 4. Comprehensive Architecture Comparison: Velda Edge vs Kong vs APISIX vs Envoy
+
+| Architecture Evaluation Criterion | Velda Edge (Rust Edition 2024) | Kong Gateway 3.9 (LuaJIT) | Apache APISIX 3.10 (LuaJIT) | Envoy Proxy 1.31 (C++) |
+| :--- | :--- | :--- | :--- | :--- |
+| **Implementation Language** | **Rust (Edition 2024, Zero-Cost Abstractions)** | C (OpenResty) + LuaJIT 2.1 | C (OpenResty) + LuaJIT 2.1 | C++ 20 |
+| **Thread Model** | **Thread-Per-Core (Shared-Nothing)** | Multi-Process (Nginx Master-Worker) | Multi-Process (Nginx Master-Worker) | Thread-Per-Core (Worker EventLoop) |
+| **Primary Execution Mechanism** | **In-Memory Sharded Quota Tables + Atomic Decrement + Shadow Sync** | Kong rate-limiting / response-ratelimiting via Redis | APISIX limit-count via shared memory / Redis | Envoy ratelimit service via gRPC |
+| **Heap Allocations** | **Zero allocations (Pre-allocated consumer slots)** | Lua table creation and Redis network I/O | Lua shared memory table allocations | gRPC Protobuf quota request allocations |
+| **Garbage Collection (GC) Impact** | None (Zero GC Pauses by design) | Periodic Lua GC collection cycles | Periodic Lua GC collection cycles | None (TCMalloc heap churn) |
+| **Hot-Path Request Serving Impact** | **Atomic CAS decrement (< 5 ns)** | Lua redis query / shared dict lock | Lua shared dict lock in access phase | Asynchronous gRPC check / thread-local cache |
+| **Backpressure / Failure Mechanism** | **Immediate 429 local reply** | Lua ngx.exit(429) | Lua ngx.exit(429) | Envoy local reply 429 |
+| **Worker Execution Allocation** | **Frontline Worker 0/1 (`velda-worker-{id}`)** | Main Nginx worker thread | Main Nginx worker thread | Main Envoy worker threads |
+| **HTTP/3 Support (QUIC Ingress)** | **Native RFC 9114 / RFC 9000 (H3 Production)** | Not Supported | Experimental | Native HTTP/3 Production |
+| **Resident Memory Footprint (Peak RSS)** | *[TBD]* | *[TBD]* | *[TBD]* | *[TBD]* |

@@ -1,205 +1,430 @@
-# Velda Edge — `oauth2_introspection` High-Throughput Benchmark Report
+# Performance Benchmark Report: OAuth2 Token Verification & Introspection Plugin (`oauth2_introspection`)
 
-This document presents the empirical benchmark results, hot-path performance characteristics, and concurrency behavior of the `oauth2_introspection` (RFC 7662) pre-upstream plugin on **Velda Edge**.
-
-For internal engine design, 2-tier caching mechanics, and cooperative thread architecture, see [ARCHITECTURE.md](./ARCHITECTURE.md).
+Performance benchmark specification and evaluation framework for the `oauth2_introspection` plugin across **Velda Edge**, **Kong Gateway 3.9**, **Apache APISIX 3.10**, and **Envoy Proxy 1.31**.
 
 ---
 
-## 1. Executive Summary & Benchmark Matrix
+## 1. Test Environment & Measurement Methodology
 
-All benchmarks were conducted across dedicated **Azure Virtual Machines** under high concurrency (**4 threads, 100 concurrent connections, 10s sustained duration**) with active OAuth2 access tokens issued by **Ory Hydra IdP**:
+### 1.1 Production-Grade Hardware & Network Testbed
 
-### 1.1 Performance Overview Across Pipeline Configurations
-
-| Route | Policy / Configuration | Throughput (RPS) | Avg Latency | P50 Latency | P75 Latency | P90 Latency | P99 Latency | Max Latency | Error Rate |
-| :--- | :--- | :---: | :---: | :---: | :---: | :---: | :---: | :---: | :---: |
-| **`/`** | **Baseline Raw Forward**<br>*(No plugins, raw L7 proxying)* | **44,226.15** | 2.36 ms | 2.04 ms | 2.57 ms | 3.29 ms | 12.07 ms | 43.89 ms | **0.00%** |
-| **`/v1/orders`** | **`oauth2_introspection` Hot Path**<br>*(L1 RAM Cache Hit, Ory Hydra)* | **43,293.78** | 2.36 ms | 2.12 ms | 2.63 ms | 3.30 ms | 9.66 ms | 24.46 ms | **0.00%** |
-
-### 1.2 Key Performance Indicators
-1. **Near-Baseline Throughput (98% of Raw Proxying)**:
-   The warm L1 RAM cache path achieves **43,293.78 RPS**, operating within **98.0%** of the raw non-authenticated baseline (**44,226.15 RPS**).
-2. **Sub-10ms Tail Latency (P99)**:
-   P99 latency stays tightly bounded at **9.66 ms** with an average latency of **2.36 ms**, with zero dropped requests across 433,680 transactions.
-3. **Sub-Millisecond Negative Caching**:
-   Revoked and invalid tokens are cached in the negative cache zone, rejecting subsequent fraudulent requests in **0.96 ms** without re-querying the IdP.
-4. **Single-Flight Shadow Revalidation**:
-   Background revalidation dispatches exactly 1 task per stale token across all concurrent threads, eliminating thundering herds against the IdP.
+*[TBD]*
 
 ---
 
-## 2. Infrastructure & Topology on Azure VM
+### 1.2 Standardized 5-Tier Metric Taxonomy
 
-The benchmark topology consists of two dedicated compute nodes deployed within the same Azure Virtual Network (VNet) with accelerated networking enabled:
+All benchmark scenarios are evaluated across five standardized, non-abbreviated metric tiers:
 
-```mermaid
-flowchart LR
-    subgraph ClientHost["Azure VM2 (Load Generator & Services)"]
-        wrk["wrk (4 Threads / 100 Conns)\nBearer Token Requests"]
-        hydra["Ory Hydra IdP\n(OAuth2 / OIDC Server)"]
-        backend["Upstream Mock Service\n(HTTP/1.1 Buffered)"]
-    end
-
-    subgraph GatewayHost["Azure VM1 (Edge Gateway)"]
-        edge["Velda Edge Gateway\n(Core-Local L1 + Sharded L2 Cache)"]
-    end
-
-    wrk -->|"HTTP/1.1 Ingress\nBearer Token"| edge
-    edge -.->|"RFC 7662 Introspect\n(Cold Miss Only)"| hydra
-    edge -->|"Proxy Authenticated Upstream"| backend
-```
-
-- **Azure VM1 (Edge Gateway Node)**:
-  - **SKU**: Standard Azure Compute Instance (4 vCPUs, 16 GB RAM).
-  - **OS**: Linux (Kernel 6.8 with TCP BBR and socket reuse).
-  - **Runtime**: `velda-edge` with dedicated Tokio worker threads pinned to CPU cores, loading compiled snapshots from RAM (`/var/lib/velda/runtime/*.bin`).
-- **Azure VM2 (Generator & Upstream Node)**:
-  - **SKU**: Standard Azure Compute Instance (4 vCPUs, 16 GB RAM).
-  - **OS**: Linux.
-  - **Runtime**:
-    - `wrk` load generator running 4 threads and 100 concurrent HTTP keep-alive connections.
-    - Upstream HTTP backend mock server responding `200 OK` (`pong`).
-    - Ory Hydra OAuth2/OIDC Server (`:8084` public, `:8085` admin introspection).
-
----
-
-## 3. Benchmark Methodology & Concurrency Scenarios
-
-### 3.1 Tier-1 L1 Hit Scenario (Warm Cache)
-- Downstream clients send requests with valid bearer tokens.
-- Lookups resolve via thread-local `CoreLocalL1Cache` in sub-2ns without taking locks or executing atomic operations.
-- Granted scopes are verified via pre-evaluated boolean check.
-- Claims are injected via pre-materialized `HeaderValue` slices.
-- Result: **43,293.78 RPS**, **2.36 ms** average latency.
-
-### 3.2 Negative Caching Scenario (Revoked Tokens)
-- Downstream clients send invalid or revoked bearer tokens.
-- On cold miss, the IdP responds with `{"active": false}`.
-- Token fingerprint is recorded in the negative cache zone for `negative_cache_ttl_seconds` (10s).
-- Subsequent requests are rejected immediately at the edge with `401 Unauthorized` in **0.96 ms**, completely shielding the IdP from DoS storms.
-
-### 3.3 Stale-While-Revalidate Under High Concurrency
-- When a token enters the final 15 seconds before expiration, L1 expires naturally.
-- The first request falling into L2 acquires the atomic revalidation lease (`mark_revalidating`) and dispatches a background revalidation future to the dedicated Shadow Worker (`velda-shadow-0`, `SCHED_IDLE`).
-- All other concurrent requests on any CPU core observe the active revalidation lease and serve existing cached claims immediately without queue contention or IdP overload.
-
----
-
-## 4. Live Benchmark Results
-
-### 4.1 Baseline Forwarding (`/`)
-Measures maximum gateway throughput with zero active plugins:
-```
-Running 10s test @ http://gateway/
-  4 threads and 100 connections
-  Thread Stats   Avg      Stdev     Max   +/- Stdev
-    Latency     2.36ms    2.01ms  43.89ms   96.24%
-    Req/Sec    11.12k   602.34    13.45k    76.25%
-  Latency Distribution
-     50%    2.04ms
-     75%    2.57ms
-     90%    3.29ms
-     99%   12.07ms
-  443,205 requests in 10.02s, 64.67MB read
-Requests/sec:  44,226.15
-Transfer/sec:      6.45MB
-```
-
-### 4.2 `oauth2_introspection` Hot Path (`/v1/orders`)
-Evaluates active bearer token verification with warm L1 RAM cache:
-```
-Running 10s test @ http://gateway/v1/orders
-  4 threads and 100 connections
-  Thread Stats   Avg      Stdev     Max   +/- Stdev
-    Latency     2.36ms    1.58ms  24.46ms   92.91%
-    Req/Sec    10.88k   518.11    12.76k    71.25%
-  Latency Distribution
-     50%    2.12ms
-     75%    2.63ms
-     90%    3.30ms
-     99%    9.66ms
-  433,680 requests in 10.02s, 63.28MB read
-Requests/sec:  43,293.78
-Transfer/sec:      6.32MB
-```
-
-### 4.3 Functional Latency Breakdown
-Measured against live Ory Hydra deployment on Azure:
-
-| Test Scenario | Action / State | Status Code | Latency | Outcome |
-| :--- | :--- | :---: | :---: | :---: |
-| **Cold Cache Miss** | First request, calls Ory Hydra IdP over HTTP | `200 OK` | **3.69 ms** | **PASS** |
-| **Hot Cache Hit** | Subsequent requests served from in-memory L1 cache | `200 OK` | **1.62 ms** | **PASS** |
-| **Negative Cache Hit** | Revoked token rejected from negative cache | `401 Unauthorized` | **0.96 ms** | **PASS** |
-| **Insufficient Scope** | Token lacking `orders` scope rejected before proxying | `403 Forbidden` | **1.45 ms** | **PASS** |
-| **Missing Token** | Request without token rejected at extraction phase | `401 Unauthorized` | **0.82 ms** | **PASS** |
-
-### 4.4 Multi-Protocol & Chaotic Stress Storm on Azure (None-TLS, TLS 1.3, mTLS, HTTP/3)
-Measured during an 8-way concurrent chaotic load test across security modes (Cleartext, 1-way TLS, 2-way mTLS with client certs) and protocols (HTTP/1.1, HTTP/2, HTTP/3 QUIC):
-
-| Traffic Axis | Security Mode | Protocol & Pipeline | Measured Throughput | Latency (P50) | Invariant / Behavior |
-| :--- | :--- | :--- | :---: | :---: | :--- |
-| **Baseline Forward** | Cleartext (None-TLS) | HTTP/1.1 Buffered | **43,073.7 RPS** | 1.60 ms | Clean raw proxying |
-| **Baseline Forward** | Standard TLS 1.3 | HTTP/2 Multiplexed | **42,578.3 RPS** | 0.49 ms | Zero TLS overhead on hot path |
-| **Baseline Forward** | Standard TLS 1.3 | **HTTP/3 QUIC (UDP)** | **27,161.7 RPS** | 1.09 ms | 100% success across 272K datagrams |
-| **mTLS Ingress** | 2-Way mTLS (Client Cert) | HTTP/1.1 Port 443 | **26,757.1 RPS** | 1.04 ms | Validated via `client_ca.crt` root |
-| **mTLS Ingress** | 2-Way mTLS (Client Cert) | HTTP/2 Port 443 | **20,878.1 RPS** | 1.43 ms | Full client cert validation in RAM |
-| **Active Auth Route** | Standard TLS 1.3 | `/v1/orders` (OAuth2 Hit) | **43,293.8 RPS** | 2.12 ms | Core-local L1 cache hit (< 2ns) |
-| **8-Way Chaotic Storm** | Mixed (All axes) | Concurrent Contention | **~34,660+ RPS** | Bounded | 1.04M reqs, 0 leaks, 89.6 MB RSS |
-
-### 4.5 Bottleneck & Worker Coordination Analysis Under Chaos
-
-Under intense multi-core contention with concurrent TLS handshakes, streaming pipes, and IdP revalidations:
-
-1. **Zero Lock Contention on Traffic Workers**:
-   - L1 lookup is strictly thread-local (`thread_local! CoreLocalL1Cache`). Traffic workers acquire **0 locks** and execute **0 atomic operations** on warm hits.
-   - Even when L1 expires, L2 uses hardware cache-line aligned (`#[repr(align(64))]`) sharding across CPU cores, preventing false sharing across AMD EPYC NUMA nodes.
-
-2. **Smooth Non-Blocking Shadow Handoff (`try_dispatch_shadow`)**:
-   - When a token enters the stale window (< 15s remaining), the traffic worker attempts an atomic compare-and-swap (`mark_revalidating`).
-   - The winning worker uses non-blocking dispatch (`try_dispatch_shadow`). If the shadow queue is full or the shadow worker is busy, the task drops cleanly without blocking the traffic worker.
-   - The traffic worker serves the existing valid claims immediately. Client requests **never wait** on the background revalidation task.
-
-3. **Thundering Herd Shielding (Single-Flight Deduplication)**:
-   - Thousands of concurrent requests across all 4 CPU cores hitting the same stale token observe `mark_revalidating == false` and return cached claims instantly.
-   - The Authorization Server (Ory Hydra) receives exactly **1 HTTP request**, completely preventing IdP crash loops under traffic spikes.
-
-4. **Adversarial / Malicious Probe Isolation**:
-   - Unauthenticated requests hitting mTLS endpoints are rejected at the TLS handshake level (`tlsv13 alert certificate required`), consuming zero CPU in the plugin layer.
-   - Revoked tokens are caught in the negative cache zone, rejecting attacks in sub-millisecond RAM lookups.
+1. **Tier 1: Macro Network, L7 & OAuth2 Token Delivery Metrics**:
+   - **Duration (seconds)**: Continuous execution duration of the benchmark session (standard 15.00 seconds).
+   - **Total Requests**: Total downstream requests successfully served.
+   - **Throughput (requests/second)**: Processing throughput rate.
+   - **Wire Bandwidth (Megabytes/second)**: Aggregate data transfer rate across the network interface.
+   - **Total Bearer Tokens Validated**: Total OAuth2 / JWT bearer tokens parsed and evaluated.
+   - **Token Verification Success Count**: Total requests successfully authorized with valid active tokens.
+   - **Token Introspection Throughput (tokens/second)**: Rate of token extraction, signature verification, and claims inspection.
+   - **Mean Latency (milliseconds)**: Average time from request receipt to response completion.
+   - **Min Latency (milliseconds)**: Minimum recorded latency.
+   - **Median Latency P50 (milliseconds)**: 50th percentile response latency.
+   - **P75 Latency (milliseconds)**: 75th percentile response latency.
+   - **P90 Latency (milliseconds)**: 90th percentile response latency.
+   - **P99 Tail Latency (milliseconds)**: 99th percentile response latency.
+   - **P99.9 Tail Latency (milliseconds)**: 99.9th percentile deep tail latency.
+   - **Max Latency (milliseconds)**: Maximum recorded response latency.
+   - **Latency Standard Deviation (milliseconds)**: Jitter and dispersion of response latency.
+   - **Connect Time Average (milliseconds)**: Downstream connection handshake duration.
+   - **HTTP Status Code Distribution (2xx / 4xx / 5xx)**: Proportional breakdown of response status codes.
+   - **Success Rate (%)**: Percentage of requests successfully completed without connection resets or drops.
+2. **Tier 2: System Resource Footprint**:
+   - **Total CPU Utilization (% CPU)**: Normalized aggregate CPU utilization across all allocated processor cores.
+   - **User CPU (% User CPU)**: CPU time spent in userspace logic.
+   - **System / Kernel CPU (% System / Kernel CPU)**: CPU time spent in kernel syscalls and socket I/O.
+   - **SoftIRQ CPU (% SoftIRQ CPU)**: CPU time spent processing network interrupt handlers.
+   - **Frontline Worker 0 CPU (%)**: Core 0 request-serving worker CPU load.
+   - **Frontline Worker 1 CPU (%)**: Core 1 request-serving worker CPU load.
+   - **Shadow Logistics Worker CPU (%)**: Dedicated background worker CPU load running under `SCHED_IDLE`.
+   - **Peak Resident Set Size (Megabytes)**: Maximum non-swapped physical memory footprint (`VmHWM`).
+   - **RAM Usage (%)**: Percentage of total system memory consumed.
+   - **Heap Allocations per Request (Bytes / Count)**: Dynamic memory allocation rate on the serving hot-path.
+   - **Memory Leak Rate (Megabytes / minute)**: Long-term memory drift over sustained execution.
+3. **Tier 3: Micro Linux Kernel & OS Telemetry via `perf stat` & tracepoints**:
+   - **System Calls per Request (System Calls / Request)**: Average syscall overhead per request.
+   - **Context Switches per Request (Context Switches / Request)**: Average thread/process context switch rate.
+   - **Total System Calls**: Aggregate transitions into the Linux kernel.
+   - **Total Context Switches**: Aggregate involuntary and voluntary scheduler context switches.
+   - **Kernel Time (seconds)**: Total cumulative time spent inside the Linux kernel.
+   - **Futex Calls**: Number of user-space locking and synchronization sleep/wake syscalls.
+   - **Futex Percentage of Total System Calls (%)**: Ratio of futex contention syscalls to total syscalls.
+4. **Tier 4: Micro High-Performance Computing & CPU Hardware Counters via `perf stat`**:
+   - **Total CPU Instructions**: Aggregate retired machine instructions executed by the CPU.
+   - **Instructions per Request (Instructions / Request)**: Average retired instructions per request.
+   - **Total CPU Cycles**: Aggregate unhalted hardware clock cycles consumed.
+   - **Cycles per Request (Cycles / Request)**: Average CPU clock cycles consumed per request.
+   - **Instructions Per Cycle (IPC)**: Hardware instruction pipeline execution efficiency.
+   - **Total Branches**: Aggregate hardware conditional and unconditional branch instructions.
+   - **Branches per Request (Branches / Request)**: Average branch instructions per request.
+   - **Branch Mispredictions**: Hardware branch prediction misses.
+   - **Branch Misprediction Rate (%)**: Ratio of branch misses to total branches.
+   - **L1 Data Cache Miss Rate (%)**: Level 1 data cache miss ratio.
+   - **Last Level Cache Miss Rate (%)**: Level 3 (LLC) cache miss ratio.
+5. **Tier 5: Plugin-Specific Mechanics & Wire Efficiency**:
+   - **RS256 / ES256 Cryptographic JWT Verification Duration (microseconds)**: Cryptographic signature validation latency over JWT bearer tokens.
+   - **In-Memory Token Cache Lock-Free Lookup Latency (nanoseconds)**: Duration to look up token state in lock-free core-local memory cache.
+   - **JWT Base64URL Header/Payload Slicing Overhead (nanoseconds)**: Overhead to slice JWT segments and decode claims JSON without memory copy.
+   - **Scope & Claim Validation Traversal Latency (nanoseconds)**: CPU cost to verify required scopes and audience claims against token claims.
+   - **Expired Token Detection & Immediate 401 Rejection Duration (nanoseconds)**: Latency to detect `exp` expiration and synthesize 401 Unauthorized response.
+   - **Introspection Cache Memory Footprint (bytes/cached token)**: Resident memory consumed per cached token entry in RAM.
+   - **Shadow Worker Background Token Cache Eviction Latency (microseconds)**: Time taken for shadow worker to evict expired tokens without blocking frontline serving.
 
 ---
 
-## 5. Workload Characteristics: Memory-Bound Execution
+## 2. Focused Benchmark Scenarios
 
-Unlike cryptographic signature verification plugins (such as `hmac_auth` which must calculate SHA-256 digests and HMAC tags per transaction), `oauth2_introspection` is purely **memory-bound**:
-1. Token hash calculation uses fast 128-bit chunk-based avalanche mixing (`token_fingerprint_128`).
-2. Cache lookup executes a direct-mapped thread-local read from RAM.
-3. Scope verification performs a pre-evaluated single boolean check.
-4. Upstream header injection uses pre-materialized `HeaderValue` slices.
-
-Because no cryptographic mathematical operations or locks are executed during cache hits, the plugin achieves **43,293.78 RPS** (retaining **98%** of raw baseline throughput) with an average latency indistinguishable from unauthenticated proxying (**2.36 ms**).
+To focus directly on essential operational requirements, the evaluation framework defines five targeted scenarios:
+- **Scenario 01: Baseline Local JWT Signature Validation (5,000 req/s)** — Measure added baseline latency overhead when validating RS256/ES256 signatures and claims under light load.
+- **Scenario 02: Nominal Production Introspection with Cache Hits (40,000 req/s, 95% Cache Hit)** — Evaluate sustained serving stability, tail latency, and resource footprint when 95% of tokens are validated via in-memory cache.
+- **Scenario 03: Peak Hot-Path Token Verification Saturation (100,000+ req/s)** — Extreme stress testing to verify lock-free cache lookup throughput and confirm non-blocking frontline worker guarantees.
+- **Scenario 04: High-Volume Token Expiry & Scope Claim Extraction (Multi-Claim Inspection)** — Evaluate claims inspection throughput when checking 10 distinct scope claims per request.
+- **Scenario 05: Malformed Token / Expired Signature Flood (Immediate 401 Rejection)** — Simulate massive attack with expired and malformed tokens to verify immediate 401 short-circuit without upstream contact.
 
 ---
 
-## 6. Verification & Reproduction Commands
+## 3. Detailed Benchmark Results
 
-To reproduce these benchmarks and verify code quality across the workspace:
+---
 
-```bash
-# 1. Run all isolated unit tests for OAuth2 Introspection
-cargo test --package velda-plugin --lib pre_upstream::oauth2_introspection
+### Scenario 01: Baseline Local JWT Signature Validation (5,000 req/s)
+- **Objective**: Determine baseline latency addition and CPU footprint when verifying JWT tokens under low concurrency.
+- **Execution Command**: `oha -z 15s -q 5000 -c 50 -H "Authorization: Bearer <valid_jwt_token>" http://<gateway_host>:<port>/api/v1/ping`
 
-# 2. Run OAuth2 Introspection integration tests
-cargo test --package velda-plugin --test oauth2_introspection_test
+| Detailed Measurement Metric | **Velda Edge** (Rust 2024) | **Kong Gateway 3.9** (LuaJIT) | **Apache APISIX 3.10** (LuaJIT) | **Envoy Proxy 1.31** (C++) |
+| :--- | :---: | :---: | :---: | :---: |
+| **Duration (seconds)** | **15.00** | **15.00** | **15.00** | **15.00** |
+| **Total Requests** | *[TBD]* | *[TBD]* | *[TBD]* | *[TBD]* |
+| **Throughput (requests/second)** | *[TBD]* | *[TBD]* | *[TBD]* | *[TBD]* |
+| **Wire Bandwidth (Megabytes/second)** | *[TBD]* | *[TBD]* | *[TBD]* | *[TBD]* |
+| **Total Bearer Tokens Validated** | *[TBD]* | *[TBD]* | *[TBD]* | *[TBD]* |
+| **Token Verification Success Count** | *[TBD]* | *[TBD]* | *[TBD]* | *[TBD]* |
+| **Token Introspection Throughput (tokens/second)** | *[TBD]* | *[TBD]* | *[TBD]* | *[TBD]* |
+| **Mean Latency (milliseconds)** | *[TBD]* | *[TBD]* | *[TBD]* | *[TBD]* |
+| **Min Latency (milliseconds)** | *[TBD]* | *[TBD]* | *[TBD]* | *[TBD]* |
+| **Median Latency P50 (milliseconds)** | *[TBD]* | *[TBD]* | *[TBD]* | *[TBD]* |
+| **P75 Latency (milliseconds)** | *[TBD]* | *[TBD]* | *[TBD]* | *[TBD]* |
+| **P90 Latency (milliseconds)** | *[TBD]* | *[TBD]* | *[TBD]* | *[TBD]* |
+| **P99 Tail Latency (milliseconds)** | *[TBD]* | *[TBD]* | *[TBD]* | *[TBD]* |
+| **P99.9 Tail Latency (milliseconds)** | *[TBD]* | *[TBD]* | *[TBD]* | *[TBD]* |
+| **Max Latency (milliseconds)** | *[TBD]* | *[TBD]* | *[TBD]* | *[TBD]* |
+| **Latency Standard Deviation (milliseconds)** | *[TBD]* | *[TBD]* | *[TBD]* | *[TBD]* |
+| **Connect Time Average (milliseconds)** | *[TBD]* | *[TBD]* | *[TBD]* | *[TBD]* |
+| **HTTP Status Code Distribution (2xx / 4xx / 5xx)** | *[TBD]* | *[TBD]* | *[TBD]* | *[TBD]* |
+| **Success Rate (%)** | *[TBD]* | *[TBD]* | *[TBD]* | *[TBD]* |
+| **Total CPU Utilization (% CPU)** | *[TBD]* | *[TBD]* | *[TBD]* | *[TBD]* |
+| **User CPU (% User CPU)** | *[TBD]* | *[TBD]* | *[TBD]* | *[TBD]* |
+| **System / Kernel CPU (% System / Kernel CPU)** | *[TBD]* | *[TBD]* | *[TBD]* | *[TBD]* |
+| **SoftIRQ CPU (% SoftIRQ CPU)** | *[TBD]* | *[TBD]* | *[TBD]* | *[TBD]* |
+| **Frontline Worker 0 CPU (%)** | *[TBD]* | *[TBD]* | *[TBD]* | *[TBD]* |
+| **Frontline Worker 1 CPU (%)** | *[TBD]* | *[TBD]* | *[TBD]* | *[TBD]* |
+| **Shadow Logistics Worker CPU (%)** | *[TBD]* | N/A | N/A | N/A |
+| **Peak Resident Set Size (Megabytes)** | *[TBD]* | *[TBD]* | *[TBD]* | *[TBD]* |
+| **RAM Usage (%)** | *[TBD]* | *[TBD]* | *[TBD]* | *[TBD]* |
+| **Heap Allocations per Request (Bytes / Count)** | *[TBD]* | *[TBD]* | *[TBD]* | *[TBD]* |
+| **Memory Leak Rate (Megabytes / minute)** | *[TBD]* | *[TBD]* | *[TBD]* | *[TBD]* |
+| **System Calls per Request (System Calls / Request)** | *[TBD]* | *[TBD]* | *[TBD]* | *[TBD]* |
+| **Context Switches per Request (Context Switches / Request)** | *[TBD]* | *[TBD]* | *[TBD]* | *[TBD]* |
+| **Total System Calls** | *[TBD]* | *[TBD]* | *[TBD]* | *[TBD]* |
+| **Total Context Switches** | *[TBD]* | *[TBD]* | *[TBD]* | *[TBD]* |
+| **Kernel Time (seconds)** | *[TBD]* | *[TBD]* | *[TBD]* | *[TBD]* |
+| **Futex Calls** | *[TBD]* | *[TBD]* | *[TBD]* | *[TBD]* |
+| **Futex Percentage of Total System Calls (%)** | *[TBD]* | *[TBD]* | *[TBD]* | *[TBD]* |
+| **Total CPU Instructions** | *[TBD]* | *[TBD]* | *[TBD]* | *[TBD]* |
+| **Instructions per Request (Instructions / Request)** | *[TBD]* | *[TBD]* | *[TBD]* | *[TBD]* |
+| **Total CPU Cycles** | *[TBD]* | *[TBD]* | *[TBD]* | *[TBD]* |
+| **Cycles per Request (Cycles / Request)** | *[TBD]* | *[TBD]* | *[TBD]* | *[TBD]* |
+| **Instructions Per Cycle (IPC)** | *[TBD]* | *[TBD]* | *[TBD]* | *[TBD]* |
+| **Total Branches** | *[TBD]* | *[TBD]* | *[TBD]* | *[TBD]* |
+| **Branches per Request (Branches / Request)** | *[TBD]* | *[TBD]* | *[TBD]* | *[TBD]* |
+| **Branch Mispredictions** | *[TBD]* | *[TBD]* | *[TBD]* | *[TBD]* |
+| **Branch Misprediction Rate (%)** | *[TBD]* | *[TBD]* | *[TBD]* | *[TBD]* |
+| **L1 Data Cache Miss Rate (%)** | *[TBD]* | *[TBD]* | *[TBD]* | *[TBD]* |
+| **Last Level Cache Miss Rate (%)** | *[TBD]* | *[TBD]* | *[TBD]* | *[TBD]* |
+| **RS256 / ES256 Cryptographic JWT Verification Duration (microseconds)** | *[TBD]* | *[TBD]* | *[TBD]* | *[TBD]* |
+| **In-Memory Token Cache Lock-Free Lookup Latency (nanoseconds)** | *[TBD]* | *[TBD]* | *[TBD]* | *[TBD]* |
+| **JWT Base64URL Header/Payload Slicing Overhead (nanoseconds)** | *[TBD]* | *[TBD]* | *[TBD]* | *[TBD]* |
+| **Scope & Claim Validation Traversal Latency (nanoseconds)** | *[TBD]* | *[TBD]* | *[TBD]* | *[TBD]* |
+| **Expired Token Detection & Immediate 401 Rejection Duration (nanoseconds)** | *[TBD]* | *[TBD]* | *[TBD]* | *[TBD]* |
+| **Introspection Cache Memory Footprint (bytes/cached token)** | *[TBD]* | *[TBD]* | *[TBD]* | *[TBD]* |
+| **Shadow Worker Background Token Cache Eviction Latency (microseconds)** | *[TBD]* | *[TBD]* | *[TBD]* | *[TBD]* |
 
-# 3. Strict linter verification (Zero warnings)
-cargo clippy --package velda-plugin --all-targets --all-features -- -D warnings
+---
 
-# 4. Format check
-cargo fmt --check
+### Scenario 02: Nominal Production Introspection with Cache Hits (40,000 req/s, 95% Cache Hit)
+- **Objective**: Measure sustained throughput, latency profile, and resource consumption under high cache hit ratios.
+- **Execution Command**: `oha -z 15s -q 40000 -c 100 -H "Authorization: Bearer <valid_jwt_token>" http://<gateway_host>:<port>/api/v1/ping`
 
-# 5. Verify 0 diff on Composition Root
-git diff crates/velda-edge
-```
+| Detailed Measurement Metric | **Velda Edge** (Rust 2024) | **Kong Gateway 3.9** (LuaJIT) | **Apache APISIX 3.10** (LuaJIT) | **Envoy Proxy 1.31** (C++) |
+| :--- | :---: | :---: | :---: | :---: |
+| **Duration (seconds)** | **15.00** | **15.00** | **15.00** | **15.00** |
+| **Total Requests** | *[TBD]* | *[TBD]* | *[TBD]* | *[TBD]* |
+| **Throughput (requests/second)** | *[TBD]* | *[TBD]* | *[TBD]* | *[TBD]* |
+| **Wire Bandwidth (Megabytes/second)** | *[TBD]* | *[TBD]* | *[TBD]* | *[TBD]* |
+| **Total Bearer Tokens Validated** | *[TBD]* | *[TBD]* | *[TBD]* | *[TBD]* |
+| **Token Verification Success Count** | *[TBD]* | *[TBD]* | *[TBD]* | *[TBD]* |
+| **Token Introspection Throughput (tokens/second)** | *[TBD]* | *[TBD]* | *[TBD]* | *[TBD]* |
+| **Mean Latency (milliseconds)** | *[TBD]* | *[TBD]* | *[TBD]* | *[TBD]* |
+| **Min Latency (milliseconds)** | *[TBD]* | *[TBD]* | *[TBD]* | *[TBD]* |
+| **Median Latency P50 (milliseconds)** | *[TBD]* | *[TBD]* | *[TBD]* | *[TBD]* |
+| **P75 Latency (milliseconds)** | *[TBD]* | *[TBD]* | *[TBD]* | *[TBD]* |
+| **P90 Latency (milliseconds)** | *[TBD]* | *[TBD]* | *[TBD]* | *[TBD]* |
+| **P99 Tail Latency (milliseconds)** | *[TBD]* | *[TBD]* | *[TBD]* | *[TBD]* |
+| **P99.9 Tail Latency (milliseconds)** | *[TBD]* | *[TBD]* | *[TBD]* | *[TBD]* |
+| **Max Latency (milliseconds)** | *[TBD]* | *[TBD]* | *[TBD]* | *[TBD]* |
+| **Latency Standard Deviation (milliseconds)** | *[TBD]* | *[TBD]* | *[TBD]* | *[TBD]* |
+| **Connect Time Average (milliseconds)** | *[TBD]* | *[TBD]* | *[TBD]* | *[TBD]* |
+| **HTTP Status Code Distribution (2xx / 4xx / 5xx)** | *[TBD]* | *[TBD]* | *[TBD]* | *[TBD]* |
+| **Success Rate (%)** | *[TBD]* | *[TBD]* | *[TBD]* | *[TBD]* |
+| **Total CPU Utilization (% CPU)** | *[TBD]* | *[TBD]* | *[TBD]* | *[TBD]* |
+| **User CPU (% User CPU)** | *[TBD]* | *[TBD]* | *[TBD]* | *[TBD]* |
+| **System / Kernel CPU (% System / Kernel CPU)** | *[TBD]* | *[TBD]* | *[TBD]* | *[TBD]* |
+| **SoftIRQ CPU (% SoftIRQ CPU)** | *[TBD]* | *[TBD]* | *[TBD]* | *[TBD]* |
+| **Frontline Worker 0 CPU (%)** | *[TBD]* | *[TBD]* | *[TBD]* | *[TBD]* |
+| **Frontline Worker 1 CPU (%)** | *[TBD]* | *[TBD]* | *[TBD]* | *[TBD]* |
+| **Shadow Logistics Worker CPU (%)** | *[TBD]* | N/A | N/A | N/A |
+| **Peak Resident Set Size (Megabytes)** | *[TBD]* | *[TBD]* | *[TBD]* | *[TBD]* |
+| **RAM Usage (%)** | *[TBD]* | *[TBD]* | *[TBD]* | *[TBD]* |
+| **Heap Allocations per Request (Bytes / Count)** | *[TBD]* | *[TBD]* | *[TBD]* | *[TBD]* |
+| **Memory Leak Rate (Megabytes / minute)** | *[TBD]* | *[TBD]* | *[TBD]* | *[TBD]* |
+| **System Calls per Request (System Calls / Request)** | *[TBD]* | *[TBD]* | *[TBD]* | *[TBD]* |
+| **Context Switches per Request (Context Switches / Request)** | *[TBD]* | *[TBD]* | *[TBD]* | *[TBD]* |
+| **Total System Calls** | *[TBD]* | *[TBD]* | *[TBD]* | *[TBD]* |
+| **Total Context Switches** | *[TBD]* | *[TBD]* | *[TBD]* | *[TBD]* |
+| **Kernel Time (seconds)** | *[TBD]* | *[TBD]* | *[TBD]* | *[TBD]* |
+| **Futex Calls** | *[TBD]* | *[TBD]* | *[TBD]* | *[TBD]* |
+| **Futex Percentage of Total System Calls (%)** | *[TBD]* | *[TBD]* | *[TBD]* | *[TBD]* |
+| **Total CPU Instructions** | *[TBD]* | *[TBD]* | *[TBD]* | *[TBD]* |
+| **Instructions per Request (Instructions / Request)** | *[TBD]* | *[TBD]* | *[TBD]* | *[TBD]* |
+| **Total CPU Cycles** | *[TBD]* | *[TBD]* | *[TBD]* | *[TBD]* |
+| **Cycles per Request (Cycles / Request)** | *[TBD]* | *[TBD]* | *[TBD]* | *[TBD]* |
+| **Instructions Per Cycle (IPC)** | *[TBD]* | *[TBD]* | *[TBD]* | *[TBD]* |
+| **Total Branches** | *[TBD]* | *[TBD]* | *[TBD]* | *[TBD]* |
+| **Branches per Request (Branches / Request)** | *[TBD]* | *[TBD]* | *[TBD]* | *[TBD]* |
+| **Branch Mispredictions** | *[TBD]* | *[TBD]* | *[TBD]* | *[TBD]* |
+| **Branch Misprediction Rate (%)** | *[TBD]* | *[TBD]* | *[TBD]* | *[TBD]* |
+| **L1 Data Cache Miss Rate (%)** | *[TBD]* | *[TBD]* | *[TBD]* | *[TBD]* |
+| **Last Level Cache Miss Rate (%)** | *[TBD]* | *[TBD]* | *[TBD]* | *[TBD]* |
+| **RS256 / ES256 Cryptographic JWT Verification Duration (microseconds)** | *[TBD]* | *[TBD]* | *[TBD]* | *[TBD]* |
+| **In-Memory Token Cache Lock-Free Lookup Latency (nanoseconds)** | *[TBD]* | *[TBD]* | *[TBD]* | *[TBD]* |
+| **JWT Base64URL Header/Payload Slicing Overhead (nanoseconds)** | *[TBD]* | *[TBD]* | *[TBD]* | *[TBD]* |
+| **Scope & Claim Validation Traversal Latency (nanoseconds)** | *[TBD]* | *[TBD]* | *[TBD]* | *[TBD]* |
+| **Expired Token Detection & Immediate 401 Rejection Duration (nanoseconds)** | *[TBD]* | *[TBD]* | *[TBD]* | *[TBD]* |
+| **Introspection Cache Memory Footprint (bytes/cached token)** | *[TBD]* | *[TBD]* | *[TBD]* | *[TBD]* |
+| **Shadow Worker Background Token Cache Eviction Latency (microseconds)** | *[TBD]* | *[TBD]* | *[TBD]* | *[TBD]* |
+
+---
+
+### Scenario 03: Peak Hot-Path Token Verification Saturation (100,000+ req/s)
+- **Objective**: Confirm maximum possible throughput when authenticating authorized bearer tokens across heavy multi-core concurrency.
+- **Execution Command**: `oha -z 15s -c 256 -H "Authorization: Bearer <valid_jwt_token>" http://<gateway_host>:<port>/api/v1/ping`
+
+| Detailed Measurement Metric | **Velda Edge** (Rust 2024) | **Kong Gateway 3.9** (LuaJIT) | **Apache APISIX 3.10** (LuaJIT) | **Envoy Proxy 1.31** (C++) |
+| :--- | :---: | :---: | :---: | :---: |
+| **Duration (seconds)** | **15.00** | **15.00** | **15.00** | **15.00** |
+| **Total Requests** | *[TBD]* | *[TBD]* | *[TBD]* | *[TBD]* |
+| **Throughput (requests/second)** | *[TBD]* | *[TBD]* | *[TBD]* | *[TBD]* |
+| **Wire Bandwidth (Megabytes/second)** | *[TBD]* | *[TBD]* | *[TBD]* | *[TBD]* |
+| **Total Bearer Tokens Validated** | *[TBD]* | *[TBD]* | *[TBD]* | *[TBD]* |
+| **Token Verification Success Count** | *[TBD]* | *[TBD]* | *[TBD]* | *[TBD]* |
+| **Token Introspection Throughput (tokens/second)** | *[TBD]* | *[TBD]* | *[TBD]* | *[TBD]* |
+| **Mean Latency (milliseconds)** | *[TBD]* | *[TBD]* | *[TBD]* | *[TBD]* |
+| **Min Latency (milliseconds)** | *[TBD]* | *[TBD]* | *[TBD]* | *[TBD]* |
+| **Median Latency P50 (milliseconds)** | *[TBD]* | *[TBD]* | *[TBD]* | *[TBD]* |
+| **P75 Latency (milliseconds)** | *[TBD]* | *[TBD]* | *[TBD]* | *[TBD]* |
+| **P90 Latency (milliseconds)** | *[TBD]* | *[TBD]* | *[TBD]* | *[TBD]* |
+| **P99 Tail Latency (milliseconds)** | *[TBD]* | *[TBD]* | *[TBD]* | *[TBD]* |
+| **P99.9 Tail Latency (milliseconds)** | *[TBD]* | *[TBD]* | *[TBD]* | *[TBD]* |
+| **Max Latency (milliseconds)** | *[TBD]* | *[TBD]* | *[TBD]* | *[TBD]* |
+| **Latency Standard Deviation (milliseconds)** | *[TBD]* | *[TBD]* | *[TBD]* | *[TBD]* |
+| **Connect Time Average (milliseconds)** | *[TBD]* | *[TBD]* | *[TBD]* | *[TBD]* |
+| **HTTP Status Code Distribution (2xx / 4xx / 5xx)** | *[TBD]* | *[TBD]* | *[TBD]* | *[TBD]* |
+| **Success Rate (%)** | *[TBD]* | *[TBD]* | *[TBD]* | *[TBD]* |
+| **Total CPU Utilization (% CPU)** | *[TBD]* | *[TBD]* | *[TBD]* | *[TBD]* |
+| **User CPU (% User CPU)** | *[TBD]* | *[TBD]* | *[TBD]* | *[TBD]* |
+| **System / Kernel CPU (% System / Kernel CPU)** | *[TBD]* | *[TBD]* | *[TBD]* | *[TBD]* |
+| **SoftIRQ CPU (% SoftIRQ CPU)** | *[TBD]* | *[TBD]* | *[TBD]* | *[TBD]* |
+| **Frontline Worker 0 CPU (%)** | *[TBD]* | *[TBD]* | *[TBD]* | *[TBD]* |
+| **Frontline Worker 1 CPU (%)** | *[TBD]* | *[TBD]* | *[TBD]* | *[TBD]* |
+| **Shadow Logistics Worker CPU (%)** | *[TBD]* | N/A | N/A | N/A |
+| **Peak Resident Set Size (Megabytes)** | *[TBD]* | *[TBD]* | *[TBD]* | *[TBD]* |
+| **RAM Usage (%)** | *[TBD]* | *[TBD]* | *[TBD]* | *[TBD]* |
+| **Heap Allocations per Request (Bytes / Count)** | *[TBD]* | *[TBD]* | *[TBD]* | *[TBD]* |
+| **Memory Leak Rate (Megabytes / minute)** | *[TBD]* | *[TBD]* | *[TBD]* | *[TBD]* |
+| **System Calls per Request (System Calls / Request)** | *[TBD]* | *[TBD]* | *[TBD]* | *[TBD]* |
+| **Context Switches per Request (Context Switches / Request)** | *[TBD]* | *[TBD]* | *[TBD]* | *[TBD]* |
+| **Total System Calls** | *[TBD]* | *[TBD]* | *[TBD]* | *[TBD]* |
+| **Total Context Switches** | *[TBD]* | *[TBD]* | *[TBD]* | *[TBD]* |
+| **Kernel Time (seconds)** | *[TBD]* | *[TBD]* | *[TBD]* | *[TBD]* |
+| **Futex Calls** | *[TBD]* | *[TBD]* | *[TBD]* | *[TBD]* |
+| **Futex Percentage of Total System Calls (%)** | *[TBD]* | *[TBD]* | *[TBD]* | *[TBD]* |
+| **Total CPU Instructions** | *[TBD]* | *[TBD]* | *[TBD]* | *[TBD]* |
+| **Instructions per Request (Instructions / Request)** | *[TBD]* | *[TBD]* | *[TBD]* | *[TBD]* |
+| **Total CPU Cycles** | *[TBD]* | *[TBD]* | *[TBD]* | *[TBD]* |
+| **Cycles per Request (Cycles / Request)** | *[TBD]* | *[TBD]* | *[TBD]* | *[TBD]* |
+| **Instructions Per Cycle (IPC)** | *[TBD]* | *[TBD]* | *[TBD]* | *[TBD]* |
+| **Total Branches** | *[TBD]* | *[TBD]* | *[TBD]* | *[TBD]* |
+| **Branches per Request (Branches / Request)** | *[TBD]* | *[TBD]* | *[TBD]* | *[TBD]* |
+| **Branch Mispredictions** | *[TBD]* | *[TBD]* | *[TBD]* | *[TBD]* |
+| **Branch Misprediction Rate (%)** | *[TBD]* | *[TBD]* | *[TBD]* | *[TBD]* |
+| **L1 Data Cache Miss Rate (%)** | *[TBD]* | *[TBD]* | *[TBD]* | *[TBD]* |
+| **Last Level Cache Miss Rate (%)** | *[TBD]* | *[TBD]* | *[TBD]* | *[TBD]* |
+| **RS256 / ES256 Cryptographic JWT Verification Duration (microseconds)** | *[TBD]* | *[TBD]* | *[TBD]* | *[TBD]* |
+| **In-Memory Token Cache Lock-Free Lookup Latency (nanoseconds)** | *[TBD]* | *[TBD]* | *[TBD]* | *[TBD]* |
+| **JWT Base64URL Header/Payload Slicing Overhead (nanoseconds)** | *[TBD]* | *[TBD]* | *[TBD]* | *[TBD]* |
+| **Scope & Claim Validation Traversal Latency (nanoseconds)** | *[TBD]* | *[TBD]* | *[TBD]* | *[TBD]* |
+| **Expired Token Detection & Immediate 401 Rejection Duration (nanoseconds)** | *[TBD]* | *[TBD]* | *[TBD]* | *[TBD]* |
+| **Introspection Cache Memory Footprint (bytes/cached token)** | *[TBD]* | *[TBD]* | *[TBD]* | *[TBD]* |
+| **Shadow Worker Background Token Cache Eviction Latency (microseconds)** | *[TBD]* | *[TBD]* | *[TBD]* | *[TBD]* |
+
+---
+
+### Scenario 04: High-Volume Token Expiry & Scope Claim Extraction (Multi-Claim Inspection)
+- **Objective**: Measure claim parsing speed and buffer allocation behavior under complex JSON payload claims.
+- **Execution Command**: `oha -z 15s -q 50000 -c 128 -H "Authorization: Bearer <multi_claim_jwt>" http://<gateway_host>:<port>/api/v1/ping`
+
+| Detailed Measurement Metric | **Velda Edge** (Rust 2024) | **Kong Gateway 3.9** (LuaJIT) | **Apache APISIX 3.10** (LuaJIT) | **Envoy Proxy 1.31** (C++) |
+| :--- | :---: | :---: | :---: | :---: |
+| **Duration (seconds)** | **15.00** | **15.00** | **15.00** | **15.00** |
+| **Total Requests** | *[TBD]* | *[TBD]* | *[TBD]* | *[TBD]* |
+| **Throughput (requests/second)** | *[TBD]* | *[TBD]* | *[TBD]* | *[TBD]* |
+| **Wire Bandwidth (Megabytes/second)** | *[TBD]* | *[TBD]* | *[TBD]* | *[TBD]* |
+| **Total Bearer Tokens Validated** | *[TBD]* | *[TBD]* | *[TBD]* | *[TBD]* |
+| **Token Verification Success Count** | *[TBD]* | *[TBD]* | *[TBD]* | *[TBD]* |
+| **Token Introspection Throughput (tokens/second)** | *[TBD]* | *[TBD]* | *[TBD]* | *[TBD]* |
+| **Mean Latency (milliseconds)** | *[TBD]* | *[TBD]* | *[TBD]* | *[TBD]* |
+| **Min Latency (milliseconds)** | *[TBD]* | *[TBD]* | *[TBD]* | *[TBD]* |
+| **Median Latency P50 (milliseconds)** | *[TBD]* | *[TBD]* | *[TBD]* | *[TBD]* |
+| **P75 Latency (milliseconds)** | *[TBD]* | *[TBD]* | *[TBD]* | *[TBD]* |
+| **P90 Latency (milliseconds)** | *[TBD]* | *[TBD]* | *[TBD]* | *[TBD]* |
+| **P99 Tail Latency (milliseconds)** | *[TBD]* | *[TBD]* | *[TBD]* | *[TBD]* |
+| **P99.9 Tail Latency (milliseconds)** | *[TBD]* | *[TBD]* | *[TBD]* | *[TBD]* |
+| **Max Latency (milliseconds)** | *[TBD]* | *[TBD]* | *[TBD]* | *[TBD]* |
+| **Latency Standard Deviation (milliseconds)** | *[TBD]* | *[TBD]* | *[TBD]* | *[TBD]* |
+| **Connect Time Average (milliseconds)** | *[TBD]* | *[TBD]* | *[TBD]* | *[TBD]* |
+| **HTTP Status Code Distribution (2xx / 4xx / 5xx)** | *[TBD]* | *[TBD]* | *[TBD]* | *[TBD]* |
+| **Success Rate (%)** | *[TBD]* | *[TBD]* | *[TBD]* | *[TBD]* |
+| **Total CPU Utilization (% CPU)** | *[TBD]* | *[TBD]* | *[TBD]* | *[TBD]* |
+| **User CPU (% User CPU)** | *[TBD]* | *[TBD]* | *[TBD]* | *[TBD]* |
+| **System / Kernel CPU (% System / Kernel CPU)** | *[TBD]* | *[TBD]* | *[TBD]* | *[TBD]* |
+| **SoftIRQ CPU (% SoftIRQ CPU)** | *[TBD]* | *[TBD]* | *[TBD]* | *[TBD]* |
+| **Frontline Worker 0 CPU (%)** | *[TBD]* | *[TBD]* | *[TBD]* | *[TBD]* |
+| **Frontline Worker 1 CPU (%)** | *[TBD]* | *[TBD]* | *[TBD]* | *[TBD]* |
+| **Shadow Logistics Worker CPU (%)** | *[TBD]* | N/A | N/A | N/A |
+| **Peak Resident Set Size (Megabytes)** | *[TBD]* | *[TBD]* | *[TBD]* | *[TBD]* |
+| **RAM Usage (%)** | *[TBD]* | *[TBD]* | *[TBD]* | *[TBD]* |
+| **Heap Allocations per Request (Bytes / Count)** | *[TBD]* | *[TBD]* | *[TBD]* | *[TBD]* |
+| **Memory Leak Rate (Megabytes / minute)** | *[TBD]* | *[TBD]* | *[TBD]* | *[TBD]* |
+| **System Calls per Request (System Calls / Request)** | *[TBD]* | *[TBD]* | *[TBD]* | *[TBD]* |
+| **Context Switches per Request (Context Switches / Request)** | *[TBD]* | *[TBD]* | *[TBD]* | *[TBD]* |
+| **Total System Calls** | *[TBD]* | *[TBD]* | *[TBD]* | *[TBD]* |
+| **Total Context Switches** | *[TBD]* | *[TBD]* | *[TBD]* | *[TBD]* |
+| **Kernel Time (seconds)** | *[TBD]* | *[TBD]* | *[TBD]* | *[TBD]* |
+| **Futex Calls** | *[TBD]* | *[TBD]* | *[TBD]* | *[TBD]* |
+| **Futex Percentage of Total System Calls (%)** | *[TBD]* | *[TBD]* | *[TBD]* | *[TBD]* |
+| **Total CPU Instructions** | *[TBD]* | *[TBD]* | *[TBD]* | *[TBD]* |
+| **Instructions per Request (Instructions / Request)** | *[TBD]* | *[TBD]* | *[TBD]* | *[TBD]* |
+| **Total CPU Cycles** | *[TBD]* | *[TBD]* | *[TBD]* | *[TBD]* |
+| **Cycles per Request (Cycles / Request)** | *[TBD]* | *[TBD]* | *[TBD]* | *[TBD]* |
+| **Instructions Per Cycle (IPC)** | *[TBD]* | *[TBD]* | *[TBD]* | *[TBD]* |
+| **Total Branches** | *[TBD]* | *[TBD]* | *[TBD]* | *[TBD]* |
+| **Branches per Request (Branches / Request)** | *[TBD]* | *[TBD]* | *[TBD]* | *[TBD]* |
+| **Branch Mispredictions** | *[TBD]* | *[TBD]* | *[TBD]* | *[TBD]* |
+| **Branch Misprediction Rate (%)** | *[TBD]* | *[TBD]* | *[TBD]* | *[TBD]* |
+| **L1 Data Cache Miss Rate (%)** | *[TBD]* | *[TBD]* | *[TBD]* | *[TBD]* |
+| **Last Level Cache Miss Rate (%)** | *[TBD]* | *[TBD]* | *[TBD]* | *[TBD]* |
+| **RS256 / ES256 Cryptographic JWT Verification Duration (microseconds)** | *[TBD]* | *[TBD]* | *[TBD]* | *[TBD]* |
+| **In-Memory Token Cache Lock-Free Lookup Latency (nanoseconds)** | *[TBD]* | *[TBD]* | *[TBD]* | *[TBD]* |
+| **JWT Base64URL Header/Payload Slicing Overhead (nanoseconds)** | *[TBD]* | *[TBD]* | *[TBD]* | *[TBD]* |
+| **Scope & Claim Validation Traversal Latency (nanoseconds)** | *[TBD]* | *[TBD]* | *[TBD]* | *[TBD]* |
+| **Expired Token Detection & Immediate 401 Rejection Duration (nanoseconds)** | *[TBD]* | *[TBD]* | *[TBD]* | *[TBD]* |
+| **Introspection Cache Memory Footprint (bytes/cached token)** | *[TBD]* | *[TBD]* | *[TBD]* | *[TBD]* |
+| **Shadow Worker Background Token Cache Eviction Latency (microseconds)** | *[TBD]* | *[TBD]* | *[TBD]* | *[TBD]* |
+
+---
+
+### Scenario 05: Malformed Token / Expired Signature Flood (Immediate 401 Rejection)
+- **Objective**: Confirm that invalid tokens are rejected at wire speed with zero upstream leakage.
+- **Execution Command**: `oha -z 15s -q 80000 -c 128 -H "Authorization: Bearer <expired_forged_token>" http://<gateway_host>:<port>/api/v1/ping`
+
+| Detailed Measurement Metric | **Velda Edge** (Rust 2024) | **Kong Gateway 3.9** (LuaJIT) | **Apache APISIX 3.10** (LuaJIT) | **Envoy Proxy 1.31** (C++) |
+| :--- | :---: | :---: | :---: | :---: |
+| **Duration (seconds)** | **15.00** | **15.00** | **15.00** | **15.00** |
+| **Total Requests** | *[TBD]* | *[TBD]* | *[TBD]* | *[TBD]* |
+| **Throughput (requests/second)** | *[TBD]* | *[TBD]* | *[TBD]* | *[TBD]* |
+| **Wire Bandwidth (Megabytes/second)** | *[TBD]* | *[TBD]* | *[TBD]* | *[TBD]* |
+| **Total Bearer Tokens Validated** | *[TBD]* | *[TBD]* | *[TBD]* | *[TBD]* |
+| **Token Verification Success Count** | *[TBD]* | *[TBD]* | *[TBD]* | *[TBD]* |
+| **Token Introspection Throughput (tokens/second)** | *[TBD]* | *[TBD]* | *[TBD]* | *[TBD]* |
+| **Mean Latency (milliseconds)** | *[TBD]* | *[TBD]* | *[TBD]* | *[TBD]* |
+| **Min Latency (milliseconds)** | *[TBD]* | *[TBD]* | *[TBD]* | *[TBD]* |
+| **Median Latency P50 (milliseconds)** | *[TBD]* | *[TBD]* | *[TBD]* | *[TBD]* |
+| **P75 Latency (milliseconds)** | *[TBD]* | *[TBD]* | *[TBD]* | *[TBD]* |
+| **P90 Latency (milliseconds)** | *[TBD]* | *[TBD]* | *[TBD]* | *[TBD]* |
+| **P99 Tail Latency (milliseconds)** | *[TBD]* | *[TBD]* | *[TBD]* | *[TBD]* |
+| **P99.9 Tail Latency (milliseconds)** | *[TBD]* | *[TBD]* | *[TBD]* | *[TBD]* |
+| **Max Latency (milliseconds)** | *[TBD]* | *[TBD]* | *[TBD]* | *[TBD]* |
+| **Latency Standard Deviation (milliseconds)** | *[TBD]* | *[TBD]* | *[TBD]* | *[TBD]* |
+| **Connect Time Average (milliseconds)** | *[TBD]* | *[TBD]* | *[TBD]* | *[TBD]* |
+| **HTTP Status Code Distribution (2xx / 4xx / 5xx)** | *[TBD]* | *[TBD]* | *[TBD]* | *[TBD]* |
+| **Success Rate (%)** | *[TBD]* | *[TBD]* | *[TBD]* | *[TBD]* |
+| **Total CPU Utilization (% CPU)** | *[TBD]* | *[TBD]* | *[TBD]* | *[TBD]* |
+| **User CPU (% User CPU)** | *[TBD]* | *[TBD]* | *[TBD]* | *[TBD]* |
+| **System / Kernel CPU (% System / Kernel CPU)** | *[TBD]* | *[TBD]* | *[TBD]* | *[TBD]* |
+| **SoftIRQ CPU (% SoftIRQ CPU)** | *[TBD]* | *[TBD]* | *[TBD]* | *[TBD]* |
+| **Frontline Worker 0 CPU (%)** | *[TBD]* | *[TBD]* | *[TBD]* | *[TBD]* |
+| **Frontline Worker 1 CPU (%)** | *[TBD]* | *[TBD]* | *[TBD]* | *[TBD]* |
+| **Shadow Logistics Worker CPU (%)** | *[TBD]* | N/A | N/A | N/A |
+| **Peak Resident Set Size (Megabytes)** | *[TBD]* | *[TBD]* | *[TBD]* | *[TBD]* |
+| **RAM Usage (%)** | *[TBD]* | *[TBD]* | *[TBD]* | *[TBD]* |
+| **Heap Allocations per Request (Bytes / Count)** | *[TBD]* | *[TBD]* | *[TBD]* | *[TBD]* |
+| **Memory Leak Rate (Megabytes / minute)** | *[TBD]* | *[TBD]* | *[TBD]* | *[TBD]* |
+| **System Calls per Request (System Calls / Request)** | *[TBD]* | *[TBD]* | *[TBD]* | *[TBD]* |
+| **Context Switches per Request (Context Switches / Request)** | *[TBD]* | *[TBD]* | *[TBD]* | *[TBD]* |
+| **Total System Calls** | *[TBD]* | *[TBD]* | *[TBD]* | *[TBD]* |
+| **Total Context Switches** | *[TBD]* | *[TBD]* | *[TBD]* | *[TBD]* |
+| **Kernel Time (seconds)** | *[TBD]* | *[TBD]* | *[TBD]* | *[TBD]* |
+| **Futex Calls** | *[TBD]* | *[TBD]* | *[TBD]* | *[TBD]* |
+| **Futex Percentage of Total System Calls (%)** | *[TBD]* | *[TBD]* | *[TBD]* | *[TBD]* |
+| **Total CPU Instructions** | *[TBD]* | *[TBD]* | *[TBD]* | *[TBD]* |
+| **Instructions per Request (Instructions / Request)** | *[TBD]* | *[TBD]* | *[TBD]* | *[TBD]* |
+| **Total CPU Cycles** | *[TBD]* | *[TBD]* | *[TBD]* | *[TBD]* |
+| **Cycles per Request (Cycles / Request)** | *[TBD]* | *[TBD]* | *[TBD]* | *[TBD]* |
+| **Instructions Per Cycle (IPC)** | *[TBD]* | *[TBD]* | *[TBD]* | *[TBD]* |
+| **Total Branches** | *[TBD]* | *[TBD]* | *[TBD]* | *[TBD]* |
+| **Branches per Request (Branches / Request)** | *[TBD]* | *[TBD]* | *[TBD]* | *[TBD]* |
+| **Branch Mispredictions** | *[TBD]* | *[TBD]* | *[TBD]* | *[TBD]* |
+| **Branch Misprediction Rate (%)** | *[TBD]* | *[TBD]* | *[TBD]* | *[TBD]* |
+| **L1 Data Cache Miss Rate (%)** | *[TBD]* | *[TBD]* | *[TBD]* | *[TBD]* |
+| **Last Level Cache Miss Rate (%)** | *[TBD]* | *[TBD]* | *[TBD]* | *[TBD]* |
+| **RS256 / ES256 Cryptographic JWT Verification Duration (microseconds)** | *[TBD]* | *[TBD]* | *[TBD]* | *[TBD]* |
+| **In-Memory Token Cache Lock-Free Lookup Latency (nanoseconds)** | *[TBD]* | *[TBD]* | *[TBD]* | *[TBD]* |
+| **JWT Base64URL Header/Payload Slicing Overhead (nanoseconds)** | *[TBD]* | *[TBD]* | *[TBD]* | *[TBD]* |
+| **Scope & Claim Validation Traversal Latency (nanoseconds)** | *[TBD]* | *[TBD]* | *[TBD]* | *[TBD]* |
+| **Expired Token Detection & Immediate 401 Rejection Duration (nanoseconds)** | *[TBD]* | *[TBD]* | *[TBD]* | *[TBD]* |
+| **Introspection Cache Memory Footprint (bytes/cached token)** | *[TBD]* | *[TBD]* | *[TBD]* | *[TBD]* |
+| **Shadow Worker Background Token Cache Eviction Latency (microseconds)** | *[TBD]* | *[TBD]* | *[TBD]* | *[TBD]* |
+
+---
+
+## 4. Comprehensive Architecture Comparison: Velda Edge vs Kong vs APISIX vs Envoy
+
+| Architecture Evaluation Criterion | Velda Edge (Rust Edition 2024) | Kong Gateway 3.9 (LuaJIT) | Apache APISIX 3.10 (LuaJIT) | Envoy Proxy 1.31 (C++) |
+| :--- | :--- | :--- | :--- | :--- |
+| **Implementation Language** | **Rust (Edition 2024, Zero-Cost Abstractions)** | C (OpenResty) + LuaJIT 2.1 | C (OpenResty) + LuaJIT 2.1 | C++ 20 |
+| **Thread Model** | **Thread-Per-Core (Shared-Nothing)** | Multi-Process (Nginx Master-Worker) | Multi-Process (Nginx Master-Worker) | Thread-Per-Core (Worker EventLoop) |
+| **Primary Execution Mechanism** | **In-Memory Lock-Free Token Cache + Hardware Crypto Validation** | Kong oauth2 / jwt plugin via Lua openresty | APISIX openid-connect plugin via lua-resty-openidc | Envoy oauth2 / jwt_authn filter in HTTP filter chain |
+| **Heap Allocations** | **Zero allocations on cache hit (Slice pointer)** | Lua table & string allocations per token parse | Lua table & string allocations per token parse | C++ Protobuf & JWT token object allocations |
+| **Garbage Collection (GC) Impact** | None (Zero GC Pauses by design) | Periodic Lua GC collection cycles | Periodic Lua GC collection cycles | None (TCMalloc heap churn) |
+| **Hot-Path Request Serving Impact** | **Lock-free cache lookup (< 15 ns)** | Lua string matching & FFI crypto calls | Lua string matching & FFI crypto calls | C++ crypto verification / cache lookup |
+| **Backpressure / Failure Mechanism** | **Immediate 401 local reply** | Lua ngx.exit(401) | Lua ngx.exit(401) | Envoy local reply 401 |
+| **Worker Execution Allocation** | **Frontline Worker 0/1 (`velda-worker-{id}`)** | Main Nginx worker thread | Main Nginx worker thread | Main Envoy worker threads |
+| **HTTP/3 Support (QUIC Ingress)** | **Native RFC 9114 / RFC 9000 (H3 Production)** | Not Supported | Experimental | Native HTTP/3 Production |
+| **Resident Memory Footprint (Peak RSS)** | *[TBD]* | *[TBD]* | *[TBD]* | *[TBD]* |
