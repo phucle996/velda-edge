@@ -2447,7 +2447,6 @@ dependencies = [
  "itoa",
  "libc",
  "opentelemetry-proto",
- "prost 0.13.5",
  "prost 0.14.5",
  "rcgen",
  "regex",
@@ -2521,7 +2520,7 @@ version = "0.1.0"
 dependencies = [
  "bincode",
  "flate2",
- "prost 0.13.5",
+ "prost 0.14.5",
  "rcgen",
  "rustls-pki-types",
  "serde",
