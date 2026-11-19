@@ -1,17 +1,7 @@
 //! Comprehensive In-Memory Metrics Tests for `velda-observability`.
 
 use std::sync::Arc;
-use std::time::Duration;
 use velda_observability::*;
-
-#[test]
-fn test_noop_telemetry_is_zero_sized_type() {
-    assert_eq!(
-        std::mem::size_of::<NoopTelemetry>(),
-        0,
-        "NoopTelemetry MUST be a Zero-Sized Type (ZST) with size = 0 bytes"
-    );
-}
 
 #[test]
 fn test_pipeline_slot_cacheline_alignment() {
@@ -31,7 +21,7 @@ fn test_total_slots_matches_pipe_kind() {
 }
 
 #[test]
-fn test_slot_index_bijective_encoding_decoding() {
+fn test_slot_index_roundtrip() {
     let mut seen_indices = std::collections::HashSet::new();
 
     for &pipe in &PipeKind::ALL {
@@ -93,13 +83,7 @@ fn test_record_completion_and_snapshot() {
 
     store.record_stream_completion(
         PipeKind::ServerStreamH2H1,
-        StreamCompletion::new(
-            200,
-            128,
-            1024,
-            Duration::from_millis(3),
-            Some(Duration::from_millis(1)),
-        ),
+        StreamCompletion::new(200, 128, 1024, 3_000_000, 1_000_000),
     );
 
     let snap = store.snapshot();
@@ -132,13 +116,7 @@ fn test_concurrent_multi_threaded_recording() {
                 store_clone.record_stream_start(PipeKind::BufferedH1H1);
                 store_clone.record_stream_completion(
                     PipeKind::BufferedH1H1,
-                    StreamCompletion::new(
-                        status,
-                        64,
-                        256,
-                        Duration::from_millis(2),
-                        Some(Duration::from_millis(1)),
-                    ),
+                    StreamCompletion::new(status, 64, 256, 2_000_000, 1_000_000),
                 );
             }
         }));
@@ -164,38 +142,6 @@ fn test_concurrent_multi_threaded_recording() {
 }
 
 #[test]
-fn test_live_telemetry_flow() {
-    let store = Arc::new(MetricsStore::new());
-    let mut tel = LiveTelemetry::new(Arc::clone(&store), PipeKind::DuplexH3H2);
-
-    tel.on_start();
-    tel.on_bytes_rx(500);
-    tel.on_ttfb();
-    tel.on_bytes_tx(2000);
-    tel.on_finish(200);
-
-    let snap = store.snapshot();
-    let pipe = snap.find_pipeline(PipeKind::DuplexH3H2).unwrap();
-
-    assert_eq!(pipe.total_requests(), 1);
-    assert_eq!(pipe.requests_2xx, 1);
-    assert_eq!(pipe.bytes_rx, 500);
-    assert_eq!(pipe.bytes_tx, 2000);
-    assert_eq!(pipe.active_streams, 0);
-}
-
-#[test]
-fn test_noop_telemetry_inlining() {
-    let mut tel = NoopTelemetry;
-    tel.on_start();
-    tel.on_bytes_rx(100);
-    tel.on_ttfb();
-    tel.on_bytes_tx(200);
-    tel.on_finish(200);
-    // Compiles to literally nothing
-}
-
-#[test]
 fn test_pool_metrics_cacheline_alignment() {
     assert_eq!(
         std::mem::align_of::<PoolMetrics>(),
@@ -205,7 +151,7 @@ fn test_pool_metrics_cacheline_alignment() {
 }
 
 #[test]
-fn test_pool_metrics_hit_miss_and_lease_lifecycle() {
+fn test_pool_hit_miss_lifecycle() {
     let store = MetricsStore::new();
     let pool = store.pool();
 
@@ -244,23 +190,23 @@ fn test_pool_metrics_hit_miss_and_lease_lifecycle() {
 }
 
 #[test]
-fn test_pool_metrics_eviction_classification_and_lifespan_histogram() {
+fn test_pool_eviction_and_lifespan() {
     let store = MetricsStore::new();
     let pool = store.pool();
 
     // Record various evictions with lifespans:
     // 1. Idle timeout after 3s (<= 5s)
-    pool.record_eviction(EvictionReason::IdleTimeout, Duration::from_secs(3));
+    pool.record_eviction(EvictionReason::IdleTimeout, 3_000_000_000);
     // 2. Unhealthy socket after 20s (<= 30s)
-    pool.record_eviction(EvictionReason::Unhealthy, Duration::from_secs(20));
+    pool.record_eviction(EvictionReason::Unhealthy, 20_000_000_000);
     // 3. Capacity exceeded after 120s (<= 300s / 5m)
-    pool.record_eviction(EvictionReason::CapacityExceeded, Duration::from_secs(120));
+    pool.record_eviction(EvictionReason::CapacityExceeded, 120_000_000_000);
     // 4. Goaway frame after 1500s (<= 1800s / 30m)
-    pool.record_eviction(EvictionReason::Goaway, Duration::from_secs(1500));
+    pool.record_eviction(EvictionReason::Goaway, 1500 * 1_000_000_000);
     // 5. Max lifetime reached after 3500s (<= 3600s / 1h)
-    pool.record_eviction(EvictionReason::MaxLifetime, Duration::from_secs(3500));
+    pool.record_eviction(EvictionReason::MaxLifetime, 3500 * 1_000_000_000);
     // 6. Long-lived connection evicted after 7200s (> 1h)
-    pool.record_eviction(EvictionReason::IdleTimeout, Duration::from_secs(7200));
+    pool.record_eviction(EvictionReason::IdleTimeout, 7200 * 1_000_000_000);
 
     let snap = store.snapshot().pool;
 
@@ -290,7 +236,7 @@ fn test_pool_metrics_eviction_classification_and_lifespan_histogram() {
 }
 
 #[test]
-fn test_pool_metrics_containers_and_multiplexed_gauges() {
+fn test_pool_containers_and_gauges() {
     let store = MetricsStore::new();
     let pool = store.pool();
 
@@ -349,7 +295,7 @@ fn test_concurrent_pool_operations() {
                 } else {
                     pool.record_hit();
                     pool.record_lease_dropped();
-                    pool.record_eviction(EvictionReason::IdleTimeout, Duration::from_secs(2));
+                    pool.record_eviction(EvictionReason::IdleTimeout, 2_000_000_000);
                 }
             }
         }));
@@ -377,7 +323,7 @@ fn test_concurrent_pool_operations() {
 }
 
 #[test]
-fn test_vectorized_pipeline_aggregation_and_basis_points() {
+fn test_pipeline_aggregation_bps() {
     let store = MetricsStore::new();
 
     // Pipeline 1: 100 requests (90 success 2xx, 10 errors 5xx)
@@ -388,8 +334,8 @@ fn test_vectorized_pipeline_aggregation_and_basis_points() {
                 status_code: 200,
                 bytes_rx: 100,
                 bytes_tx: 500,
-                duration: Duration::from_millis(2),
-                ttfb: Some(Duration::from_millis(1)),
+                duration_ns: 2_000_000,
+                ttfb_ns: 1_000_000,
             },
         );
     }
@@ -400,8 +346,8 @@ fn test_vectorized_pipeline_aggregation_and_basis_points() {
                 status_code: 500,
                 bytes_rx: 50,
                 bytes_tx: 200,
-                duration: Duration::from_millis(50),
-                ttfb: Some(Duration::from_millis(20)),
+                duration_ns: 50_000_000,
+                ttfb_ns: 20_000_000,
             },
         );
     }
@@ -414,8 +360,8 @@ fn test_vectorized_pipeline_aggregation_and_basis_points() {
                 status_code: 200,
                 bytes_rx: 200,
                 bytes_tx: 1000,
-                duration: Duration::from_millis(8),
-                ttfb: Some(Duration::from_millis(3)),
+                duration_ns: 8_000_000,
+                ttfb_ns: 3_000_000,
             },
         );
     }
@@ -455,8 +401,8 @@ fn test_per_core_sharded_simd_aggregation() {
                 status_code: 200,
                 bytes_rx: 100,
                 bytes_tx: 500,
-                duration: Duration::from_millis(core_id as u64 + 1),
-                ttfb: Some(Duration::from_millis(1)),
+                duration_ns: (core_id as u64 + 1) * 1_000_000,
+                ttfb_ns: 1_000_000,
             },
         );
     }
@@ -472,14 +418,8 @@ fn test_per_core_sharded_simd_aggregation() {
 }
 
 #[test]
-fn test_multi_hardware_accumulate_fn_dispatch_equivalence() {
-    // Instantiate 3 sharded stores bound explicitly to 3 distinct hardware widths:
-    // 256-bit (AVX2), 128-bit (SSE2 / NEON), and 64-bit (Scalar ALU)
-    let store_256 = MetricsStore::with_cores_and_fn(4, add_counters_256);
-    let store_128 = MetricsStore::with_cores_and_fn(4, add_counters_128);
-    let store_64 = MetricsStore::with_cores_and_fn(4, add_counters_64);
-
-    let stores = [&store_256, &store_128, &store_64];
+fn test_sharded_store_snapshot_aggregation() {
+    let store = MetricsStore::with_cores(4);
 
     // Seed diverse completions across all 4 core shards
     let test_cases = [
@@ -489,8 +429,8 @@ fn test_multi_hardware_accumulate_fn_dispatch_equivalence() {
             200,
             100,
             500,
-            Duration::from_millis(1),
-            Some(Duration::from_millis(1)),
+            1_000_000,
+            1_000_000,
         ),
         (
             1,
@@ -498,8 +438,8 @@ fn test_multi_hardware_accumulate_fn_dispatch_equivalence() {
             302,
             50,
             150,
-            Duration::from_millis(4),
-            Some(Duration::from_millis(2)),
+            4_000_000,
+            2_000_000,
         ),
         (
             2,
@@ -507,8 +447,8 @@ fn test_multi_hardware_accumulate_fn_dispatch_equivalence() {
             404,
             80,
             200,
-            Duration::from_millis(8),
-            Some(Duration::from_millis(4)),
+            8_000_000,
+            4_000_000,
         ),
         (
             3,
@@ -516,8 +456,8 @@ fn test_multi_hardware_accumulate_fn_dispatch_equivalence() {
             500,
             20,
             100,
-            Duration::from_millis(45),
-            Some(Duration::from_millis(25)),
+            45_000_000,
+            25_000_000,
         ),
         (
             0,
@@ -525,8 +465,8 @@ fn test_multi_hardware_accumulate_fn_dispatch_equivalence() {
             200,
             1024,
             4096,
-            Duration::from_millis(150),
-            Some(Duration::from_millis(80)),
+            150_000_000,
+            80_000_000,
         ),
         (
             1,
@@ -534,8 +474,8 @@ fn test_multi_hardware_accumulate_fn_dispatch_equivalence() {
             502,
             30,
             80,
-            Duration::from_millis(800),
-            Some(Duration::from_millis(200)),
+            800_000_000,
+            200_000_000,
         ),
         (
             2,
@@ -543,8 +483,8 @@ fn test_multi_hardware_accumulate_fn_dispatch_equivalence() {
             200,
             5000,
             12000,
-            Duration::from_millis(1500),
-            Some(Duration::from_millis(400)),
+            1_500_000_000,
+            400_000_000,
         ),
         (
             3,
@@ -552,70 +492,40 @@ fn test_multi_hardware_accumulate_fn_dispatch_equivalence() {
             200,
             256,
             1024,
-            Duration::from_millis(3),
-            Some(Duration::from_millis(1)),
+            3_000_000,
+            1_000_000,
         ),
     ];
 
-    for store in &stores {
-        for (core_id, pipe, status, rx, tx, dur, ttfb) in test_cases {
-            store.record_stream_completion_on_core(
-                core_id,
-                pipe,
-                StreamCompletion {
-                    status_code: status,
-                    bytes_rx: rx,
-                    bytes_tx: tx,
-                    duration: dur,
-                    ttfb,
-                },
-            );
-        }
-    }
-
-    let snap_256 = store_256.snapshot();
-    let snap_128 = store_128.snapshot();
-    let snap_64 = store_64.snapshot();
-
-    // Verify bit-for-bit equivalence across all 64 pipeline snapshots
-    assert_eq!(snap_256.pipelines.len(), 64);
-    assert_eq!(snap_128.pipelines.len(), 64);
-    assert_eq!(snap_64.pipelines.len(), 64);
-
-    for i in 0..64 {
-        let p_256 = &snap_256.pipelines[i];
-        let p_128 = &snap_128.pipelines[i];
-        let p_64 = &snap_64.pipelines[i];
-
-        assert_eq!(
-            p_256, p_128,
-            "Pipeline slot {} mismatch between 256 and 128",
-            i
-        );
-        assert_eq!(
-            p_256, p_64,
-            "Pipeline slot {} mismatch between 256 and 64",
-            i
+    for (core_id, pipe, status, rx, tx, dur_ns, ttfb_ns) in test_cases {
+        store.record_stream_completion_on_core(
+            core_id,
+            pipe,
+            StreamCompletion {
+                status_code: status,
+                bytes_rx: rx,
+                bytes_tx: tx,
+                duration_ns: dur_ns,
+                ttfb_ns,
+            },
         );
     }
 
-    // Verify bit-for-bit equivalence across aggregate totals
-    let tot_256 = snap_256.aggregate_pipelines();
-    let tot_128 = snap_128.aggregate_pipelines();
-    let tot_64 = snap_64.aggregate_pipelines();
+    let snap = store.snapshot();
 
-    assert_eq!(tot_256, tot_128);
-    assert_eq!(tot_256, tot_64);
+    // Verify all 64 pipeline snapshots
+    assert_eq!(snap.pipelines.len(), 64);
 
-    assert_eq!(tot_256.total_requests(), 8);
-    assert_eq!(tot_256.requests_2xx, 4);
-    assert_eq!(tot_256.requests_3xx, 1);
-    assert_eq!(tot_256.requests_4xx, 1);
-    assert_eq!(tot_256.requests_5xx, 2);
+    let tot = snap.aggregate_pipelines();
+    assert_eq!(tot.total_requests(), 8);
+    assert_eq!(tot.requests_2xx, 4);
+    assert_eq!(tot.requests_3xx, 1);
+    assert_eq!(tot.requests_4xx, 1);
+    assert_eq!(tot.requests_5xx, 2);
 }
 
 #[test]
-fn test_aggregate_pipelines_with_explicit_function_pointers() {
+fn test_aggregate_pipelines() {
     let store = MetricsStore::new();
 
     store.record_stream_completion(
@@ -624,89 +534,38 @@ fn test_aggregate_pipelines_with_explicit_function_pointers() {
             status_code: 200,
             bytes_rx: 200,
             bytes_tx: 800,
-            duration: Duration::from_millis(5),
-            ttfb: Some(Duration::from_millis(2)),
+            duration_ns: 5_000_000,
+            ttfb_ns: 2_000_000,
         },
     );
 
     let snap = store.snapshot();
+    let res = snap.aggregate_pipelines();
 
-    // Call aggregate_pipelines_with with all function pointers explicitly
-    let res_256 = snap.aggregate_pipelines_with(add_counters_256);
-    let res_128 = snap.aggregate_pipelines_with(add_counters_128);
-    let res_64 = snap.aggregate_pipelines_with(add_counters_64);
-
-    assert_eq!(res_256, res_128);
-    assert_eq!(res_256, res_64);
-    assert_eq!(res_256.total_requests(), 1);
-    assert_eq!(res_256.requests_2xx, 1);
-    assert_eq!(res_256.bytes_rx, 200);
-    assert_eq!(res_256.bytes_tx, 800);
+    assert_eq!(res.total_requests(), 1);
+    assert_eq!(res.requests_2xx, 1);
+    assert_eq!(res.bytes_rx, 200);
+    assert_eq!(res.bytes_tx, 800);
 }
 
 #[test]
-fn test_resolve_counters_fn_returns_callable_pointer() {
-    use velda_core::hardware::RegisterWidth;
-
-    let fn_256 = resolve_counters_fn(RegisterWidth::Bits256);
-    let fn_128 = resolve_counters_fn(RegisterWidth::Bits128);
-    let fn_64 = resolve_counters_fn(RegisterWidth::Bits64);
-
-    let mut dst = [10u64; 20];
-    let src = [5u64; 20];
-
-    // Each pointer must be callable without panic or invalid instruction
-    fn_256(&mut dst, &src);
-    assert_eq!(dst[0], 15);
-
-    fn_128(&mut dst, &src);
-    assert_eq!(dst[0], 20);
-
-    fn_64(&mut dst, &src);
-    assert_eq!(dst[0], 25);
-}
-
-#[test]
-fn test_workload_adaptive_counters_and_narrow_slice_safety() {
-    // 1. Check adaptive function resolution matching workload length
-    let fn_20 = resolve_counters_fn_for_len(20);
-    let fn_4 = resolve_counters_fn_for_len(4);
-    let fn_2 = resolve_counters_fn_for_len(2);
-    let fn_1 = resolve_counters_fn_for_len(1);
-
-    let mut buf = [100u64; 20];
-    let src = [10u64; 20];
-
-    // Standard workload (20 counters)
-    fn_20(&mut buf, &src);
-    assert_eq!(buf[0], 110);
-    assert_eq!(buf[19], 110);
-
-    // Narrow workload (4 counters)
-    fn_4(&mut buf[..4], &src[..4]);
-    assert_eq!(buf[0], 120);
-
-    // Narrow workload (2 counters) adapts to 128-bit
-    fn_2(&mut buf[..2], &src[..2]);
-    assert_eq!(buf[0], 130);
-
-    // Single scalar counter adapts directly to 64-bit ALU
-    fn_1(&mut buf[..1], &src[..1]);
-    assert_eq!(buf[0], 140);
-
-    // 2. Direct calls to add_counters_256 on narrow slices (< 4 and < 2)
-    // MUST adapt safely to 128-bit and scalar without panics, SIGILL, or out-of-bounds
+fn test_add_counters_arbitrary_slices() {
     let mut small_dst = [5u64; 3];
     let small_src = [2u64; 3];
-    add_counters_256(&mut small_dst, &small_src);
+    add_counters(&mut small_dst, &small_src);
     assert_eq!(small_dst, [7, 7, 7]);
 
     let mut single_dst = [42u64; 1];
     let single_src = [8u64; 1];
-    add_counters_256(&mut single_dst, &single_src);
+    add_counters(&mut single_dst, &single_src);
     assert_eq!(single_dst[0], 50);
 
     let mut empty_dst: [u64; 0] = [];
     let empty_src: [u64; 0] = [];
-    add_counters_256(&mut empty_dst, &empty_src);
+    add_counters(&mut empty_dst, &empty_src);
+
+    let mut full_dst = [10u64; 20];
+    let full_src = [5u64; 20];
+    add_counters(&mut full_dst, &full_src);
+    assert_eq!(full_dst, [15u64; 20]);
 }

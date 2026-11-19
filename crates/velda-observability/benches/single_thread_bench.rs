@@ -1,85 +1,28 @@
 //! Single-Thread Performance, Latency & Zero-Allocation Benchmark Suite for `velda-observability`.
 //!
 //! Evaluates hot-path single-thread performance:
-//! 1. `NoopTelemetry` True Zero-Cost Verification (10,000,000 ops)
-//! 2. `MetricsStore::record_stream_completion()` Direct O(1) Indexing & Atomic Update (10,000,000 ops)
-//! 3. `LiveTelemetry` Full Request Pipeline Lifecycle (5,000,000 ops)
-//! 4. `PoolMetrics` Reusability, Leasing & Eviction Hot-Path (5,000,000 ops)
-//! 5. `MetricsStore::snapshot()` Point-in-Time Read Latency (100,000 snapshots)
+//! 1. `MetricsStore::record_stream_completion()` Direct O(1) Indexing & Atomic Update (10,000,000 ops)
+//! 2. `PoolMetrics` Reusability, Leasing & Eviction Hot-Path (5,000,000 ops)
+//! 3. `MetricsStore::snapshot()` Point-in-Time Read Latency (100,000 snapshots)
 
 mod common;
 
-use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use common::{CountingAllocator, FastRng, format_duration, format_throughput};
 use velda_core::lut::PipeKind;
-use velda_observability::{
-    EvictionReason, LiveTelemetry, MetricsStore, NoopTelemetry, StreamCompletion, Telemetry,
-};
+use velda_observability::{EvictionReason, MetricsStore, StreamCompletion};
 
 #[global_allocator]
 static ALLOCATOR: CountingAllocator = CountingAllocator::new();
 
 // ============================================================================
-// Stage 1: NoopTelemetry True Zero-Cost Verification
-// ============================================================================
-
-fn bench_noop_telemetry_zero_cost() {
-    println!("### 1. `NoopTelemetry` True Zero-Cost Verification (10,000,000 ops)\n");
-    println!(
-        "| Telemetry Mode | Struct Size | Latency / op | Allocs / op | Throughput | Invariant Status |"
-    );
-    println!("| :--- | :--- | :--- | :--- | :--- | :--- |");
-
-    let iters = 10_000_000u64;
-
-    // Verify compile-time size invariant
-    let zst_size = std::mem::size_of::<NoopTelemetry>();
-    assert_eq!(zst_size, 0, "NoopTelemetry MUST be a Zero-Sized Type!");
-
-    ALLOCATOR.reset();
-    let start = Instant::now();
-
-    for _ in 0..iters {
-        let mut tel = NoopTelemetry;
-        tel.on_start();
-        tel.on_bytes_rx(std::hint::black_box(128));
-        tel.on_ttfb();
-        tel.on_bytes_tx(std::hint::black_box(1024));
-        tel.on_finish(std::hint::black_box(200));
-        let _ = std::hint::black_box(tel);
-    }
-
-    let elapsed = start.elapsed();
-    let (allocs, _) = ALLOCATOR.snapshot();
-    let ns_op = elapsed.as_nanos() as f64 / iters as f64;
-    let status = if zst_size == 0 && allocs == 0 && ns_op < 1.0 {
-        "**PASS (0 B, 0 allocs, < 1 ns)**"
-    } else if zst_size == 0 && allocs == 0 {
-        "**PASS (0 B, 0 allocs)**"
-    } else {
-        "**FAIL**"
-    };
-
-    println!(
-        "| `NoopTelemetry` (Disabled) | **{} bytes** | **{:.3} ns** | **{:.2}** | {} | {} |",
-        zst_size,
-        ns_op,
-        allocs as f64 / iters as f64,
-        format_throughput(iters, elapsed),
-        status
-    );
-    println!();
-}
-
-// ============================================================================
-// Stage 2: Direct MetricsStore Slot Lookup & Completion
+// Stage 1: Direct MetricsStore Slot Lookup & Completion
 // ============================================================================
 
 fn bench_direct_slot_completion() {
     println!(
-        "### 2. `MetricsStore::record_stream_completion()` Direct O(1) Atomic Record (10,000,000 ops)\n"
+        "### 1. `MetricsStore::record_stream_completion()` Direct O(1) Atomic Record (10,000,000 ops)\n"
     );
     println!(
         "| Target Pipeline | Operation | Latency / op | Allocs / op | Throughput | Invariant Status |"
@@ -89,13 +32,7 @@ fn bench_direct_slot_completion() {
     let iters = 10_000_000u64;
     let store = MetricsStore::new();
 
-    let completion = StreamCompletion::new(
-        200,
-        128,
-        2048,
-        Duration::from_millis(4),
-        Some(Duration::from_millis(1)),
-    );
+    let completion = StreamCompletion::new(200, 128, 2048, 4_000_000, 1_000_000);
 
     // Warm-up
     for _ in 0..10_000 {
@@ -143,58 +80,11 @@ fn bench_direct_slot_completion() {
 }
 
 // ============================================================================
-// Stage 3: LiveTelemetry Full Request Pipeline Lifecycle
-// ============================================================================
-
-fn bench_live_telemetry_lifecycle() {
-    println!("### 3. `LiveTelemetry` Full Request Pipeline Lifecycle (5,000,000 ops)\n");
-    println!(
-        "| Pipeline Flow | Operations Per Cycle | Latency / op | Allocs / op | Throughput | Invariant Status |"
-    );
-    println!("| :--- | :--- | :--- | :--- | :--- | :--- |");
-
-    let iters = 5_000_000u64;
-    let store = Arc::new(MetricsStore::new());
-
-    ALLOCATOR.reset();
-    let start = Instant::now();
-
-    for _ in 0..iters {
-        let mut tel = LiveTelemetry::new(Arc::clone(&store), PipeKind::ServerStreamH2H1);
-        tel.on_start();
-        tel.on_bytes_rx(std::hint::black_box(256));
-        tel.on_ttfb();
-        tel.on_bytes_tx(std::hint::black_box(4096));
-        tel.on_finish(std::hint::black_box(200));
-    }
-
-    let elapsed = start.elapsed();
-    let (allocs, _) = ALLOCATOR.snapshot();
-    let ns_op = elapsed.as_nanos() as f64 / iters as f64;
-    let status = if allocs == 0 && ns_op < 50.0 {
-        "**PASS (< 50 ns, 0 allocs)**"
-    } else if allocs == 0 {
-        "**PASS (0 allocs)**"
-    } else {
-        "**FAIL**"
-    };
-
-    println!(
-        "| Full 5-stage Lifecycle | start + rx + ttfb + tx + finish | **{:.2} ns** | **{:.2}** | {} | {} |",
-        ns_op,
-        allocs as f64 / iters as f64,
-        format_throughput(iters, elapsed),
-        status
-    );
-    println!();
-}
-
-// ============================================================================
-// Stage 4: PoolMetrics Reusability, Leasing & Eviction Hot-Path
+// Stage 2: PoolMetrics Reusability, Leasing & Eviction Hot-Path
 // ============================================================================
 
 fn bench_pool_metrics_hot_path() {
-    println!("### 4. `PoolMetrics` Reusability, Leasing & Eviction Hot-Path (5,000,000 ops)\n");
+    println!("### 2. `PoolMetrics` Reusability, Leasing & Eviction Hot-Path (5,000,000 ops)\n");
     println!(
         "| Operation | Workload Action | Latency / op | Allocs / op | Throughput | Invariant Status |"
     );
@@ -238,14 +128,14 @@ fn bench_pool_metrics_hot_path() {
         format_throughput(iters, elapsed)
     );
 
-    // 4.3 Eviction Recording with Lifespan Bucketing
+    // 2.3 Eviction Recording with Lifespan Bucketing
     ALLOCATOR.reset();
     let start = Instant::now();
-    let dur = Duration::from_secs(25);
+    let lifespan_ns = 25 * 1_000_000_000u64;
     for _ in 0..iters {
         pool.record_eviction(
             std::hint::black_box(EvictionReason::IdleTimeout),
-            std::hint::black_box(dur),
+            std::hint::black_box(lifespan_ns),
         );
     }
     let elapsed = start.elapsed();
@@ -261,11 +151,11 @@ fn bench_pool_metrics_hot_path() {
 }
 
 // ============================================================================
-// Stage 5: MetricsStore::snapshot() Point-in-Time Generation Latency
+// Stage 3: MetricsStore::snapshot() Point-in-Time Generation Latency
 // ============================================================================
 
 fn bench_snapshot_generation_latency() {
-    println!("### 5. `MetricsStore::snapshot()` Point-in-Time Read Latency (100,000 snapshots)\n");
+    println!("### 3. `MetricsStore::snapshot()` Point-in-Time Read Latency (100,000 snapshots)\n");
     println!("| Target Data | Snapshot Content | Latency / op | Throughput | Invariant Status |");
     println!("| :--- | :--- | :--- | :--- | :--- |");
 
@@ -312,9 +202,7 @@ fn main() {
     println!("Velda Observability — Single-Thread Micro-Benchmark Suite");
     println!("================================================================================\n");
 
-    bench_noop_telemetry_zero_cost();
     bench_direct_slot_completion();
-    bench_live_telemetry_lifecycle();
     bench_pool_metrics_hot_path();
     bench_snapshot_generation_latency();
 

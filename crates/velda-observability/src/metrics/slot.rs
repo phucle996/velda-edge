@@ -1,4 +1,27 @@
-//! Cacheline-Aligned In-Memory Pipeline Metrics Slot.
+//! Cacheline-Aligned In-Memory Pipeline Metrics Slot (`velda_observability::metrics::slot`).
+//!
+//! ```text
+//! ┌────────────────────────────────────────────────────────────────────────────────────────┐
+//! │                 PIPELINESLOT MEMORY GEOMETRY (192 BYTES, 64-BYTE ALIGNED)               │
+//! ├────────────────────────────────────────────────────────────────────────────────────────┤
+//! │ CACHE LINE 0 (Bytes 0..64): Status Counters & Throughput                               │
+//! │ 0..8   : c[0]  (IDX_REQ_2XX)            │ 8..16  : c[1]  (IDX_REQ_3XX)                 │
+//! │ 16..24 : c[2]  (IDX_REQ_4XX)            │ 24..32 : c[3]  (IDX_REQ_5XX)                 │
+//! │ 32..40 : c[4]  (IDX_REQ_OTHER)          │ 40..48 : c[5]  (IDX_BYTES_RX)                │
+//! │ 48..56 : c[6]  (IDX_BYTES_TX)           │ 56..64 : c[7]  (IDX_DUR_1MS)                 │
+//! ├────────────────────────────────────────────────────────────────────────────────────────┤
+//! │ CACHE LINE 1 (Bytes 64..128): Duration & Early TTFB Buckets                            │
+//! │ 64..72 : c[8]  (IDX_DUR_5MS)            │ 72..80 : c[9]  (IDX_DUR_10MS)                │
+//! │ 80..88 : c[10] (IDX_DUR_50MS)           │ 88..96 : c[11] (IDX_DUR_250MS)               │
+//! │ 96..104: c[12] (IDX_DUR_1000MS)          │ 104..112: c[13] (IDX_DUR_INF)               │
+//! │ 112..120: c[14] (IDX_TTFB_1MS)          │ 120..128: c[15] (IDX_TTFB_5MS)               │
+//! ├────────────────────────────────────────────────────────────────────────────────────────┤
+//! │ CACHE LINE 2 (Bytes 128..192): Late TTFB Buckets & In-Flight Gauge                     │
+//! │ 128..136: c[16] (IDX_TTFB_10MS)         │ 136..144: c[17] (IDX_TTFB_50MS)              │
+//! │ 144..152: c[18] (IDX_TTFB_250MS)        │ 152..160: c[19] (IDX_TTFB_INF)               │
+//! │ 160..168: active_streams (AtomicI64)    │ 168..192: 24-byte cacheline padding          │
+//! └────────────────────────────────────────────────────────────────────────────────────────┘
+//! ```
 //!
 //! Provides thread-safe, lock-free atomic counters and histogram buckets
 //! dedicated to a single canonical [`velda_core::lut::PipeKind`] variant.
@@ -13,8 +36,8 @@
 
 use std::sync::atomic::{AtomicI64, AtomicU64, Ordering};
 
+use super::counter::PIPELINE_COUNTERS_LEN;
 use super::types::{StatusClass, StreamCompletion};
-use super::vector::PIPELINE_COUNTERS_LEN;
 
 // Canonical Counter Indices in the 20-counter array:
 pub const IDX_REQ_2XX: usize = 0;
@@ -104,18 +127,17 @@ impl PipelineSlot {
         }
 
         // 3. E2E Duration Histogram Buckets (Single atomic add via disjoint branches)
-        let dur_ms = completion.duration.as_millis();
-        let dur_idx = if dur_ms <= 1 {
+        let dur_idx = if completion.duration_ns <= 1_000_000 {
             IDX_DUR_1MS
-        } else if dur_ms <= 5 {
+        } else if completion.duration_ns <= 5_000_000 {
             IDX_DUR_5MS
-        } else if dur_ms <= 10 {
+        } else if completion.duration_ns <= 10_000_000 {
             IDX_DUR_10MS
-        } else if dur_ms <= 50 {
+        } else if completion.duration_ns <= 50_000_000 {
             IDX_DUR_50MS
-        } else if dur_ms <= 250 {
+        } else if completion.duration_ns <= 250_000_000 {
             IDX_DUR_250MS
-        } else if dur_ms <= 1000 {
+        } else if completion.duration_ns <= 1_000_000_000 {
             IDX_DUR_1000MS
         } else {
             IDX_DUR_INF
@@ -123,17 +145,16 @@ impl PipelineSlot {
         self.counters[dur_idx].fetch_add(1, Ordering::Relaxed);
 
         // 4. TTFB Histogram Buckets (if captured - single atomic add via disjoint branches)
-        if let Some(t) = completion.ttfb {
-            let ttfb_ms = t.as_millis();
-            let ttfb_idx = if ttfb_ms <= 1 {
+        if completion.ttfb_ns > 0 {
+            let ttfb_idx = if completion.ttfb_ns <= 1_000_000 {
                 IDX_TTFB_1MS
-            } else if ttfb_ms <= 5 {
+            } else if completion.ttfb_ns <= 5_000_000 {
                 IDX_TTFB_5MS
-            } else if ttfb_ms <= 10 {
+            } else if completion.ttfb_ns <= 10_000_000 {
                 IDX_TTFB_10MS
-            } else if ttfb_ms <= 50 {
+            } else if completion.ttfb_ns <= 50_000_000 {
                 IDX_TTFB_50MS
-            } else if ttfb_ms <= 250 {
+            } else if completion.ttfb_ns <= 250_000_000 {
                 IDX_TTFB_250MS
             } else {
                 IDX_TTFB_INF

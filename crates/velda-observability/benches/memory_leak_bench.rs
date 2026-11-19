@@ -10,7 +10,7 @@ mod common;
 
 use std::sync::Arc;
 use std::thread;
-use std::time::{Duration, Instant};
+use std::time::Instant;
 
 use common::{CountingAllocator, FastRng, format_bytes, format_duration};
 use velda_core::lut::PipeKind;
@@ -30,13 +30,7 @@ fn bench_sustained_request_serving_zero_leak() {
     let iters = 10_000_000u64;
     let store = MetricsStore::new();
 
-    let completion = StreamCompletion::new(
-        200,
-        128,
-        1024,
-        Duration::from_millis(3),
-        Some(Duration::from_millis(1)),
-    );
+    let completion = StreamCompletion::new(200, 128, 1024, 3_000_000, 1_000_000);
 
     // Warm-up
     for _ in 0..10_000 {
@@ -124,7 +118,7 @@ fn bench_sustained_pool_leasing_zero_leak() {
         } else if i % 4 == 2 {
             pool.record_hit();
             pool.record_lease_dropped();
-            pool.record_eviction(EvictionReason::IdleTimeout, Duration::from_secs(5));
+            pool.record_eviction(EvictionReason::IdleTimeout, 5_000_000_000);
         } else {
             pool.record_timeout();
         }
@@ -177,7 +171,7 @@ fn bench_snapshot_generation_zero_retention() {
     // Populate initial state
     store.record_stream_completion(
         PipeKind::BufferedH1H1,
-        StreamCompletion::new(200, 64, 512, Duration::from_millis(1), None),
+        StreamCompletion::new(200, 64, 512, 1_000_000, 0),
     );
 
     // Warm-up

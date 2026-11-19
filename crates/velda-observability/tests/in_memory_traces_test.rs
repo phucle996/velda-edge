@@ -13,7 +13,6 @@ fn emit_and_drain() {
     span.start_time_unix_nano = 1_000_000;
     span.end_time_unix_nano = 2_000_000;
     span.status_code = 200;
-    span.otlp_status = 1;
     span.route_id = 1;
     span.trace_id = [1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16];
     span.span_id = [10, 20, 30, 40, 50, 60, 70, 80];

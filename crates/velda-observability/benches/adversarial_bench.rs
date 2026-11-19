@@ -8,7 +8,7 @@
 
 mod common;
 
-use std::time::{Duration, Instant};
+use std::time::Instant;
 
 use common::{FastRng, format_throughput};
 use velda_core::lut::PipeKind;
@@ -43,7 +43,7 @@ fn bench_rapid_reset_flood() {
         // Stream completed with 499 (Client Closed Request) and 0 bytes transferred
         store.record_stream_completion(
             PipeKind::ServerStreamH2H1,
-            StreamCompletion::new(499, 0, 0, Duration::from_micros(50), None),
+            StreamCompletion::new(499, 0, 0, 50_000, 0),
         );
     }
 
@@ -93,17 +93,17 @@ fn bench_erratic_status_and_pipeline_hopping() {
         let status = (rng.next_usize(500) + 100) as u16; // Random 100..599
         let bytes_rx = rng.next_usize(8192) as u64;
         let bytes_tx = rng.next_usize(131072) as u64;
-        let dur = Duration::from_millis((rng.next_usize(2000) + 1) as u64);
-        let ttfb = if rng.next_usize(2) == 0 {
-            Some(Duration::from_millis((rng.next_usize(500) + 1) as u64))
+        let dur_ns = ((rng.next_usize(2000) + 1) as u64) * 1_000_000;
+        let ttfb_ns = if rng.next_usize(2) == 0 {
+            ((rng.next_usize(500) + 1) as u64) * 1_000_000
         } else {
-            None
+            0
         };
 
         store.record_stream_start(pipe);
         store.record_stream_completion(
             pipe,
-            StreamCompletion::new(status, bytes_rx, bytes_tx, dur, ttfb),
+            StreamCompletion::new(status, bytes_rx, bytes_tx, dur_ns, ttfb_ns),
         );
     }
 
@@ -164,7 +164,7 @@ fn bench_mass_eviction_storm() {
             _ => rng.next_usize(36000) + 3601,      // 2% > 1h
         };
 
-        pool.record_eviction(reason, Duration::from_secs(lifespan_secs as u64));
+        pool.record_eviction(reason, (lifespan_secs as u64) * 1_000_000_000);
     }
 
     let elapsed = start.elapsed();
@@ -225,7 +225,7 @@ fn bench_rapid_flapping_oscillation() {
                 pool.record_miss();
                 pool.record_connection_created();
                 pool.record_lease_dropped();
-                pool.record_eviction(EvictionReason::Unhealthy, Duration::from_secs(1));
+                pool.record_eviction(EvictionReason::Unhealthy, 1_000_000_000);
             }
         }
     }

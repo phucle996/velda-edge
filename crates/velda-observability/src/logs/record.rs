@@ -1,50 +1,73 @@
 //! Canonical 256-Byte Cacheline-Aligned Access Log Record (`velda_observability::logs::record`).
 //!
+//! ```text
+//! ┌────────────────────────────────────────────────────────────────────────────────────────┐
+//! │                 ACCESSLOGRECORD MEMORY LAYOUT (256 BYTES, 64-BYTE ALIGNED)             │
+//! ├────────────────────────────────────────────────────────────────────────────────────────┤
+//! │ CACHE LINE 0 (Bytes 0..64): Execution Scalars & Ingress Timestamps                     │
+//! │ 0..8   : request_id (u64 entropy)       │ 8..16  : duration_ns (u64 elapsed)           │
+//! │ 16..32 : peer_ip (u128 RFC 4291 mapped) │ 32..40 : ingress_time_nanos (u64 epoch nano) │
+//! │ 40..44 : bytes_rx (u32)                 │ 44..48 : bytes_tx (u32)                      │
+//! │ 48..52 : upstream_ip (u32 IPv4 bits)    │ 52..54 : upstream_port (u16)                 │
+//! │ 54..56 : status_code (u16)              │ 56..58 : route_id (u16)                      │
+//! │ 58..60 : ua_major_version (u16)         │ 60..62 : rpc_msgs_or_flags (u16)             │
+//! │ 62..63 : pipe (PipeKind: u8)            │ 63..64 : completion (CompletionReason: u8)   │
+//! ├────────────────────────────────────────────────────────────────────────────────────────┤
+//! │ CACHE LINE 1 (Bytes 64..128): Identifiers & URL Buffer Head                            │
+//! │ 64..65 : method (HttpMethod: u8)        │ 65..66 : grpc_status (GrpcStatus: u8)        │
+//! │ 66..67 : ua_family (UaFamily: u8)       │ 67..68 : ua_os (UaOs: u8)                    │
+//! │ 68..70 : url_len (u16: 0..=186)         │ 70..128: url_bytes[0..58] (58 bytes)         │
+//! ├────────────────────────────────────────────────────────────────────────────────────────┤
+//! │ CACHE LINE 2 (Bytes 128..192): URL Buffer Body                                         │
+//! │ 128..192: url_bytes[58..122] (64 bytes contiguous URL payload)                        │
+//! ├────────────────────────────────────────────────────────────────────────────────────────┤
+//! │ CACHE LINE 3 (Bytes 192..256): URL Buffer Tail                                         │
+//! │ 192..256: url_bytes[122..186] (64 bytes contiguous URL payload)                       │
+//! └────────────────────────────────────────────────────────────────────────────────────────┘
+//! ```
+//!
 //! # Hardware Layout & Rationale
 //! Exactly 256 bytes (`#[repr(C, align(64))]`, exactly 4 CPU cache lines) with zero compiler padding
 //! and zero heap pointers. Every field is a fixed-width integer, monolithic URL buffer, or finite enum discriminant
 //! so that emitting a log record is a pure 256-byte value copy (`Copy`).
 
-use std::net::SocketAddr;
-
 use velda_core::lut::{
     CompletionReason, GrpcStatus, HttpMethod, PipeKind, UaFamily, UaOs, WireProtocol,
-    classify_user_agent,
 };
-
-use super::types::{encode_ip_u128, encode_upstream_ip_u32};
 
 /// Canonical 256-byte (exactly 4 CPU cache lines) pure POD Access Log Record.
 ///
 /// # Memory Layout (256 bytes, 64-byte aligned, zero compiler padding)
-/// - `0..8`:    `request_id: u64`
+/// - `0..8`:    `request_id: u64` (low 64-bit entropy of W3C RequestId)
 /// - `8..16`:   `duration_ns: u64` (lossless nanoseconds, prevents 32-bit overflow on streaming/L4)
 /// - `16..32`:  `peer_ip: u128` (16-byte aligned at offset 16; lossless IPv6 or RFC 4291 IPv4-mapped)
-/// - `32..36`:  `timestamp_sec: u32`
-/// - `36..40`:  `bytes_rx: u32`
-/// - `40..44`:  `bytes_tx: u32`
-/// - `44..48`:  `upstream_ip: u32`
-/// - `48..50`:  `peer_port: u16`
-/// - `50..52`:  `upstream_port: u16`
-/// - `52..54`:  `status_code: u16`
-/// - `54..56`:  `route_id: u16`
-/// - `56..58`:  `ua_major_version: u16`
-/// - `58..60`:  `rpc_msgs_or_flags: u16`
-/// - `60..61`:  `pipe: PipeKind` (`#[repr(u8)]`, 1 byte, strongly typed pipeline variant)
-/// - `61..66`:  5 × `#[repr(u8)]` typed enum discriminants (`completion`, `method`, `grpc_status`, `ua_family`, `ua_os`)
-/// - `66..68`:  `url_len: u16`
-/// - `68..256`: `url_bytes: [u8; 188]` (188 bytes monolithic URL: scheme + host + path_and_query)
+/// - `32..40`:  `ingress_time_nanos: u64` (true hardware Unix epoch nanoseconds at request arrival)
+/// - `40..44`:  `bytes_rx: u32`
+/// - `44..48`:  `bytes_tx: u32`
+/// - `48..52`:  `upstream_ip: u32`
+/// - `52..54`:  `upstream_port: u16`
+/// - `54..56`:  `status_code: u16`
+/// - `56..58`:  `route_id: u16`
+/// - `58..60`:  `ua_major_version: u16`
+/// - `60..62`:  `rpc_msgs_or_flags: u16`
+/// - `62..63`:  `pipe: PipeKind` (`#[repr(u8)]`, 1 byte, strongly typed pipeline variant)
+/// - `63..64`:  `completion: CompletionReason` (`#[repr(u8)]`, 1 byte)
+/// - `64..65`:  `method: HttpMethod` (`#[repr(u8)]`, 1 byte)
+/// - `65..66`:  `grpc_status: GrpcStatus` (`#[repr(u8)]`, 1 byte)
+/// - `66..67`:  `ua_family: UaFamily` (`#[repr(u8)]`, 1 byte)
+/// - `67..68`:  `ua_os: UaOs` (`#[repr(u8)]`, 1 byte)
+/// - `68..70`:  `url_len: u16`
+/// - `70..256`: `url_bytes: [u8; 186]` (186 bytes monolithic URL: scheme + host + path_and_query)
 #[repr(C, align(64))]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct AccessLogRecord {
     pub request_id: u64,
     pub duration_ns: u64,
     pub peer_ip: u128,
-    pub timestamp_sec: u32,
+    pub ingress_time_nanos: u64,
     pub bytes_rx: u32,
     pub bytes_tx: u32,
     pub upstream_ip: u32,
-    pub peer_port: u16,
     pub upstream_port: u16,
     pub status_code: u16,
     pub route_id: u16,
@@ -57,20 +80,30 @@ pub struct AccessLogRecord {
     pub ua_family: UaFamily,
     pub ua_os: UaOs,
     pub url_len: u16,
-    pub url_bytes: [u8; 188],
+    pub url_bytes: [u8; 186],
 }
 
 const _: () = assert!(std::mem::size_of::<AccessLogRecord>() == 256);
 const _: () = assert!(std::mem::align_of::<AccessLogRecord>() == 64);
 const _: () = assert!(std::mem::offset_of!(AccessLogRecord, duration_ns) == 8);
 const _: () = assert!(std::mem::offset_of!(AccessLogRecord, peer_ip) == 16);
-const _: () = assert!(std::mem::offset_of!(AccessLogRecord, timestamp_sec) == 32);
-const _: () = assert!(std::mem::offset_of!(AccessLogRecord, bytes_rx) == 36);
-const _: () = assert!(std::mem::offset_of!(AccessLogRecord, peer_port) == 48);
-const _: () = assert!(std::mem::offset_of!(AccessLogRecord, status_code) == 52);
-const _: () = assert!(std::mem::offset_of!(AccessLogRecord, pipe) == 60);
-const _: () = assert!(std::mem::offset_of!(AccessLogRecord, url_len) == 66);
-const _: () = assert!(std::mem::offset_of!(AccessLogRecord, url_bytes) == 68);
+const _: () = assert!(std::mem::offset_of!(AccessLogRecord, ingress_time_nanos) == 32);
+const _: () = assert!(std::mem::offset_of!(AccessLogRecord, bytes_rx) == 40);
+const _: () = assert!(std::mem::offset_of!(AccessLogRecord, bytes_tx) == 44);
+const _: () = assert!(std::mem::offset_of!(AccessLogRecord, upstream_ip) == 48);
+const _: () = assert!(std::mem::offset_of!(AccessLogRecord, upstream_port) == 52);
+const _: () = assert!(std::mem::offset_of!(AccessLogRecord, status_code) == 54);
+const _: () = assert!(std::mem::offset_of!(AccessLogRecord, route_id) == 56);
+const _: () = assert!(std::mem::offset_of!(AccessLogRecord, ua_major_version) == 58);
+const _: () = assert!(std::mem::offset_of!(AccessLogRecord, rpc_msgs_or_flags) == 60);
+const _: () = assert!(std::mem::offset_of!(AccessLogRecord, pipe) == 62);
+const _: () = assert!(std::mem::offset_of!(AccessLogRecord, completion) == 63);
+const _: () = assert!(std::mem::offset_of!(AccessLogRecord, method) == 64);
+const _: () = assert!(std::mem::offset_of!(AccessLogRecord, grpc_status) == 65);
+const _: () = assert!(std::mem::offset_of!(AccessLogRecord, ua_family) == 66);
+const _: () = assert!(std::mem::offset_of!(AccessLogRecord, ua_os) == 67);
+const _: () = assert!(std::mem::offset_of!(AccessLogRecord, url_len) == 68);
+const _: () = assert!(std::mem::offset_of!(AccessLogRecord, url_bytes) == 70);
 
 impl Default for AccessLogRecord {
     #[inline(always)]
@@ -86,11 +119,10 @@ impl AccessLogRecord {
             request_id: 0,
             duration_ns: 0,
             peer_ip: 0,
-            timestamp_sec: 0,
+            ingress_time_nanos: 0,
             bytes_rx: 0,
             bytes_tx: 0,
             upstream_ip: 0,
-            peer_port: 0,
             upstream_port: 0,
             status_code: 0,
             route_id: velda_core::UNMATCHED_ROUTE_ID,
@@ -103,7 +135,7 @@ impl AccessLogRecord {
             ua_family: UaFamily::None,
             ua_os: UaOs::Unknown,
             url_len: 0,
-            url_bytes: [0; 188],
+            url_bytes: [0; 186],
         }
     }
 
@@ -113,59 +145,33 @@ impl AccessLogRecord {
         if self.url_len == 0 {
             "-"
         } else {
-            let len = (self.url_len as usize).min(188);
+            let len = (self.url_len as usize).min(186);
             std::str::from_utf8(&self.url_bytes[..len]).unwrap_or("-")
         }
     }
 
-    /// Backward-compatible alias for accessing the stored URL/path.
-    #[inline(always)]
-    pub fn path(&self) -> &str {
-        self.url()
-    }
-
-    /// Sets the request URL, copying up to 188 bytes without allocation.
+    /// Sets the request URL, copying up to 186 bytes without allocation.
     #[inline(always)]
     pub fn set_url(&mut self, url: &str) {
         let b = url.as_bytes();
-        let len = b.len().min(188);
+        let len = b.len().min(186);
         self.url_len = len as u16;
         self.url_bytes[..len].copy_from_slice(&b[..len]);
-        if len < 188 {
+        if len < 186 {
             self.url_bytes[len..].fill(0);
         }
     }
 
-    /// Backward-compatible alias for `set_url`.
-    #[inline(always)]
-    pub fn set_path(&mut self, path: &str) {
-        self.set_url(path);
-    }
-
-    /// Builder pattern helper to set the request URL.
-    #[inline(always)]
-    pub fn with_url(mut self, url: &str) -> Self {
-        self.set_url(url);
-        self
-    }
-
-    /// Backward-compatible alias for `with_url`.
-    #[inline(always)]
-    pub fn with_path(mut self, path: &str) -> Self {
-        self.set_url(path);
-        self
-    }
-
-    /// Formats a complete URL (scheme + host + path_and_query) directly into the 188-byte buffer
+    /// Formats a complete URL (scheme + host + path_and_query) directly into the 186-byte buffer
     /// with zero heap allocations.
     #[inline(always)]
-    pub fn encode_url(is_tls: bool, host: Option<&str>, path_and_query: &str) -> (u16, [u8; 188]) {
-        let mut bytes = [0u8; 188];
+    pub fn encode_url(is_tls: bool, host: Option<&str>, path_and_query: &str) -> (u16, [u8; 186]) {
+        let mut bytes = [0u8; 186];
         let mut len = 0;
 
         if let Some(h) = host {
             let scheme: &[u8] = if is_tls { b"https://" } else { b"http://" };
-            let copy_s = scheme.len().min(188 - len);
+            let copy_s = scheme.len().min(186 - len);
             let mut i = 0;
             while i < copy_s {
                 bytes[len + i] = scheme[i];
@@ -174,7 +180,7 @@ impl AccessLogRecord {
             len += copy_s;
 
             let h_bytes = h.as_bytes();
-            let copy_h = h_bytes.len().min(188 - len);
+            let copy_h = h_bytes.len().min(186 - len);
             let mut i = 0;
             while i < copy_h {
                 bytes[len + i] = h_bytes[i];
@@ -184,7 +190,7 @@ impl AccessLogRecord {
         }
 
         let pq_bytes = path_and_query.as_bytes();
-        let copy_pq = pq_bytes.len().min(188 - len);
+        let copy_pq = pq_bytes.len().min(186 - len);
         let mut i = 0;
         while i < copy_pq {
             bytes[len + i] = pq_bytes[i];
@@ -195,11 +201,11 @@ impl AccessLogRecord {
         (len as u16, bytes)
     }
 
-    /// Encodes a raw byte slice into the fixed 188-byte URL buffer without heap allocation.
+    /// Encodes a raw byte slice into the fixed 186-byte URL buffer without heap allocation.
     #[inline(always)]
-    pub const fn from_url_bytes(url: &[u8]) -> (u16, [u8; 188]) {
-        let len = if url.len() > 188 { 188 } else { url.len() };
-        let mut bytes = [0u8; 188];
+    pub const fn from_url_bytes(url: &[u8]) -> (u16, [u8; 186]) {
+        let len = if url.len() > 186 { 186 } else { url.len() };
+        let mut bytes = [0u8; 186];
         let mut i = 0;
         while i < len {
             bytes[i] = url[i];
@@ -208,23 +214,11 @@ impl AccessLogRecord {
         (len as u16, bytes)
     }
 
-    /// Backward-compatible alias for `from_url_bytes`.
-    #[inline(always)]
-    pub const fn from_path_bytes(path: &[u8]) -> (u16, [u8; 188]) {
-        Self::from_url_bytes(path)
-    }
-
     /// Returns the concise, canonical pipeline execution identifier (e.g. `"buffered_h1_h1"`,
     /// `"server_stream_h2_h2"`, `"buffered_grpc_tcp_tcp"`, `"tcp_tcp"`).
     #[inline(always)]
     pub const fn pipe_name(&self) -> &'static str {
         self.pipe.as_str()
-    }
-
-    /// Returns the strongly-typed canonical pipeline execution kind.
-    #[inline(always)]
-    pub const fn pipe_kind(&self) -> PipeKind {
-        self.pipe
     }
 
     /// Returns the downstream wire protocol derived directly from the `pipe` discriminant.
@@ -238,55 +232,26 @@ impl AccessLogRecord {
     pub const fn upstream_protocol(&self) -> WireProtocol {
         self.pipe.upstream_protocol()
     }
+}
 
-    /// Constructs an integer record from request execution scalars.
-    #[allow(clippy::too_many_arguments)]
-    #[inline]
-    pub fn from_scalars(
-        request_id: u64,
-        timestamp_sec: u32,
-        duration_ns: u64,
-        peer: SocketAddr,
-        upstream: Option<SocketAddr>,
-        bytes_rx: u32,
-        bytes_tx: u32,
-        status_code: u16,
-        route_id: u16,
-        rpc_msgs_or_flags: u16,
-        pipe: PipeKind,
-        completion: CompletionReason,
-        method: HttpMethod,
-        grpc_status: GrpcStatus,
-        user_agent_bytes: &[u8],
-    ) -> Self {
-        let (ua_family, ua_os, ua_major_version) = classify_user_agent(user_agent_bytes);
-        let (upstream_ip, upstream_port) = match upstream {
-            Some(addr) => (encode_upstream_ip_u32(addr.ip()), addr.port()),
-            None => (0, 0),
-        };
+#[cfg(test)]
+mod tests {
+    use super::*;
 
-        Self {
-            request_id,
-            duration_ns,
-            peer_ip: encode_ip_u128(peer.ip()),
-            timestamp_sec,
-            bytes_rx,
-            bytes_tx,
-            upstream_ip,
-            peer_port: peer.port(),
-            upstream_port,
-            status_code,
-            route_id,
-            ua_major_version,
-            rpc_msgs_or_flags,
-            pipe,
-            completion,
-            method,
-            grpc_status,
-            ua_family,
-            ua_os,
-            url_len: 0,
-            url_bytes: [0; 188],
-        }
+    #[test]
+    fn test_record_geometry_and_alignment() {
+        assert_eq!(std::mem::size_of::<AccessLogRecord>(), 256);
+        assert_eq!(std::mem::align_of::<AccessLogRecord>(), 64);
+        assert_eq!(std::mem::offset_of!(AccessLogRecord, url_bytes), 70);
+    }
+
+    #[test]
+    fn test_record_url_mutation() {
+        let mut rec = AccessLogRecord::zeroed();
+        assert_eq!(rec.url(), "-");
+
+        rec.set_url("/api/v1/checkout?user=123");
+        assert_eq!(rec.url(), "/api/v1/checkout?user=123");
+        assert_eq!(rec.url_len, 25);
     }
 }

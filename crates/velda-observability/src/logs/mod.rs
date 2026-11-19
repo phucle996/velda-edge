@@ -8,12 +8,15 @@
 //!   on Frontline push and L2/L3 `_MM_HINT_T1` prefetching on Shadow drain.
 //! - `store`: Reference-counted `Arc<[AccessLogRecord]>` multi-exporter fan-out [`LogStore`].
 
+mod pool;
 mod record;
 mod ring;
 mod store;
-mod types;
 
+pub use pool::{
+    DEFAULT_BATCH_CAPACITY, DEFAULT_POOL_SLOTS, LogBatch, LogBatchPool, PooledLogBatch,
+};
 pub use record::AccessLogRecord;
 pub use ring::{DEFAULT_CORE_RING_CAPACITY, SpscLogRing};
 pub use store::{LogStore, LogSubscriber, global_log_store, init_global_log_store};
-pub use types::{decode_ip_u128, encode_ip_u128, encode_upstream_ip_u32};
+pub use velda_core::lut::ip::{encode_ip_u128, encode_upstream_ip_u32};

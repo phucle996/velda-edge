@@ -191,8 +191,8 @@ impl FastRng {
             status,
             bytes_rx,
             bytes_tx,
-            Duration::from_millis(duration_ms),
-            Some(Duration::from_millis(ttfb_ms)),
+            duration_ms * 1_000_000,
+            ttfb_ms * 1_000_000,
         )
     }
 }

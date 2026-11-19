@@ -1,4 +1,33 @@
-//! Cacheline-Aligned In-Memory Connection Pool Metrics.
+//! Cacheline-Aligned In-Memory Connection Pool Metrics (`velda_observability::metrics::pool`).
+//!
+//! ```text
+//! ┌────────────────────────────────────────────────────────────────────────────────────────┐
+//! │                 POOLMETRICS MEMORY GEOMETRY (256 BYTES, 64-BYTE ALIGNED)                │
+//! ├────────────────────────────────────────────────────────────────────────────────────────┤
+//! │ CACHE LINE 0 (Bytes 0..64): Gauges & Active Lifecycle Accounting                      │
+//! │ • total_connections (AtomicI64)        │ • idle_connections (AtomicI64)                │
+//! │ • active_streams   (AtomicI64)        │ • active_subpools  (AtomicI64)                │
+//! │ • pending_connects (AtomicI64)        │ • connecting       (AtomicI64)                │
+//! │ • acquired_total   (AtomicU64)        │ • reused_total     (AtomicU64) (Cache Hit)    │
+//! ├────────────────────────────────────────────────────────────────────────────────────────┤
+//! │ CACHE LINE 1 (Bytes 64..128): Traffic Counters & Eviction Classification               │
+//! │ • direct_connect_fallback (AtomicU64) │ • evictions_total  (AtomicU64)                │
+//! │ • evictions[IdleTimeout]   (AtomicU64) │ • evictions[MaxLifetime]  (AtomicU64)         │
+//! │ • evictions[Goaway]        (AtomicU64) │ • evictions[Unhealthy]    (AtomicU64)         │
+//! │ • evictions[CapExceeded]   (AtomicU64) │ • connect_failures (AtomicU64)                │
+//! ├────────────────────────────────────────────────────────────────────────────────────────┤
+//! │ CACHE LINE 2 (Bytes 128..192): Lifespan Distribution Buckets (Nanoseconds)             │
+//! │ • lifespan_le_10s  (<= 10_000_000_000 ns)                                              │
+//! │ • lifespan_le_30s  (<= 30_000_000_000 ns)                                              │
+//! │ • lifespan_le_60s  (<= 60_000_000_000 ns)                                              │
+//! │ • lifespan_le_300s (<= 300_000_000_000 ns)                                             │
+//! │ • lifespan_le_900s (<= 900_000_000_000 ns)                                             │
+//! │ • lifespan_gt_900s (>  900_000_000_000 ns)                                             │
+//! ├────────────────────────────────────────────────────────────────────────────────────────┤
+//! │ CACHE LINE 3 (Bytes 192..256): Reservation & Padding Boundary                         │
+//! │ • 64-byte terminal cacheline reservation (Zero false sharing with upstream workers)   │
+//! └────────────────────────────────────────────────────────────────────────────────────────┘
+//! ```
 //!
 //! Provides lock-free, zero-allocation atomic accounting for connection pooling,
 //! subpool container lifecycle, reusability (hit/miss rate), eviction classification,
@@ -10,7 +39,6 @@
 //! - Lock-Free: Employs `Ordering::Relaxed` atomics for hot-path leasing and release.
 
 use std::sync::atomic::{AtomicI64, AtomicU64, Ordering};
-use std::time::Duration;
 
 use super::snapshot::PoolSnapshot;
 
@@ -194,7 +222,7 @@ impl PoolMetrics {
     /// Any connection living `<= X` seconds increments all buckets with threshold `>= X`.
     /// Total connections closed with lifespan tracked = `lifespan_le_1h + lifespan_gt_1h`.
     #[inline(always)]
-    pub fn record_eviction(&self, reason: EvictionReason, lifespan: Duration) {
+    pub fn record_eviction(&self, reason: EvictionReason, lifespan_ns: u64) {
         match reason {
             EvictionReason::IdleTimeout => {
                 self.evictions_idle_timeout.fetch_add(1, Ordering::Relaxed);
@@ -215,16 +243,15 @@ impl PoolMetrics {
         }
 
         // Lifespan Bucketing (Single atomic add via disjoint branches)
-        let secs = lifespan.as_secs();
-        if secs <= 5 {
+        if lifespan_ns <= 5_000_000_000 {
             self.lifespan_b0_le_5s.fetch_add(1, Ordering::Relaxed);
-        } else if secs <= 30 {
+        } else if lifespan_ns <= 30_000_000_000 {
             self.lifespan_b1_le_30s.fetch_add(1, Ordering::Relaxed);
-        } else if secs <= 300 {
+        } else if lifespan_ns <= 300_000_000_000 {
             self.lifespan_b2_le_5m.fetch_add(1, Ordering::Relaxed);
-        } else if secs <= 1800 {
+        } else if lifespan_ns <= 1_800_000_000_000 {
             self.lifespan_b3_le_30m.fetch_add(1, Ordering::Relaxed);
-        } else if secs <= 3600 {
+        } else if lifespan_ns <= 3_600_000_000_000 {
             self.lifespan_b4_le_1h.fetch_add(1, Ordering::Relaxed);
         } else {
             self.lifespan_b5_gt_1h.fetch_add(1, Ordering::Relaxed);

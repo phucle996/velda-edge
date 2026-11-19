@@ -9,7 +9,7 @@ mod common;
 
 use std::sync::Arc;
 use std::thread;
-use std::time::{Duration, Instant};
+use std::time::Instant;
 
 use common::{FastRng, format_throughput};
 use velda_core::lut::PipeKind;
@@ -44,13 +44,7 @@ fn bench_disjoint_slots_scaling() {
             let pipe = MetricsStore::decode_slot_index(tid % TOTAL_PIPELINE_SLOTS).unwrap();
 
             handles.push(thread::spawn(move || {
-                let comp = StreamCompletion::new(
-                    200,
-                    64,
-                    512,
-                    Duration::from_millis(2),
-                    Some(Duration::from_millis(1)),
-                );
+                let comp = StreamCompletion::new(200, 64, 512, 2_000_000, 1_000_000);
 
                 for _ in 0..OPS_PER_THREAD {
                     store_clone.record_stream_completion(pipe, comp);
@@ -107,13 +101,7 @@ fn bench_contended_single_slot() {
         for _ in 0..num_threads {
             let store_clone = Arc::clone(&store);
             handles.push(thread::spawn(move || {
-                let comp = StreamCompletion::new(
-                    200,
-                    64,
-                    512,
-                    Duration::from_millis(2),
-                    Some(Duration::from_millis(1)),
-                );
+                let comp = StreamCompletion::new(200, 64, 512, 2_000_000, 1_000_000);
 
                 for _ in 0..OPS_PER_THREAD {
                     store_clone.record_stream_completion(PipeKind::BufferedH1H1, comp);
@@ -174,7 +162,7 @@ fn bench_concurrent_pool_operations() {
                         // 20% miss + drop + eviction
                         pool.record_miss();
                         pool.record_lease_dropped();
-                        pool.record_eviction(EvictionReason::IdleTimeout, Duration::from_secs(10));
+                        pool.record_eviction(EvictionReason::IdleTimeout, 10_000_000_000);
                     }
                 }
             }));

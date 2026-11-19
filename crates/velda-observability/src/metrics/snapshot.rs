@@ -9,11 +9,9 @@
 //! - Non-blocking Read: Snapshots are captured by reading atomics with `Relaxed` ordering,
 //!   guaranteeing that snapshot generation never blocks or stalls hot-path writers.
 
-use std::time::Instant;
-
 use velda_core::lut::{PipeKind, WireProtocol};
 
-use super::vector::{PIPELINE_COUNTERS_LEN, PipelineMetricsTotals};
+use super::counter::{PIPELINE_COUNTERS_LEN, PipelineMetricsTotals};
 
 /// Point-in-time snapshot of metrics for a single pipeline combination.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -283,8 +281,8 @@ impl PoolSnapshot {
 /// Complete point-in-time snapshot of the entire metrics store.
 #[derive(Debug, Clone)]
 pub struct MetricsSnapshot {
-    /// Monotonic timestamp when this snapshot was captured.
-    pub captured_at: Instant,
+    /// Monotonic Unix epoch timestamp in nanoseconds when this snapshot was captured.
+    pub captured_at_nanos: u64,
     /// Snapshots for all 36 pipeline combinations.
     pub pipelines: Vec<PipelineSnapshot>,
     /// Global L4 and transport snapshot.
@@ -300,21 +298,7 @@ impl MetricsSnapshot {
         let mut total_counters = [0u64; PIPELINE_COUNTERS_LEN];
         for p in &self.pipelines {
             let counters = p.to_counters();
-            super::vector::add_counters(&mut total_counters, &counters);
-        }
-        PipelineMetricsTotals::from_counters(&total_counters)
-    }
-
-    /// Computes aggregate totals across all pipelines using an explicit function pointer.
-    #[inline]
-    pub fn aggregate_pipelines_with(
-        &self,
-        agg_fn: super::vector::AccumulateCountersFn,
-    ) -> PipelineMetricsTotals {
-        let mut total_counters = [0u64; PIPELINE_COUNTERS_LEN];
-        for p in &self.pipelines {
-            let counters = p.to_counters();
-            agg_fn(&mut total_counters, &counters);
+            super::counter::add_pipeline_counters(&mut total_counters, &counters);
         }
         PipelineMetricsTotals::from_counters(&total_counters)
     }
@@ -366,7 +350,7 @@ impl MetricsSnapshot {
             });
         }
         Self {
-            captured_at: Instant::now(),
+            captured_at_nanos: velda_core::clock::now_unix_nanos(),
             pipelines,
             global: GlobalSnapshot {
                 connections_total: 0,
@@ -461,7 +445,7 @@ impl MetricsSnapshot {
             .collect();
 
         Self {
-            captured_at: self.captured_at,
+            captured_at_nanos: self.captured_at_nanos,
             pipelines,
             global: GlobalSnapshot {
                 connections_total: self
@@ -573,16 +557,15 @@ impl MetricsSnapshot {
 mod tests {
     use super::*;
     use crate::metrics::MetricsStore;
-    use std::time::Duration;
 
     #[test]
-    fn test_snapshot_delta_since_preserves_gauges_and_subtracts_counters() {
+    fn test_snapshot_delta_since() {
         let store = MetricsStore::new();
         store.global().connection_opened();
         store.record_stream_start(PipeKind::BufferedH1H1);
         store.record_stream_completion(
             PipeKind::BufferedH1H1,
-            crate::metrics::StreamCompletion::new(200, 100, 250, Duration::from_millis(2), None),
+            crate::metrics::StreamCompletion::new(200, 100, 250, 2_000_000, 0),
         );
 
         let snap1 = store.snapshot();
@@ -609,7 +592,7 @@ mod tests {
         store.record_stream_start(PipeKind::BufferedH1H1);
         store.record_stream_completion(
             PipeKind::BufferedH1H1,
-            crate::metrics::StreamCompletion::new(404, 50, 75, Duration::from_millis(3), None),
+            crate::metrics::StreamCompletion::new(404, 50, 75, 3_000_000, 0),
         );
         let snap3 = store.snapshot();
         let d3 = snap3.delta_since(&snap2);

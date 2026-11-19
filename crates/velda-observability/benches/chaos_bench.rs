@@ -10,7 +10,7 @@ mod common;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::thread;
-use std::time::{Duration, Instant};
+use std::time::Instant;
 
 use common::{FastRng, format_throughput};
 use velda_observability::{EvictionReason, MetricsStore};
@@ -155,7 +155,7 @@ fn bench_erratic_pool_lifecycle_chaos() {
                         pool.record_lease_dropped();
                         pool.record_eviction(
                             EvictionReason::Unhealthy,
-                            Duration::from_millis(rng.next_usize(1000) as u64),
+                            (rng.next_usize(1000) as u64) * 1_000_000,
                         );
                     }
                     _ => {

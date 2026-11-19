@@ -165,7 +165,11 @@ impl SpscLogRing {
     ///   L1d cache lines for the newly allocated batch slice.
     /// - `_mm_sfence()` enforces that all streaming stores are flushed and globally visible before
     ///   the batch `Arc` is enqueued for exporter subscribers.
-    pub fn drain_batch(&self, max_records: usize) -> Vec<AccessLogRecord> {
+    ///
+    /// Drains available records directly into a pre-allocated `target` vector from the memory pool.
+    ///
+    /// Guarantees 0 heap allocations and 0 deallocations during batch draining.
+    pub fn drain_batch_into(&self, target: &mut Vec<AccessLogRecord>, max_records: usize) -> usize {
         let tail = self.tail.0.load(Ordering::Relaxed);
         let mut head = self.cached_head.0.load(Ordering::Relaxed);
 
@@ -175,13 +179,13 @@ impl SpscLogRing {
             self.cached_head.0.store(head, Ordering::Relaxed);
             avail = head.wrapping_sub(tail);
             if avail == 0 {
-                return Vec::new();
+                return 0;
             }
         }
 
-        let to_take = avail.min(max_records);
-        let mut out = Vec::with_capacity(to_take);
-        let spare = out.spare_capacity_mut();
+        let to_take = avail.min(max_records).min(target.capacity());
+        target.clear();
+        let spare = target.spare_capacity_mut();
 
         #[cfg(target_arch = "x86_64")]
         let has_avx2 = std::is_x86_feature_detected!("avx2");
@@ -261,14 +265,21 @@ impl SpscLogRing {
             _mm_sfence();
         }
 
-        // SAFETY: All `to_take` elements in `out` were initialized above via direct SIMD/pointer copy.
+        // SAFETY: All `to_take` elements in `target` were initialized above via direct SIMD/pointer copy.
         unsafe {
-            out.set_len(to_take);
+            target.set_len(to_take);
         }
 
         self.tail
             .0
             .store(tail.wrapping_add(to_take), Ordering::Release);
+        to_take
+    }
+
+    /// Drains available records into a freshly allocated vector (convenience wrapper around [`Self::drain_batch_into`]).
+    pub fn drain_batch(&self, max_records: usize) -> Vec<AccessLogRecord> {
+        let mut out = Vec::with_capacity(max_records.min(4096));
+        self.drain_batch_into(&mut out, max_records);
         out
     }
 }

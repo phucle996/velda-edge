@@ -97,11 +97,13 @@ pub struct StreamCompletion {
     pub bytes_rx: u64,
     /// Total bytes transmitted to downstream for this stream.
     pub bytes_tx: u64,
-    /// Total stream duration from start to finish.
-    pub duration: std::time::Duration,
-    /// Measured time to first byte from upstream (if available).
-    pub ttfb: Option<std::time::Duration>,
+    /// Total stream duration from start to finish in nanoseconds.
+    pub duration_ns: u64,
+    /// Measured time to first byte from upstream in nanoseconds (0 if not captured).
+    pub ttfb_ns: u64,
 }
+
+const _: () = assert!(std::mem::size_of::<StreamCompletion>() == 40);
 
 impl StreamCompletion {
     /// Creates a new `StreamCompletion` record.
@@ -110,15 +112,15 @@ impl StreamCompletion {
         status_code: u16,
         bytes_rx: u64,
         bytes_tx: u64,
-        duration: std::time::Duration,
-        ttfb: Option<std::time::Duration>,
+        duration_ns: u64,
+        ttfb_ns: u64,
     ) -> Self {
         Self {
             status_code,
             bytes_rx,
             bytes_tx,
-            duration,
-            ttfb,
+            duration_ns,
+            ttfb_ns,
         }
     }
 }
