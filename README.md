@@ -9,7 +9,7 @@
 [![React Version](https://img.shields.io/badge/react-19.3-cyan.svg)](https://react.dev/)
 [![License](https://img.shields.io/badge/license-Apache--2.0-green.svg)](LICENSE)
 
-[Architecture](ARCHITECTURE.md) • [Hourglass Model](docs/HOURGLASS_MODEL.md) • [Pipe Strategies](docs/pipe/README.md) • [Connection Storms](docs/CONNECTION_STORMS_AND_UPSTREAM_THRASHING.md) • [Editions & Releases](docs/EDITIONS_AND_RELEASES.md) • [Benchmarks](compare/README.md) • [Config Examples](example/README.md) • [Contributing](CONTRIBUTING.md) • [Security](SECURITY.md) • [Engineering Rules](AGENTS.md)
+[Architecture](ARCHITECTURE.md) • [Hourglass Model](docs/HOURGLASS_MODEL.md) • [Pipe Strategies](docs/pipe/README.md) • [Connection Storms](docs/CONNECTION_STORMS_AND_UPSTREAM_THRASHING.md) • [Editions & Releases](docs/EDITIONS_AND_RELEASES.md) • [Config Examples](example/README.md) • [Contributing](CONTRIBUTING.md) • [Security](SECURITY.md) • [Engineering Rules](AGENTS.md)
 
 </div>
 
@@ -70,12 +70,11 @@ velda-edge/
 │   ├── velda-connection-pool# Sharded, protocol-agnostic connection pools
 │   ├── velda-observability  # Metrics, access logs, traces (per-core rings)
 │   ├── velda-edge           # Composition root, workers, pipelines, runtime, reload
-│   └── velda-bench-backend  # Benchmark backend used by the compare suite
+│   └── velda-bench-backend  # Synthetic backend server used for benchmarking
 ├── control-plane/           # Go Clean Architecture control plane
 │   ├── cmd/  infra/  migrations/
 │   └── internal/{app,config,console,domain,repository,service,transport}
 ├── ui/                      # React operator console
-├── compare/                 # Benchmark scripts and results vs Nginx / Envoy
 ├── example/                 # Complete declarative config examples
 ├── docs/                    # Architecture deep-dives and pipe strategy specs
 ├── proto/  systemd/  docker-compose*.yml  Dockerfile(s)
@@ -177,7 +176,7 @@ Velda Edge states its performance rules as invariants, and backs them with bench
 | Zero-downtime reload | Snapshots swap atomically; old generations drain naturally. |
 | Bounded background work | Every outbound or inbound background path has size, time and concurrency limits. |
 
-Measured results and per-plugin benchmark specifications are in [`compare/`](compare/README.md) and the `BENCHMARK.md` file next to each plugin. Metric cells marked `[TBD]` have not been measured yet.
+Per-plugin benchmark specifications are defined in the `BENCHMARK.md` file next to each plugin under `crates/velda-plugin/`. Metric cells marked `[TBD]` have not been measured yet.
 
 ---
 
