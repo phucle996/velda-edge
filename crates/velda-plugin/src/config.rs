@@ -9,6 +9,10 @@ use serde::{Deserialize, Serialize};
 pub struct OutboundTlsConfig {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub ca_pem: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub client_cert_pem: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub client_key_pem: Option<String>,
     #[serde(default)]
     pub insecure_skip_verify: bool,
 }
@@ -22,6 +26,8 @@ impl OutboundTlsConfig {
         velda_tls::ClientTlsConfig {
             alpn: alpn.iter().map(|s| s.to_string()).collect(),
             ca_pem: self.ca_pem.clone(),
+            client_cert_pem: self.client_cert_pem.clone(),
+            client_key_pem: self.client_key_pem.clone(),
             insecure_skip_verify: self.insecure_skip_verify,
             ..Default::default()
         }

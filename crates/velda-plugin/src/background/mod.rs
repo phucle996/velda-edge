@@ -17,6 +17,7 @@ use crate::capability::{Direction, PluginCapability, SupportedProtocols};
 use crate::error::PluginError;
 
 pub mod acme_cert_rotator;
+pub mod clickhouse_log_shipper;
 pub mod health_probe;
 pub mod jwks_rotator;
 pub mod loki_log_shipper;
@@ -29,6 +30,7 @@ pub mod std_log_shipper;
 
 pub use crate::config::OutboundTlsConfig;
 pub use acme_cert_rotator::{AcmeCertRotatorConfig, AcmeCertRotatorPlugin};
+pub use clickhouse_log_shipper::{ClickHouseLogShipperConfig, ClickHouseLogShipperPlugin};
 pub use health_probe::{HealthProbeConfig, HealthProbePlugin, HealthState};
 pub use jwks_rotator::{JwksRotatorConfig, JwksRotatorPlugin};
 pub use loki_log_shipper::{LokiLogShipperConfig, LokiLogShipperPlugin};
@@ -161,6 +163,10 @@ pub fn instantiate(
         }
         "otlp_log_shipper" => {
             let shipper = OtlpLogShipperPlugin::from_config(config)?;
+            Ok(Arc::new(shipper))
+        }
+        "clickhouse_log_shipper" => {
+            let shipper = ClickHouseLogShipperPlugin::from_config(config)?;
             Ok(Arc::new(shipper))
         }
         "otlp_trace_exporter" => {

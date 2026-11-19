@@ -27,6 +27,7 @@ pub use velda_plugin::{
 
 // Re-export all plugin configuration types from velda-plugin for seamless backward compatibility
 pub use velda_plugin::background::acme_cert_rotator::validation::*;
+pub use velda_plugin::background::clickhouse_log_shipper::validation::*;
 pub use velda_plugin::background::health_probe::validation::*;
 pub use velda_plugin::background::jwks_rotator::validation::*;
 pub use velda_plugin::background::loki_log_shipper::validation::*;
