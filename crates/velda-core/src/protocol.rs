@@ -1,8 +1,16 @@
-//! Canonical protocol families for Velda Edge.
+//! Canonical Protocol Families & Explicit Pipeline Isolation (`velda_core::protocol`).
 //!
-//! Enforces the explicit protocol isolation invariant:
-//! Listeners declare their application protocol family upfront,
-//! completely eliminating dynamic runtime sniffing on the hot path.
+//! ```text
+//! ┌─────────────────────────────────────────────────────────────────────────────────────────┐
+//! │                    EXPLICIT INGRESS PROTOCOL ISOLATION (ZERO SNIFFING)                  │
+//! ├────────────────┬────────────────────────────────────────────────────────────────────────┤
+//! │ ProtocolFamily │ Dedicated Hot-Path Pipeline                                            │
+//! ├────────────────┼────────────────────────────────────────────────────────────────────────┤
+//! │ Raw            │ L4 direct TCP byte splice / UDP datagram forward                       │
+//! │ Http           │ HttpRouter -> handle_http_stream (HTTP/1.1, HTTP/2, HTTP/3)            │
+//! │ Grpc           │ GrpcRouter -> handle_grpc_stream (gRPC over HTTP/2 or QUIC)            │
+//! └────────────────┴────────────────────────────────────────────────────────────────────────┘
+//! ```
 
 use serde::{Deserialize, Serialize};
 use std::fmt;

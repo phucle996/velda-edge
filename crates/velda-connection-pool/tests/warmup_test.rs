@@ -1,6 +1,5 @@
 //! Integration tests for the Shadow pre-warming and lane-synchronization mechanisms.
 
-use std::net::SocketAddr;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::{Duration, Instant};
@@ -12,7 +11,7 @@ use velda_connection_pool::{
 
 #[derive(Debug)]
 struct MockConnection {
-    _peer: SocketAddr,
+    _peer: (u128, u16),
     created_at: Instant,
     last_used: Instant,
     healthy: Arc<AtomicBool>,
@@ -20,7 +19,7 @@ struct MockConnection {
 }
 
 impl MockConnection {
-    fn new(peer: SocketAddr) -> Self {
+    fn new(peer: (u128, u16)) -> Self {
         Self {
             _peer: peer,
             created_at: Instant::now(),
@@ -76,8 +75,8 @@ fn test_set_current_thread_lane_synchronizes_threads() {
 #[test]
 fn test_pool_manager_shadow_logistics() {
     let pool = PoolManager::<ConnectionKey, MockConnection>::new();
-    let addr: SocketAddr = "127.0.0.1:8080".parse().unwrap();
-    let key = ConnectionKey::tcp(addr);
+    let addr = (velda_core::lut::ip::v4_to_u128(0x7f000001), 8080u16.to_be());
+    let key = ConnectionKey::tcp(addr.0, addr.1);
     let worker_lane = 3;
 
     // Shadow worker thread (lane 3) checks and deposits connections into lane 3
@@ -97,8 +96,9 @@ fn test_pool_manager_shadow_logistics() {
 
 #[test]
 fn test_multiplexed_pool_shadow_logistics() {
-    let pool = MultiplexedPool::<SocketAddr, MockConnection>::new().with_max_connections_per_key(2);
-    let addr: SocketAddr = "127.0.0.1:9090".parse().unwrap();
+    let pool =
+        MultiplexedPool::<(u128, u16), MockConnection>::new().with_max_connections_per_key(2);
+    let addr = (velda_core::lut::ip::v4_to_u128(0x7f000001), 9090u16.to_be());
     let worker_lane = 2;
     let max_streams = 100;
 

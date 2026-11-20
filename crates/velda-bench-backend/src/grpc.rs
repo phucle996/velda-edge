@@ -193,7 +193,14 @@ mod tests {
         tokio::time::sleep(Duration::from_millis(50)).await;
 
         let test_config = GrpcConfig::default();
-        let mut connector = GrpcUpstreamConnector::connect(addr, None, &test_config, None, None)
+        let (ip, port_be) = match addr {
+            std::net::SocketAddr::V4(v4) => (
+                velda_core::lut::ip::v4_to_u128(v4.ip().to_bits()),
+                v4.port().to_be(),
+            ),
+            std::net::SocketAddr::V6(v6) => (v6.ip().to_bits(), v6.port().to_be()),
+        };
+        let mut connector = GrpcUpstreamConnector::connect(ip, port_be, None, &test_config, None)
             .await
             .expect("Failed to connect to real gRPC backend");
 
@@ -250,7 +257,14 @@ mod tests {
         tokio::time::sleep(Duration::from_millis(50)).await;
 
         let test_config = GrpcConfig::default();
-        let mut connector = GrpcUpstreamConnector::connect(addr, None, &test_config, None, None)
+        let (ip, port_be) = match addr {
+            std::net::SocketAddr::V4(v4) => (
+                velda_core::lut::ip::v4_to_u128(v4.ip().to_bits()),
+                v4.port().to_be(),
+            ),
+            std::net::SocketAddr::V6(v6) => (v6.ip().to_bits(), v6.port().to_be()),
+        };
+        let mut connector = GrpcUpstreamConnector::connect(ip, port_be, None, &test_config, None)
             .await
             .expect("Failed to connect to real gRPC backend");
 

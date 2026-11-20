@@ -1,9 +1,9 @@
-//! Pre-Allocated 64-Byte Aligned SPSC Ring Buffer (`velda_observability::logs::ring`).
+//! Pre-Allocated 64-Byte Aligned SPSC Ring Buffer (`velda_observability::telemetry::ring`).
 //!
 //! ```text
 //!   FRONTLINE TRAFFIC WORKER (Core-Local Hot Path)     SHADOW LOGISTICS WORKER (SCHED_IDLE)
 //!  ┌──────────────────────────────────────────────┐   ┌─────────────────────────────────────────────┐
-//!  │ AccessLogRecord (256B, 4 Cache Lines)        │   │ 1. Non-Temporal Load (_mm256_stream_load)   │
+//!  │ TelemetryRecord (256B, 4 Cache Lines)        │   │ 1. Non-Temporal Load (_mm256_stream_load)   │
 //!  │   │                                          │   │    Bypass L1d for consumed ring slots       │
 //!  │   ▼                                          │   │      │                                      │
 //!  │ Non-Temporal Store (_mm256_stream) + sfence  │   │      ▼                                      │
@@ -12,7 +12,7 @@
 //!                         │                           └──────────────────────┬──────────────────────┘
 //!                         ▼                                                  │
 //!          ┌────────────────────────── SPSC Ring Buffer ─────────────────────┴────────┐
-//!          │ Slot 0 │ Slot 1 │ Slot 2 │ ... │ Slot N-1 (Pre-allocated in RAM / 1 MB)  │
+//!          │ Slot 0 │ Slot 1 │ Slot 2 │ ... │ Slot N-1 (2MB HugePage / Contig mmap)   │
 //!          └──────────────────────────────────────────────────────────────────────────┘
 //!                                                                            │
 //!                                                                            ▼
@@ -21,78 +21,133 @@
 //! ```
 
 use std::cell::UnsafeCell;
+use std::ptr::NonNull;
 use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
 
-use super::record::AccessLogRecord;
+use velda_core::buffer::{ArenaBackingKind, ContiguousArena};
 
-/// Default per-core SPSC ring capacity (4096 records × 256B = 1 MB per core).
-pub const DEFAULT_CORE_RING_CAPACITY: usize = 4096;
+use super::record::TelemetryRecord;
 
-#[repr(align(64))]
-struct CachePadded<T>(T);
+/// Default per-core SPSC ring capacity (8192 records × 256B = 2 MB = 1 Linux HugePage per core).
+pub const DEFAULT_CORE_RING_CAPACITY: usize = 8192;
 
-/// Pre-allocated per-core Single-Producer Single-Consumer (SPSC) 64-byte aligned ring buffer.
-pub struct SpscLogRing {
+/// Immutable hot geometry (Cache Line 0: `0..64` B).
+#[repr(C, align(64))]
+struct RingGeometry {
     capacity: usize,
     mask: usize,
-    buffer: Box<[UnsafeCell<AccessLogRecord>]>,
-    head: CachePadded<AtomicUsize>,
-    cached_tail: CachePadded<AtomicUsize>,
-    tail: CachePadded<AtomicUsize>,
-    cached_head: CachePadded<AtomicUsize>,
-    pub dropped: AtomicU64,
+    base: NonNull<UnsafeCell<TelemetryRecord>>,
 }
 
-unsafe impl Send for SpscLogRing {}
-unsafe impl Sync for SpscLogRing {}
+/// Producer-owned cache line (`64..128` B): written exclusively by the core's Frontline worker.
+#[repr(C, align(64))]
+struct ProducerLine {
+    head: AtomicUsize,
+    cached_tail: AtomicUsize,
+    dropped: AtomicU64,
+}
 
-impl SpscLogRing {
+/// Consumer-owned cache line (`128..192` B): written exclusively by the Shadow Logistics worker.
+#[repr(C, align(64))]
+struct ConsumerLine {
+    tail: AtomicUsize,
+    cached_head: AtomicUsize,
+}
+
+/// Cold OS arena ownership (`192..256` B): touched only on init, diagnostics, and Drop.
+#[repr(C, align(64))]
+struct ArenaSlot(ContiguousArena);
+
+/// Pre-allocated per-core Single-Producer Single-Consumer (SPSC) 256-byte (`4 × 64B`) ring buffer.
+///
+/// Packs into exactly 4 CPU cache lines (256 bytes, `shl idx, 8` indexing) with strict producer/
+/// consumer line isolation to prevent false sharing, backed by [`ContiguousArena`] (2 MB
+/// `MAP_HUGETLB` -> single contiguous 2 MB-aligned `mmap` -> 4 KB page-aligned heap).
+#[repr(C, align(64))]
+pub struct SpscTelemetryRing {
+    geo: RingGeometry,
+    producer: ProducerLine,
+    consumer: ConsumerLine,
+    arena: ArenaSlot,
+}
+
+const _: () = assert!(std::mem::size_of::<SpscTelemetryRing>() == 256);
+const _: () = assert!(std::mem::align_of::<SpscTelemetryRing>() == 64);
+
+unsafe impl Send for SpscTelemetryRing {}
+unsafe impl Sync for SpscTelemetryRing {}
+
+impl SpscTelemetryRing {
     pub fn new(capacity: usize) -> Self {
         let cap = capacity.max(64).next_power_of_two();
         let mask = cap - 1;
-        let mut vec = Vec::with_capacity(cap);
-        for _ in 0..cap {
-            vec.push(UnsafeCell::new(AccessLogRecord::zeroed()));
-        }
+        let total_bytes = cap * std::mem::size_of::<TelemetryRecord>();
+        // ContiguousArena aligns to >= 4KB (or 2MB HugePage) and pre-touches every page.
+        let arena = ContiguousArena::new(total_bytes);
+        let base_ptr = arena.as_mut_ptr() as *mut UnsafeCell<TelemetryRecord>;
+        debug_assert!((base_ptr as usize) & 63 == 0);
+        let base = NonNull::new(base_ptr).expect("ring ContiguousArena returned null");
 
         Self {
-            capacity: cap,
-            mask,
-            buffer: vec.into_boxed_slice(),
-            head: CachePadded(AtomicUsize::new(0)),
-            cached_tail: CachePadded(AtomicUsize::new(0)),
-            tail: CachePadded(AtomicUsize::new(0)),
-            cached_head: CachePadded(AtomicUsize::new(0)),
-            dropped: AtomicU64::new(0),
+            geo: RingGeometry {
+                capacity: cap,
+                mask,
+                base,
+            },
+            producer: ProducerLine {
+                head: AtomicUsize::new(0),
+                cached_tail: AtomicUsize::new(0),
+                dropped: AtomicU64::new(0),
+            },
+            consumer: ConsumerLine {
+                tail: AtomicUsize::new(0),
+                cached_head: AtomicUsize::new(0),
+            },
+            arena: ArenaSlot(arena),
         }
     }
 
-    /// Writes a 64-byte [`AccessLogRecord`] into the SPSC ring using Non-Temporal Streaming Stores
-    /// (`VMOVNTDQ` / `MOVNTDQ` + `_mm_sfence()`) to bypass L1d cache allocation ("L1 is gold").
+    /// Returns the OS memory backing strategy active for this ring arena.
     #[inline]
-    pub fn push(&self, record: &AccessLogRecord) -> bool {
-        let head = self.head.0.load(Ordering::Relaxed);
-        let mut tail = self.cached_tail.0.load(Ordering::Relaxed);
+    pub fn backing_kind(&self) -> ArenaBackingKind {
+        self.arena.0.backing_kind()
+    }
 
-        if head.wrapping_sub(tail) >= self.capacity {
-            tail = self.tail.0.load(Ordering::Acquire);
-            self.cached_tail.0.store(tail, Ordering::Relaxed);
-            if head.wrapping_sub(tail) >= self.capacity {
-                self.dropped.fetch_add(1, Ordering::Relaxed);
-                return false;
-            }
+    #[cold]
+    #[inline(never)]
+    fn check_full_or_drop(&self, head: usize) -> bool {
+        let tail = self.consumer.tail.load(Ordering::Acquire);
+        self.producer.cached_tail.store(tail, Ordering::Relaxed);
+        if head.wrapping_sub(tail) >= self.geo.capacity {
+            self.producer.dropped.fetch_add(1, Ordering::Relaxed);
+            return true;
+        }
+        false
+    }
+
+    /// Writes a 256-byte [`TelemetryRecord`] into the SPSC ring using Non-Temporal Streaming Stores
+    /// (`VMOVNTDQ` / `MOVNTDQ` + `_mm_sfence()`) to bypass L1d cache allocation ("L1 is gold").
+    #[inline(always)]
+    pub fn push(&self, record: &TelemetryRecord) -> bool {
+        let head = self.producer.head.load(Ordering::Relaxed);
+        let tail = self.producer.cached_tail.load(Ordering::Relaxed);
+
+        if head.wrapping_sub(tail) >= self.geo.capacity && self.check_full_or_drop(head) {
+            return false;
         }
 
-        let idx = head & self.mask;
+        let idx = head & self.geo.mask;
         unsafe {
-            let dst = self.buffer.get_unchecked(idx).get();
+            let dst = (*self.geo.base.as_ptr().add(idx)).get();
             debug_assert!((dst as usize) & 63 == 0);
 
             #[cfg(target_arch = "x86_64")]
             {
                 use core::arch::x86_64::*;
-                if std::is_x86_feature_detected!("avx2") {
-                    let s = record as *const AccessLogRecord as *const __m256i;
+                // Evaluated at compile-time (target-cpu=x86-64-v3 defines avx2 statically in .cargo/config.toml).
+                // Eliminates dynamic CPUID cache lookups (_RNvNtNtCs...CACHE@GOTPCREL) and branch tests on the hot path.
+                if cfg!(target_feature = "avx2") {
+                    let s = record as *const TelemetryRecord as *const __m256i;
                     let d = dst as *mut __m256i;
                     let v0 = _mm256_load_si256(s);
                     let v1 = _mm256_load_si256(s.add(1));
@@ -112,7 +167,7 @@ impl SpscLogRing {
                     _mm256_stream_si256(d.add(7), v7);
                     _mm_sfence();
                 } else {
-                    let s = record as *const AccessLogRecord as *const __m128i;
+                    let s = record as *const TelemetryRecord as *const __m128i;
                     let d = dst as *mut __m128i;
                     for i in 0..16 {
                         let v = _mm_load_si128(s.add(i));
@@ -124,24 +179,26 @@ impl SpscLogRing {
 
             #[cfg(not(target_arch = "x86_64"))]
             {
-                std::ptr::copy_nonoverlapping(record as *const AccessLogRecord, dst, 1);
+                std::ptr::copy_nonoverlapping(record as *const TelemetryRecord, dst, 1);
                 std::sync::atomic::fence(Ordering::Release);
             }
         }
 
-        self.head.0.store(head.wrapping_add(1), Ordering::Release);
+        self.producer
+            .head
+            .store(head.wrapping_add(1), Ordering::Release);
         true
     }
 
     /// Discards all queued records in $\mathcal{O}(1)$ when no exporter plugins are active.
     #[inline]
     pub fn discard_all(&self) -> usize {
-        let tail = self.tail.0.load(Ordering::Relaxed);
-        let head = self.head.0.load(Ordering::Acquire);
+        let tail = self.consumer.tail.load(Ordering::Relaxed);
+        let head = self.producer.head.load(Ordering::Acquire);
         let count = head.wrapping_sub(tail);
         if count > 0 {
-            self.cached_head.0.store(head, Ordering::Relaxed);
-            self.tail.0.store(head, Ordering::Release);
+            self.consumer.cached_head.store(head, Ordering::Relaxed);
+            self.consumer.tail.store(head, Ordering::Release);
         }
         count
     }
@@ -169,14 +226,14 @@ impl SpscLogRing {
     /// Drains available records directly into a pre-allocated `target` vector from the memory pool.
     ///
     /// Guarantees 0 heap allocations and 0 deallocations during batch draining.
-    pub fn drain_batch_into(&self, target: &mut Vec<AccessLogRecord>, max_records: usize) -> usize {
-        let tail = self.tail.0.load(Ordering::Relaxed);
-        let mut head = self.cached_head.0.load(Ordering::Relaxed);
+    pub fn drain_batch_into(&self, target: &mut Vec<TelemetryRecord>, max_records: usize) -> usize {
+        let tail = self.consumer.tail.load(Ordering::Relaxed);
+        let mut head = self.consumer.cached_head.load(Ordering::Relaxed);
 
         let mut avail = head.wrapping_sub(tail);
         if avail == 0 {
-            head = self.head.0.load(Ordering::Acquire);
-            self.cached_head.0.store(head, Ordering::Relaxed);
+            head = self.producer.head.load(Ordering::Acquire);
+            self.consumer.cached_head.store(head, Ordering::Relaxed);
             avail = head.wrapping_sub(tail);
             if avail == 0 {
                 return 0;
@@ -187,18 +244,22 @@ impl SpscLogRing {
         target.clear();
         let spare = target.spare_capacity_mut();
 
+        // Hoist immutable ring geometry outside the drain loop so LLVM pins both in registers.
+        let mask = self.geo.mask;
+        let base = self.geo.base.as_ptr();
+
         #[cfg(target_arch = "x86_64")]
-        let has_avx2 = std::is_x86_feature_detected!("avx2");
+        let has_avx2 = cfg!(target_feature = "avx2");
 
         for (i, slot_uninit) in spare[..to_take].iter_mut().enumerate() {
-            let idx = tail.wrapping_add(i) & self.mask;
+            let idx = tail.wrapping_add(i) & mask;
 
             #[cfg(target_arch = "x86_64")]
             if i + 4 < to_take {
-                let prefetch_idx = tail.wrapping_add(i + 4) & self.mask;
+                let prefetch_idx = tail.wrapping_add(i + 4) & mask;
                 unsafe {
                     use core::arch::x86_64::*;
-                    let slot = self.buffer.get_unchecked(prefetch_idx).get() as *const i8;
+                    let slot = (*base.add(prefetch_idx)).get() as *const i8;
                     _mm_prefetch(slot, _MM_HINT_T1);
                     _mm_prefetch(slot.add(64), _MM_HINT_T1);
                     _mm_prefetch(slot.add(128), _MM_HINT_T1);
@@ -206,10 +267,10 @@ impl SpscLogRing {
                 }
             }
 
-            let src = unsafe { self.buffer.get_unchecked(idx).get() };
+            let src = unsafe { (*base.add(idx)).get() };
             let dst = slot_uninit.as_mut_ptr();
 
-            // Both src (slot in Box<[UnsafeCell<AccessLogRecord>]>) and dst (element in Vec<AccessLogRecord>)
+            // Both src (slot in 4KB/2MB aligned ring arena) and dst (element in Vec<TelemetryRecord>)
             // are strictly 64-byte aligned due to #[repr(C, align(64))].
             debug_assert!((src as usize) & 63 == 0);
             debug_assert!((dst as usize) & 63 == 0);
@@ -270,16 +331,28 @@ impl SpscLogRing {
             target.set_len(to_take);
         }
 
-        self.tail
-            .0
+        self.consumer
+            .tail
             .store(tail.wrapping_add(to_take), Ordering::Release);
         to_take
     }
 
     /// Drains available records into a freshly allocated vector (convenience wrapper around [`Self::drain_batch_into`]).
-    pub fn drain_batch(&self, max_records: usize) -> Vec<AccessLogRecord> {
+    pub fn drain_batch(&self, max_records: usize) -> Vec<TelemetryRecord> {
         let mut out = Vec::with_capacity(max_records.min(4096));
         self.drain_batch_into(&mut out, max_records);
         out
+    }
+
+    /// Returns total number of records pushed onto this core's SPSC ring.
+    #[inline]
+    pub fn emitted_count(&self) -> u64 {
+        self.producer.head.load(Ordering::Relaxed) as u64
+    }
+
+    /// Returns total number of records dropped due to ring saturation on this core.
+    #[inline]
+    pub fn dropped_count(&self) -> u64 {
+        self.producer.dropped.load(Ordering::Relaxed)
     }
 }

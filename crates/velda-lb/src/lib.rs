@@ -19,4 +19,4 @@ pub use balancer::LoadBalancer;
 pub use context::SelectionContext;
 pub use metrics::EndpointMetrics;
 
-pub use velda_core::{Endpoint, EndpointId};
+pub use velda_core::Endpoint;

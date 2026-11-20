@@ -1,55 +1,18 @@
-//! Kernel topology, OS release, and I/O acceleration probe.
+//! Kernel Topology, OS Release & Capability Probe (`velda_core::hardware::kernel`).
 //!
-//! Owns host Linux kernel version detection via `uname(2)`, capability qualification,
-//! and hardware acceleration tier classification.
+//! ```text
+//! ┌─────────────────────────────────────────────────────────────────────────────────────────┐
+//! │                    KERNEL CAPABILITY PROBE (uname(2) + /proc/sys/net/core)              │
+//! ├─────────────────────────────────────────────────────────────────────────────────────────┤
+//! │  KernelProfile                                                                          │
+//! │    ├── version: KernelVersion { major, minor, patch }                                   │
+//! │    ├── rmem_max: Option<u64>   (/proc/sys/net/core/rmem_max)                            │
+//! │    ├── wmem_max: Option<u64>   (/proc/sys/net/core/wmem_max)                            │
+//! │    └── supports_*() -> bool    (const version capability predicates)                    │
+//! └─────────────────────────────────────────────────────────────────────────────────────────┘
+//! ```
 
 use std::fmt;
-
-/// Canonical I/O acceleration tiers for edge networking.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
-pub enum AccelerationTier {
-    /// Non-Linux or degraded environment.
-    ///
-    /// Uses standard user-space buffers and cross-platform Tokio reactor.
-    Degraded,
-
-    /// Standard Linux Production Path (Linux < 5.10).
-    ///
-    /// Employs `SO_REUSEPORT` multi-listener sharding, CPU core affinity,
-    /// and zero-copy `splice(2)` for L4 TCP proxying.
-    Standard,
-
-    /// ACCELERATION FAST-PATH: Linux Kernel >= 5.10 with high-performance networking features.
-    ///
-    /// Employs Thread-Per-Core pinned execution, `SO_REUSEPORT` socket sharding,
-    /// TCP pacing (`TCP_NOTSENT_LOWAT`), sub-millisecond RTO/delack, BBR congestion control,
-    /// and busy polling optimization.
-    LinuxFastPath,
-}
-
-impl AccelerationTier {
-    /// Returns the canonical string representation of this acceleration tier.
-    #[inline]
-    pub const fn as_str(&self) -> &'static str {
-        match self {
-            Self::Degraded => "degraded",
-            Self::Standard => "standard",
-            Self::LinuxFastPath => "linux_fast_path",
-        }
-    }
-
-    /// Returns `true` if this tier is an accelerated fast-path.
-    #[inline]
-    pub const fn is_accelerated(&self) -> bool {
-        matches!(self, Self::LinuxFastPath)
-    }
-}
-
-impl fmt::Display for AccelerationTier {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        f.write_str(self.as_str())
-    }
-}
 
 /// Structured Linux kernel release version (`major.minor.patch`).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
@@ -91,15 +54,11 @@ impl fmt::Display for KernelVersion {
     }
 }
 
-/// Discovered kernel release and I/O acceleration profile.
+/// Discovered kernel release and socket capability profile.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct KernelProfile {
     /// Detected kernel release version.
     pub version: KernelVersion,
-    /// Classified hardware/kernel I/O acceleration tier.
-    pub acceleration: AccelerationTier,
-    /// Human-readable diagnostic description of how the acceleration tier was selected.
-    pub reason: &'static str,
     /// Maximum OS socket receive buffer size in bytes (`net.core.rmem_max`).
     pub rmem_max: Option<u64>,
     /// Maximum OS socket send buffer size in bytes (`net.core.wmem_max`).
@@ -107,17 +66,11 @@ pub struct KernelProfile {
 }
 
 impl KernelProfile {
-    /// Creates a kernel profile from explicit components.
+    /// Creates a kernel profile from a detected [`KernelVersion`].
     #[inline]
-    pub const fn new(
-        version: KernelVersion,
-        acceleration: AccelerationTier,
-        reason: &'static str,
-    ) -> Self {
+    pub const fn new(version: KernelVersion) -> Self {
         Self {
             version,
-            acceleration,
-            reason,
             rmem_max: None,
             wmem_max: None,
         }
@@ -338,184 +291,6 @@ impl KernelProfile {
 }
 
 /// Classification of Ingress CPU Core steering generations.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
-pub enum CoreSteeringTier {
-    /// Baseline single-acceptor listen queue (no multi-core distribution).
-    Baseline,
-    /// Kernel 4-tuple hashing across SO_REUSEPORT sockets (Linux >= 3.9).
-    ReusePort,
-    /// Steer listener socket queues to matching CPU core (SO_INCOMING_CPU, Linux >= 3.19).
-    IncomingCpu,
-    /// Direct BPF/eBPF steering from NIC softirq CPU to pinned worker (SO_ATTACH_REUSEPORT_CBPF, Linux >= 4.5).
-    BpfCpuSteering,
-}
-
-/// Classification of Upstream outbound ephemeral port allocation generations.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
-pub enum OutboundPortScalingTier {
-    /// Standard early ephemeral port allocation at bind time (Linux < 4.2).
-    Standard,
-    /// Delayed port allocation until connect() time (IP_BIND_ADDRESS_NO_PORT, Linux >= 4.2).
-    BindAddressNoPort,
-}
-
-/// Classification of UDP / HTTP/3 datagram receive offload generations.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
-pub enum UdpOffloadTier {
-    /// Standard per-datagram recv_from syscalls.
-    Standard,
-    /// Hardware/kernel drop monitoring via SO_RXQ_OVFL (Linux >= 2.6.33).
-    QueueMonitored,
-    /// Generic Receive Offload batching up to 64KB per syscall via UDP_GRO (Linux >= 5.0).
-    GenericReceiveOffload,
-}
-
-/// Classification of UDP / QUIC egress datagram segmentation generations.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
-pub enum UdpEgressTier {
-    /// Standard datagram-by-datagram sendto/sendmsg (Linux < 4.18).
-    Standard,
-    /// Generic Segmentation Offload (GSO) batching up to 64KB via UDP_SEGMENT (Linux >= 4.18).
-    GenericSegmentationOffload,
-}
-
-/// Classification of multiplexed write pacing generations.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
-pub enum MultiplexPacingTier {
-    /// Default OS send buffer.
-    DefaultBuffer,
-    /// Unsent queue threshold pacing via TCP_NOTSENT_LOWAT (Linux >= 3.12).
-    NotsentLowat,
-}
-
-/// Classification of silent peer disconnection and loss recovery generations.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
-pub enum DeadPeerTeardownTier {
-    /// Standard TCP keepalive probes (Linux >= 2.4).
-    KeepaliveProbes,
-    /// Explicit deadline enforcement via TCP_USER_TIMEOUT (Linux >= 2.6.37).
-    UserTimeout,
-    /// Sub-millisecond loss detection & pacing via TCP_RTO_MIN_US + TCP_DELACK_MAX_US + TCP_RTO_MAX_MS (Linux >= 6.9).
-    MicrosecondPaced,
-}
-
-/// Classification of multi-path and ECMP route failure recovery generations.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
-pub enum MultipathResilienceTier {
-    /// Standard static routing across connection lifetime (Linux < 5.18).
-    Standard,
-    /// Automatic ECMP flow rehash on packet loss / timeout via SO_TXREHASH (Linux >= 5.18).
-    TxRehash,
-}
-
-/// Classification of NAPI busy polling generations.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
-pub enum BusyPollTier {
-    /// Standard epoll wait with thread sleep and hardware interrupts.
-    Standard,
-    /// Basic socket polling via SO_BUSY_POLL (Linux >= 3.11).
-    BasicBusyPoll,
-    /// IRQ-masked NAPI busy poll via SO_PREFER_BUSY_POLL & SO_BUSY_POLL_BUDGET (Linux >= 5.11).
-    PreferBusyPoll,
-}
-
-/// Evolutionary acceleration ladder resolving the highest supported kernel acceleration path
-/// for each specific optimization goal.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub struct KernelAccelerationLadder {
-    /// Ingress connection steering and core affinity generation.
-    pub core_steering: CoreSteeringTier,
-    /// Outbound ephemeral port scaling generation.
-    pub outbound_port_scaling: OutboundPortScalingTier,
-    /// UDP receive batching and offload generation.
-    pub udp_offload: UdpOffloadTier,
-    /// UDP egress segmentation offload generation.
-    pub udp_egress: UdpEgressTier,
-    /// HTTP/2 and multiplexed stream write pacing generation.
-    pub multiplex_pacing: MultiplexPacingTier,
-    /// Silent peer disconnection and loss recovery generation.
-    pub dead_peer_teardown: DeadPeerTeardownTier,
-    /// Multi-path and ECMP route failure recovery generation.
-    pub multipath_resilience: MultipathResilienceTier,
-    /// NAPI busy polling latency optimization generation.
-    pub busy_poll: BusyPollTier,
-}
-
-impl KernelAccelerationLadder {
-    /// Resolves the highest evolution tier for each acceleration goal based on the detected kernel profile.
-    pub fn from_kernel(kernel: &KernelProfile) -> Self {
-        let core_steering = if kernel.supports_so_attach_reuseport_cbpf() {
-            CoreSteeringTier::BpfCpuSteering
-        } else if kernel.supports_incoming_cpu() {
-            CoreSteeringTier::IncomingCpu
-        } else if kernel.version.is_at_least(3, 9) {
-            CoreSteeringTier::ReusePort
-        } else {
-            CoreSteeringTier::Baseline
-        };
-
-        let outbound_port_scaling = if kernel.supports_ip_bind_address_no_port() {
-            OutboundPortScalingTier::BindAddressNoPort
-        } else {
-            OutboundPortScalingTier::Standard
-        };
-
-        let udp_offload = if kernel.supports_udp_gro() {
-            UdpOffloadTier::GenericReceiveOffload
-        } else if kernel.supports_so_rxq_ovfl() {
-            UdpOffloadTier::QueueMonitored
-        } else {
-            UdpOffloadTier::Standard
-        };
-
-        let udp_egress = if kernel.supports_udp_segment() {
-            UdpEgressTier::GenericSegmentationOffload
-        } else {
-            UdpEgressTier::Standard
-        };
-
-        let multiplex_pacing = if kernel.supports_tcp_notsent_lowat() {
-            MultiplexPacingTier::NotsentLowat
-        } else {
-            MultiplexPacingTier::DefaultBuffer
-        };
-
-        let dead_peer_teardown = if kernel.supports_tcp_microsecond_rto() {
-            DeadPeerTeardownTier::MicrosecondPaced
-        } else if kernel.supports_tcp_user_timeout() {
-            DeadPeerTeardownTier::UserTimeout
-        } else {
-            DeadPeerTeardownTier::KeepaliveProbes
-        };
-
-        let multipath_resilience = if kernel.supports_so_txrehash() {
-            MultipathResilienceTier::TxRehash
-        } else {
-            MultipathResilienceTier::Standard
-        };
-
-        let busy_poll = if kernel.supports_so_prefer_busy_poll() {
-            BusyPollTier::PreferBusyPoll
-        } else if kernel.supports_busy_poll() {
-            BusyPollTier::BasicBusyPoll
-        } else {
-            BusyPollTier::Standard
-        };
-
-        Self {
-            core_steering,
-            outbound_port_scaling,
-            udp_offload,
-            udp_egress,
-            multiplex_pacing,
-            dead_peer_teardown,
-            multipath_resilience,
-            busy_poll,
-        }
-    }
-}
-
-/// Parses raw kernel release bytes (e.g. b"6.8.0-45-generic") into a structured [`KernelVersion`].
 ///
 /// Uses single-pass byte splitting without regex or dynamic heap allocations.
 #[inline]
@@ -551,7 +326,7 @@ fn read_sysctl_u64(path: &str) -> Option<u64> {
         .ok()
 }
 
-/// Probes host OS kernel version and hardware I/O acceleration capabilities.
+/// Probes host OS kernel version and socket buffer capabilities.
 #[cfg(target_os = "linux")]
 pub fn probe_kernel() -> KernelProfile {
     let rmem_max = read_sysctl_u64("/proc/sys/net/core/rmem_max");
@@ -561,12 +336,8 @@ pub fn probe_kernel() -> KernelProfile {
     let mut uts = std::mem::MaybeUninit::<libc::utsname>::uninit();
     let res = unsafe { libc::uname(uts.as_mut_ptr()) };
     if res != 0 {
-        return KernelProfile::new(
-            KernelVersion::default(),
-            AccelerationTier::Standard,
-            "uname_probe_failed_fallback_epoll",
-        )
-        .with_socket_buffers(rmem_max, wmem_max);
+        return KernelProfile::new(KernelVersion::default())
+            .with_socket_buffers(rmem_max, wmem_max);
     }
     let uts = unsafe { uts.assume_init() };
 
@@ -578,34 +349,13 @@ pub fn probe_kernel() -> KernelProfile {
     }
 
     let version = parse_version_bytes(&buf[..len]);
-
-    // ACCELERATION FAST-PATH: Linux Kernel >= 5.10 enables high-performance networking features:
-    // SO_REUSEPORT, TCP_NOTSENT_LOWAT pacing, sub-ms TCP timers, BBR, and busy polling.
-    let profile = if version.is_at_least(5, 10) {
-        KernelProfile::new(
-            version,
-            AccelerationTier::LinuxFastPath,
-            "kernel_5_10_plus_linux_fast_path",
-        )
-    } else {
-        KernelProfile::new(
-            version,
-            AccelerationTier::Standard,
-            "kernel_below_5_10_standard_epoll",
-        )
-    };
-
-    profile.with_socket_buffers(rmem_max, wmem_max)
+    KernelProfile::new(version).with_socket_buffers(rmem_max, wmem_max)
 }
 
 /// Fallback probe for non-Linux host environments.
 #[cfg(not(target_os = "linux"))]
 pub fn probe_kernel() -> KernelProfile {
-    KernelProfile::new(
-        KernelVersion::new(0, 0, 0),
-        AccelerationTier::Degraded,
-        "non_linux_host",
-    )
+    KernelProfile::new(KernelVersion::new(0, 0, 0))
 }
 
 #[cfg(test)]
@@ -649,14 +399,10 @@ mod tests {
         #[cfg(target_os = "linux")]
         {
             assert!(profile.version.major >= 2);
-            assert!(
-                profile.acceleration == AccelerationTier::Standard
-                    || profile.acceleration == AccelerationTier::LinuxFastPath
-            );
         }
         #[cfg(not(target_os = "linux"))]
         {
-            assert_eq!(profile.acceleration, AccelerationTier::Degraded);
+            assert_eq!(profile.version, KernelVersion::new(0, 0, 0));
         }
     }
 }

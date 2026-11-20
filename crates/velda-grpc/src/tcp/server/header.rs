@@ -1,7 +1,5 @@
 //! Downstream gRPC Header Processing and Proxy Enrichment over TCP (RFC 9113 / RFC 7239).
 
-use std::net::SocketAddr;
-
 use http::Uri;
 use http::header::{HeaderMap, HeaderName, HeaderValue};
 
@@ -20,8 +18,9 @@ pub const HOP_BY_HOP: [HeaderName; 5] = [
 /// Overwrites standard proxy forwarding headers (`x-forwarded-*`, `x-real-ip`) directly with authoritative values.
 pub fn enrich_headers(
     headers: &mut HeaderMap,
-    peer: SocketAddr,
-    local_addr: SocketAddr,
+    peer_ip: u128,
+    local_ip: u128,
+    local_port_be: u16,
     is_tls: bool,
     authority: Option<&str>,
 ) {
@@ -39,16 +38,9 @@ pub fn enrich_headers(
     }
 
     // 2. Inject authoritative client IP (directly overwriting spoofed headers)
-    let client_ip = peer.ip();
     let proto = if is_tls { "https" } else { "http" };
 
-    let mut ip_buf = [0u8; 64];
-    let ip_len = {
-        use std::io::Write;
-        let mut cursor = std::io::Cursor::new(&mut ip_buf[..]);
-        let _ = write!(cursor, "{}", client_ip);
-        cursor.position() as usize
-    };
+    let (ip_buf, ip_len) = velda_core::lut::ip::format_ip_bytes(peer_ip);
     let client_ip_bytes = &ip_buf[..ip_len];
 
     if let Ok(val) = HeaderValue::from_bytes(client_ip_bytes) {
@@ -63,7 +55,7 @@ pub fn enrich_headers(
 
     headers.insert(
         HeaderName::from_static("x-forwarded-port"),
-        HeaderValue::from(local_addr.port()),
+        HeaderValue::from(u16::from_be(local_port_be)),
     );
 
     if let Some(auth) = authority
@@ -77,22 +69,19 @@ pub fn enrich_headers(
     let fwd_len = {
         use std::io::Write;
         let mut cursor = std::io::Cursor::new(&mut fwd_buf[..]);
-        match client_ip {
-            std::net::IpAddr::V4(v4) => {
-                let _ = write!(cursor, "for={v4}");
-            }
-            std::net::IpAddr::V6(v6) => {
-                let _ = write!(cursor, "for=\"[{v6}]\"");
-            }
+        let client_str = std::str::from_utf8(client_ip_bytes).unwrap_or("");
+        if velda_core::lut::ip::is_v4_u128(peer_ip) {
+            let _ = write!(cursor, "for={client_str}");
+        } else {
+            let _ = write!(cursor, "for=\"[{client_str}]\"");
         }
         let _ = write!(cursor, ";proto={proto};by=");
-        match local_addr.ip() {
-            std::net::IpAddr::V4(v4) => {
-                let _ = write!(cursor, "{v4}");
-            }
-            std::net::IpAddr::V6(v6) => {
-                let _ = write!(cursor, "\"[{v6}]\"");
-            }
+        let (local_buf, local_len) = velda_core::lut::ip::format_ip_bytes(local_ip);
+        let local_str = std::str::from_utf8(&local_buf[..local_len]).unwrap_or("");
+        if velda_core::lut::ip::is_v4_u128(local_ip) {
+            let _ = write!(cursor, "{local_str}");
+        } else {
+            let _ = write!(cursor, "\"[{local_str}]\"");
         }
         if let Some(auth) = authority {
             let _ = write!(cursor, ";host=\"{auth}\"");
@@ -124,13 +113,15 @@ mod tests {
         headers.insert("connection", "keep-alive".parse().unwrap());
         headers.insert("x-forwarded-for", "1.2.3.4".parse().unwrap());
 
-        let peer: SocketAddr = "192.168.1.1:1000".parse().unwrap();
-        let local: SocketAddr = "10.0.0.1:443".parse().unwrap();
+        let peer_ip = velda_core::lut::ip::v4_to_u128(0xC0A8_0101);
+        let local_ip = velda_core::lut::ip::v4_to_u128(0x0A00_0001);
+        let local_port_be = 443u16.to_be();
 
         enrich_headers(
             &mut headers,
-            peer,
-            local,
+            peer_ip,
+            local_ip,
+            local_port_be,
             true,
             Some("grpc.service.internal"),
         );

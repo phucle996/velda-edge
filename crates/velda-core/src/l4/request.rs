@@ -1,12 +1,16 @@
-//! Layer 4 request/connection model.
+//! Layer 4 Request & Connection Metadata (`velda_core::l4::request`).
 //!
-//! L4 operates below the HTTP layer. It represents the network
-//! connection and transport-level metadata without making any
-//! assumptions about HTTP semantics.
-
-use std::net::SocketAddr;
-
-pub use crate::types::ConnectionId;
+//! ```text
+//! ┌─────────────────────────────────────────────────────────────────────────────────────────┐
+//! │                     L4Request (TRANSPORT METADATA, PURE INTEGERS)                       │
+//! ├──────────────────────┬──────────────────────────────────────────────────────────────────┤
+//! │ connection_id: u64   │ Monotonic per-connection identifier                              │
+//! │ protocol             │ TransportProtocol::{ Tcp, Udp }                                  │
+//! │ peer_ip / port_be    │ u128 (IPv4-mapped ::ffff:a.b.c.d or IPv6) + u16 network order    │
+//! │ local_ip / port_be   │ u128 accepted listener IP + u16 network order                    │
+//! │ original_dst_ip/port │ u128 + u16 BE (SO_ORIGINAL_DST / TPROXY, 0 if unavailable)       │
+//! └──────────────────────┴──────────────────────────────────────────────────────────────────┘
+//! ```
 
 /// Supported L4 transport protocols.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
@@ -15,67 +19,65 @@ pub enum TransportProtocol {
     Udp,
 }
 
-/// Information about the peer connected to Velda.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub struct Peer {
-    pub address: SocketAddr,
-}
-
-/// L4 connection metadata.
+/// L4 connection metadata stored as pure integer fields.
 ///
 /// This structure intentionally contains only transport-level
 /// information. HTTP-specific data belongs to [`crate::L7Request`].
 #[derive(Debug, Clone)]
 pub struct L4Request {
     /// Unique identifier of the connection.
-    pub connection_id: ConnectionId,
+    pub connection_id: u64,
 
     /// Transport protocol used by the connection.
     pub protocol: TransportProtocol,
 
-    /// Client address.
-    pub peer: Peer,
+    /// Client IP address in `u128` (IPv4-mapped `::ffff:a.b.c.d` or IPv6).
+    pub peer_ip: u128,
 
-    /// Local address accepted by Velda.
-    pub local_addr: SocketAddr,
+    /// Client port in network byte order (big-endian).
+    pub peer_port_be: u16,
 
-    /// Original destination, when available.
-    ///
-    /// This can be populated when Velda operates behind transparent
-    /// proxying, TPROXY, or similar networking mechanisms.
-    pub original_destination: Option<SocketAddr>,
+    /// Local IP address accepted by Velda (`u128` IPv4-mapped or IPv6).
+    pub local_ip: u128,
+
+    /// Local port in network byte order (big-endian).
+    pub local_port_be: u16,
+
+    /// Original destination IP (`0` if unavailable).
+    pub original_dst_ip: u128,
+
+    /// Original destination port in network byte order (`0` if unavailable).
+    pub original_dst_port_be: u16,
 }
 
 impl L4Request {
-    /// Creates a new L4 request context.
-    pub fn new(
-        connection_id: ConnectionId,
+    /// Creates a new L4 request context from raw integer IP/port pairs.
+    #[inline]
+    pub const fn new(
+        connection_id: u64,
         protocol: TransportProtocol,
-        peer: SocketAddr,
-        local_addr: SocketAddr,
+        peer_ip: u128,
+        peer_port_be: u16,
+        local_ip: u128,
+        local_port_be: u16,
     ) -> Self {
         Self {
             connection_id,
             protocol,
-            peer: Peer { address: peer },
-            local_addr,
-            original_destination: None,
+            peer_ip,
+            peer_port_be,
+            local_ip,
+            local_port_be,
+            original_dst_ip: 0,
+            original_dst_port_be: 0,
         }
     }
 
     /// Sets the original destination address.
-    pub fn with_original_destination(mut self, address: SocketAddr) -> Self {
-        self.original_destination = Some(address);
+    #[inline]
+    pub const fn with_original_destination(mut self, ip: u128, port_be: u16) -> Self {
+        self.original_dst_ip = ip;
+        self.original_dst_port_be = port_be;
         self
-    }
-
-    /// Returns the client IP address.
-    pub fn client_ip(&self) -> std::net::IpAddr {
-        self.peer.address.ip()
-    }
-
-    /// Returns the client port.
-    pub fn client_port(&self) -> u16 {
-        self.peer.address.port()
     }
 }

@@ -6,11 +6,18 @@
 //! `SO_REUSEPORT`, `TCP_FASTOPEN`, `BBR`, `TCP_DEFER_ACCEPT`, `UDP_GRO`/`GSO`, and zero-copy `splice`),
 //! leaving higher-level traffic scheduling and kernel-bypass dispatch to `velda-ingress`.
 
+pub mod connect;
 pub mod connection;
 pub mod error;
+pub mod socket;
 pub mod tcp;
 pub mod udp;
 
+pub use connect::{
+    connect_tcp_endpoint, connect_tcp_raw, connect_udp_endpoint, connect_udp_raw, format_raw_addr,
+    raw_to_sockaddr_storage, raw_to_sockaddr_storage_u128, raw_to_socket_addr, raw_to_socket2_addr,
+    sockaddr_storage_to_raw, socket_addr_to_raw,
+};
 pub use connection::{Connection, ConnectionReader, ConnectionWriter, next_connection_id};
 pub use error::{Result, SockError};
 pub use tcp::{

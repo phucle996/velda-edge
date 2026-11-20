@@ -8,7 +8,6 @@
 
 mod common;
 
-use std::net::SocketAddr;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
@@ -34,8 +33,11 @@ fn bench_steady_state_checkout_return_zero_leak() {
     // Setup 10 diverse connection keys and populate each key with a reusable connection
     let mut keys = Vec::with_capacity(10);
     for i in 0..10 {
-        let addr: SocketAddr = format!("10.0.0.{}:8080", i + 1).parse().unwrap();
-        let key = ConnectionKey::tcp(addr);
+        let addr = (
+            velda_core::lut::ip::v4_to_u128(0x0A00_0000 | ((i + 1) as u32)),
+            8080u16.to_be(),
+        );
+        let key = ConnectionKey::tcp(addr.0, addr.1);
         pool.release(&key, BenchResource::new(addr), true, false);
         keys.push(key);
     }
@@ -102,9 +104,10 @@ fn bench_multiplexed_stream_soak_audit() {
     let iters = 2_000_000;
     let pool = Arc::new(PoolManager::<ConnectionKey, BenchResource>::new());
 
-    let addr_mux: SocketAddr = "10.0.5.1:443".parse().unwrap();
+    let addr_mux = (velda_core::lut::ip::v4_to_u128(0x0a000501), 443u16.to_be());
     let key_mux = ConnectionKey::http(
-        addr_mux,
+        addr_mux.0,
+        addr_mux.1,
         "h2",
         Some("api.velda.internal".into()),
         Some("api.velda.internal".into()),
@@ -175,8 +178,8 @@ fn bench_abrupt_lease_drop_lifecycle_audit() {
     let iters = 100_000;
     let pool = Arc::new(PoolManager::<ConnectionKey, BenchResource>::new());
 
-    let addr_seq: SocketAddr = "10.0.6.1:80".parse().unwrap();
-    let key_seq = ConnectionKey::http(addr_seq, "http/1.1", None, None);
+    let addr_seq = (velda_core::lut::ip::v4_to_u128(0x0a000601), 80u16.to_be());
+    let key_seq = ConnectionKey::http(addr_seq.0, addr_seq.1, "http/1.1", None, None);
     let prof_seq = ConnectionProfile::sequential(key_seq, Duration::from_secs(60));
     pool.register_profile(&prof_seq, BenchResource::new(addr_seq))
         .release(true);
@@ -249,9 +252,9 @@ fn bench_idle_eviction_sweeper_soak() {
     let pool = PoolManager::<ConnectionKey, BenchResource>::with_config(config);
 
     // Warm-up: initialize the 50 subpools in shard containers
-    for port in 10000..10050 {
-        let addr: SocketAddr = format!("127.0.0.1:{port}").parse().unwrap();
-        let key = ConnectionKey::tcp(addr);
+    for port in 10000u16..10050 {
+        let addr = (velda_core::lut::ip::v4_to_u128(0x7F00_0001), port.to_be());
+        let key = ConnectionKey::tcp(addr.0, addr.1);
         let mut conn = BenchResource::new(addr);
         conn.touch_at(Instant::now() - Duration::from_secs(100));
         pool.release(&key, conn, true, false);
@@ -264,8 +267,8 @@ fn bench_idle_eviction_sweeper_soak() {
 
     for i in 0..iters {
         let port = 10000 + (i % 50) as u16;
-        let addr: SocketAddr = format!("127.0.0.1:{port}").parse().unwrap();
-        let key = ConnectionKey::tcp(addr);
+        let addr = (velda_core::lut::ip::v4_to_u128(0x7F00_0001), port.to_be());
+        let key = ConnectionKey::tcp(addr.0, addr.1);
 
         let mut conn = BenchResource::new(addr);
         // Mark expired

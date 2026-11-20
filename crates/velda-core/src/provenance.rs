@@ -1,7 +1,14 @@
-//! Provenance and compile-time metadata for Velda Edge.
+//! Compile-Time Provenance & ELF `.rodata` Watermark (`velda_core::provenance`).
 //!
-//! Provides verifiable identity, build hashes, authorship, and tamper-resistant
-//! watermarks embedded directly into `.rodata` binaries.
+//! ```text
+//! ┌─────────────────────────────────────────────────────────────────────────────────────────┐
+//! │                     ELF .rodata WATERMARK (#[used], STRIP-RESISTANT)                    │
+//! ├─────────────────────────────────────────────────────────────────────────────────────────┤
+//! │  build.rs (env vars) ──► VELDA_PROVENANCE_WATERMARK: &str (0x564C4441 "VLDA")           │
+//! │    ├── CARGO_PKG_VERSION │ VELDA_GIT_HASH │ VELDA_RUSTC_VERSION │ VELDA_TARGET_TRIPLE   │
+//! │    └── Inspectable on stripped binaries via: strings <bin> | grep VELDA                 │
+//! └─────────────────────────────────────────────────────────────────────────────────────────┘
+//! ```
 
 /// Raw compile-time watermark embedded in the ELF `.rodata` section.
 ///

@@ -128,28 +128,23 @@ impl LoadBalancer for GenericHash {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::net::SocketAddr;
 
     #[test]
     fn test_ip_hash_consistency() {
-        let ep1: SocketAddr = "10.0.0.1:8080".parse().unwrap();
-        let ep2: SocketAddr = "10.0.0.2:8080".parse().unwrap();
-        let ep3: SocketAddr = "10.0.0.3:8080".parse().unwrap();
-
         let endpoints = vec![
-            Endpoint::new("e1", ep1, 1),
-            Endpoint::new("e2", ep2, 1),
-            Endpoint::new("e3", ep3, 1),
+            Endpoint::from_v4([10, 0, 0, 1], 8080, 1),
+            Endpoint::from_v4([10, 0, 0, 2], 8080, 1),
+            Endpoint::from_v4([10, 0, 0, 3], 8080, 1),
         ];
 
         let balancer = IpHash::new();
         let client_ip = velda_core::lut::ip::encode_ipv4_u128(0xC0A8_0164);
         let ctx = SelectionContext::with_client_ip(client_ip);
 
-        let initial_choice = balancer.select(&endpoints, &ctx).unwrap().address;
+        let initial_choice = *balancer.select(&endpoints, &ctx).unwrap();
 
         for _ in 0..100 {
-            let choice = balancer.select(&endpoints, &ctx).unwrap().address;
+            let choice = *balancer.select(&endpoints, &ctx).unwrap();
             assert_eq!(choice, initial_choice);
         }
     }

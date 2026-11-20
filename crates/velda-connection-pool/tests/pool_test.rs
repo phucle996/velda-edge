@@ -9,7 +9,6 @@
 //! 6. Service decommissioning via predicate-based `drain_matching`.
 //! 7. High-concurrency multi-worker stress testing under Tokio runtime.
 
-use std::net::SocketAddr;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::{Duration, Instant};
@@ -20,7 +19,7 @@ use velda_connection_pool::{
 
 #[derive(Debug)]
 struct MockConnection {
-    peer: SocketAddr,
+    peer: (u128, u16),
     created_at: Instant,
     last_used: Instant,
     healthy: Arc<AtomicBool>,
@@ -28,7 +27,7 @@ struct MockConnection {
 }
 
 impl MockConnection {
-    fn new(peer: SocketAddr) -> Self {
+    fn new(peer: (u128, u16)) -> Self {
         Self {
             peer,
             created_at: Instant::now(),
@@ -38,7 +37,7 @@ impl MockConnection {
         }
     }
 
-    fn with_created_at(peer: SocketAddr, created_at: Instant) -> Self {
+    fn with_created_at(peer: (u128, u16), created_at: Instant) -> Self {
         Self {
             peer,
             created_at,
@@ -79,8 +78,8 @@ impl PoolableResource for MockConnection {
 #[test]
 fn test_pool_end_to_end_acquire_and_lease_lifecycle() {
     let pool = Arc::new(PoolManager::<ConnectionKey, MockConnection>::new());
-    let addr: SocketAddr = "10.0.0.10:8080".parse().unwrap();
-    let key = ConnectionKey::tcp(addr);
+    let addr = (velda_core::lut::ip::v4_to_u128(0x0a00000a), 8080u16.to_be());
+    let key = ConnectionKey::tcp(addr.0, addr.1);
 
     // 1. Initial acquire misses with zero container allocation
     assert!(pool.acquire(&key, Duration::from_secs(30)).is_none());
@@ -119,12 +118,13 @@ fn test_pool_end_to_end_acquire_and_lease_lifecycle() {
 #[test]
 fn test_pool_protocol_and_sni_isolation() {
     let pool = PoolManager::<ConnectionKey, MockConnection>::new();
-    let addr: SocketAddr = "10.0.0.1:443".parse().unwrap();
+    let addr = (velda_core::lut::ip::v4_to_u128(0x0a000001), 443u16.to_be());
 
-    let key_h1 = ConnectionKey::http(addr, "http1", Some("api.velda.io".into()), None);
-    let key_h2 = ConnectionKey::http(addr, "http2", Some("api.velda.io".into()), None);
-    let key_other_sni = ConnectionKey::http(addr, "http2", Some("admin.velda.io".into()), None);
-    let key_tcp = ConnectionKey::tcp(addr);
+    let key_h1 = ConnectionKey::http(addr.0, addr.1, "http1", Some("api.velda.io".into()), None);
+    let key_h2 = ConnectionKey::http(addr.0, addr.1, "http2", Some("api.velda.io".into()), None);
+    let key_other_sni =
+        ConnectionKey::http(addr.0, addr.1, "http2", Some("admin.velda.io".into()), None);
+    let key_tcp = ConnectionKey::tcp(addr.0, addr.1);
 
     // Release a connection only for HTTP/1.1 with api.velda.io
     pool.release(&key_h1, MockConnection::new(addr), true, false);
@@ -152,8 +152,8 @@ fn test_pool_capacity_and_fd_protection() {
         max_lifetime: None,
     };
     let pool = PoolManager::<ConnectionKey, MockConnection>::with_config(config);
-    let addr: SocketAddr = "10.0.0.2:8080".parse().unwrap();
-    let key = ConnectionKey::tcp(addr);
+    let addr = (velda_core::lut::ip::v4_to_u128(0x0a000002), 8080u16.to_be());
+    let key = ConnectionKey::tcp(addr.0, addr.1);
 
     let conn1 = MockConnection::new(addr);
     let conn2 = MockConnection::new(addr);
@@ -173,8 +173,8 @@ fn test_pool_capacity_and_fd_protection() {
 #[test]
 fn test_pool_expiration_and_eviction() {
     let pool = PoolManager::<ConnectionKey, MockConnection>::new();
-    let addr: SocketAddr = "10.0.0.3:8080".parse().unwrap();
-    let key = ConnectionKey::tcp(addr);
+    let addr = (velda_core::lut::ip::v4_to_u128(0x0a000003), 8080u16.to_be());
+    let key = ConnectionKey::tcp(addr.0, addr.1);
 
     // 1. Connection that exceeded max lifetime (created 2 hours ago)
     let expired_lifetime =
@@ -208,8 +208,8 @@ fn test_pool_expiration_and_eviction() {
 #[test]
 fn test_pool_empty_duration_pruning() {
     let pool = PoolManager::<ConnectionKey, MockConnection>::new();
-    let addr: SocketAddr = "10.0.0.4:8080".parse().unwrap();
-    let key = ConnectionKey::tcp(addr);
+    let addr = (velda_core::lut::ip::v4_to_u128(0x0a000004), 8080u16.to_be());
+    let key = ConnectionKey::tcp(addr.0, addr.1);
 
     // 1. Ensure pool created; it has no idle connections
     assert!(pool.ensure_pool(&key));
@@ -242,12 +242,12 @@ fn test_pool_empty_duration_pruning() {
 #[test]
 fn test_pool_drain_matching_service() {
     let pool = PoolManager::<ConnectionKey, MockConnection>::new();
-    let svc_addr: SocketAddr = "10.0.1.1:8080".parse().unwrap();
-    let other_addr: SocketAddr = "10.0.2.1:8080".parse().unwrap();
+    let svc_addr = (velda_core::lut::ip::v4_to_u128(0x0a000101), 8080u16.to_be());
+    let other_addr = (velda_core::lut::ip::v4_to_u128(0x0a000201), 8080u16.to_be());
 
-    let k1 = ConnectionKey::tcp(svc_addr);
-    let k2 = ConnectionKey::http(svc_addr, "http1", None, None);
-    let k_other = ConnectionKey::tcp(other_addr);
+    let k1 = ConnectionKey::tcp(svc_addr.0, svc_addr.1);
+    let k2 = ConnectionKey::http(svc_addr.0, svc_addr.1, "http1", None, None);
+    let k_other = ConnectionKey::tcp(other_addr.0, other_addr.1);
 
     pool.release(&k1, MockConnection::new(svc_addr), true, false);
     pool.release(&k2, MockConnection::new(svc_addr), true, false);
@@ -256,7 +256,7 @@ fn test_pool_drain_matching_service() {
     assert_eq!(pool.total_pool_containers(), 3);
 
     // Decommissioning svc_addr drains all its connections AND removes its containers
-    let drained = pool.drain_matching(|k| k.target_addr == svc_addr);
+    let drained = pool.drain_matching(|k| (k.target_ip, k.target_port_be) == svc_addr);
     assert_eq!(drained, 2);
     assert_eq!(pool.total_idle_conns(), 1);
     assert_eq!(pool.total_pool_containers(), 1);
@@ -275,8 +275,8 @@ async fn test_pool_sharding_concurrency() {
         let handle = tokio::spawn(async move {
             for i in 0..100 {
                 let port = 8000 + (worker_id * 4 + (i % 4)) as u16;
-                let addr: SocketAddr = format!("127.0.0.1:{port}").parse().unwrap();
-                let key = ConnectionKey::tcp(addr);
+                let addr = (velda_core::lut::ip::v4_to_u128(0x7F00_0001), port.to_be());
+                let key = ConnectionKey::tcp(addr.0, addr.1);
 
                 let _ = pool_clone.acquire(&key, Duration::from_secs(30));
                 pool_clone.release(&key, MockConnection::new(addr), true, false);
@@ -306,8 +306,8 @@ fn test_pool_profiles_end_to_end_integration() {
     let pool = Arc::new(PoolManager::<ConnectionKey, MockConnection>::new());
 
     // 1. Sequential Profile (HTTP/1.1)
-    let addr_h1: SocketAddr = "10.10.1.1:80".parse().unwrap();
-    let key_h1 = ConnectionKey::http(addr_h1, "http/1.1", None, None);
+    let addr_h1 = (velda_core::lut::ip::v4_to_u128(0x0a0a0101), 80u16.to_be());
+    let key_h1 = ConnectionKey::http(addr_h1.0, addr_h1.1, "http/1.1", None, None);
     let prof_h1 = ConnectionProfile::sequential(key_h1, Duration::from_secs(30));
 
     assert!(pool.acquire_profile(&prof_h1).is_none());
@@ -323,8 +323,8 @@ fn test_pool_profiles_end_to_end_integration() {
     assert_eq!(pool.total_idle_conns(), 1);
 
     // 2. Exclusive Profile (Raw TCP)
-    let addr_tcp: SocketAddr = "10.10.2.1:9000".parse().unwrap();
-    let key_tcp = ConnectionKey::tcp(addr_tcp);
+    let addr_tcp = (velda_core::lut::ip::v4_to_u128(0x0a0a0201), 9000u16.to_be());
+    let key_tcp = ConnectionKey::tcp(addr_tcp.0, addr_tcp.1);
     let prof_tcp = ConnectionProfile::exclusive(key_tcp, Duration::from_secs(30));
 
     assert!(pool.acquire_profile(&prof_tcp).is_none());
@@ -337,9 +337,10 @@ fn test_pool_profiles_end_to_end_integration() {
     assert_eq!(pool.total_idle_conns(), 1);
 
     // 3. Multiplexed Profile (HTTP/2)
-    let addr_h2: SocketAddr = "10.10.3.1:443".parse().unwrap();
+    let addr_h2 = (velda_core::lut::ip::v4_to_u128(0x0a0a0301), 443u16.to_be());
     let key_h2 = ConnectionKey::http(
-        addr_h2,
+        addr_h2.0,
+        addr_h2.1,
         "h2",
         Some("service.internal".into()),
         Some("h2".into()),
@@ -372,8 +373,8 @@ fn test_pool_profiles_end_to_end_integration() {
 #[test]
 fn test_safe_idle_threshold_75_percent_cutoff() {
     let pool = PoolManager::<ConnectionKey, MockConnection>::new();
-    let addr: SocketAddr = "10.0.0.99:8080".parse().unwrap();
-    let key = ConnectionKey::tcp(addr);
+    let addr = (velda_core::lut::ip::v4_to_u128(0x0a000063), 8080u16.to_be());
+    let key = ConnectionKey::tcp(addr.0, addr.1);
     let idle_timeout = Duration::from_secs(100); // 75% cutoff = 75s
 
     // 1. Connection idle for 50s (< 75s cutoff): Safe to reuse

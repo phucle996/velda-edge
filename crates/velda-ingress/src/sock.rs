@@ -9,7 +9,6 @@
 //! datagrams, affixing `listener_id`, and immediately dispatching opaque byte streams to caller closures.
 
 use std::future::Future;
-use std::net::SocketAddr;
 use std::sync::Arc;
 use std::time::Duration;
 use tokio::sync::watch;
@@ -17,6 +16,7 @@ use tokio::task::JoinSet;
 
 use velda_sock::{
     Connection, Datagram, TcpListener, TcpListenerConfig, UdpSocket, UdpSocketConfig,
+    format_raw_addr,
 };
 
 use crate::error::Result;
@@ -30,9 +30,11 @@ pub struct TcpBinding {
     /// Unique listener identifier declared in configuration.
     pub id: String,
     /// Pre-compiled 32-bit FNV-1a listener identifier for zero-allocation hot-path dispatch.
-    pub listener_id: velda_core::ListenerId,
-    /// Local address to bind and listen on.
-    pub addr: SocketAddr,
+    pub listener_id: u32,
+    /// Local IP address (`u128`, IPv4-mapped or IPv6) to bind and listen on.
+    pub ip: u128,
+    /// Local port in network byte order (big-endian).
+    pub port_be: u16,
     /// Whether downstream TLS is enabled on this listener.
     pub tls_enabled: bool,
     /// TCP socket listener options (backlog, nodelay, buffer sizing, reuseport).
@@ -41,21 +43,22 @@ pub struct TcpBinding {
 
 impl TcpBinding {
     /// Creates a new TCP ingress binding.
-    pub fn new(id: impl Into<String>, addr: SocketAddr, tls_enabled: bool) -> Self {
+    pub fn new(id: impl Into<String>, ip: u128, port_be: u16, tls_enabled: bool) -> Self {
         let id = id.into();
-        let listener_id = velda_core::ListenerId::from_name(&id);
+        let listener_id = velda_core::fnv1a_hash_32(&id);
         Self {
             id,
             listener_id,
-            addr,
+            ip,
+            port_be,
             tls_enabled,
             config: TcpListenerConfig::default(),
         }
     }
 
-    /// Returns the pre-compiled 32-bit [`velda_core::ListenerId`].
+    /// Returns the pre-compiled 32-bit FNV-1a listener identifier (`u32`).
     #[inline]
-    pub const fn listener_id(&self) -> velda_core::ListenerId {
+    pub const fn listener_id(&self) -> u32 {
         self.listener_id
     }
 
@@ -78,7 +81,8 @@ pub struct TcpIngress {
 impl TcpIngress {
     /// Binds a TCP ingress listener to the address configured in its binding.
     pub fn bind(binding: TcpBinding) -> Result<Self> {
-        let listeners = TcpListener::bind_shards(binding.addr, binding.config.clone())?;
+        let listeners =
+            TcpListener::bind_shards(binding.ip, binding.port_be, binding.config.clone())?;
         let listener_id = Arc::from(binding.id.as_str());
         Ok(Self {
             listeners,
@@ -91,10 +95,10 @@ impl TcpIngress {
     pub fn bind_shard(
         binding: TcpBinding,
         shard_id: usize,
-        addr_override: Option<SocketAddr>,
+        addr_override: Option<(u128, u16)>,
     ) -> Result<Self> {
-        let addr = addr_override.unwrap_or(binding.addr);
-        let listener = TcpListener::bind_shard(addr, binding.config.clone(), shard_id)?;
+        let (ip, port_be) = addr_override.unwrap_or((binding.ip, binding.port_be));
+        let listener = TcpListener::bind_shard(ip, port_be, binding.config.clone(), shard_id)?;
         let listener_id = Arc::from(binding.id.as_str());
         Ok(Self {
             listeners: vec![listener],
@@ -103,10 +107,10 @@ impl TcpIngress {
         })
     }
 
-    /// Returns the bound local socket address.
+    /// Returns the bound local `(ip, port_be)`.
     #[inline]
-    pub fn local_addr(&self) -> SocketAddr {
-        self.listeners[0].local_addr()
+    pub fn local_addr(&self) -> (u128, u16) {
+        (self.listeners[0].local_ip, self.listeners[0].local_port_be)
     }
 
     /// Returns the number of listener shards currently bound.
@@ -127,9 +131,9 @@ impl TcpIngress {
         &self.binding.id
     }
 
-    /// Returns the pre-compiled 32-bit [`velda_core::ListenerId`].
+    /// Returns the pre-compiled 32-bit FNV-1a listener identifier (`u32`).
     #[inline]
-    pub const fn listener_id(&self) -> velda_core::ListenerId {
+    pub const fn listener_id(&self) -> u32 {
         self.binding.listener_id
     }
 
@@ -183,12 +187,13 @@ impl TcpIngress {
         H: Fn(Connection) -> Fut + Send + Sync + Clone + 'static,
         Fut: Future<Output = ()> + Send + 'static,
     {
-        let local_addr = ingress.local_addr();
+        let (local_ip, local_port_be) = ingress.local_addr();
+        let local_addr_str = format_raw_addr(local_ip, local_port_be);
         let listener_id = Arc::clone(&ingress.listener_id);
         let total_shards = ingress.listeners.len();
         tracing::info!(
             listener_id = %listener_id,
-            listen_addr = %local_addr,
+            listen_addr = %local_addr_str,
             shard = shard_idx,
             total_shards,
             "TCP ingress listener shard bound and serving"
@@ -211,7 +216,7 @@ impl TcpIngress {
                         listener_id = %listener_id,
                         conn_id = %conn.id(),
                         shard = shard_idx,
-                        peer = %conn.peer(),
+                        peer = %format_raw_addr(conn.peer_ip, conn.peer_port_be),
                         "TCP ingress accepted connection"
                     );
                     tokio::spawn(handler(conn.with_listener_id(Arc::clone(&listener_id))));
@@ -230,7 +235,7 @@ impl TcpIngress {
                                     listener_id = %listener_id,
                                     conn_id = %conn.id(),
                                     shard = shard_idx,
-                                    peer = %conn.peer(),
+                                    peer = %format_raw_addr(conn.peer_ip, conn.peer_port_be),
                                     batch,
                                     "TCP ingress batch-accepted connection"
                                 );
@@ -254,7 +259,7 @@ impl TcpIngress {
                 Ok(None) => {
                     tracing::info!(
                         listener_id = %listener_id,
-                        listen_addr = %local_addr,
+                        listen_addr = %local_addr_str,
                         shard = shard_idx,
                         "TCP ingress loop shutting down"
                     );
@@ -263,7 +268,7 @@ impl TcpIngress {
                 Err(err) => {
                     tracing::error!(
                         listener_id = %listener_id,
-                        listen_addr = %local_addr,
+                        listen_addr = %local_addr_str,
                         shard = shard_idx,
                         error = %err,
                         backoff_ms = backoff.as_millis() as u64,
@@ -286,9 +291,11 @@ pub struct UdpBinding {
     /// Unique listener identifier declared in configuration.
     pub id: String,
     /// Pre-compiled 32-bit FNV-1a listener identifier for zero-allocation hot-path dispatch.
-    pub listener_id: velda_core::ListenerId,
-    /// Local address to bind and listen on.
-    pub addr: SocketAddr,
+    pub listener_id: u32,
+    /// Local IP address (`u128`, IPv4-mapped or IPv6) to bind and listen on.
+    pub ip: u128,
+    /// Local port in network byte order (big-endian).
+    pub port_be: u16,
     /// Whether downstream TLS (QUIC/DTLS) is enabled on this listener.
     pub tls_enabled: bool,
     /// UDP socket options (buffer sizing, reuseport, concurrency shards).
@@ -297,21 +304,22 @@ pub struct UdpBinding {
 
 impl UdpBinding {
     /// Creates a new UDP ingress binding.
-    pub fn new(id: impl Into<String>, addr: SocketAddr, tls_enabled: bool) -> Self {
+    pub fn new(id: impl Into<String>, ip: u128, port_be: u16, tls_enabled: bool) -> Self {
         let id = id.into();
-        let listener_id = velda_core::ListenerId::from_name(&id);
+        let listener_id = velda_core::fnv1a_hash_32(&id);
         Self {
             id,
             listener_id,
-            addr,
+            ip,
+            port_be,
             tls_enabled,
             config: UdpSocketConfig::default(),
         }
     }
 
-    /// Returns the pre-compiled 32-bit [`velda_core::ListenerId`].
+    /// Returns the pre-compiled 32-bit FNV-1a listener identifier (`u32`).
     #[inline]
-    pub const fn listener_id(&self) -> velda_core::ListenerId {
+    pub const fn listener_id(&self) -> u32 {
         self.listener_id
     }
 
@@ -334,7 +342,7 @@ pub struct UdpIngress {
 impl UdpIngress {
     /// Binds a UDP ingress listener to the address configured in its binding.
     pub fn bind(binding: UdpBinding) -> Result<Self> {
-        let sockets = UdpSocket::bind_shards(binding.addr, binding.config.clone())?
+        let sockets = UdpSocket::bind_shards(binding.ip, binding.port_be, binding.config.clone())?
             .into_iter()
             .map(Arc::new)
             .collect();
@@ -350,10 +358,10 @@ impl UdpIngress {
     pub fn bind_shard(
         binding: UdpBinding,
         shard_id: usize,
-        addr_override: Option<SocketAddr>,
+        addr_override: Option<(u128, u16)>,
     ) -> Result<Self> {
-        let addr = addr_override.unwrap_or(binding.addr);
-        let socket = UdpSocket::bind_shard(addr, binding.config.clone(), shard_id)?;
+        let (ip, port_be) = addr_override.unwrap_or((binding.ip, binding.port_be));
+        let socket = UdpSocket::bind_shard(ip, port_be, binding.config.clone(), shard_id)?;
         let listener_id = Arc::from(binding.id.as_str());
         Ok(Self {
             sockets: vec![Arc::new(socket)],
@@ -362,10 +370,10 @@ impl UdpIngress {
         })
     }
 
-    /// Returns the bound local socket address.
+    /// Returns the bound local `(ip, port_be)`.
     #[inline]
-    pub fn local_addr(&self) -> SocketAddr {
-        self.sockets[0].local_addr()
+    pub fn local_addr(&self) -> (u128, u16) {
+        (self.sockets[0].local_ip, self.sockets[0].local_port_be)
     }
 
     /// Returns the number of socket shards currently bound.
@@ -386,9 +394,9 @@ impl UdpIngress {
         &self.binding.id
     }
 
-    /// Returns the pre-compiled 32-bit [`velda_core::ListenerId`].
+    /// Returns the pre-compiled 32-bit FNV-1a listener identifier (`u32`).
     #[inline]
-    pub const fn listener_id(&self) -> velda_core::ListenerId {
+    pub const fn listener_id(&self) -> u32 {
         self.binding.listener_id
     }
 
@@ -429,12 +437,13 @@ impl UdpIngress {
         Fut: Future<Output = ()> + Send + 'static,
     {
         let socket = Arc::clone(&ingress.sockets[shard_idx]);
-        let local_addr = ingress.local_addr();
+        let (local_ip, local_port_be) = ingress.local_addr();
+        let local_addr_str = format_raw_addr(local_ip, local_port_be);
         let listener_id = Arc::clone(&ingress.listener_id);
         let total_shards = ingress.sockets.len();
         tracing::info!(
             listener_id = %listener_id,
-            listen_addr = %local_addr,
+            listen_addr = %local_addr_str,
             shard = shard_idx,
             total_shards,
             "UDP ingress socket shard bound and receiving"
@@ -445,7 +454,7 @@ impl UdpIngress {
         const SLAB_SIZE: usize = BATCH_SIZE * SLOT_SIZE;
 
         let mut slab = vec![0u8; SLAB_SIZE];
-        let mut batch_out = [(0usize, local_addr); BATCH_SIZE];
+        let mut batch_out = [(0usize, 0u128, 0u16); BATCH_SIZE];
 
         loop {
             if *shutdown.borrow() {
@@ -457,7 +466,7 @@ impl UdpIngress {
                     if *shutdown.borrow() {
                         tracing::info!(
                             listener_id = %listener_id,
-                            listen_addr = %local_addr,
+                            listen_addr = %local_addr_str,
                             shard = shard_idx,
                             "UDP ingress loop shutting down"
                         );
@@ -468,7 +477,7 @@ impl UdpIngress {
                     if let Err(err) = ready_res {
                         tracing::error!(
                             listener_id = %listener_id,
-                            listen_addr = %local_addr,
+                            listen_addr = %local_addr_str,
                             shard = shard_idx,
                             error = %err,
                             "UDP socket readiness error"
@@ -484,13 +493,13 @@ impl UdpIngress {
                         }
                         drain_loops += 1;
 
-                        for (i, &(n, peer)) in batch_out[..count].iter().enumerate() {
+                        for (i, &(n, peer_ip, peer_port_be)) in batch_out[..count].iter().enumerate() {
                             if n == 0 {
                                 continue;
                             }
                             let offset = i * SLOT_SIZE;
                             let dgram_bytes = bytes::Bytes::copy_from_slice(&slab[offset..offset + n]);
-                            let dgram = Datagram::new(peer, local_addr, dgram_bytes);
+                            let dgram = Datagram::new(peer_ip, peer_port_be, local_ip, local_port_be, dgram_bytes);
 
                             handler(Arc::clone(&listener_id), Arc::clone(&socket), dgram).await;
                         }

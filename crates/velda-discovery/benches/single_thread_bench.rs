@@ -117,9 +117,9 @@ fn bench_endpoint_set_arc_swap_read() {
 
     let iters = 1_000_000;
     let endpoints = vec![
-        Endpoint::new("api.internal", "10.0.0.1:8080".parse().unwrap(), 1),
-        Endpoint::new("api.internal", "10.0.0.2:8080".parse().unwrap(), 1),
-        Endpoint::new("api.internal", "10.0.0.3:8080".parse().unwrap(), 1),
+        Endpoint::from_v4([10, 0, 0, 1], 8080, 1),
+        Endpoint::from_v4([10, 0, 0, 2], 8080, 1),
+        Endpoint::from_v4([10, 0, 0, 3], 8080, 1),
     ];
     let discovery = Discovery::new_explicit(endpoints);
 

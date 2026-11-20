@@ -1,6 +1,5 @@
 //! Declarative ingress binding representing stateful TCP, stateless UDP, or kernel-bypass XDP.
 
-use std::net::SocketAddr;
 pub use velda_xdp::XdpConfig;
 
 use crate::error::{IngressError, Result};
@@ -54,16 +53,17 @@ impl IngressBinding {
     /// Creates an ingress binding from protocol name ("tcp" or "udp").
     pub fn from_transport(
         id: impl Into<String>,
-        addr: SocketAddr,
+        ip: u128,
+        port_be: u16,
         transport_protocol: impl AsRef<str>,
         tls_enabled: bool,
     ) -> Result<Self> {
         let tp = transport_protocol.as_ref();
         let id_str = id.into();
         if tp.eq_ignore_ascii_case("tcp") {
-            Ok(Self::Tcp(TcpBinding::new(id_str, addr, tls_enabled)))
+            Ok(Self::Tcp(TcpBinding::new(id_str, ip, port_be, tls_enabled)))
         } else if tp.eq_ignore_ascii_case("udp") {
-            Ok(Self::Udp(UdpBinding::new(id_str, addr, tls_enabled)))
+            Ok(Self::Udp(UdpBinding::new(id_str, ip, port_be, tls_enabled)))
         } else {
             Err(IngressError::Io(std::io::Error::new(
                 std::io::ErrorKind::InvalidInput,
@@ -83,21 +83,21 @@ impl IngressBinding {
         }
     }
 
-    /// Returns the pre-compiled 32-bit [`velda_core::ListenerId`].
+    /// Returns the pre-compiled 32-bit FNV-1a listener identifier (`u32`).
     #[inline]
-    pub const fn listener_id(&self) -> velda_core::ListenerId {
+    pub const fn listener_id(&self) -> u32 {
         match self {
             Self::Tcp(b) | Self::XdpTcp(b, _) => b.listener_id,
             Self::Udp(b) | Self::XdpUdp(b, _) => b.listener_id,
         }
     }
 
-    /// Returns the local address to bind.
+    /// Returns the local address `(ip, port_be)` to bind.
     #[inline]
-    pub fn addr(&self) -> SocketAddr {
+    pub fn addr(&self) -> (u128, u16) {
         match self {
-            Self::Tcp(b) | Self::XdpTcp(b, _) => b.addr,
-            Self::Udp(b) | Self::XdpUdp(b, _) => b.addr,
+            Self::Tcp(b) | Self::XdpTcp(b, _) => (b.ip, b.port_be),
+            Self::Udp(b) | Self::XdpUdp(b, _) => (b.ip, b.port_be),
         }
     }
 

@@ -1,13 +1,18 @@
-//! Common error model for the Velda data plane.
+//! Common Error Model & Reject Reasons (`velda_core::error`).
 //!
-//! `velda-core` defines the shared error contract used across the
-//! request lifecycle. Concrete subsystems such as routing, upstream,
-//! TLS, transport, and plugins may define their own internal errors
-//! and convert them into this type when crossing crate boundaries.
-//!
-//! The core error model intentionally does not contain HTTP-specific
-//! response generation logic. Translating an error into an HTTP
-//! response is the responsibility of the appropriate data-plane layer.
+//! ```text
+//! ┌─────────────────────────────────────────────────────────────────────────────────────────┐
+//! │                          DATA PLANE ERROR & REJECTION FLOW                              │
+//! ├─────────────────────────────────────────────────────────────────────────────────────────┤
+//! │  Subsystem Error (Router / Upstream / TLS / Transport / Plugin)                         │
+//! │         │                                                                               │
+//! │         ▼                                                                               │
+//! │  velda_core::Error { kind: ErrorKind, message: Cow<'static, str>, source }              │
+//! │         │                                                                               │
+//! │         ├──► InvalidRequest / Protocol / RouteNotFound / UpstreamUnavailable / Timeout  │
+//! │         └──► Protocol Layer (velda-http1/2/3, velda-grpc) maps to wire status           │
+//! └─────────────────────────────────────────────────────────────────────────────────────────┘
+//! ```
 
 use std::{error::Error as StdError, fmt};
 

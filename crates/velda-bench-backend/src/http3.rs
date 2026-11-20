@@ -43,10 +43,29 @@ impl Http3Router {
                         Err(_) => continue,
                     };
                     let now = Instant::now();
-                    let (outgoing, requests) = engine.handle_datagram(now, peer, None, &buf[..len]);
+                    let (peer_ip, peer_port_be) = match peer {
+                        std::net::SocketAddr::V4(v4) => (
+                            velda_core::lut::ip::v4_to_u128(v4.ip().to_bits()),
+                            v4.port().to_be(),
+                        ),
+                        std::net::SocketAddr::V6(v6) => (v6.ip().to_bits(), v6.port().to_be()),
+                    };
+                    let (outgoing, requests) =
+                        engine.handle_datagram(now, peer_ip, peer_port_be, None, &buf[..len]);
 
                     for out in outgoing {
-                        let _ = socket.send_to(&out.payload, out.peer).await;
+                        let out_addr = if velda_core::lut::ip::is_v4_u128(out.peer_ip) {
+                            std::net::SocketAddr::V4(velda_core::lut::ip::v4itoaddr(
+                                out.peer_ip,
+                                out.peer_port_be,
+                            ))
+                        } else {
+                            std::net::SocketAddr::V6(velda_core::lut::ip::v6itoaddr(
+                                out.peer_ip,
+                                out.peer_port_be,
+                            ))
+                        };
+                        let _ = socket.send_to(&out.payload, out_addr).await;
                     }
 
                     for req_event in requests {
@@ -100,7 +119,18 @@ impl Http3Router {
 
                         if let Ok(out_pkts) = engine.send_response(now, req_event.handle, req_event.stream_id, &resp) {
                             for out in out_pkts {
-                                let _ = socket.send_to(&out.payload, out.peer).await;
+                                let out_addr = if velda_core::lut::ip::is_v4_u128(out.peer_ip) {
+                                    std::net::SocketAddr::V4(velda_core::lut::ip::v4itoaddr(
+                                        out.peer_ip,
+                                        out.peer_port_be,
+                                    ))
+                                } else {
+                                    std::net::SocketAddr::V6(velda_core::lut::ip::v6itoaddr(
+                                        out.peer_ip,
+                                        out.peer_port_be,
+                                    ))
+                                };
+                                let _ = socket.send_to(&out.payload, out_addr).await;
                             }
                         }
                     }
@@ -109,7 +139,18 @@ impl Http3Router {
                     let now = Instant::now();
                     let out_pkts = engine.handle_timeouts(now);
                     for out in out_pkts {
-                        let _ = socket.send_to(&out.payload, out.peer).await;
+                        let out_addr = if velda_core::lut::ip::is_v4_u128(out.peer_ip) {
+                            std::net::SocketAddr::V4(velda_core::lut::ip::v4itoaddr(
+                                out.peer_ip,
+                                out.peer_port_be,
+                            ))
+                        } else {
+                            std::net::SocketAddr::V6(velda_core::lut::ip::v6itoaddr(
+                                out.peer_ip,
+                                out.peer_port_be,
+                            ))
+                        };
+                        let _ = socket.send_to(&out.payload, out_addr).await;
                     }
                 }
             }

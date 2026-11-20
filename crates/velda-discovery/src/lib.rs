@@ -15,15 +15,21 @@
 pub mod dns;
 pub mod endpoint;
 pub mod error;
+pub mod scheduler;
 pub mod service;
 
 pub use dns::{
     CacheLookup, DEFAULT_DNS_PACKET_BUFFER_SIZE, DnsAnswer, DnsCache, DnsResolverConfig,
     DnsResolverProvider, DnsServer, DnsServerProvider, DnsServerTarget, DnsTransport,
-    HostsFileSource, ResolvConfServerProvider, StaticServerProvider, SystemDnsTransport,
-    UdpDnsTransport, build_query_packet, parse_response_packet, skip_name,
+    HostsFileSource, ResolvConfServerProvider, SrvAnswer, SrvRecord, StaticServerProvider,
+    SystemDnsTransport, UdpDnsTransport, build_query_packet, decode_name, parse_response_packet,
+    parse_srv_response_packet, skip_name,
 };
 
-pub use endpoint::{Endpoint, EndpointId, EndpointSet};
+pub use endpoint::{Endpoint, EndpointSet};
 pub use error::{DiscoveryError, Result};
+pub use scheduler::{
+    ChangeCallback, DiscoveryScheduler, DiscoveryTarget, DnsDiscoveryTarget, DnsSrvDiscoveryTarget,
+    global_discovery_scheduler,
+};
 pub use service::{Discovery, DiscoveryMode};

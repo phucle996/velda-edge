@@ -36,10 +36,11 @@
 //!   across all active core shards are reduced concurrently via direct hardware SIMD vector
 //!   accumulation (AVX2 256-bit -> SSE2/NEON 128-bit -> Scalar 64-bit).
 
-use std::cell::Cell;
-use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::atomic::Ordering;
 
 use velda_core::lut::PipeKind;
+
+use crate::worker_tls::{WORKER_TLS, init_auto_lane};
 
 use super::counter::{PIPELINE_COUNTERS_LEN, add_pipeline_counters};
 use super::global::GlobalMetrics;
@@ -56,27 +57,24 @@ use super::types::StreamCompletion;
 /// Maximum number of hardware worker core shards supported.
 pub const MAX_METRIC_WORKERS: usize = 128;
 
-thread_local! {
-    static THREAD_METRIC_LANE: Cell<Option<usize>> = const { Cell::new(None) };
-}
-static LANE_SEQUENCE: AtomicUsize = AtomicUsize::new(0);
-
 /// Sets the explicit zero-based metrics lane for the calling thread.
 #[inline]
 pub fn set_current_worker_lane(lane: usize) {
-    THREAD_METRIC_LANE.with(|cell| cell.set(Some(lane)));
+    WORKER_TLS.with(|tls| {
+        tls.lane.set(lane);
+        tls.lane_set.set(true);
+    });
 }
 
 /// Returns the zero-based metrics lane for the calling thread.
 /// Automatically self-allocates an incremental lane index if unconfigured.
-#[inline]
+#[inline(always)]
 pub fn current_worker_lane() -> usize {
-    THREAD_METRIC_LANE.with(|cell| match cell.get() {
-        Some(lane) => lane,
-        None => {
-            let lane = LANE_SEQUENCE.fetch_add(1, Ordering::Relaxed);
-            cell.set(Some(lane));
-            lane
+    WORKER_TLS.with(|tls| {
+        if tls.lane_set.get() {
+            tls.lane.get()
+        } else {
+            init_auto_lane(tls)
         }
     })
 }

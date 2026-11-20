@@ -75,7 +75,6 @@
 //! ```
 
 use std::collections::HashMap;
-use std::net::SocketAddr;
 use std::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, Ordering};
 use std::sync::{Arc, LazyLock, Mutex};
 use std::time::{Duration, Instant};
@@ -157,7 +156,7 @@ impl EndpointHealthRecord {
 #[derive(Debug)]
 pub struct HealthTracker {
     config: HealthConfig,
-    records: ArcSwap<HashMap<SocketAddr, Arc<EndpointHealthRecord>>>,
+    records: ArcSwap<HashMap<(u128, u16), Arc<EndpointHealthRecord>>>,
     registration_lock: Mutex<()>,
     unhealthy_count: AtomicU32,
     epoch: AtomicU64,
@@ -209,7 +208,7 @@ impl HealthTracker {
         }
     }
 
-    fn get_or_create(&self, addr: &SocketAddr) -> Arc<EndpointHealthRecord> {
+    fn get_or_create(&self, addr: &(u128, u16)) -> Arc<EndpointHealthRecord> {
         let current = self.records.load();
         if let Some(record) = current.get(addr) {
             return Arc::clone(record);
@@ -230,7 +229,7 @@ impl HealthTracker {
 
     /// Prunes health records for endpoints that are no longer part of active discovery.
     /// Prevents unbounded memory growth in dynamic environments with ephemeral endpoints.
-    pub fn prune_unregistered(&self, active_addrs: &std::collections::HashSet<SocketAddr>) {
+    pub fn prune_unregistered(&self, active_addrs: &std::collections::HashSet<(u128, u16)>) {
         let current = self.records.load();
         if current.keys().all(|addr| active_addrs.contains(addr)) {
             return;
@@ -265,7 +264,7 @@ impl HealthTracker {
 
     /// Checks if a health record exists for the given socket address.
     #[inline]
-    pub fn has_record(&self, addr: &SocketAddr) -> bool {
+    pub fn has_record(&self, addr: &(u128, u16)) -> bool {
         self.records.load().contains_key(addr)
     }
 
@@ -277,7 +276,7 @@ impl HealthTracker {
 
     /// Records a successful connection or request from client traffic (Passive).
     /// Pure lock-free atomic fast path.
-    pub fn record_success(&self, addr: &SocketAddr) {
+    pub fn record_success(&self, addr: &(u128, u16)) {
         let current = self.records.load();
         let record = match current.get(addr) {
             Some(r) => r,
@@ -298,7 +297,7 @@ impl HealthTracker {
 
     /// Records a connection or I/O failure from client traffic (Passive).
     /// Pure lock-free CAS state transition.
-    pub fn record_failure(&self, addr: &SocketAddr) {
+    pub fn record_failure(&self, addr: &(u128, u16)) {
         let passive_cfg = match self.config.passive {
             Some(ref cfg) if cfg.enabled => cfg,
             _ => return,
@@ -320,7 +319,7 @@ impl HealthTracker {
     }
 
     /// Records an active probe result (from active health check background task).
-    pub fn record_active_result(&self, addr: &SocketAddr, success: bool) {
+    pub fn record_active_result(&self, addr: &(u128, u16), success: bool) {
         let active_cfg = match self.config.active {
             Some(ref cfg) if cfg.enabled => cfg,
             _ => return,
@@ -378,7 +377,7 @@ impl HealthTracker {
 
     /// Checks if an endpoint is considered healthy and eligible for connection acquisition.
     /// Hot-path invariant: O(1) lock-free read on atomic flags, zero allocations, zero mutexes.
-    pub fn is_healthy(&self, addr: &SocketAddr) -> bool {
+    pub fn is_healthy(&self, addr: &(u128, u16)) -> bool {
         let current = self.records.load();
         let Some(record) = current.get(addr) else {
             return true;
@@ -425,7 +424,10 @@ mod tests {
     fn test_passive_health_recovery() {
         let config = HealthConfig::passive_only(2, Duration::from_millis(50));
         let tracker = HealthTracker::new(config);
-        let ep: SocketAddr = "127.0.0.1:8080".parse().unwrap();
+        let ep: (u128, u16) = (
+            velda_core::lut::ip::v4_to_u128(0x7F00_0001),
+            8080u16.to_be(),
+        );
 
         assert!(tracker.is_healthy(&ep));
 
@@ -462,7 +464,10 @@ mod tests {
             }),
         };
         let tracker = HealthTracker::new(config);
-        let ep: SocketAddr = "127.0.0.1:8081".parse().unwrap();
+        let ep: (u128, u16) = (
+            velda_core::lut::ip::v4_to_u128(0x7F00_0001),
+            8081u16.to_be(),
+        );
 
         assert!(tracker.is_healthy(&ep));
 
@@ -487,8 +492,14 @@ mod tests {
     fn test_prune_underflow_resilience() {
         let config = HealthConfig::passive_only(1, Duration::from_secs(60));
         let tracker = HealthTracker::new(config);
-        let ep1: SocketAddr = "127.0.0.1:9001".parse().unwrap();
-        let ep2: SocketAddr = "127.0.0.1:9002".parse().unwrap();
+        let ep1: (u128, u16) = (
+            velda_core::lut::ip::v4_to_u128(0x7F00_0001),
+            9001u16.to_be(),
+        );
+        let ep2: (u128, u16) = (
+            velda_core::lut::ip::v4_to_u128(0x7F00_0001),
+            9002u16.to_be(),
+        );
 
         tracker.record_failure(&ep1);
         tracker.record_failure(&ep2);
@@ -538,7 +549,10 @@ mod tests {
             }),
         };
         let tracker = HealthTracker::new(config);
-        let ep: SocketAddr = "127.0.0.1:8085".parse().unwrap();
+        let ep: (u128, u16) = (
+            velda_core::lut::ip::v4_to_u128(0x7F00_0001),
+            8085u16.to_be(),
+        );
 
         assert!(tracker.is_healthy(&ep));
         assert!(!tracker.has_unhealthy());

@@ -3,26 +3,30 @@ use std::sync::{Arc, LazyLock};
 
 /// Global hardware-tuned [`CryptoProvider`] singleton.
 ///
-/// Inspects CPU register capabilities (`RegisterWidth`) and hardware AES instructions once at startup:
-/// - On CPUs with hardware AES + Carry-less Multiplication (`Bits128`/`Bits256`), prioritizes AES-GCM suites.
-/// - On CPUs without hardware AES or running on pure integer/SIMD ARX registers, promotes
-///   `CHACHA20_POLY1305` (256-bit/128-bit ARX vector cipher) to the top of the preference list.
+/// Uses compile-time target features to determine hardware AES support:
+/// - On targets compiled with hardware AES + Carry-less Multiplication, prioritizes AES-GCM suites.
+/// - Otherwise promotes `CHACHA20_POLY1305` to the top of the preference list.
 static HARDWARE_CRYPTO_PROVIDER: LazyLock<Arc<CryptoProvider>> = LazyLock::new(|| {
     let mut provider = rustls::crypto::aws_lc_rs::default_provider();
-    let reg_caps = velda_core::hardware::global_hardware_topology()
-        .cpu
-        .register_capabilities;
 
-    #[cfg(target_arch = "x86_64")]
-    let has_hw_aes = std::arch::is_x86_feature_detected!("aes")
-        && std::arch::is_x86_feature_detected!("pclmulqdq")
-        && reg_caps.is_supported(velda_core::hardware::RegisterWidth::Bits128);
+    #[cfg(any(
+        all(
+            target_arch = "x86_64",
+            target_feature = "aes",
+            target_feature = "pclmulqdq"
+        ),
+        all(target_arch = "aarch64", target_feature = "aes")
+    ))]
+    let has_hw_aes = true;
 
-    #[cfg(target_arch = "aarch64")]
-    let has_hw_aes = std::arch::is_aarch64_feature_detected!("aes")
-        && reg_caps.is_supported(velda_core::hardware::RegisterWidth::Bits128);
-
-    #[cfg(not(any(target_arch = "x86_64", target_arch = "aarch64")))]
+    #[cfg(not(any(
+        all(
+            target_arch = "x86_64",
+            target_feature = "aes",
+            target_feature = "pclmulqdq"
+        ),
+        all(target_arch = "aarch64", target_feature = "aes")
+    )))]
     let has_hw_aes = false;
 
     if !has_hw_aes {

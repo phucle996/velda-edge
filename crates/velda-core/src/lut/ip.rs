@@ -90,6 +90,38 @@ pub const fn encode_ipv4_u128(ipv4_bits: u32) -> u128 {
     0x0000_FFFF_0000_0000u128 | (ipv4_bits as u128)
 }
 
+/// Converts a 32-bit host-endian IPv4 integer to RFC 4291 IPv4-mapped `u128`.
+#[inline(always)]
+pub const fn v4_to_u128(v4: u32) -> u128 {
+    0x0000_FFFF_0000_0000_u128 | (v4 as u128)
+}
+
+/// Returns `true` if `ip` is an RFC 4291 IPv4-mapped `u128` (`::ffff:a.b.c.d`).
+#[inline(always)]
+pub const fn is_v4_u128(ip: u128) -> bool {
+    (ip >> 32) == 0xFFFF
+}
+
+/// Translates a `u128` IPv4-mapped integer and big-endian `port_be` directly into `SocketAddrV4`.
+#[inline(always)]
+pub const fn v4itoaddr(ip: u128, port_be: u16) -> std::net::SocketAddrV4 {
+    std::net::SocketAddrV4::new(
+        std::net::Ipv4Addr::from_bits(ip as u32),
+        u16::from_be(port_be),
+    )
+}
+
+/// Translates a `u128` IPv6 integer and big-endian `port_be` directly into `SocketAddrV6`.
+#[inline(always)]
+pub const fn v6itoaddr(ip: u128, port_be: u16) -> std::net::SocketAddrV6 {
+    std::net::SocketAddrV6::new(
+        std::net::Ipv6Addr::from_bits(ip),
+        u16::from_be(port_be),
+        0,
+        0,
+    )
+}
+
 /// Zero-allocation parser for dotted-decimal ASCII IPv4 bytes (`"a.b.c.d"` -> host-endian `u32`).
 #[inline]
 pub const fn parse_ipv4_bytes(bytes: &[u8]) -> Option<u32> {

@@ -151,9 +151,8 @@ async fn bench_udp_atomic_counter_contention() {
     );
     println!("| :--- | :--- | :--- | :--- | :--- | :--- | :--- |");
 
-    let socket = Arc::new(
-        UdpSocket::bind("127.0.0.1:0".parse().unwrap(), UdpSocketConfig::default()).unwrap(),
-    );
+    let loopback_ip = velda_core::lut::ip::v4_to_u128(u32::from_be_bytes([127, 0, 0, 1]));
+    let socket = Arc::new(UdpSocket::bind(loopback_ip, 0, UdpSocketConfig::default()).unwrap());
 
     let topo = velda_core::hardware::global_hardware_topology();
     let workers = topo.worker_threads();
@@ -354,9 +353,9 @@ async fn bench_reconciler_channel_contention() {
     let barrier = Arc::new(tokio::sync::Barrier::new(num_producers + 1));
     let mut handles = Vec::with_capacity(num_producers);
 
-    let dummy_addr = "127.0.0.1:0".parse().unwrap();
+    let dummy_ip = velda_core::lut::ip::v4_to_u128(u32::from_be_bytes([127, 0, 0, 1]));
     let template_binding =
-        IngressBinding::from_transport("reconcile-test", dummy_addr, "tcp", false).unwrap();
+        IngressBinding::from_transport("reconcile-test", dummy_ip, 0, "tcp", false).unwrap();
 
     for _ in 0..num_producers {
         let h = handle.clone();

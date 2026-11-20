@@ -58,9 +58,10 @@ pub fn reconcile_active_listeners<TcpD, UdpD, TcpH, UdpH, FutTcp, FutUdp>(
             None => false,
         };
         if !should_keep {
+            let (ip, port_be) = current_binding.addr();
             tracing::info!(
                 listener_id = %id,
-                addr = %current_binding.addr(),
+                addr = %velda_sock::format_raw_addr(ip, port_be),
                 "Declarative Reconcile: Closing obsolete/modified listener"
             );
             let _ = tx.send(true);
@@ -79,7 +80,7 @@ pub fn reconcile_active_listeners<TcpD, UdpD, TcpH, UdpH, FutTcp, FutUdp>(
                     Ok(ingress) => {
                         tracing::info!(
                             listener_id = %id,
-                            addr = %tcp_binding.addr,
+                            addr = %velda_sock::format_raw_addr(tcp_binding.ip, tcp_binding.port_be),
                             shards = ingress.shard_count(),
                             "Declarative Reconcile: Bound new TCP listener shards"
                         );
@@ -91,7 +92,7 @@ pub fn reconcile_active_listeners<TcpD, UdpD, TcpH, UdpH, FutTcp, FutUdp>(
                     Err(err) => {
                         tracing::error!(
                             listener_id = %id,
-                            addr = %tcp_binding.addr,
+                            addr = %velda_sock::format_raw_addr(tcp_binding.ip, tcp_binding.port_be),
                             error = %err,
                             "Declarative Reconcile: Failed to bind TCP listener"
                         );
@@ -102,7 +103,7 @@ pub fn reconcile_active_listeners<TcpD, UdpD, TcpH, UdpH, FutTcp, FutUdp>(
                     Ok(ingress) => {
                         tracing::info!(
                             listener_id = %id,
-                            addr = %udp_binding.addr,
+                            addr = %velda_sock::format_raw_addr(udp_binding.ip, udp_binding.port_be),
                             shards = ingress.shard_count(),
                             "Declarative Reconcile: Bound new UDP socket shards"
                         );
@@ -114,7 +115,7 @@ pub fn reconcile_active_listeners<TcpD, UdpD, TcpH, UdpH, FutTcp, FutUdp>(
                     Err(err) => {
                         tracing::error!(
                             listener_id = %id,
-                            addr = %udp_binding.addr,
+                            addr = %velda_sock::format_raw_addr(udp_binding.ip, udp_binding.port_be),
                             error = %err,
                             "Declarative Reconcile: Failed to bind UDP socket"
                         );
@@ -130,7 +131,7 @@ pub fn reconcile_active_listeners<TcpD, UdpD, TcpH, UdpH, FutTcp, FutUdp>(
                                         Ok(ingress) => {
                                             tracing::info!(
                                                 listener_id = %id,
-                                                addr = %tcp_binding.addr,
+                                                addr = %velda_sock::format_raw_addr(tcp_binding.ip, tcp_binding.port_be),
                                                 shards = ingress.shard_count(),
                                                 "Declarative Reconcile: Bound companion TCP listener for XDP"
                                             );
@@ -146,7 +147,7 @@ pub fn reconcile_active_listeners<TcpD, UdpD, TcpH, UdpH, FutTcp, FutUdp>(
                                         Err(err) => {
                                             tracing::error!(
                                                 listener_id = %id,
-                                                addr = %tcp_binding.addr,
+                                                addr = %velda_sock::format_raw_addr(tcp_binding.ip, tcp_binding.port_be),
                                                 error = %err,
                                                 "Declarative Reconcile: Failed to bind companion TCP listener for XDP"
                                             );
@@ -161,7 +162,7 @@ pub fn reconcile_active_listeners<TcpD, UdpD, TcpH, UdpH, FutTcp, FutUdp>(
                         Err(err) => {
                             tracing::error!(
                                 listener_id = %id,
-                                addr = %tcp_binding.addr,
+                                addr = %velda_sock::format_raw_addr(tcp_binding.ip, tcp_binding.port_be),
                                 error = %err,
                                 "Declarative Reconcile: Failed to bind XDP TCP listener"
                             );
@@ -178,7 +179,7 @@ pub fn reconcile_active_listeners<TcpD, UdpD, TcpH, UdpH, FutTcp, FutUdp>(
                                         Ok(ingress) => {
                                             tracing::info!(
                                                 listener_id = %id,
-                                                addr = %udp_binding.addr,
+                                                addr = %velda_sock::format_raw_addr(udp_binding.ip, udp_binding.port_be),
                                                 shards = ingress.shard_count(),
                                                 "Declarative Reconcile: Bound companion UDP socket for XDP"
                                             );
@@ -194,7 +195,7 @@ pub fn reconcile_active_listeners<TcpD, UdpD, TcpH, UdpH, FutTcp, FutUdp>(
                                         Err(err) => {
                                             tracing::error!(
                                                 listener_id = %id,
-                                                addr = %udp_binding.addr,
+                                                addr = %velda_sock::format_raw_addr(udp_binding.ip, udp_binding.port_be),
                                                 error = %err,
                                                 "Declarative Reconcile: Failed to bind companion UDP socket for XDP"
                                             );
@@ -209,7 +210,7 @@ pub fn reconcile_active_listeners<TcpD, UdpD, TcpH, UdpH, FutTcp, FutUdp>(
                         Err(err) => {
                             tracing::error!(
                                 listener_id = %id,
-                                addr = %udp_binding.addr,
+                                addr = %velda_sock::format_raw_addr(udp_binding.ip, udp_binding.port_be),
                                 error = %err,
                                 "Declarative Reconcile: Failed to bind XDP UDP socket"
                             );
@@ -227,7 +228,7 @@ pub fn reconcile_active_listeners_shard<TcpD, UdpD, TcpH, UdpH, FutTcp, FutUdp>(
     active: &mut HashMap<String, (IngressBinding, watch::Sender<bool>)>,
     desired: Vec<IngressBinding>,
     tasks: &mut JoinSet<()>,
-    overrides: &HashMap<String, std::net::SocketAddr>,
+    overrides: &HashMap<String, (u128, u16)>,
     tcp_dispatcher: &TcpD,
     udp_dispatcher: &UdpD,
 ) where
@@ -285,10 +286,11 @@ pub fn reconcile_active_listeners_shard<TcpD, UdpD, TcpH, UdpH, FutTcp, FutUdp>(
                 IngressBinding::Tcp(ref tcp_binding) => {
                     match TcpIngress::bind_shard(tcp_binding.clone(), shard_id, addr_override) {
                         Ok(ingress) => {
+                            let (ip, port_be) = ingress.local_addr();
                             tracing::info!(
                                 shard = shard_id,
                                 listener_id = %id,
-                                addr = %ingress.local_addr(),
+                                addr = %velda_sock::format_raw_addr(ip, port_be),
                                 "Shard Reconcile: Bound new TCP listener shard"
                             );
                             let (tx, rx) = watch::channel(false);
@@ -309,10 +311,11 @@ pub fn reconcile_active_listeners_shard<TcpD, UdpD, TcpH, UdpH, FutTcp, FutUdp>(
                 IngressBinding::Udp(ref udp_binding) => {
                     match UdpIngress::bind_shard(udp_binding.clone(), shard_id, addr_override) {
                         Ok(ingress) => {
+                            let (ip, port_be) = ingress.local_addr();
                             tracing::info!(
                                 shard = shard_id,
                                 listener_id = %id,
-                                addr = %ingress.local_addr(),
+                                addr = %velda_sock::format_raw_addr(ip, port_be),
                                 "Shard Reconcile: Bound new UDP socket shard"
                             );
                             let (tx, rx) = watch::channel(false);

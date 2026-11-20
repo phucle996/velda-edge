@@ -8,7 +8,6 @@
 //! 5. Zero memory leaks during eviction of timed-out and unhealthy resources.
 
 use std::alloc::{GlobalAlloc, Layout, System};
-use std::net::SocketAddr;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, AtomicI64, AtomicU64, Ordering};
 use std::time::{Duration, Instant};
@@ -194,7 +193,7 @@ fn verify_shard_table_zero_leak() {
     // Warm up
     {
         let table = ShardTable::<ConnectionKey, HeapResource>::with_workers(4);
-        let key = ConnectionKey::tcp("127.0.0.1:8080".parse().unwrap());
+        let key = ConnectionKey::tcp(velda_core::lut::ip::v4_to_u128(0x7f000001), 8080u16.to_be());
         let shard = table.shard_for(&key);
         let mut guard = shard.lock();
         guard.insert(key, SubPool::new(10));
@@ -205,10 +204,13 @@ fn verify_shard_table_zero_leak() {
     {
         let table = ShardTable::<ConnectionKey, HeapResource>::with_workers(8);
         for i in 0..2000 {
-            let addr: SocketAddr = format!("10.0.{}.{}:8080", (i / 250) + 1, (i % 250) + 1)
-                .parse()
-                .unwrap();
-            let key = ConnectionKey::tcp(addr);
+            let addr = (
+                velda_core::lut::ip::v4_to_u128(
+                    (10u32 << 24) | ((((i / 250) + 1) as u32) << 8) | (((i % 250) + 1) as u32),
+                ),
+                8080u16.to_be(),
+            );
+            let key = ConnectionKey::tcp(addr.0, addr.1);
             let shard = table.shard_for(&key);
             let mut guard = shard.lock();
             let subpool = guard.entry(key).or_insert_with(|| SubPool::new(10));
@@ -233,8 +235,8 @@ fn verify_shard_table_zero_leak() {
 }
 
 fn verify_acquire_release_lifecycle_zero_leak() {
-    let addr: SocketAddr = "10.0.1.1:8080".parse().unwrap();
-    let key = ConnectionKey::tcp(addr);
+    let addr = (velda_core::lut::ip::v4_to_u128(0x0a000101), 8080u16.to_be());
+    let key = ConnectionKey::tcp(addr.0, addr.1);
     let test_config = PoolConfig {
         max_idle_per_key: 32,
         ..PoolConfig::default()
@@ -288,8 +290,8 @@ fn verify_acquire_release_lifecycle_zero_leak() {
 }
 
 fn verify_pool_lease_raii_drop_zero_leak() {
-    let addr: SocketAddr = "10.0.2.1:8080".parse().unwrap();
-    let key = ConnectionKey::tcp(addr);
+    let addr = (velda_core::lut::ip::v4_to_u128(0x0a000201), 8080u16.to_be());
+    let key = ConnectionKey::tcp(addr.0, addr.1);
     let test_config = PoolConfig {
         max_idle_per_key: 32,
         ..PoolConfig::default()
@@ -346,10 +348,16 @@ fn verify_key_churn_and_drain_zero_leak() {
 
         // Rapidly create 1,000 keys and add resources
         for i in 0..1000 {
-            let addr: SocketAddr = format!("10.1.{}.{}:8080", (i / 250) + 1, (i % 250) + 1)
-                .parse()
-                .unwrap();
-            let key = ConnectionKey::tcp(addr);
+            let addr = (
+                velda_core::lut::ip::v4_to_u128(
+                    (10u32 << 24)
+                        | (1u32 << 16)
+                        | ((((i / 250) + 1) as u32) << 8)
+                        | (((i % 250) + 1) as u32),
+                ),
+                8080u16.to_be(),
+            );
+            let key = ConnectionKey::tcp(addr.0, addr.1);
             for _ in 0..3 {
                 pool.release(&key, HeapResource::new(2048), true, false);
             }
@@ -389,8 +397,13 @@ fn verify_concurrent_hammer_multithreaded_zero_leak() {
         for worker_id in 0..workers {
             let pool_clone = Arc::clone(&pool);
             handles.push(std::thread::spawn(move || {
-                let addr: SocketAddr = format!("10.2.{worker_id}.1:8080").parse().unwrap();
-                let key = ConnectionKey::tcp(addr);
+                let addr = (
+                    velda_core::lut::ip::v4_to_u128(
+                        (10u32 << 24) | (2u32 << 16) | ((worker_id as u32) << 8) | 1,
+                    ),
+                    8080u16.to_be(),
+                );
+                let key = ConnectionKey::tcp(addr.0, addr.1);
 
                 // Seed with 2 connections per worker
                 pool_clone.release(&key, HeapResource::new(2048), true, false);
@@ -436,10 +449,16 @@ fn verify_eviction_and_unhealthy_zero_leak() {
         // Seed 1,000 keys with expired connections
         let past = Instant::now() - Duration::from_secs(3600);
         for i in 0..1000 {
-            let addr: SocketAddr = format!("10.3.{}.{}:8080", (i / 250) + 1, (i % 250) + 1)
-                .parse()
-                .unwrap();
-            let key = ConnectionKey::tcp(addr);
+            let addr = (
+                velda_core::lut::ip::v4_to_u128(
+                    (10u32 << 24)
+                        | (3u32 << 16)
+                        | ((((i / 250) + 1) as u32) << 8)
+                        | (((i % 250) + 1) as u32),
+                ),
+                8080u16.to_be(),
+            );
+            let key = ConnectionKey::tcp(addr.0, addr.1);
             pool.release(&key, HeapResource::with_created_at(2048, past), true, false);
         }
 

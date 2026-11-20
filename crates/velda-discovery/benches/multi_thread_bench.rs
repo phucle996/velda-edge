@@ -84,8 +84,8 @@ fn bench_concurrent_endpoint_set_readers_during_writer() {
     let num_readers = 8;
     let duration = Duration::from_millis(1500);
     let endpoints = vec![
-        Endpoint::new("svc.internal", "10.0.0.1:8080".parse().unwrap(), 1),
-        Endpoint::new("svc.internal", "10.0.0.2:8080".parse().unwrap(), 1),
+        Endpoint::from_v4([10, 0, 0, 1], 8080, 1),
+        Endpoint::from_v4([10, 0, 0, 2], 8080, 1),
     ];
     let discovery = Arc::new(Discovery::new_explicit(endpoints));
 
@@ -121,17 +121,9 @@ fn bench_concurrent_endpoint_set_readers_during_writer() {
         let mut toggle = false;
         while run_writer.load(Ordering::Relaxed) {
             let new_eps = if toggle {
-                vec![Endpoint::new(
-                    "svc.internal",
-                    "10.0.0.3:8080".parse().unwrap(),
-                    1,
-                )]
+                vec![Endpoint::from_v4([10, 0, 0, 3], 8080, 1)]
             } else {
-                vec![Endpoint::new(
-                    "svc.internal",
-                    "10.0.0.4:8080".parse().unwrap(),
-                    1,
-                )]
+                vec![Endpoint::from_v4([10, 0, 0, 4], 8080, 1)]
             };
             toggle = !toggle;
             disc_writer.update_endpoints(new_eps, count);

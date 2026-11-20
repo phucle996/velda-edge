@@ -4,7 +4,6 @@
 //! capable of multiplexing concurrent bidirectional gRPC streams over a single
 //! QUIC connection without Head-of-Line blocking.
 
-use std::net::SocketAddr;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
@@ -22,7 +21,8 @@ use crate::error::GrpcError;
 #[derive(Clone)]
 pub struct GrpcUdpClient {
     command_tx: mpsc::Sender<ClientCommand>,
-    target: SocketAddr,
+    target_ip: u128,
+    target_port_be: u16,
 }
 
 impl GrpcUdpClient {
@@ -58,10 +58,10 @@ impl GrpcUdpClient {
         self.send_request(req.clone()).await
     }
 
-    /// Returns the target physical socket address of this client connection.
+    /// Returns the target physical `(ip: u128, port_be: u16)` of this client connection.
     #[inline]
-    pub fn target(&self) -> SocketAddr {
-        self.target
+    pub fn target(&self) -> (u128, u16) {
+        (self.target_ip, self.target_port_be)
     }
 
     /// Returns `true` if the background driver loop has terminated or connection closed.
@@ -89,13 +89,20 @@ pub fn default_client_config() -> Result<ClientConfig, GrpcError> {
 /// Establishes a persistent, multiplexed gRPC client connection over QUIC / UDP to the target backend endpoint
 /// using explicit QUIC [`ClientConfig`].
 pub async fn connect(
-    target: SocketAddr,
+    target_ip: u128,
+    target_port_be: u16,
     server_name: &str,
     config: &GrpcConfig,
     client_cfg: ClientConfig,
 ) -> Result<GrpcUdpClient, GrpcError> {
+    let is_v4 = velda_core::lut::ip::is_v4_u128(target_ip);
+    let target = if is_v4 {
+        std::net::SocketAddr::V4(velda_core::lut::ip::v4itoaddr(target_ip, target_port_be))
+    } else {
+        std::net::SocketAddr::V6(velda_core::lut::ip::v6itoaddr(target_ip, target_port_be))
+    };
     // 1. Bind local UDP egress socket
-    let bind_addr: SocketAddr = if target.is_ipv4() {
+    let bind_addr: std::net::SocketAddr = if is_v4 {
         "0.0.0.0:0".parse().unwrap()
     } else {
         "[::]:0".parse().unwrap()
@@ -194,5 +201,9 @@ pub async fn connect(
         config.max_message_size,
     ));
 
-    Ok(GrpcUdpClient { command_tx, target })
+    Ok(GrpcUdpClient {
+        command_tx,
+        target_ip,
+        target_port_be,
+    })
 }

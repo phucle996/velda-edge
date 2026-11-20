@@ -1,4 +1,3 @@
-use std::net::SocketAddr;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::{Duration, Instant};
@@ -216,8 +215,8 @@ fn test_pool_manager_rejects_unhealthy_or_draining() {
 #[test]
 fn test_pool_manager_acquire_profile_sequential() {
     let pool = Arc::new(PoolManager::<ConnectionKey, MockConn>::new());
-    let addr: SocketAddr = "127.0.0.1:8080".parse().unwrap();
-    let key = ConnectionKey::tcp(addr);
+    let addr = (velda_core::lut::ip::v4_to_u128(0x7f000001), 8080u16.to_be());
+    let key = ConnectionKey::tcp(addr.0, addr.1);
     let profile = ConnectionProfile::sequential(key.clone(), Duration::from_secs(30));
 
     // 1. Initial acquire misses
@@ -249,8 +248,8 @@ fn test_pool_manager_acquire_profile_sequential() {
 #[test]
 fn test_pool_manager_acquire_profile_exclusive() {
     let pool = Arc::new(PoolManager::<ConnectionKey, MockConn>::new());
-    let addr: SocketAddr = "127.0.0.1:9090".parse().unwrap();
-    let key = ConnectionKey::tcp(addr);
+    let addr = (velda_core::lut::ip::v4_to_u128(0x7f000001), 9090u16.to_be());
+    let key = ConnectionKey::tcp(addr.0, addr.1);
     let profile = ConnectionProfile::exclusive(key.clone(), Duration::from_secs(30));
 
     // 1. Miss
@@ -278,8 +277,14 @@ fn test_pool_manager_acquire_profile_exclusive() {
 #[test]
 fn test_pool_manager_acquire_profile_multiplexed() {
     let pool = Arc::new(PoolManager::<ConnectionKey, MockConn>::new());
-    let addr: SocketAddr = "127.0.0.1:443".parse().unwrap();
-    let key = ConnectionKey::http(addr, "h2", Some("api.velda.io".into()), Some("h2".into()));
+    let addr = (velda_core::lut::ip::v4_to_u128(0x7f000001), 443u16.to_be());
+    let key = ConnectionKey::http(
+        addr.0,
+        addr.1,
+        "h2",
+        Some("api.velda.io".into()),
+        Some("h2".into()),
+    );
     let profile = ConnectionProfile::multiplexed(key.clone(), Duration::from_secs(30), 2);
 
     // 1. Initial acquire misses
@@ -319,8 +324,8 @@ fn test_pool_manager_acquire_profile_multiplexed() {
 #[test]
 fn test_pool_manager_drain_and_evict_multiplexed() {
     let pool = Arc::new(PoolManager::<ConnectionKey, MockConn>::new());
-    let addr: SocketAddr = "127.0.0.1:8443".parse().unwrap();
-    let key = ConnectionKey::tcp(addr);
+    let addr = (velda_core::lut::ip::v4_to_u128(0x7f000001), 8443u16.to_be());
+    let key = ConnectionKey::tcp(addr.0, addr.1);
     let profile = ConnectionProfile::multiplexed(key.clone(), Duration::from_millis(10), 10);
 
     let conn = MockConn(400, Instant::now(), AtomicBool::new(true));

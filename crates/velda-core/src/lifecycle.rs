@@ -1,35 +1,17 @@
-//! Request lifecycle and extension contracts for Velda Edge.
-//!
-//! The lifecycle describes how a request moves through the data plane.
-//! `velda-core` defines the contract only; the actual execution is
-//! driven by the traffic and protocol engines (`velda-ingress` and `velda-http`).
-//!
-//! High-level lifecycle:
+//! Request Lifecycle & Plugin Extension Contracts (`velda_core::lifecycle`).
 //!
 //! ```text
-//!     ACCEPT
-//!        |
-//!        v
-//!     DECODE
-//!        |
-//!        v
-//!     PRE_ROUTE      <- L7 hooks
-//!        |
-//!        v
-//!     ROUTE
-//!        |
-//!        v
-//!     PRE_UPSTREAM   <- L7 hooks
-//!        |
-//!        v
-//!     UPSTREAM
-//!        |
-//!        v
-//!     POST_RESPONSE  <- L7 hooks
+//! ┌─────────────────────────────────────────────────────────────────────────────────────────┐
+//! │                          FLAT REQUEST SERVING LIFECYCLE                                 │
+//! ├─────────────────────────────────────────────────────────────────────────────────────────┤
+//! │  ACCEPT ──► DECODE ──► PRE_ROUTE ──► ROUTE ──► PRE_UPSTREAM ──► UPSTREAM ──► POST_RESP  │
+//! │                           │                        │                            │       │
+//! │                           ▼                        ▼                            ▼       │
+//! │                      [L7 Hooks]               [L7 Hooks]                   [L7 Hooks]   │
+//! │                           │                        │                            │       │
+//! │                           └──► Action::{ Continue, Respond, Reject } ◄──────────┘       │
+//! └─────────────────────────────────────────────────────────────────────────────────────────┘
 //! ```
-//!
-//! Transport-level processing such as TCP accept, TLS negotiation,
-//! and HTTP decoding is not implemented here.
 
 use std::future::Future;
 use std::time::Duration;

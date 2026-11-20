@@ -21,7 +21,7 @@ impl XdpIngress {
         tcp_binding: TcpBinding,
         xdp_config: XdpConfig,
         shard_id: usize,
-        addr_override: Option<std::net::SocketAddr>,
+        addr_override: Option<(u128, u16)>,
     ) -> Result<Self> {
         let id: Arc<str> = Arc::from(tcp_binding.id.as_str());
         let xdp_listener = XdpListener::bind(xdp_config)?;
@@ -45,7 +45,7 @@ impl XdpIngress {
         udp_binding: UdpBinding,
         xdp_config: XdpConfig,
         shard_id: usize,
-        addr_override: Option<std::net::SocketAddr>,
+        addr_override: Option<(u128, u16)>,
     ) -> Result<Self> {
         let id: Arc<str> = Arc::from(udp_binding.id.as_str());
         let xdp_listener = XdpListener::bind(xdp_config)?;

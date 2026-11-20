@@ -1,7 +1,19 @@
-//! Adaptive buffer dimensions and anti-OOM mathematical sizing.
+//! Adaptive Buffer Dimensions & Anti-OOM Mathematical Sizing (`velda_core::buffer::adaptive`).
 //!
-//! Provides mathematically bounded burst ceilings based on host memory and core concurrency,
-//! preventing memory exhaustion under sustained traffic bursts.
+//! ```text
+//! ┌─────────────────────────────────────────────────────────────────────────────────────────┐
+//! │                      DUAL-CONSTRAINT ANTI-OOM SIZING FORMULA                            │
+//! ├─────────────────────────────────────────────────────────────────────────────────────────┤
+//! │  max_cap = min( baseline * 3, baseline + (total_mem * 0.20) / (cores * item_bytes) )    │
+//! │                                                                                         │
+//! │  Per-Core Baseline Clamps (from max_idle):                                              │
+//! │    header_slots   : (max_idle * 2)  clamp [256..2048]   (1 KiB / slot)                  │
+//! │    small_4k_slabs : (headers / 2)   clamp [128..1024]   (4 KiB / slab)                  │
+//! │    medium_16k     : (headers / 4)   clamp [ 64.. 512]   (16 KiB / slab)                 │
+//! │    standard_32k   : (headers / 8)   clamp [ 32.. 256]   (32 KiB / slab)                 │
+//! │    large_64k      : (headers / 16)  clamp [ 16.. 128]   (64 KiB / slab)                 │
+//! └─────────────────────────────────────────────────────────────────────────────────────────┘
+//! ```
 
 /// Pre-computed continuous adaptive buffer pool dimensions per traffic worker core.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

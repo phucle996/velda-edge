@@ -1,7 +1,6 @@
 //! Request context and runtime state passed to load balancer selections.
 
 use std::collections::HashMap;
-use std::net::SocketAddr;
 
 use crate::metrics::EndpointMetrics;
 
@@ -21,7 +20,7 @@ pub struct SelectionContext<'a> {
     pub hash_bytes: Option<&'a [u8]>,
 
     /// Optional reference to the dynamic metrics table for state-aware balancers.
-    pub metrics_map: Option<&'a HashMap<SocketAddr, EndpointMetrics>>,
+    pub metrics_map: Option<&'a HashMap<(u128, u16), EndpointMetrics>>,
 
     /// Contiguous metrics slice eliminates SipHash lookup overhead in HashMap.
     pub metrics_slice: Option<&'a [EndpointMetrics]>,
@@ -82,7 +81,7 @@ impl<'a> SelectionContext<'a> {
 
     /// Attaches the dynamic metrics map to this context.
     #[inline]
-    pub fn with_metrics(mut self, metrics_map: &'a HashMap<SocketAddr, EndpointMetrics>) -> Self {
+    pub fn with_metrics(mut self, metrics_map: &'a HashMap<(u128, u16), EndpointMetrics>) -> Self {
         self.metrics_map = Some(metrics_map);
         self
     }

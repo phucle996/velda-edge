@@ -39,6 +39,23 @@ pub struct DnsAnswer {
 /// but honoring it literally would turn every refresh tick into a wire query.
 const MIN_POSITIVE_TTL: Duration = Duration::from_secs(1);
 
+/// Parsed RFC 2782 SRV record.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SrvRecord {
+    pub priority: u16,
+    pub weight: u16,
+    pub port: u16,
+    pub target: String,
+}
+
+/// SRV records and optional A/AAAA glue returned by one SRV query.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SrvAnswer {
+    pub records: Vec<SrvRecord>,
+    pub glue: Vec<(String, IpAddr)>,
+    pub ttl: Option<Duration>,
+}
+
 /// Asynchronous wire transport for querying DNS nameservers.
 pub trait DnsTransport: Send + Sync + 'static {
     /// Queries the target DNS server for `host` A and AAAA records.
@@ -47,6 +64,21 @@ pub trait DnsTransport: Send + Sync + 'static {
         server: SocketAddr,
         host: &str,
     ) -> impl std::future::Future<Output = Result<DnsAnswer>> + Send;
+
+    /// Queries the target DNS server for `service` SRV (RFC 2782) records.
+    fn query_srv(
+        &self,
+        _server: SocketAddr,
+        service: &str,
+    ) -> impl std::future::Future<Output = Result<SrvAnswer>> + Send {
+        let host = service.to_string();
+        async move {
+            Err(DiscoveryError::DnsResolutionFailed {
+                host,
+                reason: "SRV queries not supported by this transport".into(),
+            })
+        }
+    }
 }
 
 impl<T: DnsTransport + ?Sized> DnsTransport for Arc<T> {
@@ -56,6 +88,14 @@ impl<T: DnsTransport + ?Sized> DnsTransport for Arc<T> {
         host: &str,
     ) -> impl std::future::Future<Output = Result<DnsAnswer>> + Send {
         (**self).query(server, host)
+    }
+
+    fn query_srv(
+        &self,
+        server: SocketAddr,
+        service: &str,
+    ) -> impl std::future::Future<Output = Result<SrvAnswer>> + Send {
+        (**self).query_srv(server, service)
     }
 }
 
@@ -393,14 +433,104 @@ impl<S: DnsServerProvider, T: DnsTransport> DnsResolverProvider<S, T> {
             }),
         )
     }
+
+    /// Resolves an RFC 2782 SRV service name into [`Endpoint`]s with dynamic ports and weights.
+    pub async fn resolve_srv(&self, service: &str) -> Result<Vec<Endpoint>> {
+        let servers = self.servers.servers();
+        if servers.is_empty() {
+            return Err(DiscoveryError::DnsResolutionFailed {
+                host: service.to_string(),
+                reason: "no upstream DNS nameservers configured".into(),
+            });
+        }
+
+        let mut last_err = None;
+        let mut srv_answer = None;
+
+        for &server_addr in servers {
+            match tokio::time::timeout(
+                self.config.query_timeout,
+                self.transport.query_srv(server_addr, service),
+            )
+            .await
+            {
+                Ok(Ok(ans)) if !ans.records.is_empty() => {
+                    srv_answer = Some(ans);
+                    break;
+                }
+                Ok(Ok(_)) => {
+                    last_err = Some(DiscoveryError::DnsResolutionFailed {
+                        host: service.to_string(),
+                        reason: "nameserver returned empty SRV record list".into(),
+                    });
+                }
+                Ok(Err(e)) => {
+                    last_err = Some(e);
+                }
+                Err(_) => {
+                    last_err = Some(DiscoveryError::DnsResolutionFailed {
+                        host: service.to_string(),
+                        reason: format!(
+                            "SRV query to {server_addr} timed out after {:?}",
+                            self.config.query_timeout
+                        ),
+                    });
+                }
+            }
+        }
+
+        let Some(ans) = srv_answer else {
+            return Err(
+                last_err.unwrap_or_else(|| DiscoveryError::DnsResolutionFailed {
+                    host: service.to_string(),
+                    reason: "all nameservers failed SRV query".into(),
+                }),
+            );
+        };
+
+        let mut endpoints = Vec::new();
+        for srv in ans.records {
+            if srv.target.is_empty() || srv.target == "." {
+                continue;
+            }
+            let weight = (srv.weight as u32).max(1);
+            let mut matched_glue = false;
+            for (name, ip) in &ans.glue {
+                if name.eq_ignore_ascii_case(&srv.target) {
+                    let ep = match ip {
+                        IpAddr::V4(v4) => Endpoint::from_v4(v4.octets(), srv.port, weight),
+                        IpAddr::V6(v6) => Endpoint::from_v6(v6.octets(), srv.port, weight),
+                    };
+                    endpoints.push(ep);
+                    matched_glue = true;
+                }
+            }
+            if !matched_glue && let Ok(target_eps) = self.resolve(&srv.target, srv.port).await {
+                for ep in target_eps {
+                    let mut weighted = ep;
+                    weighted.weight = weight;
+                    endpoints.push(weighted);
+                }
+            }
+        }
+
+        if endpoints.is_empty() {
+            return Err(DiscoveryError::DnsResolutionFailed {
+                host: service.to_string(),
+                reason: "SRV records resolved to zero usable endpoints".into(),
+            });
+        }
+
+        Ok(endpoints)
+    }
 }
 
 /// Helper converting IP addresses and a port into canonical `Endpoint` entities.
-fn ips_to_endpoints(host: &str, port: u16, ips: &[IpAddr]) -> Vec<Endpoint> {
+fn ips_to_endpoints(_host: &str, port: u16, ips: &[IpAddr]) -> Vec<Endpoint> {
     ips.iter()
-        .map(|&ip| {
-            let addr = SocketAddr::new(ip, port);
-            Endpoint::new(host, addr, 1)
+        .map(|&ip| match ip {
+            IpAddr::V4(v4) => Endpoint::from_v4(v4.octets(), port, 1),
+            IpAddr::V6(v6) => Endpoint::from_v6(v6.octets(), port, 1),
         })
         .collect()
 }

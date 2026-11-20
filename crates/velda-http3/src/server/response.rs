@@ -229,7 +229,11 @@ impl Http3ServerResponse {
         while let Some(transmit) = conn.poll_transmit(now, 64, transmit_buf) {
             if transmit.size > 0 {
                 outgoing.push(OutgoingDatagram {
-                    peer: transmit.destination,
+                    peer_ip: match transmit.destination.ip() {
+                        std::net::IpAddr::V4(v4) => velda_core::lut::ip::v4_to_u128(v4.to_bits()),
+                        std::net::IpAddr::V6(v6) => v6.to_bits(),
+                    },
+                    peer_port_be: transmit.destination.port().to_be(),
                     payload: Bytes::copy_from_slice(&transmit_buf[..transmit.size]),
                     segment_size: transmit.segment_size.map(|s| s as u16),
                 });
@@ -355,7 +359,11 @@ pub fn send_response(
     while let Some(transmit) = conn.poll_transmit(now, 64, transmit_buf) {
         if transmit.size > 0 {
             outgoing.push(OutgoingDatagram {
-                peer: transmit.destination,
+                peer_ip: match transmit.destination.ip() {
+                    std::net::IpAddr::V4(v4) => velda_core::lut::ip::v4_to_u128(v4.to_bits()),
+                    std::net::IpAddr::V6(v6) => v6.to_bits(),
+                },
+                peer_port_be: transmit.destination.port().to_be(),
                 payload: Bytes::copy_from_slice(&transmit_buf[..transmit.size]),
                 segment_size: transmit.segment_size.map(|s| s as u16),
             });
@@ -402,7 +410,11 @@ pub fn send_response_head(
     while let Some(transmit) = conn.poll_transmit(now, GSO_TRANSMIT_BATCH_SIZE, transmit_buf) {
         if transmit.size > 0 {
             outgoing.push(OutgoingDatagram {
-                peer: transmit.destination,
+                peer_ip: match transmit.destination.ip() {
+                    std::net::IpAddr::V4(v4) => velda_core::lut::ip::v4_to_u128(v4.to_bits()),
+                    std::net::IpAddr::V6(v6) => v6.to_bits(),
+                },
+                peer_port_be: transmit.destination.port().to_be(),
                 payload: Bytes::copy_from_slice(&transmit_buf[..transmit.size]),
                 segment_size: transmit.segment_size.map(|s| s as u16),
             });
@@ -488,7 +500,11 @@ pub fn send_data_chunk(
     while let Some(transmit) = conn.poll_transmit(now, GSO_TRANSMIT_BATCH_SIZE, transmit_buf) {
         if transmit.size > 0 {
             outgoing.push(OutgoingDatagram {
-                peer: transmit.destination,
+                peer_ip: match transmit.destination.ip() {
+                    std::net::IpAddr::V4(v4) => velda_core::lut::ip::v4_to_u128(v4.to_bits()),
+                    std::net::IpAddr::V6(v6) => v6.to_bits(),
+                },
+                peer_port_be: transmit.destination.port().to_be(),
                 payload: Bytes::copy_from_slice(&transmit_buf[..transmit.size]),
                 segment_size: transmit.segment_size.map(|s| s as u16),
             });

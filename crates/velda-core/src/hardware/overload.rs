@@ -1,8 +1,18 @@
-//! Resource saturation detection, memory usage sampling, and overload tracking.
+//! Resource Saturation Detection & Hysteresis State Machine (`velda_core::hardware::overload`).
 //!
-//! Owns memory usage probing (supporting cgroups v1 & v2 and Linux `/proc/self/statm`),
-//! overload level state machine, and hysteresis watermarks to protect against OOMKilled
-//! without creating thrashing / flapping oscillation.
+//! ```text
+//! ┌─────────────────────────────────────────────────────────────────────────────────────────┐
+//! │                     OVERLOAD HYSTERESIS STATE MACHINE (AtomicU8)                        │
+//! ├─────────────────────────────────────────────────────────────────────────────────────────┤
+//! │                                                                                         │
+//! │    ┌────────────┐   mem >= high_wm    ┌──────────────┐   mem >= crit_wm   ┌──────────┐  │
+//! │    │ Normal (0) │ ──────────────────► │ Shedding (1) │ ─────────────────► │ Critical │  │
+//! │    │            │ ◄────────────────── │ (429 heavy)  │ ◄───────────────── │   (2)    │  │
+//! │    └────────────┘   mem <= low_wm     └──────────────┘   mem <= shed_wm   └──────────┘  │
+//! │                                                                                         │
+//! │  Memory Source: cgroup v2/v1 usage + /proc/self/statm (sampled off hot path)            │
+//! └─────────────────────────────────────────────────────────────────────────────────────────┘
+//! ```
 
 use std::sync::atomic::{AtomicU8, AtomicUsize, Ordering};
 

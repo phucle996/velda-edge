@@ -1,20 +1,20 @@
-use std::net::SocketAddr;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU32, Ordering};
 use std::time::Duration;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::TcpStream;
 use tokio::sync::watch;
-use velda_sock::{TcpListener, TcpListenerConfig};
+use velda_sock::{TcpListener, TcpListenerConfig, raw_to_socket_addr};
+
+const LOOPBACK_V4: u128 = velda_core::lut::ip::v4_to_u128(0x7F00_0001);
 
 #[tokio::test]
 async fn test_tcp_listener_bind_and_accept() {
     let config = TcpListenerConfig::new().with_nodelay(true);
-    let addr: SocketAddr = "127.0.0.1:0".parse().unwrap();
-    let listener = TcpListener::bind(addr, config).unwrap();
+    let listener = TcpListener::bind(LOOPBACK_V4, 0, config).unwrap();
 
-    let bound_addr = listener.local_addr();
-    assert_ne!(bound_addr.port(), 0);
+    let bound_addr = raw_to_socket_addr(listener.local_ip, listener.local_port_be);
+    assert_ne!(u16::from_be(listener.local_port_be), 0);
 
     let client_task = tokio::spawn(async move {
         let mut stream = TcpStream::connect(bound_addr).await.unwrap();
@@ -32,9 +32,8 @@ async fn test_tcp_listener_bind_and_accept() {
 #[tokio::test]
 async fn test_tcp_listener_accept_with_shutdown() {
     let config = TcpListenerConfig::default();
-    let addr: SocketAddr = "127.0.0.1:0".parse().unwrap();
-    let listener = TcpListener::bind(addr, config).unwrap();
-    let bound_addr = listener.local_addr();
+    let listener = TcpListener::bind(LOOPBACK_V4, 0, config).unwrap();
+    let bound_addr = raw_to_socket_addr(listener.local_ip, listener.local_port_be);
 
     let (shutdown_tx, mut shutdown_rx) = watch::channel(false);
 
@@ -64,9 +63,8 @@ async fn test_tcp_listener_accept_with_shutdown() {
 #[tokio::test]
 async fn test_tcp_listener_serve_loop() {
     let config = TcpListenerConfig::default();
-    let addr: SocketAddr = "127.0.0.1:0".parse().unwrap();
-    let listener = Arc::new(TcpListener::bind(addr, config).unwrap());
-    let bound_addr = listener.local_addr();
+    let listener = Arc::new(TcpListener::bind(LOOPBACK_V4, 0, config).unwrap());
+    let bound_addr = raw_to_socket_addr(listener.local_ip, listener.local_port_be);
 
     let (shutdown_tx, shutdown_rx) = watch::channel(false);
     let counter = Arc::new(AtomicU32::new(0));
@@ -125,19 +123,18 @@ async fn test_tcp_listener_reuseport_shards() {
         .with_reuseport(true)
         .with_concurrency_shards(4)
         .with_quickack(true);
-    let addr: SocketAddr = "127.0.0.1:0".parse().unwrap();
-    let shards = TcpListener::bind_shards(addr, config).unwrap();
+    let shards = TcpListener::bind_shards(LOOPBACK_V4, 0, config).unwrap();
 
     #[cfg(unix)]
     assert_eq!(shards.len(), 4);
     #[cfg(not(unix))]
     assert!(!shards.is_empty());
 
-    let port = shards[0].local_addr().port();
+    let port = u16::from_be(shards[0].local_port_be);
     assert_ne!(port, 0);
 
     for s in &shards {
-        assert_eq!(s.local_addr().port(), port);
+        assert_eq!(u16::from_be(s.local_port_be), port);
     }
 }
 
@@ -147,14 +144,13 @@ async fn test_tcp_listener_shards_with_incoming_cpu() {
         .with_reuseport(true)
         .with_concurrency_shards(2)
         .with_incoming_cpu(true);
-    let addr: SocketAddr = "127.0.0.1:0".parse().unwrap();
-    let shards = TcpListener::bind_shards(addr, config).unwrap();
+    let shards = TcpListener::bind_shards(LOOPBACK_V4, 0, config).unwrap();
 
     #[cfg(unix)]
     assert_eq!(shards.len(), 2);
     #[cfg(not(unix))]
     assert!(!shards.is_empty());
 
-    let port = shards[0].local_addr().port();
+    let port = u16::from_be(shards[0].local_port_be);
     assert_ne!(port, 0);
 }

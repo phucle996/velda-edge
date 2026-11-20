@@ -189,8 +189,16 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let conn_start = Instant::now();
     let mut clients = Vec::with_capacity(num_conns);
     for _ in 0..num_conns {
+        let (p_ip, p_port_be) = match primary_target.addr {
+            SocketAddr::V4(v4) => (
+                velda_core::lut::ip::v4_to_u128(v4.ip().to_bits()),
+                v4.port().to_be(),
+            ),
+            SocketAddr::V6(v6) => (v6.ip().to_bits(), v6.port().to_be()),
+        };
         let client = connect(
-            primary_target.addr,
+            p_ip,
+            p_port_be,
             &effective_host,
             &config,
             velda_http3::client::default_client_config()?,

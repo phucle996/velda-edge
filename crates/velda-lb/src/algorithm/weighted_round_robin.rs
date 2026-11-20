@@ -49,60 +49,9 @@ pub fn swrr_update_scalar(current_weights: &mut [i64], endpoints: &[Endpoint]) -
     best_idx
 }
 
-#[cfg(target_arch = "x86_64")]
-#[target_feature(enable = "avx2")]
-unsafe fn swrr_update_avx2(current_weights: &mut [i64], endpoints: &[Endpoint]) -> usize {
-    use std::arch::x86_64::*;
-    let len = endpoints.len();
-    if len <= 4 {
-        return swrr_update_scalar(current_weights, endpoints);
-    }
-
-    let mut weights_raw = [0i64; 64];
-    let count = len.min(64);
-    for i in 0..count {
-        weights_raw[i] = endpoints[i].weight as i64;
-    }
-
-    let chunks = count / 4;
-    let cw_ptr = current_weights.as_mut_ptr();
-    let w_ptr = weights_raw.as_ptr();
-
-    unsafe {
-        for i in 0..chunks {
-            let cw_vec = _mm256_loadu_si256(cw_ptr.add(i * 4) as *const __m256i);
-            let w_vec = _mm256_loadu_si256(w_ptr.add(i * 4) as *const __m256i);
-            let sum_vec = _mm256_add_epi64(cw_vec, w_vec);
-            _mm256_storeu_si256(cw_ptr.add(i * 4) as *mut __m256i, sum_vec);
-        }
-
-        let remainder_start = chunks * 4;
-        for i in remainder_start..count {
-            *cw_ptr.add(i) += *w_ptr.add(i);
-        }
-
-        let mut best_idx = 0;
-        let mut max_weight = *cw_ptr;
-        for i in 1..count {
-            let w = *cw_ptr.add(i);
-            if w > max_weight {
-                max_weight = w;
-                best_idx = i;
-            }
-        }
-        best_idx
-    }
-}
-
-/// Vector-accelerated SWRR weight accumulator with runtime CPU feature fallback.
+/// SWRR weight accumulator in pure Rust so LLVM auto-vectorizes for the target CPU.
 #[inline]
 pub fn swrr_update_vector(current_weights: &mut [i64], endpoints: &[Endpoint]) -> usize {
-    #[cfg(target_arch = "x86_64")]
-    {
-        if std::is_x86_feature_detected!("avx2") {
-            return unsafe { swrr_update_avx2(current_weights, endpoints) };
-        }
-    }
     swrr_update_scalar(current_weights, endpoints)
 }
 
@@ -196,20 +145,15 @@ impl LoadBalancer for WeightedRoundRobin {
 mod tests {
     use super::*;
     use std::collections::HashMap;
-    use std::net::SocketAddr;
 
     #[test]
     fn test_smooth_wrr_distribution() {
-        let ep1: SocketAddr = "10.0.0.1:8080".parse().unwrap();
-        let ep2: SocketAddr = "10.0.0.2:8080".parse().unwrap();
-        let ep3: SocketAddr = "10.0.0.3:8080".parse().unwrap();
+        let ep1 = Endpoint::from_v4([10, 0, 0, 1], 8080, 5);
+        let ep2 = Endpoint::from_v4([10, 0, 0, 2], 8080, 1);
+        let ep3 = Endpoint::from_v4([10, 0, 0, 3], 8080, 1);
 
         // Weights: ep1=5, ep2=1, ep3=1 (Total = 7)
-        let endpoints = vec![
-            Endpoint::new("e1", ep1, 5),
-            Endpoint::new("e2", ep2, 1),
-            Endpoint::new("e3", ep3, 1),
-        ];
+        let endpoints = vec![ep1, ep2, ep3];
 
         let balancer = WeightedRoundRobin::new();
         let ctx = SelectionContext::NONE;
@@ -219,17 +163,22 @@ mod tests {
 
         for _ in 0..7 {
             let selected = balancer.select(&endpoints, &ctx).unwrap();
-            *counts.entry(selected.address).or_insert(0) += 1;
-            sequence.push(selected.id.0.as_str());
+            let addr = (selected.ip, selected.port_be);
+            *counts.entry(addr).or_insert(0) += 1;
+            sequence.push(addr);
         }
 
-        // In 7 requests: ep1 gets exactly 5, ep2 gets 1, ep3 gets 1
-        assert_eq!(counts.get(&ep1), Some(&5));
-        assert_eq!(counts.get(&ep2), Some(&1));
-        assert_eq!(counts.get(&ep3), Some(&1));
+        let k1 = (ep1.ip, ep1.port_be);
+        let k2 = (ep2.ip, ep2.port_be);
+        let k3 = (ep3.ip, ep3.port_be);
 
-        // Smooth interleaving: never 5 consecutive "e1"s
-        assert_eq!(sequence, vec!["e1", "e1", "e2", "e1", "e3", "e1", "e1"]);
+        // In 7 requests: ep1 gets exactly 5, ep2 gets 1, ep3 gets 1
+        assert_eq!(counts.get(&k1), Some(&5));
+        assert_eq!(counts.get(&k2), Some(&1));
+        assert_eq!(counts.get(&k3), Some(&1));
+
+        // Smooth interleaving: never 5 consecutive ep1s
+        assert_eq!(sequence, vec![k1, k1, k2, k1, k3, k1, k1]);
     }
 
     #[test]
@@ -237,9 +186,10 @@ mod tests {
         use std::panic;
         use std::sync::Arc;
 
-        let ep1: SocketAddr = "10.0.0.1:8080".parse().unwrap();
-        let ep2: SocketAddr = "10.0.0.2:8080".parse().unwrap();
-        let endpoints = vec![Endpoint::new("e1", ep1, 1), Endpoint::new("e2", ep2, 1)];
+        let endpoints = vec![
+            Endpoint::from_v4([10, 0, 0, 1], 8080, 1),
+            Endpoint::from_v4([10, 0, 0, 2], 8080, 1),
+        ];
 
         let balancer = Arc::new(WeightedRoundRobin::new());
         let b_clone = Arc::clone(&balancer);
@@ -261,8 +211,7 @@ mod tests {
 
     #[test]
     fn test_swrr_with_workers_probed_scaling() {
-        let ep1: SocketAddr = "10.0.0.1:8080".parse().unwrap();
-        let endpoints = vec![Endpoint::new("e1", ep1, 1)];
+        let endpoints = vec![Endpoint::from_v4([10, 0, 0, 1], 8080, 1)];
         let ctx = SelectionContext::NONE;
 
         for workers in [1, 2, 4, 8, 16, 64] {
@@ -274,9 +223,10 @@ mod tests {
 
     #[test]
     fn test_swrr_zero_weight_fallback() {
-        let ep1: SocketAddr = "10.0.0.1:8080".parse().unwrap();
-        let ep2: SocketAddr = "10.0.0.2:8080".parse().unwrap();
-        let endpoints = vec![Endpoint::new("e1", ep1, 0), Endpoint::new("e2", ep2, 0)];
+        let endpoints = vec![
+            Endpoint::from_v4([10, 0, 0, 1], 8080, 0),
+            Endpoint::from_v4([10, 0, 0, 2], 8080, 0),
+        ];
         let balancer = WeightedRoundRobin::new();
         let ctx = SelectionContext::NONE;
 

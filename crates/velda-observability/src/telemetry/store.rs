@@ -1,12 +1,12 @@
-//! Multi-Exporter Fan-Out Access Log Store (`velda_observability::logs::store`).
+//! Multi-Exporter Fan-Out Telemetry Store (`velda_observability::telemetry::store`).
 //!
 //! ```text
 //!  ┌────────────────────────────────────────────────────────────────────────────────────────┐
-//!  │                       LOGSTORE MULTI-EXPORTER ARCHITECTURE                             │
+//!  │                    TELEMETRYSTORE MULTI-EXPORTER ARCHITECTURE                          │
 //!  │                                                                                        │
 //!  │    Frontline Core 0      Frontline Core 1                Frontline Core N-1            │
 //!  │   ┌─────────────────┐   ┌─────────────────┐             ┌─────────────────┐            │
-//!  │   │ SpscLogRing (0) │   │ SpscLogRing (1) │   ... ...   │ SpscLogRing(N-1)│            │
+//!  │   │ SpscTelemetryRing (0) │   │ SpscTelemetryRing (1) │   ... ...   │ SpscTelemetryRing(N-1)│            │
 //!  │   └────────┬────────┘   └────────┬────────┘             └────────┬────────┘            │
 //!  │            │                     │                               │                     │
 //!  │            │ flush_lane(0)       │ flush_lane(1)                 │ flush_lane(N-1)     │
@@ -14,10 +14,10 @@
 //!  │  ┌──────────────────────────────────────────────────────────────────────────────────┐  │
 //!  │  │                      Shadow Logistics Worker (SCHED_IDLE)                        │  │
 //!  │  │                                                                                  │  │
-//!  │  │  1. acquire_slot() ──► LogBatchPool (32 Slots × 64KB)                            │  │
+//!  │  │  1. acquire_slot() ──► TelemetryBatchPool (32 Slots × 64KB)                            │  │
 //!  │  │  2. ring.drain_batch_into(&mut slot.records) (VMOVNTDQ / AVX streaming store)    │  │
 //!  │  │  3. slot.leases.store(K)                                                         │  │
-//!  │  │  4. LogBatch::from_pooled(slot_id, slice, pool)                                  │  │
+//!  │  │  4. TelemetryBatch::from_pooled(slot_id, slice, pool)                                  │  │
 //!  │  └───────────────────────────────────┬──────────────────────────────────────────────┘  │
 //!  │                                      │                                                 │
 //!  │                        Fan-Out to K Active Subscribers                                 │
@@ -31,7 +31,7 @@
 //!  │         │                            │                            │                    │
 //!  │         │ pop & serialize            │ pop & serialize            │ pop & serialize    │
 //!  │         ▼                            ▼                            ▼                    │
-//!  │    drop(LogBatch)               drop(LogBatch)               drop(LogBatch)            │
+//!  │    drop(TelemetryBatch)               drop(TelemetryBatch)               drop(TelemetryBatch)            │
 //!  │    leases - 1                   leases - 1                   leases - 1                │
 //!  │         │                            │                            │                    │
 //!  │         └────────────────────────────┼────────────────────────────┘                    │
@@ -57,7 +57,7 @@
 //!   slots remain in-flight with subscribers or undergo zero-copy recycling.
 //! - **Subscriber Fan-Out**: Each active subscriber receives a leased handle to the pooled batch.
 //! - **Memory Recycling**: Once all subscribers finish processing, the slot is cleared and
-//!   returned to `LogBatchPool` without memory reallocation.
+//!   returned to `TelemetryBatchPool` without memory reallocation.
 
 use std::collections::VecDeque;
 use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
@@ -65,35 +65,35 @@ use std::sync::{Arc, Mutex, OnceLock};
 
 use crate::metrics::{MAX_METRIC_WORKERS, current_worker_lane};
 
-use super::pool::{DEFAULT_BATCH_CAPACITY, DEFAULT_POOL_SLOTS, LogBatch, LogBatchPool};
-use super::record::AccessLogRecord;
-use super::ring::{DEFAULT_CORE_RING_CAPACITY, SpscLogRing};
+use super::pool::{DEFAULT_BATCH_CAPACITY, DEFAULT_POOL_SLOTS, TelemetryBatch, TelemetryBatchPool};
+use super::record::TelemetryRecord;
+use super::ring::{DEFAULT_CORE_RING_CAPACITY, SpscTelemetryRing};
 
 struct SubscriberInner {
     id: u64,
     max_batches: usize,
-    queue: Mutex<VecDeque<LogBatch>>,
+    queue: Mutex<VecDeque<TelemetryBatch>>,
     pub dropped_batches: AtomicU64,
 }
 
 /// RAII handle held by an active background log exporter plugin.
 ///
-/// Dropping a received [`LogBatch`] automatically recycles its contiguous memory
+/// Dropping a received [`TelemetryBatch`] automatically recycles its contiguous memory
 /// pages back into the pool without calling the OS allocator (`__rust_dealloc == 0`).
-/// Dropping `LogSubscriber` itself unregisters the exporter from [`LogStore`].
-pub struct LogSubscriber {
+/// Dropping `TelemetrySubscriber` itself unregisters the exporter from [`TelemetryStore`].
+pub struct TelemetrySubscriber {
     inner: Arc<SubscriberInner>,
-    store: Arc<LogStore>,
+    store: Arc<TelemetryStore>,
 }
 
-impl LogSubscriber {
-    /// Pops the next batch of [`AccessLogRecord`]s if available.
-    pub fn try_recv_batch(&self) -> Option<LogBatch> {
+impl TelemetrySubscriber {
+    /// Pops the next batch of [`TelemetryRecord`]s if available.
+    pub fn try_recv_batch(&self) -> Option<TelemetryBatch> {
         self.inner.queue.lock().unwrap().pop_front()
     }
 
     /// Drains up to `max_batches` currently queued batches for bulk export.
-    pub fn drain_batches(&self, max_batches: usize) -> Vec<LogBatch> {
+    pub fn drain_batches(&self, max_batches: usize) -> Vec<TelemetryBatch> {
         let mut guard = self.inner.queue.lock().unwrap();
         let take = guard.len().min(max_batches);
         let mut out = Vec::with_capacity(take);
@@ -104,9 +104,15 @@ impl LogSubscriber {
         }
         out
     }
+
+    /// Number of queued batches evicted from the front due to subscriber backpressure.
+    #[inline]
+    pub fn dropped_batches(&self) -> u64 {
+        self.inner.dropped_batches.load(Ordering::Relaxed)
+    }
 }
 
-impl Drop for LogSubscriber {
+impl Drop for TelemetrySubscriber {
     fn drop(&mut self) {
         let mut subs = self.store.subscribers.lock().unwrap();
         subs.retain(|s| s.id != self.inner.id);
@@ -116,24 +122,24 @@ impl Drop for LogSubscriber {
     }
 }
 
-/// Central Lock-Free Access Log Store owned by `velda-observability`.
-pub struct LogStore {
-    pub shards: Vec<SpscLogRing>,
+/// Central Lock-Free Telemetry Store owned by `velda-observability`.
+pub struct TelemetryStore {
+    pub shards: Vec<SpscTelemetryRing>,
     pub active_cores: usize,
+    shard_mask: usize,
     subscribers: Mutex<Vec<Arc<SubscriberInner>>>,
     pub active_subscriber_count: AtomicUsize,
     next_subscriber_id: AtomicU64,
-    pub emitted_total: AtomicU64,
-    pub batch_pool: Arc<LogBatchPool>,
+    pub batch_pool: Arc<TelemetryBatchPool>,
 }
 
-impl Default for LogStore {
+impl Default for TelemetryStore {
     fn default() -> Self {
         Self::new()
     }
 }
 
-impl LogStore {
+impl TelemetryStore {
     pub fn new() -> Self {
         let detected_cores = velda_core::hardware::global_hardware_topology()
             .cpu
@@ -142,47 +148,70 @@ impl LogStore {
     }
 
     pub fn with_cores_and_capacity(cores: usize, ring_capacity: usize) -> Self {
-        let active_cores = cores.clamp(1, MAX_METRIC_WORKERS);
+        // Power-of-two shards let hot-path emit() index via 1-cycle bitmask instead of integer div.
+        let active_cores = cores.clamp(1, MAX_METRIC_WORKERS).next_power_of_two();
+        let shard_mask = active_cores - 1;
         let mut shards = Vec::with_capacity(active_cores);
         for _ in 0..active_cores {
-            shards.push(SpscLogRing::new(ring_capacity));
+            shards.push(SpscTelemetryRing::new(ring_capacity));
         }
 
         Self {
             shards,
             active_cores,
+            shard_mask,
             subscribers: Mutex::new(Vec::new()),
             active_subscriber_count: AtomicUsize::new(0),
             next_subscriber_id: AtomicU64::new(1),
-            emitted_total: AtomicU64::new(0),
-            batch_pool: LogBatchPool::new(DEFAULT_POOL_SLOTS, DEFAULT_BATCH_CAPACITY),
+            batch_pool: TelemetryBatchPool::new(DEFAULT_POOL_SLOTS, DEFAULT_BATCH_CAPACITY),
         }
     }
 
-    /// Emits a 64-byte [`AccessLogRecord`] onto the calling thread's core-local SPSC ring.
-    #[inline]
-    pub fn emit(&self, record: &AccessLogRecord) -> bool {
+    /// Emits a 256-byte [`TelemetryRecord`] onto the calling thread's core-local SPSC ring.
+    #[inline(always)]
+    pub fn emit(&self, record: &TelemetryRecord) -> bool {
         self.emit_on_core(current_worker_lane(), record)
     }
 
-    /// Emits a 64-byte [`AccessLogRecord`] onto an explicit worker core's SPSC ring.
-    #[inline]
-    pub fn emit_on_core(&self, core_id: usize, record: &AccessLogRecord) -> bool {
-        let idx = core_id % self.active_cores;
-        let ok = unsafe { self.shards.get_unchecked(idx).push(record) };
-        if ok {
-            self.emitted_total.fetch_add(1, Ordering::Relaxed);
-        }
-        ok
+    /// Emits a 256-byte [`TelemetryRecord`] onto an explicit worker core's SPSC ring.
+    #[inline(always)]
+    pub fn emit_on_core(&self, core_id: usize, record: &TelemetryRecord) -> bool {
+        let idx = core_id & self.shard_mask;
+        unsafe { self.shards.get_unchecked(idx).push(record) }
     }
 
-    /// Registers a new background exporter plugin subscriber.
-    pub fn subscribe(self: &Arc<Self>, max_batches: usize) -> LogSubscriber {
+    /// Emits a 256-byte [`TelemetryRecord`] on cold error / early-rejection paths.
+    ///
+    /// Marked `#[cold]` and `#[inline(never)]` so that early error handlers (400, 404, 431,
+    /// 502, 503, 504, client disconnects) do not duplicate 8 `vmovntdq` non-temporal stores
+    /// and vector shuffles into frontline serving loops, preserving the 32 KB L1 Instruction
+    /// Cache for hot request execution.
+    #[cold]
+    #[inline(never)]
+    pub fn emit_cold(&self, record: &TelemetryRecord) -> bool {
+        self.emit_cold_on_core(current_worker_lane(), record)
+    }
+
+    /// Emits a 256-byte [`TelemetryRecord`] onto an explicit worker core's SPSC ring on cold error paths.
+    #[cold]
+    #[inline(never)]
+    pub fn emit_cold_on_core(&self, core_id: usize, record: &TelemetryRecord) -> bool {
+        let idx = core_id & self.shard_mask;
+        unsafe { self.shards.get_unchecked(idx).push(record) }
+    }
+
+    /// Registers a new background exporter subscriber (log shipper or trace exporter).
+    ///
+    /// Caps queue depth at half of `batch_pool` slots so a slow TCP/HTTP exporter drops its
+    /// oldest unconsumed leases before it can pin the entire rotating pool.
+    pub fn subscribe(self: &Arc<Self>, max_batches: usize) -> TelemetrySubscriber {
         let id = self.next_subscriber_id.fetch_add(1, Ordering::Relaxed);
+        let pool_cap = (self.batch_pool.slots.len() / 2).max(4);
+        let capped = max_batches.clamp(4, pool_cap);
         let inner = Arc::new(SubscriberInner {
             id,
-            max_batches: max_batches.max(16),
-            queue: Mutex::new(VecDeque::with_capacity(max_batches.min(256))),
+            max_batches: capped,
+            queue: Mutex::new(VecDeque::with_capacity(capped)),
             dropped_batches: AtomicU64::new(0),
         });
 
@@ -192,19 +221,19 @@ impl LogStore {
             .store(subs.len(), Ordering::Release);
         drop(subs);
 
-        LogSubscriber {
+        TelemetrySubscriber {
             inner,
             store: Arc::clone(self),
         }
     }
 
     /// Executed by Shadow Worker (`velda-shadow-{lane}`) to drain its core-local SPSC ring
-    /// and fan out zero-allocation [`LogBatch`] buffers to active exporters.
+    /// and fan out zero-allocation [`TelemetryBatch`] buffers to active exporters.
     ///
-    /// Uses pre-allocated contiguous memory pages from [`LogBatchPool`], recycling memory
+    /// Uses pre-allocated contiguous memory pages from [`TelemetryBatchPool`], recycling memory
     /// in $\mathcal{O}(1)$ upon drop without returning pages to the OS allocator.
     pub fn flush_lane(&self, lane: usize, max_batch_size: usize) -> usize {
-        let idx = lane % self.active_cores;
+        let idx = lane & self.shard_mask;
         let ring = unsafe { self.shards.get_unchecked(idx) };
 
         if self.active_subscriber_count.load(Ordering::Acquire) == 0 {
@@ -226,7 +255,7 @@ impl LogStore {
                 return 0;
             }
             slot.leases.store(1, Ordering::Release);
-            LogBatch::from_pooled(
+            TelemetryBatch::from_pooled(
                 slot_id,
                 records_vec.as_slice(),
                 Arc::clone(&self.batch_pool),
@@ -236,7 +265,7 @@ impl LogStore {
             if records.is_empty() {
                 return 0;
             }
-            LogBatch::from_arc(Arc::from(records))
+            TelemetryBatch::from_arc(Arc::from(records))
         };
 
         let count = batch.len();
@@ -267,25 +296,34 @@ impl LogStore {
         total
     }
 
+    /// Total records emitted across all core-local SPSC rings (computed cold on demand).
+    pub fn emitted_total(&self) -> u64 {
+        self.shards.iter().map(|s| s.emitted_count()).sum()
+    }
+
     pub fn ring_dropped_total(&self) -> u64 {
-        self.shards
-            .iter()
-            .map(|s| s.dropped.load(Ordering::Relaxed))
-            .sum()
+        self.shards.iter().map(|s| s.dropped_count()).sum()
     }
 }
 
-static GLOBAL_LOG_STORE: OnceLock<Arc<LogStore>> = OnceLock::new();
+static GLOBAL_TELEMETRY_STORE: OnceLock<Arc<TelemetryStore>> = OnceLock::new();
 
-/// Returns the globally shared in-memory access log store.
-#[inline]
-pub fn global_log_store() -> Arc<LogStore> {
-    GLOBAL_LOG_STORE
-        .get_or_init(|| Arc::new(LogStore::new()))
-        .clone()
+#[cold]
+#[inline(never)]
+fn init_default_telemetry_store() -> &'static Arc<TelemetryStore> {
+    GLOBAL_TELEMETRY_STORE.get_or_init(|| Arc::new(TelemetryStore::new()))
+}
+
+/// Returns a reference to the globally shared in-memory telemetry store without cloning `Arc`.
+#[inline(always)]
+pub fn global_telemetry_store() -> &'static Arc<TelemetryStore> {
+    match GLOBAL_TELEMETRY_STORE.get() {
+        Some(store) => store,
+        None => init_default_telemetry_store(),
+    }
 }
 
 /// Initializes the globally shared access log store at bootstrap.
-pub fn init_global_log_store(store: Arc<LogStore>) -> Result<(), Arc<LogStore>> {
-    GLOBAL_LOG_STORE.set(store)
+pub fn init_global_telemetry_store(store: Arc<TelemetryStore>) -> Result<(), Arc<TelemetryStore>> {
+    GLOBAL_TELEMETRY_STORE.set(store)
 }

@@ -5,9 +5,10 @@
 //! [1. Discovery] ──> [2. Usable Health Filter] ──> [3. Load Balancer] ──> [4. Candidate Execution / Failover]
 //! ```
 
+use std::cell::Cell;
 use std::collections::HashSet;
-use std::net::SocketAddr;
 use std::sync::Arc;
+use std::sync::atomic::{AtomicUsize, Ordering};
 use std::time::Duration;
 
 use arc_swap::ArcSwap;
@@ -17,6 +18,52 @@ use velda_lb::{LoadBalancer, RoundRobin, SelectionContext};
 
 use crate::error::{Result, UpstreamError};
 use crate::health::{HealthConfig, HealthTracker};
+
+thread_local! {
+    static UPSTREAM_LANE_ID: Cell<usize> = const { Cell::new(usize::MAX) };
+}
+
+#[inline(always)]
+fn current_lane_id() -> usize {
+    UPSTREAM_LANE_ID.with(|cell| {
+        let mut id = cell.get();
+        if id == usize::MAX {
+            static NEXT_LANE: AtomicUsize = AtomicUsize::new(0);
+            id = NEXT_LANE.fetch_add(1, Ordering::Relaxed);
+            cell.set(id);
+        }
+        id
+    })
+}
+
+/// Immutable per-lane endpoint snapshot pushed by discovery on topology changes.
+#[derive(Debug)]
+pub struct LaneEndpointSnapshot {
+    pub endpoints: Arc<[Endpoint]>,
+    pub generation: u64,
+}
+
+#[repr(align(64))]
+struct LaneEndpointShard {
+    snapshot: ArcSwap<LaneEndpointSnapshot>,
+}
+
+struct LaneEndpointShards {
+    shards: Box<[LaneEndpointShard]>,
+    mask: usize,
+}
+
+impl LaneEndpointShards {
+    fn push(&self, endpoints: &[Endpoint], generation: u64) {
+        let snap = Arc::new(LaneEndpointSnapshot {
+            endpoints: Arc::from(endpoints),
+            generation,
+        });
+        for shard in &self.shards {
+            shard.snapshot.store(Arc::clone(&snap));
+        }
+    }
+}
 
 #[derive(Debug)]
 struct DegradedSnapshot {
@@ -74,6 +121,7 @@ pub struct Upstream<LB: LoadBalancer = RoundRobin> {
     health: Arc<HealthTracker>,
     balancer: LB,
     timeouts: UpstreamTimeouts,
+    lanes: Arc<LaneEndpointShards>,
     degraded_cache: ArcSwap<DegradedSnapshot>,
 }
 
@@ -86,6 +134,32 @@ impl<LB: LoadBalancer> Upstream<LB> {
         balancer: LB,
         timeouts: UpstreamTimeouts,
     ) -> Self {
+        let lane_count = velda_core::hardware::global_hardware_topology()
+            .worker_threads
+            .max(1)
+            .next_power_of_two();
+        let initial_set = discovery.current_endpoints();
+        let initial_snap = Arc::new(LaneEndpointSnapshot {
+            endpoints: Arc::from(initial_set.all_endpoints()),
+            generation: initial_set.generation(),
+        });
+        let shards: Vec<LaneEndpointShard> = (0..lane_count)
+            .map(|_| LaneEndpointShard {
+                snapshot: ArcSwap::from(Arc::clone(&initial_snap)),
+            })
+            .collect();
+        let lanes = Arc::new(LaneEndpointShards {
+            shards: shards.into_boxed_slice(),
+            mask: lane_count - 1,
+        });
+
+        let weak_lanes = Arc::downgrade(&lanes);
+        discovery.set_on_change(Arc::new(move |endpoints, gen_id| {
+            if let Some(l) = weak_lanes.upgrade() {
+                l.push(endpoints, gen_id);
+            }
+        }));
+
         Self {
             id: Arc::from(id.as_ref()),
             protocol: protocol.into(),
@@ -93,12 +167,25 @@ impl<LB: LoadBalancer> Upstream<LB> {
             health: Arc::new(HealthTracker::new(HealthConfig::default())),
             balancer,
             timeouts,
+            lanes,
             degraded_cache: ArcSwap::from_pointee(DegradedSnapshot {
                 discovery_gen: u64::MAX,
                 health_epoch: u64::MAX,
                 usable_endpoints: Arc::from([]),
             }),
         }
+    }
+
+    /// Event-driven push: updates all lane shards with the latest sorted endpoint slice.
+    pub fn push_endpoints(&self, endpoints: &[Endpoint], generation: u64) {
+        self.lanes.push(endpoints, generation);
+    }
+
+    /// Returns the pre-computed lane-local endpoint snapshot without touching `Discovery::current`.
+    #[inline(always)]
+    pub fn current_lane_endpoints(&self) -> arc_swap::Guard<Arc<LaneEndpointSnapshot>> {
+        let idx = current_lane_id() & self.lanes.mask;
+        self.lanes.shards[idx].snapshot.load()
     }
 
     /// Attaches custom health tracker configuration.
@@ -150,10 +237,10 @@ impl<LB: LoadBalancer> Upstream<LB> {
     /// Prunes health tracker state for endpoints that are no longer part of active discovery.
     pub fn prune_retired_endpoints(&self) {
         let current = self.discovery.current_endpoints();
-        let active_addrs: HashSet<SocketAddr> = current
+        let active_addrs: HashSet<(u128, u16)> = current
             .all_endpoints()
             .iter()
-            .map(|ep| ep.address)
+            .map(|ep| (ep.ip, ep.port_be))
             .collect();
         self.health.prune_unregistered(&active_addrs);
     }
@@ -182,9 +269,9 @@ impl<LB: LoadBalancer> Upstream<LB> {
     // ------------------------------------------------------------------------
 
     /// Selects a healthy endpoint address using the configured load balancer and selection context.
-    pub fn select_endpoint_with_context(&self, ctx: &SelectionContext<'_>) -> Result<SocketAddr> {
-        let endpoints = self.discovery.current_endpoints();
-        let all_eps = endpoints.all_endpoints();
+    pub fn select_endpoint_with_context(&self, ctx: &SelectionContext<'_>) -> Result<(u128, u16)> {
+        let lane_snap = self.current_lane_endpoints();
+        let all_eps: &[Endpoint] = &lane_snap.endpoints;
         if all_eps.is_empty() {
             return Err(UpstreamError::NoEndpointsAvailable(Arc::clone(&self.id)));
         }
@@ -193,9 +280,9 @@ impl<LB: LoadBalancer> Upstream<LB> {
         let usable: &[Endpoint] = if !self.health.has_unhealthy() {
             all_eps
         } else {
-            let current_gen = endpoints.generation();
+            let current_gen = lane_snap.generation;
             let current_epoch = self.health.epoch();
-            cached_degraded = self.get_or_compile_degraded(&endpoints, current_gen, current_epoch);
+            cached_degraded = self.get_or_compile_degraded(all_eps, current_gen, current_epoch);
             if cached_degraded.is_empty() {
                 return Err(UpstreamError::NoEndpointsAvailable(Arc::clone(&self.id)));
             }
@@ -207,12 +294,12 @@ impl<LB: LoadBalancer> Upstream<LB> {
             .select(usable, ctx)
             .ok_or_else(|| UpstreamError::NoEndpointsAvailable(Arc::clone(&self.id)))?;
 
-        Ok(selected.address)
+        Ok((selected.ip, selected.port_be))
     }
 
     /// Selects a healthy endpoint address using the configured load balancer.
     #[inline]
-    pub fn select_endpoint(&self) -> Result<SocketAddr> {
+    pub fn select_endpoint(&self) -> Result<(u128, u16)> {
         self.select_endpoint_with_context(&SelectionContext::NONE)
     }
 
@@ -222,12 +309,12 @@ impl<LB: LoadBalancer> Upstream<LB> {
     /// failover if the operation encounters a network/connection error.
     pub async fn execute<F, Fut, T, E>(&self, mut action: F) -> Result<T>
     where
-        F: FnMut(SocketAddr) -> Fut,
+        F: FnMut((u128, u16)) -> Fut,
         Fut: std::future::Future<Output = std::result::Result<T, E>>,
         E: std::fmt::Display,
     {
-        let endpoints = self.discovery.current_endpoints();
-        let all_eps = endpoints.all_endpoints();
+        let lane_snap = self.current_lane_endpoints();
+        let all_eps: &[Endpoint] = &lane_snap.endpoints;
         if all_eps.is_empty() {
             return Err(UpstreamError::NoEndpointsAvailable(Arc::clone(&self.id)));
         }
@@ -236,9 +323,9 @@ impl<LB: LoadBalancer> Upstream<LB> {
         let usable: &[Endpoint] = if !self.health.has_unhealthy() {
             all_eps
         } else {
-            let current_gen = endpoints.generation();
+            let current_gen = lane_snap.generation;
             let current_epoch = self.health.epoch();
-            cached_degraded = self.get_or_compile_degraded(&endpoints, current_gen, current_epoch);
+            cached_degraded = self.get_or_compile_degraded(all_eps, current_gen, current_epoch);
             if cached_degraded.is_empty() {
                 return Err(UpstreamError::NoEndpointsAvailable(Arc::clone(&self.id)));
             }
@@ -258,7 +345,7 @@ impl<LB: LoadBalancer> Upstream<LB> {
                 break;
             };
 
-            let target_addr = selected.address;
+            let target_addr = (selected.ip, selected.port_be);
             match action(target_addr).await {
                 Ok(val) => {
                     self.health.record_success(&target_addr);
@@ -270,8 +357,8 @@ impl<LB: LoadBalancer> Upstream<LB> {
 
                     fallback_endpoints = candidate_slice
                         .iter()
-                        .filter(|ep| ep.address != target_addr)
-                        .cloned()
+                        .filter(|ep| (ep.ip, ep.port_be) != target_addr)
+                        .copied()
                         .collect();
                     candidate_slice = &fallback_endpoints[..];
                 }
@@ -279,14 +366,15 @@ impl<LB: LoadBalancer> Upstream<LB> {
         }
 
         Err(UpstreamError::ConnectionFailed {
-            endpoint: usable[0].address,
+            ip: usable[0].ip,
+            port_be: usable[0].port_be,
             reason: last_err.unwrap_or_else(|| "all candidate endpoints failed".into()),
         })
     }
 
     fn get_or_compile_degraded(
         &self,
-        endpoints: &Arc<EndpointSet>,
+        endpoints: &[Endpoint],
         current_gen: u64,
         current_epoch: u64,
     ) -> Arc<[Endpoint]> {
@@ -296,10 +384,9 @@ impl<LB: LoadBalancer> Upstream<LB> {
         }
 
         let compiled: Arc<[Endpoint]> = endpoints
-            .all_endpoints()
             .iter()
-            .filter(|ep| self.health.is_healthy(&ep.address))
-            .cloned()
+            .filter(|ep| self.health.is_healthy(&(ep.ip, ep.port_be)))
+            .copied()
             .collect();
 
         self.degraded_cache.store(Arc::new(DegradedSnapshot {
@@ -319,15 +406,12 @@ impl<LB: LoadBalancer> Upstream<LB> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::net::SocketAddr;
 
     #[tokio::test]
     async fn test_upstream_round_robin_selection() {
-        let ep1: SocketAddr = "127.0.0.1:8080".parse().unwrap();
-        let ep2: SocketAddr = "127.0.0.1:8081".parse().unwrap();
         let discovery = Discovery::new_explicit(vec![
-            Endpoint::new("e1", ep1, 1),
-            Endpoint::new("e2", ep2, 1),
+            Endpoint::from_v4([127, 0, 0, 1], 8080, 1),
+            Endpoint::from_v4([127, 0, 0, 1], 8081, 1),
         ]);
 
         let timeouts = UpstreamTimeouts::http(
@@ -353,13 +437,12 @@ mod tests {
 
     #[tokio::test]
     async fn test_upstream_execute_failover() {
-        let ep1: SocketAddr = "10.0.0.1:8080".parse().unwrap();
-        let ep2: SocketAddr = "10.0.0.2:8080".parse().unwrap();
+        let ep1_raw = Endpoint::from_v4([10, 0, 0, 1], 8080, 1);
+        let ep2_raw = Endpoint::from_v4([10, 0, 0, 2], 8080, 1);
+        let ep1 = (ep1_raw.ip, ep1_raw.port_be);
+        let ep2 = (ep2_raw.ip, ep2_raw.port_be);
 
-        let discovery = Discovery::new_explicit(vec![
-            Endpoint::new("e1", ep1, 1),
-            Endpoint::new("e2", ep2, 1),
-        ]);
+        let discovery = Discovery::new_explicit(vec![ep1_raw, ep2_raw]);
 
         let timeouts = UpstreamTimeouts::tcp(Duration::from_millis(500), Duration::from_secs(30));
         let upstream = Upstream::new("test-up", "tcp", discovery, RoundRobin::new(), timeouts)
@@ -384,13 +467,11 @@ mod tests {
 
     #[tokio::test]
     async fn test_upstream_maintenance_and_prune() {
-        let ep1: SocketAddr = "10.0.0.1:8080".parse().unwrap();
-        let ep2: SocketAddr = "10.0.0.2:8080".parse().unwrap();
+        let ep1_raw = Endpoint::from_v4([10, 0, 0, 1], 8080, 1);
+        let ep2_raw = Endpoint::from_v4([10, 0, 0, 2], 8080, 1);
+        let ep2 = (ep2_raw.ip, ep2_raw.port_be);
 
-        let discovery = Discovery::new_explicit(vec![
-            Endpoint::new("e1", ep1, 1),
-            Endpoint::new("e2", ep2, 1),
-        ]);
+        let discovery = Discovery::new_explicit(vec![ep1_raw, ep2_raw]);
         let timeouts = UpstreamTimeouts::tcp(Duration::from_millis(500), Duration::from_millis(10));
         let health_config = HealthConfig::passive_only(1, Duration::from_secs(10));
         let upstream = Arc::new(
@@ -409,7 +490,7 @@ mod tests {
         assert!(upstream.health().has_record(&ep2));
 
         // Prune retired endpoints
-        discovery.update_endpoints(vec![Endpoint::new("e1", ep1, 1)], 2);
+        discovery.update_endpoints(vec![ep1_raw], 2);
         upstream.prune_retired_endpoints();
         assert!(!upstream.health().has_record(&ep2));
     }

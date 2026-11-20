@@ -248,8 +248,8 @@ fn bench_discovery_arcswap_generation_soak() {
 
     let iters = 10_000;
     let initial_eps = vec![
-        Endpoint::new("svc.local", "10.0.0.1:8080".parse().unwrap(), 1),
-        Endpoint::new("svc.local", "10.0.0.2:8080".parse().unwrap(), 1),
+        Endpoint::from_v4([10, 0, 0, 1], 8080, 1),
+        Endpoint::from_v4([10, 0, 0, 2], 8080, 1),
     ];
 
     let discovery = Arc::new(Discovery::new_explicit(initial_eps));
@@ -258,8 +258,8 @@ fn bench_discovery_arcswap_generation_soak() {
     for generation in 1..=50 {
         let port = 8000 + (generation % 100) as u16;
         let eps = vec![
-            Endpoint::new("svc.local", format!("10.1.0.1:{port}").parse().unwrap(), 1),
-            Endpoint::new("svc.local", format!("10.1.0.2:{port}").parse().unwrap(), 1),
+            Endpoint::from_v4([10, 1, 0, 1], port, 1),
+            Endpoint::from_v4([10, 1, 0, 2], port, 1),
         ];
         discovery.update_endpoints(eps, generation as u64);
         let _ = discovery.current_endpoints();
@@ -272,8 +272,8 @@ fn bench_discovery_arcswap_generation_soak() {
     for generation in 1..=iters {
         let port = 8000 + (generation % 100) as u16;
         let eps = vec![
-            Endpoint::new("svc.local", format!("10.1.0.1:{port}").parse().unwrap(), 1),
-            Endpoint::new("svc.local", format!("10.1.0.2:{port}").parse().unwrap(), 1),
+            Endpoint::from_v4([10, 1, 0, 1], port, 1),
+            Endpoint::from_v4([10, 1, 0, 2], port, 1),
         ];
         discovery.update_endpoints(eps, generation as u64);
 

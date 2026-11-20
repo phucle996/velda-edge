@@ -1,80 +1,53 @@
-//! Request and connection context shared across the Velda data plane.
-//!
-//! Contexts carry state through the request lifecycle. They do not
-//! implement routing, plugin execution, upstream communication,
-//! protocol parsing, or transport handling.
-//!
-//! The context layer connects the L4 and L7 models:
+//! Flat Request Context & State (`velda_core::context`).
 //!
 //! ```text
-//!     L4 connection
-//!          |
-//!          v
-//!     RequestContext
-//!          |
-//!          +---- L4Request
-//!          |
-//!          +---- L7Request
-//!          |
-//!          +---- RequestState
+//! ┌─────────────────────────────────────────────────────────────────────────────────────────┐
+//! │                           FLAT REQUEST CONTEXT COMPOSITION                              │
+//! ├─────────────────────────────────────────────────────────────────────────────────────────┤
+//! │  RequestContext                                                                         │
+//! │    ├── l4: L4Request        (connection_id: u64, peer/local ip: u128 + port_be: u16)    │
+//! │    ├── l7: L7Request        (method, uri, headers, body)                                │
+//! │    └── state: RequestState  (request_id: u128, route_id: u16, upstream_id: u16,         │
+//! │                              upstream_ip: u128, upstream_port_be: u16,                  │
+//! │                              rejection: u8, upstream_attempts: u16, timestamps...)      │
+//! └─────────────────────────────────────────────────────────────────────────────────────────┘
 //! ```
-//!
-//! The actual processing is performed by higher-level crates such as
-//! `velda-ingress`, `velda-router`, `velda-plugin`, and `velda-upstream`.
 
 use crate::l4::request::L4Request;
 use crate::l7::request::L7Request;
-use crate::types::{ConnectionId, RequestId, RouteId, UpstreamId};
 
-/// Context associated with a network connection.
+/// Sentinel value indicating no route has been matched (`u16::MAX`).
+pub const UNMATCHED_ROUTE_ID: u16 = u16::MAX;
+
+/// Sentinel value indicating no upstream has been assigned (`u16::MAX`).
+pub const UNASSIGNED_UPSTREAM_ID: u16 = u16::MAX;
+
+/// Canonical 32-bit FNV-1a deterministic hash for compiling string names into `u32` IDs.
 ///
-/// A connection may contain multiple L7 requests, especially when
-/// HTTP keep-alive or HTTP/2 multiplexing is used.
-///
-/// Therefore, connection-level information must not be confused
-/// with request-level state.
-#[derive(Debug, Clone)]
-pub struct ConnectionContext {
-    /// L4 connection information.
-    pub connection: L4Request,
-}
-
-impl ConnectionContext {
-    /// Creates a new connection context.
-    #[inline]
-    pub fn new(connection: L4Request) -> Self {
-        Self { connection }
+/// Offset basis: `0x811c9dc5`, Prime: `0x01000193`.
+#[inline]
+pub const fn fnv1a_hash_32(name: &str) -> u32 {
+    let bytes = name.as_bytes();
+    let mut hash: u32 = 0x811c_9dc5;
+    let mut i = 0;
+    while i < bytes.len() {
+        hash ^= bytes[i] as u32;
+        hash = hash.wrapping_mul(0x0100_0193);
+        i += 1;
     }
-
-    /// Returns the unique connection identifier.
-    #[inline]
-    pub fn id(&self) -> ConnectionId {
-        self.connection.connection_id
-    }
-
-    /// Returns the client IP address.
-    #[inline]
-    pub fn client_ip(&self) -> std::net::IpAddr {
-        self.connection.client_ip()
-    }
+    hash
 }
 
 /// Context associated with a single request.
 ///
 /// `RequestContext` is the main object passed through the Velda
 /// request lifecycle and plugin hooks.
-///
-/// The L4 context is retained because higher-level policy may still
-/// need transport information such as the client address.
 #[derive(Debug, Clone)]
 pub struct RequestContext {
     /// L4 connection information.
-    pub l4: ConnectionContext,
+    pub l4: L4Request,
 
     /// L7 HTTP request.
-    ///
-    /// This is present when the connection has been decoded into
-    /// an HTTP request.
     pub l7: L7Request,
 
     /// Mutable state accumulated during request processing.
@@ -84,71 +57,22 @@ pub struct RequestContext {
 impl RequestContext {
     /// Creates a new request context.
     #[inline]
-    pub fn new(l4: ConnectionContext, l7: L7Request, request_id: RequestId) -> Self {
+    pub fn new(l4: L4Request, l7: L7Request, request_id: u128) -> Self {
         Self {
             l4,
             l7,
             state: RequestState::new(request_id),
         }
     }
-
-    /// Returns the request identifier.
-    #[inline]
-    pub fn request_id(&self) -> RequestId {
-        self.state.request_id
-    }
-
-    /// Returns the client IP address.
-    #[inline]
-    pub fn client_ip(&self) -> std::net::IpAddr {
-        self.l4.client_ip()
-    }
-
-    /// Returns the selected route, if routing has already completed.
-    #[inline]
-    pub fn route(&self) -> Option<RouteId> {
-        self.state.route
-    }
-
-    /// Returns the selected upstream, if one has already been selected.
-    #[inline]
-    pub fn upstream(&self) -> Option<UpstreamId> {
-        self.state.upstream
-    }
 }
 
 /// Mutable state accumulated throughout the request lifecycle.
 ///
-/// `RequestState` contains information produced by one phase and
-/// consumed by later phases.
-///
-/// Example:
-///
-/// ```text
-///     PRE_ROUTE
-///         │
-///         ▼
-///     ROUTE
-///         │
-///         ├── route = Some(...)
-///         │
-///         ▼
-///     PRE_UPSTREAM
-///         │
-///         ├── upstream = Some(...)
-///         │
-///         ▼
-///     UPSTREAM
-/// ```
-///
-/// Keep this structure explicit and strongly typed. Avoid using
-/// `HashMap<String, Box<dyn Any>>` as a generic plugin state store.
-///
 /// Compact state layout targeting a single 64-byte L1 Data Cache line (`size_of <= 64`).
-#[derive(Debug, Clone, PartialEq, Eq, Default)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct RequestState {
-    /// Unique identifier for this request.
-    pub request_id: RequestId,
+    /// Unique 128-bit W3C TraceContext identifier for this request.
+    pub request_id: u128,
 
     /// Ingress arrival timestamp in nanoseconds from hardware clock.
     pub ingress_time_nanos: u64,
@@ -156,11 +80,11 @@ pub struct RequestState {
     /// Client IP address encoded as RFC 4291 `u128` integer (`0` if unset).
     pub client_ip: u128,
 
-    /// Route selected by the router.
-    pub route: Option<RouteId>,
+    /// Route selected by the router (`UNMATCHED_ROUTE_ID` if unmatched).
+    pub route_id: u16,
 
-    /// Upstream selected for the request.
-    pub upstream: Option<UpstreamId>,
+    /// Upstream selected for the request (`UNASSIGNED_UPSTREAM_ID` if unassigned).
+    pub upstream_id: u16,
 
     /// Whether routing has completed.
     pub routed: bool,
@@ -172,17 +96,24 @@ pub struct RequestState {
     pub upstream_completed: bool,
 }
 
+impl Default for RequestState {
+    #[inline]
+    fn default() -> Self {
+        Self::new(0)
+    }
+}
+
 impl RequestState {
     /// Creates a new request state.
     #[inline]
-    pub fn new(request_id: RequestId) -> Self {
-        let ingress_time_nanos = request_id.timestamp_nanos();
+    pub const fn new(request_id: u128) -> Self {
+        let ingress_time_nanos = crate::request_id::timestamp_nanos(request_id);
         Self {
             request_id,
             ingress_time_nanos,
             client_ip: 0,
-            route: None,
-            upstream: None,
+            route_id: UNMATCHED_ROUTE_ID,
+            upstream_id: UNASSIGNED_UPSTREAM_ID,
             routed: false,
             upstream_started: false,
             upstream_completed: false,
@@ -204,15 +135,15 @@ impl RequestState {
 
     /// Stores the route selected by the router.
     #[inline]
-    pub fn set_route(&mut self, route: RouteId) {
-        self.route = Some(route);
+    pub fn set_route(&mut self, route_id: u16) {
+        self.route_id = route_id;
         self.routed = true;
     }
 
     /// Stores the upstream selected for the request.
     #[inline]
-    pub fn set_upstream(&mut self, upstream: UpstreamId) {
-        self.upstream = Some(upstream);
+    pub fn set_upstream(&mut self, upstream_id: u16) {
+        self.upstream_id = upstream_id;
     }
 
     /// Marks the upstream request as started.

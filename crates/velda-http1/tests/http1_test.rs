@@ -644,7 +644,15 @@ fn test_enrich_headers_overwrites_forwarded_headers() {
         http::HeaderValue::from_static("fake-proto"),
     );
 
-    velda_http1::enrich_headers(&mut headers, &uri, peer, local, false);
+    velda_http1::enrich_headers(
+        &mut headers,
+        &uri,
+        velda_core::lut::ip::v4_to_u128(0x0102_0304),
+        velda_core::lut::ip::v4_to_u128(0x0A00_0001),
+        80u16.to_be(),
+        false,
+    );
+    let _ = (peer, local);
 
     assert_eq!(headers.get("x-forwarded-for").unwrap(), "9.9.9.9, 1.2.3.4");
     assert_eq!(headers.get("x-real-ip").unwrap(), "1.2.3.4");

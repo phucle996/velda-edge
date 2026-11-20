@@ -8,7 +8,7 @@
 //! ```text
 //! ╔══════════════════════════════════════════════════════════════════════════════════════════════════════════════════╗
 //! ║                          VELDA EDGE — GLOBAL SOCKET MANAGER & PORT ISOLATION MECHANISM                           ║
-//! ║                                  (crates/velda-core/src/socket.rs: GlobalSocketManager)                          ║
+//! ║                                  (crates/velda-sock/src/socket.rs: GlobalSocketManager)                          ║
 //! ╚══════════════════════════════════════════════════════════════════════════════════════════════════════════════════╝
 //!
 //!                                          ┌───────────────────────────────────┐
@@ -18,7 +18,7 @@
 //!                                                            │
 //!                                                            ▼
 //!                              ┌───────────────────────────────────────────────────────────┐
-//!                              │       GlobalSocketManager (crates/velda-core)             │
+//!                              │       GlobalSocketManager (crates/velda-sock)             │
 //!                              │   RwLock<Vec<SocketClaim>>: Process-Wide Conflict Registry│
 //!                              └─────────────┬───────────────────────────────┬─────────────┘
 //!                                            │                               │
@@ -40,50 +40,13 @@
 //!                       └─────────────┬─────────────┘                └─────────────┬─────────────┘
 //!                                     │                                            │
 //!                   Handoff Ownership to IngressEngine              Handoff Ownership to BackgroundPlugin
-//!                                     │                                            │
-//!                                     ▼                                            ▼
-//! ╔══════════════════════════════════════════════════════════╗ ╔══════════════════════════════════════════════════════════╗
-//! ║        FRONTLINE TRAFFIC CONE (Top-Cone Ingress)         ║ ║       SHADOW LOGISTICS RUNNER (Background Daemon)    ║
-//! ║        Owner: velda-ingress + velda-sock / velda-xdp     ║ ║       Owner: velda-plugin (health_probe)             ║
-//! ╠══════════════════════════════════════════════════════════╣ ╠══════════════════════════════════════════════════════════╣
-//! ║                                                          ║ ║                                                          ║
-//! ║  • Multi-Shard Worker Distribution (run_ingress_shard)   ║ ║  • Dedicated Background Thread: velda-shadow-0           ║
-//! ║  • 1:1 Core Pinning:                                     ║ ║  • Linux Scheduling Policy: SCHED_IDLE                   ║
-//! ║    ├── Core 0: velda-worker-0 (SCHED_NORMAL, Priority 1) ║ ║    └── Yields CPU when frontline worker is runnable    ║
-//! ║    └── Core 1: velda-worker-1 (SCHED_NORMAL, Priority 1) ║ ║                                                          ║
-//! ║                                                          ║ ║  [ Sequential Inline Accept Loop — Zero Tokio Spawn ]    ║
-//! ║  [ Hot-Path Request Forwarding Pipeline ]                ║ ║  loop {                                                  ║
-//! ║  Downstream Client Request (:8080)                       ║ ║      select! {                                           ║
-//! ║        │                                                 ║ ║          biased;                                         ║
-//! ║        ▼                                                 ║ ║          _ = shutdown.changed() => break,                ║
-//! ║  ┌───────────┐     ┌──────────┐     ┌────────────────┐   ║ ║          conn = listener.accept() => {                   ║
-//! ║  │   Decode  │ ──► │  Router  │ ──► │ Upstream (8081)│   ║ ║              tokio::time::timeout(500ms, async {         ║
-//! ║  └───────────┘     └──────────┘     └────────────────┘   ║ ║                  let mut buf = [0u8; 512]; // Stack      ║
-//! ║                                                          ║ ║                  let n = stream.read(&mut buf).await;    ║
-//! ║  Invariants:                                             ║ ║                  let resp = (self.eval_fn)(&buf[..n]);   ║
-//! ║  - Zero JSON Parsing, Zero Disk I/O, Zero Dynamic Sniff  ║ ║                  stream.write_all(resp).await; // L1D    ║
-//! ║  - Completely UNAWARE of and UNTOUCHED by Port 9091!     ║ ║              });                                         ║
-//! ║                                                          ║ ║          }                                               ║
-//! ║                                                          ║ ║      }                                                   ║
-//! ║                                                          ║ ║  }                                                       ║
-//! ╚══════════════════════════════════════════════════════════╝ ╚══════════════════════════════════════════════════════════╝
-//!                                     ▲                                            ▲
-//!                                     │                                            │
-//!                                     └───────────────────┬────────────────────────┘
-//!                                                         │
-//!                                     ┌───────────────────┴───────────────────┐
-//!                                     │      CLEAN LIFECYCLE DEALLOCATION     │
-//!                                     │          (SIGTERM / Shutdown)         │
-//!                                     ├───────────────────────────────────────┤
-//!                                     │ 1. Broadcast shutdown via watch::rx   │
-//!                                     │ 2. Shadow Worker closes listener      │
-//!                                     │ 3. Invoke release_shadow_tcp(id)      │
-//!                                     │    -> Returns clean port to Kernel    │
-//!                                     └───────────────────────────────────────┘
 //! ```
 
-use std::net::SocketAddr;
 use std::sync::{OnceLock, RwLock};
+
+use velda_core::lut::ip::is_v4_u128;
+
+use crate::connect::{format_raw_addr, raw_to_socket2_addr, socket_addr_to_raw};
 
 /// Operational role of a listening socket opened on the host.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
@@ -129,8 +92,8 @@ impl std::fmt::Display for SocketProtocol {
 pub struct SocketClaim {
     /// Transport protocol (TCP, UDP, UDS).
     pub protocol: SocketProtocol,
-    /// Bound socket address (for TCP/UDP).
-    pub address: Option<SocketAddr>,
+    /// Bound integer address `(ip: u128, port_be: u16)` (for TCP/UDP).
+    pub addr: Option<(u128, u16)>,
     /// Path for UDS socket (for Unix Domain Sockets).
     pub path: Option<String>,
     /// Operational role of this socket.
@@ -213,14 +176,15 @@ impl SocketManager {
     /// Registers a Data Plane Traffic Ingress socket claim.
     pub fn register_traffic_socket(
         &self,
-        address: SocketAddr,
+        ip: u128,
+        port_be: u16,
         protocol: SocketProtocol,
         listener_id: impl Into<String>,
     ) -> Result<(), SocketError> {
         let listener_id = listener_id.into();
         let claim = SocketClaim {
             protocol,
-            address: Some(address),
+            addr: Some((ip, port_be)),
             path: None,
             role: SocketRole::Traffic,
             owner_id: listener_id,
@@ -236,7 +200,7 @@ impl SocketManager {
     ) -> Result<(), SocketError> {
         let claim = SocketClaim {
             protocol: SocketProtocol::Uds,
-            address: None,
+            addr: None,
             path: Some(path.into()),
             role: SocketRole::Management,
             owner_id: management_id.into(),
@@ -249,7 +213,8 @@ impl SocketManager {
     /// Returns the standard library [`std::net::TcpListener`] ready for non-blocking wrapping.
     pub fn acquire_shadow_tcp(
         &self,
-        address: SocketAddr,
+        ip: u128,
+        port_be: u16,
         shadow_id: impl Into<String>,
     ) -> Result<std::net::TcpListener, SocketError> {
         let shadow_id = shadow_id.into();
@@ -258,7 +223,7 @@ impl SocketManager {
         // Check for conflicts with existing claims
         for existing in claims.iter() {
             if existing.protocol == SocketProtocol::Tcp
-                && existing.address == Some(address)
+                && existing.addr == Some((ip, port_be))
                 && existing.owner_id != shadow_id
             {
                 return Err(SocketError::Conflict {
@@ -266,16 +231,16 @@ impl SocketManager {
                     existing_role: existing.role,
                     conflicting_owner: shadow_id,
                     conflicting_role: SocketRole::Shadow,
-                    binding: address.to_string(),
+                    binding: format_raw_addr(ip, port_be),
                 });
             }
         }
 
         // Perform atomic OS bind with SO_REUSEADDR and SO_REUSEPORT
-        let domain = if address.is_ipv6() {
-            socket2::Domain::IPV6
-        } else {
+        let domain = if is_v4_u128(ip) {
             socket2::Domain::IPV4
+        } else {
+            socket2::Domain::IPV6
         };
         let socket =
             socket2::Socket::new(domain, socket2::Type::STREAM, None).map_err(SocketError::Io)?;
@@ -292,21 +257,22 @@ impl SocketManager {
                 std::mem::size_of_val(&opt) as libc::socklen_t,
             );
         }
-        socket.bind(&address.into()).map_err(SocketError::Io)?;
+        let s2_addr = raw_to_socket2_addr(ip, port_be, if is_v4_u128(ip) { 0 } else { 1 });
+        socket.bind(&s2_addr).map_err(SocketError::Io)?;
         socket.listen(1024).map_err(SocketError::Io)?;
         let listener: std::net::TcpListener = socket.into();
 
         // Record or update claim
         if let Some(pos) = claims.iter().position(|c| {
             c.protocol == SocketProtocol::Tcp
-                && c.address == Some(address)
+                && c.addr == Some((ip, port_be))
                 && c.owner_id == shadow_id
         }) {
             claims[pos].role = SocketRole::Shadow;
         } else {
             claims.push(SocketClaim {
                 protocol: SocketProtocol::Tcp,
-                address: Some(address),
+                addr: Some((ip, port_be)),
                 path: None,
                 role: SocketRole::Shadow,
                 owner_id: shadow_id,
@@ -330,17 +296,18 @@ impl SocketManager {
     /// Binds an OS UDP socket for a shadow logistics service, verifying against port collisions.
     pub fn acquire_shadow_udp(
         &self,
-        address: SocketAddr,
+        ip: u128,
+        port_be: u16,
         shadow_id: impl Into<String>,
     ) -> Result<std::net::UdpSocket, SocketError> {
         let shadow_id = shadow_id.into();
         let mut claims = self.claims.write().unwrap();
 
         // Check for conflicts with existing UDP claims if explicit non-zero port
-        if address.port() != 0 {
+        if port_be != 0 {
             for existing in claims.iter() {
                 if existing.protocol == SocketProtocol::Udp
-                    && existing.address == Some(address)
+                    && existing.addr == Some((ip, port_be))
                     && existing.owner_id != shadow_id
                 {
                     return Err(SocketError::Conflict {
@@ -348,22 +315,22 @@ impl SocketManager {
                         existing_role: existing.role,
                         conflicting_owner: shadow_id,
                         conflicting_role: SocketRole::Shadow,
-                        binding: address.to_string(),
+                        binding: format_raw_addr(ip, port_be),
                     });
                 }
             }
         }
 
         // Perform OS bind with SO_REUSEADDR and SO_REUSEPORT (if non-zero port)
-        let domain = if address.is_ipv6() {
-            socket2::Domain::IPV6
-        } else {
+        let domain = if is_v4_u128(ip) {
             socket2::Domain::IPV4
+        } else {
+            socket2::Domain::IPV6
         };
         let socket =
             socket2::Socket::new(domain, socket2::Type::DGRAM, None).map_err(SocketError::Io)?;
         socket.set_reuse_address(true).map_err(SocketError::Io)?;
-        if address.port() != 0 {
+        if port_be != 0 {
             #[cfg(all(unix, not(target_os = "solaris"), not(target_os = "illumos")))]
             unsafe {
                 use std::os::unix::io::AsRawFd;
@@ -377,21 +344,25 @@ impl SocketManager {
                 );
             }
         }
-        socket.bind(&address.into()).map_err(SocketError::Io)?;
+        let s2_addr = raw_to_socket2_addr(ip, port_be, if is_v4_u128(ip) { 0 } else { 1 });
+        socket.bind(&s2_addr).map_err(SocketError::Io)?;
         let std_socket: std::net::UdpSocket = socket.into();
-        let actual_addr = std_socket.local_addr().unwrap_or(address);
+        let (actual_ip, actual_port_be) = std_socket
+            .local_addr()
+            .map(socket_addr_to_raw)
+            .unwrap_or((ip, port_be));
 
         // Record or update claim
         if let Some(pos) = claims.iter().position(|c| {
             c.protocol == SocketProtocol::Udp
-                && c.address == Some(actual_addr)
+                && c.addr == Some((actual_ip, actual_port_be))
                 && c.owner_id == shadow_id
         }) {
             claims[pos].role = SocketRole::Shadow;
         } else {
             claims.push(SocketClaim {
                 protocol: SocketProtocol::Udp,
-                address: Some(actual_addr),
+                addr: Some((actual_ip, actual_port_be)),
                 path: None,
                 role: SocketRole::Shadow,
                 owner_id: shadow_id,
@@ -420,9 +391,7 @@ impl SocketManager {
                 (SocketProtocol::Uds, SocketProtocol::Uds) => {
                     claim.path.is_some() && claim.path == existing.path
                 }
-                (p1, p2) if p1 == p2 => {
-                    claim.address.is_some() && claim.address == existing.address
-                }
+                (p1, p2) if p1 == p2 => claim.addr.is_some() && claim.addr == existing.addr,
                 _ => false,
             };
 
@@ -431,8 +400,8 @@ impl SocketManager {
                     continue;
                 }
                 let binding = claim
-                    .address
-                    .map(|a| a.to_string())
+                    .addr
+                    .map(|(ip, port_be)| format_raw_addr(ip, port_be))
                     .or_else(|| claim.path.clone())
                     .unwrap_or_else(|| "unknown".into());
 
@@ -450,13 +419,13 @@ impl SocketManager {
         Ok(())
     }
 
-    /// Checks if a socket address and protocol are already claimed.
-    pub fn is_claimed(&self, address: SocketAddr, protocol: SocketProtocol) -> bool {
+    /// Checks if a socket `(ip, port_be)` and protocol are already claimed.
+    pub fn is_claimed(&self, ip: u128, port_be: u16, protocol: SocketProtocol) -> bool {
         self.claims
             .read()
             .unwrap()
             .iter()
-            .any(|c| c.protocol == protocol && c.address == Some(address))
+            .any(|c| c.protocol == protocol && c.addr == Some((ip, port_be)))
     }
 
     /// Returns a point-in-time snapshot of all currently active socket claims.
@@ -472,18 +441,19 @@ mod tests {
     #[test]
     fn test_socket_manager_traffic_and_shadow() {
         let mgr = SocketManager::new();
-        let addr1: SocketAddr = "127.0.0.1:18080".parse().unwrap();
-        let addr2: SocketAddr = "127.0.0.1:19090".parse().unwrap();
+        let loopback = velda_core::lut::ip::v4_to_u128(0x7F00_0001);
+        let port1_be = 18080u16.to_be();
+        let port2_be = 19090u16.to_be();
 
-        mgr.register_traffic_socket(addr1, SocketProtocol::Tcp, "listener-http")
+        mgr.register_traffic_socket(loopback, port1_be, SocketProtocol::Tcp, "listener-http")
             .unwrap();
 
         // Conflict when shadow tries to claim traffic port
-        let res = mgr.acquire_shadow_tcp(addr1, "prometheus_exporter");
+        let res = mgr.acquire_shadow_tcp(loopback, port1_be, "prometheus_exporter");
         assert!(res.is_err());
 
         // Shadow successfully acquires distinct port
-        let listener = mgr.acquire_shadow_tcp(addr2, "prometheus_exporter");
+        let listener = mgr.acquire_shadow_tcp(loopback, port2_be, "prometheus_exporter");
         assert!(listener.is_ok());
 
         // Release works

@@ -1,11 +1,15 @@
 //! High-performance UDP socket wrapper with atomic byte counting and socket options.
 
-use std::net::SocketAddr;
 use std::sync::atomic::{AtomicU64, Ordering};
 use tokio::net::UdpSocket as TokioUdpSocket;
+use velda_core::lut::ip::is_v4_u128;
 
 use super::config::UdpSocketConfig;
 use super::datagram::Datagram;
+use crate::connect::{
+    format_raw_addr, raw_to_sockaddr_storage_u128, raw_to_socket_addr, sockaddr_storage_to_raw,
+    socket_addr_to_raw,
+};
 use crate::error::{Result, SockError};
 
 /// Cache-line aligned 64-bit atomic counter to prevent false sharing under high concurrency.
@@ -26,7 +30,8 @@ impl CacheAlignedAtomicU64 {
 #[derive(Debug)]
 pub struct UdpSocket {
     socket: TokioUdpSocket,
-    local_addr: SocketAddr,
+    pub local_ip: u128,
+    pub local_port_be: u16,
     config: UdpSocketConfig,
     pub worker_id: usize,
     bytes_received: CacheAlignedAtomicU64,
@@ -34,9 +39,9 @@ pub struct UdpSocket {
 }
 
 impl UdpSocket {
-    /// Binds a new UDP socket to the given address with the specified configuration.
-    pub fn bind(addr: SocketAddr, config: UdpSocketConfig) -> Result<Self> {
-        let domain = if addr.is_ipv4() {
+    /// Binds a new UDP socket to `(ip, port_be)` with the specified configuration.
+    pub fn bind(ip: u128, port_be: u16, config: UdpSocketConfig) -> Result<Self> {
+        let domain = if is_v4_u128(ip) {
             socket2::Domain::IPV4
         } else {
             socket2::Domain::IPV6
@@ -75,7 +80,7 @@ impl UdpSocket {
             use std::os::fd::AsRawFd;
             let fd = sock.as_raw_fd();
             let val: libc::c_int = 1;
-            let (level, optname) = if addr.is_ipv4() {
+            let (level, optname) = if is_v4_u128(ip) {
                 (libc::IPPROTO_IP, libc::IP_FREEBIND)
             } else {
                 (libc::IPPROTO_IPV6, libc::IPV6_FREEBIND)
@@ -178,20 +183,31 @@ impl UdpSocket {
 
         sock.set_nonblocking(true).map_err(SockError::Io)?;
 
-        sock.bind(&addr.into())
-            .map_err(|e| SockError::Bind { addr, source: e })?;
+        let addr = raw_to_socket_addr(ip, port_be);
+        sock.bind(&addr.into()).map_err(|e| SockError::Bind {
+            ip,
+            port_be,
+            source: e,
+        })?;
 
         let std_socket: std::net::UdpSocket = sock.into();
-        let socket = TokioUdpSocket::from_std(std_socket)
-            .map_err(|e| SockError::Bind { addr, source: e })?;
+        let socket = TokioUdpSocket::from_std(std_socket).map_err(|e| SockError::Bind {
+            ip,
+            port_be,
+            source: e,
+        })?;
 
-        let local_addr = socket
-            .local_addr()
-            .map_err(|e| SockError::Bind { addr, source: e })?;
+        let local_addr = socket.local_addr().map_err(|e| SockError::Bind {
+            ip,
+            port_be,
+            source: e,
+        })?;
+        let (local_ip, local_port_be) = socket_addr_to_raw(local_addr);
 
         Ok(Self {
             socket,
-            local_addr,
+            local_ip,
+            local_port_be,
             config,
             worker_id: 0,
             bytes_received: CacheAlignedAtomicU64::new(0),
@@ -200,27 +216,32 @@ impl UdpSocket {
     }
 
     /// Binds a single UDP socket shard affined to a specific worker/CPU core.
-    pub fn bind_shard(addr: SocketAddr, config: UdpSocketConfig, worker_id: usize) -> Result<Self> {
-        let mut socket = Self::bind(addr, config.clone())?;
+    pub fn bind_shard(
+        ip: u128,
+        port_be: u16,
+        config: UdpSocketConfig,
+        worker_id: usize,
+    ) -> Result<Self> {
+        let mut socket = Self::bind(ip, port_be, config.clone())?;
         socket.worker_id = worker_id;
         // See `TcpListener::bind_shard`: hardware RSS authority is applied only when proven;
         // otherwise the kernel software hash owns flow distribution.
-        if !addr.ip().is_loopback()
-            && let Some(core) = velda_core::hardware::ingress_steering_cpu(worker_id)
-        {
+        let is_loopback = ip == velda_core::lut::ip::v4_to_u128(0x7F00_0001) || ip == 1;
+        if !is_loopback && let Some(core) = velda_core::hardware::ingress_steering_cpu(worker_id) {
             socket.apply_incoming_cpu(core);
         }
         Ok(socket)
     }
 
-    /// Binds multiple UDP socket shards to the specified address with `SO_REUSEPORT`.
+    /// Binds multiple UDP socket shards to `(ip, port_be)` with `SO_REUSEPORT`.
     ///
     /// If `config.concurrency_shards > 1` and `config.reuseport` is enabled, binds up to
     /// `config.concurrency_shards` sockets to the same port.
-    /// The first socket determines the exact assigned address (critical when `addr.port() == 0`).
-    pub fn bind_shards(addr: SocketAddr, config: UdpSocketConfig) -> Result<Vec<Self>> {
-        let first = Self::bind_shard(addr, config.clone(), 0)?;
-        let actual_addr = first.local_addr();
+    /// The first socket determines the exact assigned address (critical when `port_be == 0`).
+    pub fn bind_shards(ip: u128, port_be: u16, config: UdpSocketConfig) -> Result<Vec<Self>> {
+        let first = Self::bind_shard(ip, port_be, config.clone(), 0)?;
+        let actual_ip = first.local_ip;
+        let actual_port_be = first.local_port_be;
         let target_shards = if config.reuseport {
             config.concurrency_shards.max(1)
         } else {
@@ -235,12 +256,12 @@ impl UdpSocket {
         shards.push(first);
 
         for shard_idx in 1..target_shards {
-            match Self::bind_shard(actual_addr, config.clone(), shard_idx) {
+            match Self::bind_shard(actual_ip, actual_port_be, config.clone(), shard_idx) {
                 Ok(shard) => shards.push(shard),
                 Err(err) => {
                     tracing::warn!(
                         shard = shard_idx,
-                        listen_addr = %actual_addr,
+                        listen_addr = %format_raw_addr(actual_ip, actual_port_be),
                         error = %err,
                         "Failed to bind SO_REUSEPORT UDP socket shard; continuing with existing shards"
                     );
@@ -289,20 +310,16 @@ impl UdpSocket {
     /// Wraps an existing Tokio [`TokioUdpSocket`] with the given configuration.
     pub fn from_tokio(socket: TokioUdpSocket, config: UdpSocketConfig) -> Result<Self> {
         let local_addr = socket.local_addr().map_err(SockError::Io)?;
+        let (local_ip, local_port_be) = socket_addr_to_raw(local_addr);
         Ok(Self {
             socket,
-            local_addr,
+            local_ip,
+            local_port_be,
             config,
             worker_id: 0,
             bytes_received: CacheAlignedAtomicU64::new(0),
             bytes_sent: CacheAlignedAtomicU64::new(0),
         })
-    }
-
-    /// Returns the local address this socket is bound to.
-    #[inline]
-    pub const fn local_addr(&self) -> SocketAddr {
-        self.local_addr
     }
 
     /// Returns the configuration applied to this socket.
@@ -324,24 +341,21 @@ impl UdpSocket {
     }
 
     /// Receives a datagram into the provided buffer, tracking the received byte count.
-    pub async fn recv_from(&self, buf: &mut [u8]) -> Result<(usize, SocketAddr)> {
+    pub async fn recv_from(&self, buf: &mut [u8]) -> Result<(usize, u128, u16)> {
         let (n, peer) = self.socket.recv_from(buf).await.map_err(SockError::Io)?;
         self.bytes_received.0.fetch_add(n as u64, Ordering::Relaxed);
-        Ok((n, peer))
+        let (peer_ip, peer_port_be) = socket_addr_to_raw(peer);
+        Ok((n, peer_ip, peer_port_be))
     }
 
     /// Attempts non-blocking datagram receipt via `try_recv_from`.
-    ///
-    /// Returns:
-    /// - `Some(Ok((bytes, peer)))` on immediate non-blocking kernel delivery (zero epoll overhead).
-    /// - `Some(Err(e))` on permanent I/O error.
-    /// - `None` if the socket ingress buffer is empty (`WouldBlock`), requiring asynchronous waiting.
     #[inline]
-    pub fn try_recv_from(&self, buf: &mut [u8]) -> Option<Result<(usize, SocketAddr)>> {
+    pub fn try_recv_from(&self, buf: &mut [u8]) -> Option<Result<(usize, u128, u16)>> {
         match self.socket.try_recv_from(buf) {
             Ok((n, peer)) => {
                 self.bytes_received.0.fetch_add(n as u64, Ordering::Relaxed);
-                Some(Ok((n, peer)))
+                let (peer_ip, peer_port_be) = socket_addr_to_raw(peer);
+                Some(Ok((n, peer_ip, peer_port_be)))
             }
             Err(ref e) if e.kind() == std::io::ErrorKind::WouldBlock => None,
             Err(e) => Some(Err(SockError::Io(e))),
@@ -362,19 +376,26 @@ impl UdpSocket {
     /// Receives an entire datagram dynamically allocated up to `max_size`.
     pub async fn recv_datagram(&self, max_size: usize) -> Result<Datagram> {
         let mut buf = vec![0u8; max_size];
-        let (n, peer) = self.recv_from(&mut buf).await?;
+        let (n, peer_ip, peer_port_be) = self.recv_from(&mut buf).await?;
         buf.truncate(n);
-        Ok(Datagram::new(peer, self.local_addr, buf))
+        Ok(Datagram::new(
+            peer_ip,
+            peer_port_be,
+            self.local_ip,
+            self.local_port_be,
+            buf,
+        ))
     }
 
     /// Attempts non-blocking datagram transmission via `try_send_to`.
-    ///
-    /// Returns:
-    /// - `Some(Ok(bytes))` on immediate non-blocking kernel delivery (zero epoll overhead).
-    /// - `Some(Err(e))` on permanent I/O error.
-    /// - `None` if the socket egress buffer is full (`WouldBlock`), requiring asynchronous waiting.
     #[inline]
-    pub fn try_send_to(&self, buf: &[u8], target: SocketAddr) -> Option<Result<usize>> {
+    pub fn try_send_to(
+        &self,
+        buf: &[u8],
+        target_ip: u128,
+        target_port_be: u16,
+    ) -> Option<Result<usize>> {
+        let target = raw_to_socket_addr(target_ip, target_port_be);
         match self.socket.try_send_to(buf, target) {
             Ok(n) => {
                 self.bytes_sent.0.fetch_add(n as u64, Ordering::Relaxed);
@@ -385,11 +406,12 @@ impl UdpSocket {
         }
     }
 
-    /// Sends a datagram buffer to the specified remote address, tracking the sent byte count.
-    pub async fn send_to(&self, buf: &[u8], target: SocketAddr) -> Result<usize> {
-        if let Some(res) = self.try_send_to(buf, target) {
+    /// Sends a datagram buffer to `(target_ip, target_port_be)`, tracking the sent byte count.
+    pub async fn send_to(&self, buf: &[u8], target_ip: u128, target_port_be: u16) -> Result<usize> {
+        if let Some(res) = self.try_send_to(buf, target_ip, target_port_be) {
             return res;
         }
+        let target = raw_to_socket_addr(target_ip, target_port_be);
         let n = self
             .socket
             .send_to(buf, target)
@@ -400,24 +422,23 @@ impl UdpSocket {
     }
 
     /// Attempts non-blocking GSO datagram transmission via Linux kernel `UDP_SEGMENT` cmsg.
-    ///
-    /// If `segment_size == 0` or unsupported on host OS, degrades gracefully to standard datagram send.
     #[inline]
     pub fn try_send_gso_to(
         &self,
         buf: &[u8],
         segment_size: u16,
-        target: SocketAddr,
+        target_ip: u128,
+        target_port_be: u16,
     ) -> Option<Result<usize>> {
         #[cfg(target_os = "linux")]
         {
             if segment_size == 0 {
-                return self.try_send_to(buf, target);
+                return self.try_send_to(buf, target_ip, target_port_be);
             }
 
             use std::os::fd::AsRawFd;
             let fd = self.socket.as_raw_fd();
-            let sock_addr = socket2::SockAddr::from(target);
+            let (mut storage, addr_len) = raw_to_sockaddr_storage_u128(target_ip, target_port_be);
 
             let mut iov = libc::iovec {
                 iov_base: buf.as_ptr() as *mut libc::c_void,
@@ -426,8 +447,8 @@ impl UdpSocket {
 
             let mut cmsg_buf = [0u8; 64];
             let mut msg = unsafe { std::mem::zeroed::<libc::msghdr>() };
-            msg.msg_name = sock_addr.as_ptr() as *mut libc::c_void;
-            msg.msg_namelen = sock_addr.len();
+            msg.msg_name = &mut storage as *mut _ as *mut libc::c_void;
+            msg.msg_namelen = addr_len;
             msg.msg_iov = &mut iov;
             msg.msg_iovlen = 1;
             msg.msg_control = cmsg_buf.as_mut_ptr() as *mut libc::c_void;
@@ -463,7 +484,7 @@ impl UdpSocket {
         #[cfg(not(target_os = "linux"))]
         {
             let _ = segment_size;
-            self.try_send_to(buf, target)
+            self.try_send_to(buf, target_ip, target_port_be)
         }
     }
 
@@ -472,14 +493,15 @@ impl UdpSocket {
         &self,
         buf: &[u8],
         segment_size: u16,
-        target: SocketAddr,
+        target_ip: u128,
+        target_port_be: u16,
     ) -> Result<usize> {
-        if let Some(res) = self.try_send_gso_to(buf, segment_size, target) {
+        if let Some(res) = self.try_send_gso_to(buf, segment_size, target_ip, target_port_be) {
             return res;
         }
         loop {
             self.socket.writable().await.map_err(SockError::Io)?;
-            if let Some(res) = self.try_send_gso_to(buf, segment_size, target) {
+            if let Some(res) = self.try_send_gso_to(buf, segment_size, target_ip, target_port_be) {
                 return res;
             }
         }
@@ -487,20 +509,20 @@ impl UdpSocket {
 
     /// Sends a [`Datagram`] to its destination peer, tracking the sent byte count.
     pub async fn send_datagram(&self, datagram: &Datagram) -> Result<usize> {
-        self.send_to(datagram.data(), datagram.peer()).await
+        self.send_to(datagram.data(), datagram.peer_ip, datagram.peer_port_be)
+            .await
     }
 
     /// Sends a batch of outgoing UDP datagrams using `sendmmsg` (Linux) for minimal syscall overhead.
     ///
-    /// Each entry is `(payload, target)`. Falls back to per-packet `try_send_to` on non-Linux
-    /// or if `sendmmsg` is unavailable. Stack-allocated buffers eliminate heap allocation.
+    /// Each entry is `(payload, target_ip, target_port_be)`.
     #[cfg(target_os = "linux")]
-    pub fn try_send_batch(&self, packets: &[(&[u8], SocketAddr)]) -> usize {
+    pub fn try_send_batch(&self, packets: &[(&[u8], u128, u16)]) -> usize {
         if packets.is_empty() {
             return 0;
         }
         if packets.len() == 1 {
-            return match self.try_send_to(packets[0].0, packets[0].1) {
+            return match self.try_send_to(packets[0].0, packets[0].1, packets[0].2) {
                 Some(Ok(_)) => 1,
                 _ => 0,
             };
@@ -510,8 +532,7 @@ impl UdpSocket {
         let fd = self.socket.as_raw_fd();
         let batch_len = packets.len().min(64); // kernel caps at UIO_MAXIOV
 
-        let mut sock_addrs: [std::mem::MaybeUninit<socket2::SockAddr>; 64] =
-            [const { std::mem::MaybeUninit::uninit() }; 64];
+        let mut storages: [libc::sockaddr_storage; 64] = unsafe { std::mem::zeroed() };
         let mut iovecs = [libc::iovec {
             iov_base: std::ptr::null_mut(),
             iov_len: 0,
@@ -519,13 +540,13 @@ impl UdpSocket {
         let mut msgs = unsafe { std::mem::zeroed::<[libc::mmsghdr; 64]>() };
 
         for i in 0..batch_len {
-            sock_addrs[i].write(socket2::SockAddr::from(packets[i].1));
+            let (storage, addr_len) = raw_to_sockaddr_storage_u128(packets[i].1, packets[i].2);
+            storages[i] = storage;
             iovecs[i].iov_base = packets[i].0.as_ptr() as *mut libc::c_void;
             iovecs[i].iov_len = packets[i].0.len();
 
-            let sa = unsafe { sock_addrs[i].assume_init_ref() };
-            msgs[i].msg_hdr.msg_name = sa.as_ptr() as *mut libc::c_void;
-            msgs[i].msg_hdr.msg_namelen = sa.len();
+            msgs[i].msg_hdr.msg_name = &mut storages[i] as *mut _ as *mut libc::c_void;
+            msgs[i].msg_hdr.msg_namelen = addr_len;
             msgs[i].msg_hdr.msg_iov = &mut iovecs[i];
             msgs[i].msg_hdr.msg_iovlen = 1;
         }
@@ -544,10 +565,10 @@ impl UdpSocket {
 
     /// Fallback for non-Linux platforms sending sequentially.
     #[cfg(not(target_os = "linux"))]
-    pub fn try_send_batch(&self, packets: &[(&[u8], SocketAddr)]) -> usize {
+    pub fn try_send_batch(&self, packets: &[(&[u8], u128, u16)]) -> usize {
         let mut sent = 0;
-        for (buf, target) in packets {
-            if let Some(Ok(_)) = self.try_send_to(buf, *target) {
+        for &(buf, ip, port_be) in packets {
+            if let Some(Ok(_)) = self.try_send_to(buf, ip, port_be) {
                 sent += 1;
             } else {
                 break;
@@ -557,14 +578,11 @@ impl UdpSocket {
     }
 
     /// Receives a batch of incoming UDP datagrams using `recvmmsg` (Linux) for minimal syscall overhead.
-    ///
-    /// Reads up to `max_batch` packets (capped at 32) into the provided buffers in a single system call.
-    /// Stack-allocated structures ensure zero heap allocations on the ingress hot path.
     #[cfg(target_os = "linux")]
     pub fn try_recv_batch(
         &self,
         buffers: &mut [[u8; 2048]],
-        out: &mut [(usize, SocketAddr)],
+        out: &mut [(usize, u128, u16)],
     ) -> usize {
         let max_batch = buffers.len().min(out.len()).min(32);
         if max_batch == 0 {
@@ -615,37 +633,17 @@ impl UdpSocket {
             let count = res_count as usize;
             let mut total_bytes = 0u64;
             for i in 0..count {
-                let sa = &sock_storage[i];
-                let addr = match sa.ss_family as libc::c_int {
-                    libc::AF_INET => {
-                        let sin = unsafe { &*(sa as *const _ as *const libc::sockaddr_in) };
-                        let ip = std::net::Ipv4Addr::from(u32::from_be(sin.sin_addr.s_addr));
-                        let port = u16::from_be(sin.sin_port);
-                        SocketAddr::V4(std::net::SocketAddrV4::new(ip, port))
-                    }
-                    libc::AF_INET6 => {
-                        let sin6 = unsafe { &*(sa as *const _ as *const libc::sockaddr_in6) };
-                        let ip = std::net::Ipv6Addr::from(sin6.sin6_addr.s6_addr);
-                        let port = u16::from_be(sin6.sin6_port);
-                        SocketAddr::V6(std::net::SocketAddrV6::new(
-                            ip,
-                            port,
-                            sin6.sin6_flowinfo,
-                            sin6.sin6_scope_id,
-                        ))
-                    }
-                    _ => SocketAddr::new(std::net::IpAddr::V4(std::net::Ipv4Addr::UNSPECIFIED), 0),
-                };
+                let (peer_ip, peer_port_be) = sockaddr_storage_to_raw(&sock_storage[i]);
 
                 if (msgs[i].msg_hdr.msg_flags & libc::MSG_TRUNC) != 0 {
                     tracing::trace!("Dropping truncated UDP datagram exceeding slab slot");
-                    out[i] = (0, addr);
+                    out[i] = (0, peer_ip, peer_port_be);
                     continue;
                 }
 
                 let n = msgs[i].msg_len as usize;
                 total_bytes += n as u64;
-                out[i] = (n, addr);
+                out[i] = (n, peer_ip, peer_port_be);
             }
             self.bytes_received
                 .0
@@ -661,7 +659,7 @@ impl UdpSocket {
     pub fn try_recv_batch(
         &self,
         buffers: &mut [[u8; 2048]],
-        out: &mut [(usize, SocketAddr)],
+        out: &mut [(usize, u128, u16)],
     ) -> usize {
         let max_batch = buffers.len().min(out.len());
         let mut count = 0;
@@ -678,26 +676,12 @@ impl UdpSocket {
     }
 
     /// Receives a batch of incoming UDP datagrams directly into a contiguous slab buffer via `recvmmsg` (Linux).
-    ///
-    /// Reads up to `max_batch` packets (capped at 32) in a single non-blocking system call,
-    /// placing each packet into an aligned `packet_len` slot within the contiguous `slab`.
-    ///
-    /// # Performance & Hardware Rationale
-    /// 1. **Syscall Reduction**: Traditional `recv_from` issues 1 system call per datagram. Under heavy load
-    ///    (e.g. 1M requests, 200 concurrent clients), this causes thousands of context switches. `recvmmsg`
-    ///    drains up to 32 datagrams in a single context switch.
-    /// 2. **Zero-Copy & Zero-Alloc Ingress**: Writing directly into a single contiguous slab allows the caller
-    ///    to freeze the slab and extract datagrams using `Bytes::slice(offset..offset + len)`. This reduces
-    ///    heap allocations by up to 97% (1 buffer instead of 32 separate allocations) and eliminates all
-    ///    userspace `memcpy` operations on the ingress packet path.
-    /// 3. **Cache Line Locality**: Placing incoming packet buffers in contiguous memory maximizes L1/L2 data
-    ///    cache prefetching efficiency on modern vector-capable CPUs.
     #[cfg(target_os = "linux")]
     pub fn try_recv_batch_slab(
         &self,
         slab: &mut [u8],
         packet_len: usize,
-        out: &mut [(usize, SocketAddr)],
+        out: &mut [(usize, u128, u16)],
     ) -> usize {
         let max_batch = (slab.len() / packet_len).min(out.len()).min(32);
         if max_batch == 0 {
@@ -749,37 +733,17 @@ impl UdpSocket {
             let count = res_count as usize;
             let mut total_bytes = 0u64;
             for i in 0..count {
-                let sa = &sock_storage[i];
-                let addr = match sa.ss_family as libc::c_int {
-                    libc::AF_INET => {
-                        let sin = unsafe { &*(sa as *const _ as *const libc::sockaddr_in) };
-                        let ip = std::net::Ipv4Addr::from(u32::from_be(sin.sin_addr.s_addr));
-                        let port = u16::from_be(sin.sin_port);
-                        SocketAddr::V4(std::net::SocketAddrV4::new(ip, port))
-                    }
-                    libc::AF_INET6 => {
-                        let sin6 = unsafe { &*(sa as *const _ as *const libc::sockaddr_in6) };
-                        let ip = std::net::Ipv6Addr::from(sin6.sin6_addr.s6_addr);
-                        let port = u16::from_be(sin6.sin6_port);
-                        SocketAddr::V6(std::net::SocketAddrV6::new(
-                            ip,
-                            port,
-                            sin6.sin6_flowinfo,
-                            sin6.sin6_scope_id,
-                        ))
-                    }
-                    _ => SocketAddr::new(std::net::IpAddr::V4(std::net::Ipv4Addr::UNSPECIFIED), 0),
-                };
+                let (peer_ip, peer_port_be) = sockaddr_storage_to_raw(&sock_storage[i]);
 
                 if (msgs[i].msg_hdr.msg_flags & libc::MSG_TRUNC) != 0 {
                     tracing::trace!("Dropping truncated UDP datagram exceeding slab slot");
-                    out[i] = (0, addr);
+                    out[i] = (0, peer_ip, peer_port_be);
                     continue;
                 }
 
                 let n = msgs[i].msg_len as usize;
                 total_bytes += n as u64;
-                out[i] = (n, addr);
+                out[i] = (n, peer_ip, peer_port_be);
             }
             self.bytes_received
                 .0
@@ -796,7 +760,7 @@ impl UdpSocket {
         &self,
         slab: &mut [u8],
         packet_len: usize,
-        out: &mut [(usize, SocketAddr)],
+        out: &mut [(usize, u128, u16)],
     ) -> usize {
         let max_batch = (slab.len() / packet_len).min(out.len());
         let mut count = 0;
@@ -815,22 +779,18 @@ impl UdpSocket {
     }
 
     /// Sends a GSO-segmented datagram with proper `UDP_SEGMENT` cmsg (Linux).
-    ///
-    /// When `segment_size` is `Some(size)`, the kernel segments the large buffer into
-    /// individual UDP datagrams of `size` bytes each in a single `sendmsg` syscall.
-    /// If the kernel NIC does not support GSO (returns `EMSGSIZE`), this automatically
-    /// falls back to `sendmmsg` batching to ensure zero packet drops and maximum throughput.
     #[inline]
     pub fn try_send_gso_aware(
         &self,
         buf: &[u8],
         segment_size: Option<u16>,
-        target: SocketAddr,
+        target_ip: u128,
+        target_port_be: u16,
     ) -> Option<Result<usize>> {
         match segment_size {
             Some(seg) if seg > 0 && buf.len() > seg as usize => {
                 if self.config.gso {
-                    match self.try_send_gso_to(buf, seg, target) {
+                    match self.try_send_gso_to(buf, seg, target_ip, target_port_be) {
                         Some(Err(SockError::Io(ref e)))
                             if e.raw_os_error() == Some(libc::EMSGSIZE) =>
                         {
@@ -844,11 +804,12 @@ impl UdpSocket {
                 let chunk_size = seg as usize;
                 let mut offset = 0;
                 while offset < buf.len() {
-                    let mut batch: [(&[u8], SocketAddr); 64] = [(&[], target); 64];
+                    let mut batch: [(&[u8], u128, u16); 64] =
+                        [(&[], target_ip, target_port_be); 64];
                     let mut count = 0;
                     while count < 64 && offset < buf.len() {
                         let end = (offset + chunk_size).min(buf.len());
-                        batch[count] = (&buf[offset..end], target);
+                        batch[count] = (&buf[offset..end], target_ip, target_port_be);
                         offset = end;
                         count += 1;
                     }
@@ -864,7 +825,7 @@ impl UdpSocket {
                 }
                 Some(Ok(buf.len()))
             }
-            _ => self.try_send_to(buf, target),
+            _ => self.try_send_to(buf, target_ip, target_port_be),
         }
     }
 
@@ -873,12 +834,13 @@ impl UdpSocket {
         &self,
         buf: &[u8],
         segment_size: Option<u16>,
-        target: SocketAddr,
+        target_ip: u128,
+        target_port_be: u16,
     ) -> Result<usize> {
         match segment_size {
             Some(seg) if seg > 0 && buf.len() > seg as usize => {
                 if self.config.gso {
-                    match self.try_send_gso_to(buf, seg, target) {
+                    match self.try_send_gso_to(buf, seg, target_ip, target_port_be) {
                         Some(Err(SockError::Io(ref e)))
                             if e.raw_os_error() == Some(libc::EMSGSIZE) =>
                         {
@@ -889,7 +851,7 @@ impl UdpSocket {
                         None => {
                             loop {
                                 self.socket.writable().await.map_err(SockError::Io)?;
-                                match self.try_send_gso_to(buf, seg, target) {
+                                match self.try_send_gso_to(buf, seg, target_ip, target_port_be) {
                                     Some(Err(SockError::Io(ref e)))
                                         if e.raw_os_error() == Some(libc::EMSGSIZE) =>
                                     {
@@ -907,11 +869,12 @@ impl UdpSocket {
                 let chunk_size = seg as usize;
                 let mut offset = 0;
                 while offset < buf.len() {
-                    let mut batch: [(&[u8], SocketAddr); 64] = [(&[], target); 64];
+                    let mut batch: [(&[u8], u128, u16); 64] =
+                        [(&[], target_ip, target_port_be); 64];
                     let mut count = 0;
                     while count < 64 && offset < buf.len() {
                         let end = (offset + chunk_size).min(buf.len());
-                        batch[count] = (&buf[offset..end], target);
+                        batch[count] = (&buf[offset..end], target_ip, target_port_be);
                         offset = end;
                         count += 1;
                     }
@@ -927,7 +890,7 @@ impl UdpSocket {
                 }
                 Ok(buf.len())
             }
-            _ => self.send_to(buf, target).await,
+            _ => self.send_to(buf, target_ip, target_port_be).await,
         }
     }
 

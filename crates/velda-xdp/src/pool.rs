@@ -240,14 +240,15 @@ pub fn scan_swar_64(words: &[AtomicU64], start: usize) -> Option<usize> {
     }
 }
 
-/// Dispatches bitmask word scanning directly through tiered vector/SWAR acceleration.
+/// Dispatches bitmask word scanning directly through compile-time tiered vector/SWAR acceleration.
 #[inline]
 pub fn scan_available_word(words: &[AtomicU64], start: usize) -> Option<usize> {
-    #[cfg(target_arch = "x86_64")]
+    #[cfg(all(target_arch = "x86_64", target_feature = "avx2"))]
     {
-        if std::is_x86_feature_detected!("avx2") {
-            return scan_avx2_256(words, start);
-        }
+        scan_avx2_256(words, start)
+    }
+    #[cfg(all(target_arch = "x86_64", not(target_feature = "avx2")))]
+    {
         scan_sse2_128(words, start)
     }
     #[cfg(not(target_arch = "x86_64"))]

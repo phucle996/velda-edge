@@ -228,7 +228,7 @@ fn finalize_checksum(mut sum: u64) -> u16 {
 // ----------------------------------------------------------------------------
 // Tier 1: 256-bit AVX2 Checksum Kernel (32 bytes per iteration)
 // ----------------------------------------------------------------------------
-#[cfg(target_arch = "x86_64")]
+#[cfg(all(target_arch = "x86_64", target_feature = "avx2"))]
 #[target_feature(enable = "avx2")]
 unsafe fn checksum_avx2_256_inner(data: &[u8]) -> u16 {
     use std::arch::x86_64::*;
@@ -276,9 +276,12 @@ unsafe fn checksum_avx2_256_inner(data: &[u8]) -> u16 {
 /// Tier 1 (256-bit AVX2): Computes RFC 1071 checksum 32 bytes per iteration.
 #[cfg(target_arch = "x86_64")]
 pub fn checksum_avx2_256(data: &[u8]) -> u16 {
-    if is_x86_feature_detected!("avx2") {
+    #[cfg(target_feature = "avx2")]
+    {
         unsafe { checksum_avx2_256_inner(data) }
-    } else {
+    }
+    #[cfg(not(target_feature = "avx2"))]
+    {
         checksum_sse2_128(data)
     }
 }

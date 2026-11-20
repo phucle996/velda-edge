@@ -1,4 +1,4 @@
-//! Pre-Allocated Contiguous Memory Page Batch Pool (`velda_observability::logs::pool`).
+//! Pre-Allocated Contiguous Memory Page Batch Pool (`velda_observability::telemetry::pool`).
 //!
 //! ```text
 //!  ┌────────────────────────────────────────────────────────────────────────────────────────┐
@@ -14,7 +14,7 @@
 //!  │                            ┌────────────────────────┐                       │           │
 //!  │                            │   SLOT N: FILL STAGE   │                       │           │
 //!  │                            │   (Producer Active)    │                       │           │
-//!  │       SpscLogRing ────────►│ drain_batch_into()     │                       │           │
+//!  │       SpscTelemetryRing ────────►│ drain_batch_into()     │                       │           │
 //!  │       (Frontline Core)     │ AVX Non-Temporal Store │                       │           │
 //!  │                            │ (16 Pages = 64KB Cont) │                       │           │
 //!  │                            └───────────┬────────────┘                       │           │
@@ -48,8 +48,8 @@
 //! # Structural Geometry & Multi-Buffer Lifecycle
 //! - **Slot Geometry**: Each slot holds 256 records × 256 bytes = 65,536 bytes (16 contiguous 4KB
 //!   virtual memory pages, 64-byte cache line aligned).
-//! - **Pool Sizing**: 32 pre-allocated slots occupy 2 MB of contiguous RAM, matching Linux 2MB
-//!   HugePage sizing.
+//! - **Pool Sizing**: 64 pre-allocated slots occupy 4 MB of RAM (2 × 2 MB HugePage quanta), giving
+//!   ample rotating headroom even when a slow exporter temporarily queues up to half the pool.
 //! - **Multi-Buffer Rotation**: While Slot $N$ is being filled by the producer, Slot $N-1$ is
 //!   concurrently being read by subscribers, and Slot $N-2$ is recycled back to the ready pool.
 //! - **Recycling**: When `leases.fetch_sub(1) == 1`, the final reference resets `records.clear()`
@@ -60,35 +60,35 @@ use std::ops::Deref;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 
-use super::record::AccessLogRecord;
+use super::record::TelemetryRecord;
 
-/// Default number of rotating batch slots in the pool (32 slots × 64 KB = 2 MB, 1 HugePage).
-pub const DEFAULT_POOL_SLOTS: usize = 32;
+/// Default number of rotating batch slots in the pool (64 slots × 64 KB = 4 MB).
+pub const DEFAULT_POOL_SLOTS: usize = 64;
 
 /// Default capacity per batch (256 records × 256B = 64 KB = 16 contiguous 4KB pages).
 pub const DEFAULT_BATCH_CAPACITY: usize = 256;
 
 /// A pre-allocated, contiguous memory slot residing in the pool.
-pub struct BatchSlot {
+pub struct TelemetryBatchSlot {
     pub slot_id: usize,
-    pub records: UnsafeCell<Vec<AccessLogRecord>>,
+    pub records: UnsafeCell<Vec<TelemetryRecord>>,
     pub leases: AtomicUsize,
 }
 
-unsafe impl Send for BatchSlot {}
-unsafe impl Sync for BatchSlot {}
+unsafe impl Send for TelemetryBatchSlot {}
+unsafe impl Sync for TelemetryBatchSlot {}
 
 /// Central contiguous memory page pool managing rotating access log batches.
-pub struct LogBatchPool {
-    pub slots: Box<[BatchSlot]>,
+pub struct TelemetryBatchPool {
+    pub slots: Box<[TelemetryBatchSlot]>,
     available: Mutex<Vec<usize>>,
     pub batch_capacity: usize,
 }
 
-unsafe impl Send for LogBatchPool {}
-unsafe impl Sync for LogBatchPool {}
+unsafe impl Send for TelemetryBatchPool {}
+unsafe impl Sync for TelemetryBatchPool {}
 
-impl LogBatchPool {
+impl TelemetryBatchPool {
     /// Pre-allocates `slot_count` contiguous batch buffers of `batch_capacity` records each.
     pub fn new(slot_count: usize, batch_capacity: usize) -> Arc<Self> {
         let count = slot_count.max(8);
@@ -96,7 +96,7 @@ impl LogBatchPool {
 
         let mut slots = Vec::with_capacity(count);
         for id in 0..count {
-            slots.push(BatchSlot {
+            slots.push(TelemetryBatchSlot {
                 slot_id: id,
                 records: UnsafeCell::new(Vec::with_capacity(cap)),
                 leases: AtomicUsize::new(0),
@@ -133,16 +133,16 @@ impl LogBatchPool {
 }
 
 /// An active lease pointing to a pooled contiguous memory batch.
-pub struct PooledLogBatch {
+pub struct PooledTelemetryBatch {
     slot_id: usize,
-    ptr: *const [AccessLogRecord],
-    pool: Arc<LogBatchPool>,
+    ptr: *const [TelemetryRecord],
+    pool: Arc<TelemetryBatchPool>,
 }
 
-unsafe impl Send for PooledLogBatch {}
-unsafe impl Sync for PooledLogBatch {}
+unsafe impl Send for PooledTelemetryBatch {}
+unsafe impl Sync for PooledTelemetryBatch {}
 
-impl PooledLogBatch {
+impl PooledTelemetryBatch {
     /// Current number of active leases sharing this pooled slot.
     #[inline]
     pub fn lease_count(&self) -> usize {
@@ -150,7 +150,7 @@ impl PooledLogBatch {
     }
 }
 
-impl Clone for PooledLogBatch {
+impl Clone for PooledTelemetryBatch {
     fn clone(&self) -> Self {
         self.pool.slots[self.slot_id]
             .leases
@@ -163,7 +163,7 @@ impl Clone for PooledLogBatch {
     }
 }
 
-impl Drop for PooledLogBatch {
+impl Drop for PooledTelemetryBatch {
     fn drop(&mut self) {
         let slot = &self.pool.slots[self.slot_id];
         if slot.leases.fetch_sub(1, Ordering::AcqRel) == 1 {
@@ -179,14 +179,14 @@ impl Drop for PooledLogBatch {
 
 /// Canonical batched log representation.
 ///
-/// Encapsulates either a pooled contiguous memory batch ([`PooledLogBatch`]) or
-/// a standalone fallback batch ([`Arc<[AccessLogRecord]>`]).
-pub enum LogBatch {
-    Pooled(PooledLogBatch),
-    Arc(Arc<[AccessLogRecord]>),
+/// Encapsulates either a pooled contiguous memory batch ([`PooledTelemetryBatch`]) or
+/// a standalone fallback batch ([`Arc<[TelemetryRecord]>`]).
+pub enum TelemetryBatch {
+    Pooled(PooledTelemetryBatch),
+    Arc(Arc<[TelemetryRecord]>),
 }
 
-impl Clone for LogBatch {
+impl Clone for TelemetryBatch {
     fn clone(&self) -> Self {
         match self {
             Self::Pooled(p) => Self::Pooled(p.clone()),
@@ -195,26 +195,30 @@ impl Clone for LogBatch {
     }
 }
 
-impl LogBatch {
+impl TelemetryBatch {
     /// Creates a pooled batch from an acquired pool slot and record slice.
     #[inline]
-    pub fn from_pooled(slot_id: usize, slice: &[AccessLogRecord], pool: Arc<LogBatchPool>) -> Self {
-        Self::Pooled(PooledLogBatch {
+    pub fn from_pooled(
+        slot_id: usize,
+        slice: &[TelemetryRecord],
+        pool: Arc<TelemetryBatchPool>,
+    ) -> Self {
+        Self::Pooled(PooledTelemetryBatch {
             slot_id,
-            ptr: slice as *const [AccessLogRecord],
+            ptr: slice as *const [TelemetryRecord],
             pool,
         })
     }
 
     /// Creates a fallback unpooled batch from a standard Arc slice.
     #[inline]
-    pub fn from_arc(arc: Arc<[AccessLogRecord]>) -> Self {
+    pub fn from_arc(arc: Arc<[TelemetryRecord]>) -> Self {
         Self::Arc(arc)
     }
 
     /// Returns the underlying record slice.
     #[inline(always)]
-    pub fn as_slice(&self) -> &[AccessLogRecord] {
+    pub fn as_slice(&self) -> &[TelemetryRecord] {
         match self {
             Self::Pooled(p) => unsafe { &*p.ptr },
             Self::Arc(a) => a.as_ref(),
@@ -231,8 +235,8 @@ impl LogBatch {
     }
 }
 
-impl Deref for LogBatch {
-    type Target = [AccessLogRecord];
+impl Deref for TelemetryBatch {
+    type Target = [TelemetryRecord];
 
     #[inline(always)]
     fn deref(&self) -> &Self::Target {
@@ -240,9 +244,9 @@ impl Deref for LogBatch {
     }
 }
 
-impl AsRef<[AccessLogRecord]> for LogBatch {
+impl AsRef<[TelemetryRecord]> for TelemetryBatch {
     #[inline(always)]
-    fn as_ref(&self) -> &[AccessLogRecord] {
+    fn as_ref(&self) -> &[TelemetryRecord] {
         self.as_slice()
     }
 }

@@ -25,4 +25,3 @@ pub use error::{Result, UpstreamError};
 pub use gate::AdaptiveConcurrencyGate;
 pub use health::{ActiveHealthConfig, HealthConfig, HealthTracker, PassiveHealthConfig};
 pub use upstream::{Upstream, UpstreamTimeouts};
-pub use velda_core::UpstreamId;

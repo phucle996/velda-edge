@@ -63,6 +63,12 @@ impl Hasher for FastHasher {
     }
 
     #[inline]
+    fn write_u128(&mut self, i: u128) {
+        self.state = (self.state ^ (i as u64)).wrapping_mul(0x100000001b3);
+        self.state = (self.state ^ ((i >> 64) as u64)).wrapping_mul(0x100000001b3);
+    }
+
+    #[inline]
     fn write_usize(&mut self, i: usize) {
         self.write_u64(i as u64);
     }
@@ -84,16 +90,21 @@ impl BuildHasher for FastBuildHasher {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::net::SocketAddr;
 
     #[test]
     fn test_fast_hasher_distribution() {
         let builder = FastBuildHasher;
-        let addr1: SocketAddr = "127.0.0.1:8080".parse().unwrap();
-        let addr2: SocketAddr = "127.0.0.1:8081".parse().unwrap();
+        let k1 = (
+            velda_core::lut::ip::v4_to_u128(0x7F00_0001),
+            8080u16.to_be(),
+        );
+        let k2 = (
+            velda_core::lut::ip::v4_to_u128(0x7F00_0001),
+            8081u16.to_be(),
+        );
 
-        let h1 = builder.hash_one(addr1);
-        let h2 = builder.hash_one(addr2);
+        let h1 = builder.hash_one(k1);
+        let h2 = builder.hash_one(k2);
 
         assert_ne!(h1, h2);
         // Ensure non-zero and good spread

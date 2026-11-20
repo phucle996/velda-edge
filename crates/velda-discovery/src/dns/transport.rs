@@ -10,7 +10,7 @@ use std::time::Duration;
 
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 
-use crate::dns::resolver::{DnsAnswer, DnsTransport};
+use crate::dns::resolver::{DnsAnswer, DnsTransport, SrvAnswer, SrvRecord};
 use crate::error::{DiscoveryError, Result};
 
 // ============================================================================
@@ -221,6 +221,100 @@ impl DnsTransport for UdpDnsTransport {
                 host: host.to_string(),
                 reason: "no A or AAAA records returned".into(),
             })
+        }
+    }
+
+    async fn query_srv(&self, server: SocketAddr, service: &str) -> Result<SrvAnswer> {
+        let unreachable = |msg: &str, e: std::io::Error| DiscoveryError::DnsResolutionFailed {
+            host: service.to_string(),
+            reason: format!("{msg}: {e}"),
+        };
+
+        let bind_addr: SocketAddr = if server.is_ipv6() {
+            "[::]:0".parse().unwrap()
+        } else {
+            "0.0.0.0:0".parse().unwrap()
+        };
+        let socket = tokio::net::UdpSocket::bind(bind_addr)
+            .await
+            .map_err(|e| unreachable("failed to bind local UDP socket", e))?;
+        socket
+            .connect(server)
+            .await
+            .map_err(|e| unreachable("failed to connect to DNS server", e))?;
+
+        let rand = getrandom::u32().map_err(|e| DiscoveryError::DnsResolutionFailed {
+            host: service.to_string(),
+            reason: format!("failed to draw random transaction id: {e}"),
+        })?;
+        let id = rand as u16;
+
+        let mut packet = build_query_packet(id, service, 33).ok_or_else(|| {
+            DiscoveryError::DnsResolutionFailed {
+                host: service.to_string(),
+                reason: "invalid service name for SRV query".into(),
+            }
+        })?;
+        packet[10..12].copy_from_slice(&1u16.to_be_bytes());
+        packet.push(0);
+        packet.extend_from_slice(&41u16.to_be_bytes());
+        packet.extend_from_slice(&(DEFAULT_DNS_PACKET_BUFFER_SIZE as u16).to_be_bytes());
+        packet.extend_from_slice(&0u32.to_be_bytes());
+        packet.extend_from_slice(&0u16.to_be_bytes());
+
+        socket
+            .send(&packet)
+            .await
+            .map_err(|e| unreachable("failed to send SRV query packet", e))?;
+
+        let mut buf = [0u8; DEFAULT_DNS_PACKET_BUFFER_SIZE];
+        loop {
+            let n = socket
+                .recv(&mut buf)
+                .await
+                .map_err(|e| unreachable("failed to receive SRV response", e))?;
+            let pkt = &buf[..n];
+            if pkt.len() < 12 {
+                continue;
+            }
+            let rid = u16::from_be_bytes([pkt[0], pkt[1]]);
+            if rid != id || !question_matches(pkt, service, 33) {
+                continue;
+            }
+            let flags = u16::from_be_bytes([pkt[2], pkt[3]]);
+            if (flags & 0x0200) != 0 {
+                // Truncated: fall back to TCP
+                let mut stream = tokio::net::TcpStream::connect(server)
+                    .await
+                    .map_err(|e| unreachable("failed to connect TCP for SRV", e))?;
+                let mut tcp_pkt = build_query_packet(id, service, 33).ok_or_else(|| {
+                    DiscoveryError::DnsResolutionFailed {
+                        host: service.to_string(),
+                        reason: "invalid service name for SRV TCP query".into(),
+                    }
+                })?;
+                let len_bytes = (tcp_pkt.len() as u16).to_be_bytes();
+                let mut framed = Vec::with_capacity(2 + tcp_pkt.len());
+                framed.extend_from_slice(&len_bytes);
+                framed.append(&mut tcp_pkt);
+                stream
+                    .write_all(&framed)
+                    .await
+                    .map_err(|e| unreachable("failed to write TCP SRV query", e))?;
+                let mut len_buf = [0u8; 2];
+                stream
+                    .read_exact(&mut len_buf)
+                    .await
+                    .map_err(|e| unreachable("failed to read TCP SRV length", e))?;
+                let msg_len = u16::from_be_bytes(len_buf) as usize;
+                let mut body = vec![0u8; msg_len];
+                stream
+                    .read_exact(&mut body)
+                    .await
+                    .map_err(|e| unreachable("failed to read TCP SRV body", e))?;
+                return parse_srv_response_packet(id, service, &body);
+            }
+            return parse_srv_response_packet(id, service, pkt);
         }
     }
 }
@@ -512,6 +606,204 @@ pub fn parse_response_packet(query_id: u16, host: &str, buf: &[u8]) -> Result<Dn
 
     Ok(DnsAnswer {
         ips,
+        ttl: min_ttl.map(|s| Duration::from_secs(u64::from(s))),
+    })
+}
+
+/// Decodes a DNS domain name (supporting RFC 1035 label compression) starting at `offset`.
+/// Returns `(decoded_name, next_offset_after_name_field)`.
+pub fn decode_name(buf: &[u8], mut offset: usize) -> Option<(String, usize)> {
+    let mut name = String::new();
+    let mut jumped = false;
+    let mut end_offset = 0usize;
+    let mut hops = 0usize;
+
+    loop {
+        if offset >= buf.len() {
+            return None;
+        }
+        let len = buf[offset];
+        if len == 0 {
+            if !jumped {
+                end_offset = offset + 1;
+            }
+            break;
+        }
+        if (len & 0xC0) == 0xC0 {
+            if offset + 1 >= buf.len() {
+                return None;
+            }
+            if !jumped {
+                end_offset = offset + 2;
+                jumped = true;
+            }
+            let ptr = (((len & 0x3F) as usize) << 8) | (buf[offset + 1] as usize);
+            offset = ptr;
+            hops += 1;
+            if hops > 64 {
+                return None;
+            }
+        } else {
+            let label_len = len as usize;
+            offset += 1;
+            if offset + label_len > buf.len() {
+                return None;
+            }
+            if !name.is_empty() {
+                name.push('.');
+            }
+            name.push_str(std::str::from_utf8(&buf[offset..offset + label_len]).ok()?);
+            offset += label_len;
+        }
+    }
+
+    Some((name, end_offset))
+}
+
+/// Parses an RFC 2782 DNS SRV response packet (`TYPE = 33`), including Additional A/AAAA glue.
+pub fn parse_srv_response_packet(query_id: u16, service: &str, buf: &[u8]) -> Result<SrvAnswer> {
+    if buf.len() < 12 {
+        return Err(DiscoveryError::DnsResolutionFailed {
+            host: service.to_string(),
+            reason: "truncated DNS SRV response header".into(),
+        });
+    }
+    let resp_id = u16::from_be_bytes([buf[0], buf[1]]);
+    if resp_id != query_id {
+        return Err(DiscoveryError::DnsResolutionFailed {
+            host: service.to_string(),
+            reason: format!("mismatched DNS SRV query id: expected {query_id}, got {resp_id}"),
+        });
+    }
+    let flags = u16::from_be_bytes([buf[2], buf[3]]);
+    let rcode = flags & 0x000F;
+    if rcode != 0 {
+        return Err(DiscoveryError::DnsResolutionFailed {
+            host: service.to_string(),
+            reason: format!("DNS SRV query returned error rcode={rcode}"),
+        });
+    }
+
+    let qdcount = u16::from_be_bytes([buf[4], buf[5]]) as usize;
+    let ancount = u16::from_be_bytes([buf[6], buf[7]]) as usize;
+    let nscount = u16::from_be_bytes([buf[8], buf[9]]) as usize;
+    let arcount = u16::from_be_bytes([buf[10], buf[11]]) as usize;
+
+    let mut pos = 12;
+    for _ in 0..qdcount {
+        pos = skip_name(buf, pos).ok_or_else(|| DiscoveryError::DnsResolutionFailed {
+            host: service.to_string(),
+            reason: "malformed question section in SRV response".into(),
+        })?;
+        if pos + 4 > buf.len() {
+            return Err(DiscoveryError::DnsResolutionFailed {
+                host: service.to_string(),
+                reason: "truncated question section in SRV response".into(),
+            });
+        }
+        pos += 4;
+    }
+
+    let mut records = Vec::new();
+    let mut min_ttl: Option<u32> = None;
+
+    for _ in 0..ancount {
+        pos = skip_name(buf, pos).ok_or_else(|| DiscoveryError::DnsResolutionFailed {
+            host: service.to_string(),
+            reason: "malformed answer name in SRV response".into(),
+        })?;
+        if pos + 10 > buf.len() {
+            return Err(DiscoveryError::DnsResolutionFailed {
+                host: service.to_string(),
+                reason: "truncated answer header in SRV response".into(),
+            });
+        }
+        let rtype = u16::from_be_bytes([buf[pos], buf[pos + 1]]);
+        let rclass = u16::from_be_bytes([buf[pos + 2], buf[pos + 3]]);
+        let ttl = u32::from_be_bytes([buf[pos + 4], buf[pos + 5], buf[pos + 6], buf[pos + 7]]);
+        let rdlength = u16::from_be_bytes([buf[pos + 8], buf[pos + 9]]) as usize;
+        pos += 10;
+        if pos + rdlength > buf.len() {
+            return Err(DiscoveryError::DnsResolutionFailed {
+                host: service.to_string(),
+                reason: "truncated answer rdata in SRV response".into(),
+            });
+        }
+
+        if rclass == 1 && rtype == 33 && rdlength >= 7 {
+            let priority = u16::from_be_bytes([buf[pos], buf[pos + 1]]);
+            let weight = u16::from_be_bytes([buf[pos + 2], buf[pos + 3]]);
+            let port = u16::from_be_bytes([buf[pos + 4], buf[pos + 5]]);
+            if let Some((target, _)) = decode_name(buf, pos + 6) {
+                records.push(SrvRecord {
+                    priority,
+                    weight,
+                    port,
+                    target,
+                });
+                min_ttl = Some(min_ttl.map_or(ttl, |m| m.min(ttl)));
+            }
+        }
+        pos += rdlength;
+    }
+
+    // Skip authority section
+    for _ in 0..nscount {
+        pos = match skip_name(buf, pos) {
+            Some(p) => p,
+            None => break,
+        };
+        if pos + 10 > buf.len() {
+            break;
+        }
+        let rdlength = u16::from_be_bytes([buf[pos + 8], buf[pos + 9]]) as usize;
+        pos += 10;
+        if pos + rdlength > buf.len() {
+            break;
+        }
+        pos += rdlength;
+    }
+
+    // Parse additional glue records (A / AAAA)
+    let mut glue = Vec::new();
+    for _ in 0..arcount {
+        let Some((name, after_name)) = decode_name(buf, pos) else {
+            break;
+        };
+        pos = after_name;
+        if pos + 10 > buf.len() {
+            break;
+        }
+        let rtype = u16::from_be_bytes([buf[pos], buf[pos + 1]]);
+        let rclass = u16::from_be_bytes([buf[pos + 2], buf[pos + 3]]);
+        let rdlength = u16::from_be_bytes([buf[pos + 8], buf[pos + 9]]) as usize;
+        pos += 10;
+        if pos + rdlength > buf.len() {
+            break;
+        }
+        if rclass == 1 {
+            if rtype == 1 && rdlength == 4 {
+                glue.push((
+                    name,
+                    IpAddr::V4(Ipv4Addr::new(
+                        buf[pos],
+                        buf[pos + 1],
+                        buf[pos + 2],
+                        buf[pos + 3],
+                    )),
+                ));
+            } else if rtype == 28 && rdlength == 16 {
+                let mut octets = [0u8; 16];
+                octets.copy_from_slice(&buf[pos..pos + 16]);
+                glue.push((name, IpAddr::V6(Ipv6Addr::from(octets))));
+            }
+        }
+        pos += rdlength;
+    }
+
+    Ok(SrvAnswer {
+        records,
+        glue,
         ttl: min_ttl.map(|s| Duration::from_secs(u64::from(s))),
     })
 }

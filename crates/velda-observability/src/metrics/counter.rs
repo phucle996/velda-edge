@@ -42,37 +42,17 @@
 /// Number of canonical 64-bit counters per pipeline slot.
 pub const PIPELINE_COUNTERS_LEN: usize = 20;
 
-/// Adds 20 contiguous 64-bit pipeline counters from `src` into `dst` using SIMD acceleration.
+/// Adds 20 contiguous 64-bit pipeline counters from `src` into `dst`.
+///
+/// Pure Rust loop so LLVM auto-vectorizes cleanly for the target CPU.
 #[inline]
 pub fn add_pipeline_counters(
     dst: &mut [u64; PIPELINE_COUNTERS_LEN],
     src: &[u64; PIPELINE_COUNTERS_LEN],
 ) {
-    #[cfg(target_arch = "x86_64")]
-    {
-        if is_x86_feature_detected!("avx2") {
-            unsafe {
-                add_pipeline_counters_avx2(dst, src);
-            }
-            return;
-        }
-        if is_x86_feature_detected!("sse2") {
-            unsafe {
-                add_pipeline_counters_sse2(dst, src);
-            }
-            return;
-        }
+    for i in 0..PIPELINE_COUNTERS_LEN {
+        dst[i] = dst[i].saturating_add(src[i]);
     }
-    #[cfg(target_arch = "aarch64")]
-    {
-        if std::arch::is_aarch64_feature_detected!("neon") {
-            unsafe {
-                add_pipeline_counters_neon(dst, src);
-            }
-            return;
-        }
-    }
-    add_pipeline_counters_scalar(dst, src);
 }
 
 /// Aggregates counter slices of arbitrary length using the optimal path.
@@ -90,74 +70,6 @@ pub fn add_counters(dst: &mut [u64], src: &[u64]) {
         for i in 0..len {
             dst[i] = dst[i].saturating_add(src[i]);
         }
-    }
-}
-
-#[cfg(target_arch = "x86_64")]
-#[target_feature(enable = "avx2")]
-pub unsafe fn add_pipeline_counters_avx2(
-    dst: &mut [u64; PIPELINE_COUNTERS_LEN],
-    src: &[u64; PIPELINE_COUNTERS_LEN],
-) {
-    use std::arch::x86_64::*;
-    // 20 u64 counters = exactly 5 chunks of 4 u64 (256-bit each)
-    unsafe {
-        for chunk in 0..5 {
-            let offset = chunk * 4;
-            let d = _mm256_loadu_si256(dst.as_ptr().add(offset) as *const __m256i);
-            let s = _mm256_loadu_si256(src.as_ptr().add(offset) as *const __m256i);
-            let sum = _mm256_add_epi64(d, s);
-            _mm256_storeu_si256(dst.as_mut_ptr().add(offset) as *mut __m256i, sum);
-        }
-    }
-}
-
-#[cfg(target_arch = "x86_64")]
-#[target_feature(enable = "sse2")]
-pub unsafe fn add_pipeline_counters_sse2(
-    dst: &mut [u64; PIPELINE_COUNTERS_LEN],
-    src: &[u64; PIPELINE_COUNTERS_LEN],
-) {
-    use std::arch::x86_64::*;
-    // 20 u64 counters = exactly 10 chunks of 2 u64 (128-bit each)
-    unsafe {
-        for chunk in 0..10 {
-            let offset = chunk * 2;
-            let d = _mm_loadu_si128(dst.as_ptr().add(offset) as *const __m128i);
-            let s = _mm_loadu_si128(src.as_ptr().add(offset) as *const __m128i);
-            let sum = _mm_add_epi64(d, s);
-            _mm_storeu_si128(dst.as_mut_ptr().add(offset) as *mut __m128i, sum);
-        }
-    }
-}
-
-#[cfg(target_arch = "aarch64")]
-#[target_feature(enable = "neon")]
-pub unsafe fn add_pipeline_counters_neon(
-    dst: &mut [u64; PIPELINE_COUNTERS_LEN],
-    src: &[u64; PIPELINE_COUNTERS_LEN],
-) {
-    use std::arch::aarch64::*;
-    // 20 u64 counters = exactly 10 chunks of 2 u64 (128-bit each)
-    unsafe {
-        for chunk in 0..10 {
-            let offset = chunk * 2;
-            let d = vld1q_u64(dst.as_ptr().add(offset));
-            let s = vld1q_u64(src.as_ptr().add(offset));
-            let sum = vaddq_u64(d, s);
-            vst1q_u64(dst.as_mut_ptr().add(offset), sum);
-        }
-    }
-}
-
-/// Fallback scalar accumulation for 20 pipeline counters.
-#[inline]
-pub fn add_pipeline_counters_scalar(
-    dst: &mut [u64; PIPELINE_COUNTERS_LEN],
-    src: &[u64; PIPELINE_COUNTERS_LEN],
-) {
-    for i in 0..PIPELINE_COUNTERS_LEN {
-        dst[i] = dst[i].saturating_add(src[i]);
     }
 }
 
@@ -284,28 +196,11 @@ mod tests {
             src[i] = (i as u64 + 1) * 2_500_000;
         }
 
-        let mut scalar_dst = base_dst;
-        add_pipeline_counters_scalar(&mut scalar_dst, &src);
+        let mut dst = base_dst;
+        add_pipeline_counters(&mut dst, &src);
 
-        let mut simd_dst = base_dst;
-        add_pipeline_counters(&mut simd_dst, &src);
-
-        assert_eq!(scalar_dst, simd_dst, "SIMD and scalar must be identical");
-
-        #[cfg(target_arch = "x86_64")]
-        {
-            if is_x86_feature_detected!("avx2") {
-                let mut avx2_dst = base_dst;
-                unsafe {
-                    add_pipeline_counters_avx2(&mut avx2_dst, &src);
-                }
-                assert_eq!(scalar_dst, avx2_dst, "AVX2 must match scalar");
-            }
-            let mut sse2_dst = base_dst;
-            unsafe {
-                add_pipeline_counters_sse2(&mut sse2_dst, &src);
-            }
-            assert_eq!(scalar_dst, sse2_dst, "SSE2 must match scalar");
+        for i in 0..PIPELINE_COUNTERS_LEN {
+            assert_eq!(dst[i], base_dst[i].saturating_add(src[i]));
         }
     }
 

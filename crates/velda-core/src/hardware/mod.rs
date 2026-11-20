@@ -1,18 +1,16 @@
-//! Hardware topology and concurrency profile for the Velda Edge Data Plane.
+//! Hardware Topology & Continuous Capacity Profile (`velda_core::hardware`).
 //!
-//! Provides the canonical representation of available CPU cores and worker threads
-//! probed once and cached in RAM (`OnceLock`).
-//!
-//! # Continuous Hardware Sizing Architecture:
-//! - CPU Topology: Driven by available logical cores and cgroup CPU limits.
-//!   Controls worker thread count, channel capacity, and concurrency sharding.
-//! - Memory Topology: Driven by total RAM capacity and cgroup memory limits.
-//!   Derives continuous socket buffers, backlog depths, and in-memory cache capacities
-//!   via [`HardwareSizing`].
-//!
-//! Strict Invariant:
-//! - This module ONLY owns host hardware inspection and continuous capacity profiling.
-//! - Sizing is derived continuously without rigid discrete tier boundaries.
+//! ```text
+//! ┌─────────────────────────────────────────────────────────────────────────────────────────┐
+//! │                 ONCE-LOCK HARDWARE TOPOLOGY & CONTINUOUS SIZING ENGINE                  │
+//! ├──────────────┬──────────────────────────────────────────────────────────────────────────┤
+//! │ cpu          │ Logical cores + cgroup v1/v2 quota -> worker threads & sharding          │
+//! │ memory       │ Physical RAM + cgroup limits       -> HardwareSizing buffers & caches    │
+//! │ kernel       │ uname(2) + sysctl                  -> KernelProfile & capability queries │
+//! │ nic / rdma   │ sysfs RX queues + ETHTOOL_GRSSH    -> HardwareRss vs Software, RNICs     │
+//! │ overload     │ /proc/self/statm + hysteresis      -> Normal -> Shedding -> Critical     │
+//! └──────────────┴──────────────────────────────────────────────────────────────────────────┘
+//! ```
 
 pub mod cpu;
 pub mod kernel;
@@ -24,12 +22,8 @@ pub mod rdma;
 use std::sync::OnceLock;
 
 pub use crate::worker::CorePartition;
-pub use cpu::{CpuProfile, CpuRegisterCapabilities, RegisterWidth, copy_bulk_payload, probe_cpu};
-pub use kernel::{
-    AccelerationTier, BusyPollTier, CoreSteeringTier, DeadPeerTeardownTier,
-    KernelAccelerationLadder, KernelProfile, KernelVersion, MultipathResilienceTier,
-    MultiplexPacingTier, OutboundPortScalingTier, UdpEgressTier, UdpOffloadTier, probe_kernel,
-};
+pub use cpu::{CpuProfile, copy_bulk_payload, probe_cpu};
+pub use kernel::{KernelProfile, KernelVersion, probe_kernel};
 pub use memory::{MemoryProfile, probe_memory};
 pub use nic::{IngressHashAuthority, NicProfile, ingress_steering_cpu, probe_nic};
 pub use overload::{OverloadConfig, OverloadLevel, OverloadTracker, probe_memory_usage};
@@ -227,18 +221,6 @@ impl HardwareTopology {
         self.memory_bytes
     }
 
-    /// Returns the classified hardware I/O acceleration tier.
-    #[inline]
-    pub fn acceleration_tier(&self) -> AccelerationTier {
-        self.kernel.acceleration
-    }
-
-    /// Returns `true` if kernel acceleration fast-path is enabled.
-    #[inline]
-    pub fn is_accelerated(&self) -> bool {
-        self.kernel.acceleration.is_accelerated()
-    }
-
     /// Returns the pre-computed optimal idle connection capacity per upstream target.
     #[inline]
     pub fn optimal_max_idle_per_key(&self) -> usize {
@@ -249,12 +231,6 @@ impl HardwareTopology {
     #[inline]
     pub fn concurrency_shards(&self) -> usize {
         self.concurrency_shards
-    }
-
-    /// Resolves the evolutionary acceleration ladder selecting the highest supported kernel path per goal.
-    #[inline]
-    pub fn acceleration_ladder(&self) -> KernelAccelerationLadder {
-        KernelAccelerationLadder::from_kernel(&self.kernel)
     }
 }
 

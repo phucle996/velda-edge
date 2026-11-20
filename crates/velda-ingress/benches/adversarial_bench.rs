@@ -9,7 +9,6 @@
 
 mod common;
 
-use std::net::SocketAddr;
 use std::time::{Duration, Instant};
 
 use common::{CountingAllocator, format_duration};
@@ -47,7 +46,8 @@ fn bench_hostile_protocol_injection() {
     println!("| :--- | :--- | :--- | :--- | :--- |");
 
     let iters = 100_000;
-    let dummy_addr: SocketAddr = "127.0.0.1:80".parse().unwrap();
+    let dummy_ip = velda_core::lut::ip::v4_to_u128(u32::from_be_bytes([127, 0, 0, 1]));
+    let dummy_port_be = 80u16.to_be();
 
     let attack_vectors = [
         ("Empty String", ""),
@@ -66,7 +66,8 @@ fn bench_hostile_protocol_injection() {
         let start = Instant::now();
 
         for _ in 0..iters {
-            let res = IngressBinding::from_transport("test", dummy_addr, payload, false);
+            let res =
+                IngressBinding::from_transport("test", dummy_ip, dummy_port_be, payload, false);
             let _ = std::hint::black_box(res);
         }
 
@@ -105,7 +106,7 @@ fn bench_adversarial_protocol_dimension_fuzzing() {
     println!("> Fuzzing 1,000,000 malformed, mixed-case, and boundary protocol combinations...\n");
 
     let iters = 1_000_000;
-    let dummy_addr: SocketAddr = "127.0.0.1:0".parse().unwrap();
+    let dummy_ip = velda_core::lut::ip::v4_to_u128(u32::from_be_bytes([127, 0, 0, 1]));
     let fuzz_cases = [
         ("tcp", "http", true),
         ("udp", "http3", true),
@@ -125,7 +126,7 @@ fn bench_adversarial_protocol_dimension_fuzzing() {
 
     for i in 0..iters {
         let (tp, ap, expected_ok) = fuzz_cases[i % fuzz_cases.len()];
-        let res = IngressBinding::from_transport("fuzz_listener", dummy_addr, tp, false);
+        let res = IngressBinding::from_transport("fuzz_listener", dummy_ip, 0, tp, false);
         let _ = ap;
         let is_ok = res.is_ok();
         debug_assert_eq!(is_ok, expected_ok);
@@ -164,14 +165,15 @@ fn bench_rapid_binding_flapping() {
 
     let iters = 50_000;
     let mut engine = TrafficEngine::new();
-    let dummy_addr: SocketAddr = "127.0.0.1:0".parse().unwrap();
+    let dummy_ip = velda_core::lut::ip::v4_to_u128(u32::from_be_bytes([127, 0, 0, 1]));
 
     let start = Instant::now();
 
     for i in 0..iters {
         let binding = IngressBinding::from_transport(
             format!("flapping_listener_{:03}", i % 50),
-            dummy_addr,
+            dummy_ip,
+            0,
             if i % 2 == 0 { "tcp" } else { "udp" },
             i % 4 == 0,
         )
@@ -218,8 +220,10 @@ fn bench_datagram_payload_boundaries() {
     println!("| :--- | :--- | :--- | :--- | :--- |");
 
     let iters = 100_000;
-    let peer: SocketAddr = "192.168.1.100:54321".parse().unwrap();
-    let local: SocketAddr = "127.0.0.1:443".parse().unwrap();
+    let peer_ip = velda_core::lut::ip::v4_to_u128(u32::from_be_bytes([192, 168, 1, 100]));
+    let peer_port_be = 54321u16.to_be();
+    let local_ip = velda_core::lut::ip::v4_to_u128(u32::from_be_bytes([127, 0, 0, 1]));
+    let local_port_be = 443u16.to_be();
 
     let scenarios = [
         ("Empty Datagram (Keepalive)", 0),
@@ -236,7 +240,13 @@ fn bench_datagram_payload_boundaries() {
         let start = Instant::now();
 
         for _ in 0..iters {
-            let dgram = Datagram::new(peer, local, payload.clone());
+            let dgram = Datagram::new(
+                peer_ip,
+                peer_port_be,
+                local_ip,
+                local_port_be,
+                payload.clone(),
+            );
             let _ = std::hint::black_box(dgram);
         }
 

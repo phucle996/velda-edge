@@ -8,8 +8,6 @@
 //!    with in-place L7 [`XdpSlabLease::header_workspace`] tracking.
 //! 4. Decoupled Read/Write Streams: [`XdpStream::into_split`] round-trip and frame recycling.
 
-use std::net::{IpAddr, Ipv4Addr, SocketAddr};
-
 use velda_xdp::config::DEFAULT_XDP_HEADER_WORKSPACE;
 use velda_xdp::stack::L3Packet;
 use velda_xdp::stack::frame::{
@@ -115,7 +113,10 @@ fn test_zero_copy_udp_datagram_and_header_workspace_pipeline() {
     let (src_ip, dst_ip) = match l3 {
         L3Packet::Ipv4 { header, .. } => {
             assert_eq!(header.protocol, IP_PROTO_UDP);
-            (IpAddr::V4(header.src_ip), IpAddr::V4(header.dst_ip))
+            (
+                velda_core::lut::ip::v4_to_u128(header.src_ip.to_bits()),
+                velda_core::lut::ip::v4_to_u128(header.dst_ip.to_bits()),
+            )
         }
         _ => panic!("Expected IPv4"),
     };
@@ -125,13 +126,15 @@ fn test_zero_copy_udp_datagram_and_header_workspace_pipeline() {
         parse_inbound_datagram(src_ip, dst_ip, 14 + 20, lease).expect("UDP datagram parse ok");
 
     assert_eq!(
-        datagram.src,
-        SocketAddr::new(IpAddr::V4(Ipv4Addr::new(192, 168, 1, 50)), 44333)
+        datagram.src_ip,
+        velda_core::lut::ip::v4_to_u128(u32::from_be_bytes([192, 168, 1, 50]))
     );
+    assert_eq!(datagram.src_port_be, 44333u16.to_be());
     assert_eq!(
-        datagram.dst,
-        SocketAddr::new(IpAddr::V4(Ipv4Addr::new(127, 0, 0, 1)), 443)
+        datagram.dst_ip,
+        velda_core::lut::ip::v4_to_u128(u32::from_be_bytes([127, 0, 0, 1]))
     );
+    assert_eq!(datagram.dst_port_be, 443u16.to_be());
     assert_eq!(datagram.payload(), payload_bytes);
 
     // D. Use HeaderWorkspace within the same physical slab page for zero-copy token storage

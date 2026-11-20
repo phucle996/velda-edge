@@ -200,7 +200,7 @@ impl Drop for RdmaSlabArenaInner {
 // ============================================================================
 // Universe 1: AVX2 256-bit Vector Lane Scanning (4x 64-bit words = 256 slots)
 // ============================================================================
-#[cfg(target_arch = "x86_64")]
+#[cfg(all(target_arch = "x86_64", target_feature = "avx2"))]
 #[target_feature(enable = "avx2")]
 unsafe fn scan_avx2_256_inner(
     words: &[AtomicU64],
@@ -229,7 +229,7 @@ unsafe fn scan_avx2_256_inner(
     None
 }
 
-#[cfg(target_arch = "x86_64")]
+#[cfg(all(target_arch = "x86_64", target_feature = "avx2"))]
 fn scan_avx2_256(words: &[AtomicU64], start: usize, word_mask: usize) -> Option<usize> {
     if words.len() >= 4 {
         unsafe { scan_avx2_256_inner(words, start, word_mask) }
@@ -242,7 +242,10 @@ fn scan_avx2_256(words: &[AtomicU64], start: usize, word_mask: usize) -> Option<
 // Universe 2: SSE2 128-bit Vector Lane Scanning (2x 64-bit words = 128 slots)
 // Baseline on 100% of x86_64 CPUs since 2003 (Zero downclocking risk)
 // ============================================================================
-#[cfg(target_arch = "x86_64")]
+#[cfg(any(
+    all(target_arch = "x86_64", not(target_feature = "avx2")),
+    all(target_arch = "x86_64", test)
+))]
 fn scan_sse2_128(words: &[AtomicU64], start: usize, word_mask: usize) -> Option<usize> {
     use core::arch::x86_64::*;
     if words.len() < 2 {
@@ -320,14 +323,15 @@ fn scan_swar_64(words: &[AtomicU64], start: usize, word_mask: usize) -> Option<u
     }
 }
 
-/// Dispatches bitmap scanning directly through tiered vector/SWAR acceleration (AVX2 -> SSE2 -> SWAR).
+/// Dispatches bitmap scanning directly through compile-time tiered vector/SWAR acceleration (AVX2 -> SSE2 -> SWAR).
 #[inline]
 pub fn scan_bitmap(words: &[AtomicU64], start: usize, word_mask: usize) -> Option<usize> {
-    #[cfg(target_arch = "x86_64")]
+    #[cfg(all(target_arch = "x86_64", target_feature = "avx2"))]
     {
-        if std::is_x86_feature_detected!("avx2") {
-            return scan_avx2_256(words, start, word_mask);
-        }
+        scan_avx2_256(words, start, word_mask)
+    }
+    #[cfg(all(target_arch = "x86_64", not(target_feature = "avx2")))]
+    {
         scan_sse2_128(words, start, word_mask)
     }
     #[cfg(not(target_arch = "x86_64"))]
@@ -1115,12 +1119,10 @@ mod tests {
         }
 
         // 3. AVX2 (256-bit YMM)
-        #[cfg(target_arch = "x86_64")]
+        #[cfg(all(target_arch = "x86_64", target_feature = "avx2"))]
         {
-            if std::is_x86_feature_detected!("avx2") {
-                let res_avx2 = scan_avx2_256(&words, 0, 7);
-                assert_eq!(res_avx2, Some(4), "AVX2 must locate word 4");
-            }
+            let res_avx2 = scan_avx2_256(&words, 0, 7);
+            assert_eq!(res_avx2, Some(4), "AVX2 must locate word 4");
         }
 
         // Fill word 4 so all 512 slots are full
@@ -1130,9 +1132,10 @@ mod tests {
         #[cfg(target_arch = "x86_64")]
         {
             assert_eq!(scan_sse2_128(&words, 0, 7), None);
-            if std::is_x86_feature_detected!("avx2") {
-                assert_eq!(scan_avx2_256(&words, 0, 7), None);
-            }
+        }
+        #[cfg(all(target_arch = "x86_64", target_feature = "avx2"))]
+        {
+            assert_eq!(scan_avx2_256(&words, 0, 7), None);
         }
     }
 }

@@ -1,7 +1,7 @@
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::{TcpListener, TcpStream};
-use velda_core::{ConnectionId, TransportProtocol};
-use velda_sock::{Connection, next_connection_id};
+use velda_core::TransportProtocol;
+use velda_sock::{Connection, next_connection_id, socket_addr_to_raw};
 
 #[tokio::test]
 async fn test_connection_io_and_byte_counters() {
@@ -18,10 +18,14 @@ async fn test_connection_io_and_byte_counters() {
     });
 
     let (stream, peer_addr) = listener.accept().await.unwrap();
+    let (peer_ip, peer_port_be) = socket_addr_to_raw(peer_addr);
+    let (local_ip, local_port_be) = socket_addr_to_raw(server_addr);
     let mut conn = Connection::from_stream(stream).unwrap();
 
-    assert_eq!(conn.peer(), peer_addr);
-    assert_eq!(conn.local_addr(), server_addr);
+    assert_eq!(conn.peer_ip, peer_ip);
+    assert_eq!(conn.peer_port_be, peer_port_be);
+    assert_eq!(conn.local_ip, local_ip);
+    assert_eq!(conn.local_port_be, local_port_be);
     assert_eq!(conn.bytes_read(), 0);
     assert_eq!(conn.bytes_written(), 0);
 
@@ -44,23 +48,24 @@ async fn test_connection_context_and_l4_request() {
 
     let _client = TcpStream::connect(server_addr).await.unwrap();
     let (stream, peer_addr) = listener.accept().await.unwrap();
+    let (peer_ip, peer_port_be) = socket_addr_to_raw(peer_addr);
+    let (local_ip, local_port_be) = socket_addr_to_raw(server_addr);
 
-    let id = ConnectionId::new(42);
-    let conn = Connection::new(id, stream, peer_addr, server_addr);
+    let id = 42u64;
+    let conn = Connection::new(id, stream, peer_ip, peer_port_be, local_ip, local_port_be);
 
     assert_eq!(conn.id(), id);
 
     let l4_req = conn.to_l4_request();
     assert_eq!(l4_req.connection_id, id);
     assert_eq!(l4_req.protocol, TransportProtocol::Tcp);
-    assert_eq!(l4_req.peer.address, peer_addr);
-    assert_eq!(l4_req.local_addr, server_addr);
-    assert_eq!(l4_req.client_ip(), peer_addr.ip());
-    assert_eq!(l4_req.client_port(), peer_addr.port());
+    assert_eq!(l4_req.peer_ip, peer_ip);
+    assert_eq!(l4_req.peer_port_be, peer_port_be);
+    assert_eq!(l4_req.local_ip, local_ip);
+    assert_eq!(l4_req.local_port_be, local_port_be);
 
-    let ctx = conn.to_connection_context();
-    assert_eq!(ctx.id(), id);
-    assert_eq!(ctx.client_ip(), peer_addr.ip());
+    assert_eq!(l4_req.connection_id, id);
+    assert_eq!(l4_req.peer_ip, peer_ip);
 }
 
 #[tokio::test]
@@ -133,14 +138,19 @@ async fn test_connection_into_inner() {
 
     let _client = TcpStream::connect(server_addr).await.unwrap();
     let (stream, peer_addr) = listener.accept().await.unwrap();
+    let (peer_ip, peer_port_be) = socket_addr_to_raw(peer_addr);
+    let (local_ip, local_port_be) = socket_addr_to_raw(server_addr);
 
     let conn = Connection::from_stream(stream).unwrap();
     let conn_id = conn.id();
 
-    let (id, _stream, peer, local) = conn.into_inner();
+    let (id, _stream, got_peer_ip, got_peer_port_be, got_local_ip, got_local_port_be) =
+        conn.into_inner();
     assert_eq!(id, conn_id);
-    assert_eq!(peer, peer_addr);
-    assert_eq!(local, server_addr);
+    assert_eq!(got_peer_ip, peer_ip);
+    assert_eq!(got_peer_port_be, peer_port_be);
+    assert_eq!(got_local_ip, local_ip);
+    assert_eq!(got_local_port_be, local_port_be);
 }
 
 #[test]
@@ -149,6 +159,6 @@ fn test_monotonic_connection_id_generator() {
     let id2 = next_connection_id();
     let id3 = next_connection_id();
 
-    assert!(id2.value() > id1.value());
-    assert!(id3.value() > id2.value());
+    assert!(id2 > id1);
+    assert!(id3 > id2);
 }

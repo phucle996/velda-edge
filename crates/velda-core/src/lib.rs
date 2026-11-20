@@ -1,22 +1,16 @@
-//! Core contracts and data models for Velda Edge.
+//! Core Contracts, Primitive Vocabulary & Hardware-Aligned Foundations (`velda_core`).
 //!
-//! `velda-core` is the foundation crate of the Velda data plane.
-//! It defines shared types, request/response models, lifecycle
-//! contracts, and common errors used by higher-level crates.
-//!
-//! This crate intentionally does not implement:
-//!
-//! - TCP/UDP transport handling
-//! - TLS termination
-//! - HTTP parsing
-//! - Route matching
-//! - Plugin execution
-//! - Upstream connection management
-//! - Load balancing
-//! - Runtime orchestration
-//!
-//! Higher-level crates such as `velda-ingress`, `velda-router`,
-//! `velda-plugin`, and `velda-upstream` build on these contracts.
+//! ```text
+//! ┌─────────────────────────────────────────────────────────────────────────────────────────┐
+//! │                        VELDA-CORE PRIMITIVE & CONTRACT BOUNDARY                         │
+//! ├────────────────┬────────────────────────────────────────────────────────────────────────┤
+//! │ context / l4/7 │ Flat RequestContext, RequestState, L4Request/Response, L7Req/Resp      │
+//! │ endpoint       │ 24B POD Endpoint (ip: u128, weight: u32, port_be: u16, is_v6: u8)      │
+//! │ buffer / lut   │ Pre-warmed HeaderWorkspace/PayloadSlabPool & L1D O(1) lookup tables    │
+//! │ hardware/clock │ CPU/NIC/Memory topology probing, overload guards, dual-tier clock      │
+//! │ lifecycle/err  │ Narrow hook contracts (Continue/Respond/Reject) & shared Error/Reject  │
+//! └────────────────┴────────────────────────────────────────────────────────────────────────┘
+//! ```
 
 pub mod buffer;
 pub mod clock;
@@ -31,9 +25,7 @@ pub mod lut;
 pub mod protocol;
 pub mod provenance;
 pub mod request_id;
-pub mod socket;
 pub mod streaming;
-pub mod types;
 pub mod worker;
 
 // -----------------------------------------------------------------------------
@@ -59,17 +51,19 @@ pub use streaming::StreamingMode;
 // L4 / L7 Models
 // -----------------------------------------------------------------------------
 
-pub use l4::request::{L4Request, Peer, TransportProtocol};
+pub use l4::request::{L4Request, TransportProtocol};
 pub use l4::response::{L4Action, L4Response};
 pub use l7::Body;
 pub use l7::request::L7Request;
 pub use l7::response::L7Response;
 
 // -----------------------------------------------------------------------------
-// Context
+// Context & Flat Integer Identifiers
 // -----------------------------------------------------------------------------
 
-pub use context::{ConnectionContext, RequestContext, RequestState};
+pub use context::{
+    RequestContext, RequestState, UNASSIGNED_UPSTREAM_ID, UNMATCHED_ROUTE_ID, fnv1a_hash_32,
+};
 
 // -----------------------------------------------------------------------------
 // Errors
@@ -87,9 +81,5 @@ pub use lifecycle::{Action, CachedResponseDirective, HookPhase, Phase};
 // Shared Identifiers & Endpoints
 // -----------------------------------------------------------------------------
 
-pub use endpoint::{Endpoint, EndpointId};
+pub use endpoint::Endpoint;
 pub use provenance::Provenance;
-pub use types::{
-    ConnectionId, ListenerId, RequestId, RouteId, UNASSIGNED_UPSTREAM_ID, UNMATCHED_ROUTE_ID,
-    UpstreamId,
-};

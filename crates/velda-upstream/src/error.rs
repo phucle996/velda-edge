@@ -1,6 +1,5 @@
 //! Error taxonomy for the `velda-upstream` subsystem.
 
-use std::net::SocketAddr;
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -15,9 +14,10 @@ pub enum UpstreamError {
     NoEndpointsAvailable(Arc<str>),
 
     /// Failed to connect to a backend endpoint.
-    #[error("failed to connect to backend endpoint '{endpoint}': {reason}")]
+    #[error("failed to connect to backend endpoint ({ip:#x}, port_be={port_be}): {reason}")]
     ConnectionFailed {
-        endpoint: SocketAddr,
+        ip: u128,
+        port_be: u16,
         reason: String,
     },
 

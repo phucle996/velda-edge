@@ -11,8 +11,16 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     let config = Http3Config::auto();
     let start = Instant::now();
+    let (t_ip, t_port_be) = match target {
+        SocketAddr::V4(v4) => (
+            velda_core::lut::ip::v4_to_u128(v4.ip().to_bits()),
+            v4.port().to_be(),
+        ),
+        SocketAddr::V6(v6) => (v6.ip().to_bits(), v6.port().to_be()),
+    };
     let client = connect(
-        target,
+        t_ip,
+        t_port_be,
         "backend.local",
         &config,
         velda_http3::client::default_client_config()?,

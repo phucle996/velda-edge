@@ -239,12 +239,16 @@ fn test_rdma_config_zero_wr_rejected() {
 
 #[tokio::test]
 async fn test_rdma_listener_bind_local_addr() {
-    let listener = RdmaListener::bind("127.0.0.1:0".parse().unwrap(), RdmaConfig::mock())
-        .await
-        .expect("Listener bind");
+    let listener = RdmaListener::bind(
+        velda_core::lut::ip::v4_to_u128(0x7F00_0001),
+        0,
+        RdmaConfig::mock(),
+    )
+    .await
+    .expect("Listener bind");
     let addr = listener.local_addr().expect("Local addr");
-    assert_eq!(addr.ip(), std::net::Ipv4Addr::LOCALHOST);
-    assert!(addr.port() > 0);
+    assert_eq!(addr.0, velda_core::lut::ip::v4_to_u128(0x7F00_0001));
+    assert!(u16::from_be(addr.1) > 0);
 }
 
 #[tokio::test]

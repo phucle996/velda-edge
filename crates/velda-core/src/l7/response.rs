@@ -1,3 +1,17 @@
+//! Layer 7 HTTP Response Model (`velda_core::l7::response`).
+//!
+//! ```text
+//! ┌─────────────────────────────────────────────────────────────────────────────────────────┐
+//! │                           L7Response WIRE REPRESENTATION                                │
+//! ├─────────────────────────────────────────────────────────────────────────────────────────┤
+//! │  L7Response                                                                             │
+//! │    ├── status:  StatusCode       (HTTP status code)                                     │
+//! │    ├── version: Version          (HTTP/1.1 | HTTP/2 | HTTP/3)                           │
+//! │    ├── headers: HeaderWorkspace  (16B register staging + HeaderMap)                     │
+//! │    └── body:    Body             (Empty | Slab | Bytes)                                 │
+//! └─────────────────────────────────────────────────────────────────────────────────────────┘
+//! ```
+
 use http::{StatusCode, Version};
 
 use super::request::Body;

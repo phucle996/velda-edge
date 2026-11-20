@@ -54,10 +54,7 @@ impl RingHash {
     fn compute_fingerprint(endpoints: &[Endpoint]) -> u64 {
         let mut fp = 0xcbf29ce484222325u64;
         for ep in endpoints {
-            let addr_hash = match ep.address {
-                std::net::SocketAddr::V4(v4) => fnv1a_hash(&v4.ip().octets()) ^ (v4.port() as u64),
-                std::net::SocketAddr::V6(v6) => fnv1a_hash(&v6.ip().octets()) ^ (v6.port() as u64),
-            };
+            let addr_hash = fnv1a_hash(&ep.ip.to_be_bytes()) ^ (u16::from_be(ep.port_be) as u64);
             fp ^= addr_hash ^ (ep.weight as u64);
             fp = fp.wrapping_mul(0x100000001b3);
         }
@@ -73,23 +70,13 @@ impl RingHash {
 
         for (idx, ep) in endpoints.iter().enumerate() {
             let num_vnodes = ep.weight.clamp(1, 100) * VNODES_PER_WEIGHT_UNIT;
-            let (ip_bytes, ip_len) = match ep.address {
-                std::net::SocketAddr::V4(v4) => {
-                    let mut b = [0u8; 24];
-                    b[..4].copy_from_slice(&v4.ip().octets());
-                    (b, 4)
-                }
-                std::net::SocketAddr::V6(v6) => {
-                    let mut b = [0u8; 24];
-                    b[..16].copy_from_slice(&v6.ip().octets());
-                    (b, 16)
-                }
-            };
+            let mut seed = [0u8; 22];
+            seed[..16].copy_from_slice(&ep.ip.to_be_bytes());
+            seed[16..18].copy_from_slice(&ep.port_be.to_be_bytes());
 
             for v in 0..num_vnodes {
-                let mut seed = ip_bytes;
-                seed[ip_len..ip_len + 4].copy_from_slice(&v.to_be_bytes());
-                let h = fnv1a_hash(&seed[..ip_len + 4]);
+                seed[18..22].copy_from_slice(&v.to_be_bytes());
+                let h = fnv1a_hash(&seed);
                 vnodes.push(Vnode {
                     hash: h,
                     endpoint_idx: idx,
@@ -212,28 +199,23 @@ impl LoadBalancer for RingHash {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::net::SocketAddr;
 
     #[test]
     fn test_ring_hash_consistency() {
-        let ep1: SocketAddr = "10.0.0.1:8080".parse().unwrap();
-        let ep2: SocketAddr = "10.0.0.2:8080".parse().unwrap();
-        let ep3: SocketAddr = "10.0.0.3:8080".parse().unwrap();
-
         let endpoints = vec![
-            Endpoint::new("e1", ep1, 1),
-            Endpoint::new("e2", ep2, 2),
-            Endpoint::new("e3", ep3, 1),
+            Endpoint::from_v4([10, 0, 0, 1], 8080, 1),
+            Endpoint::from_v4([10, 0, 0, 2], 8080, 2),
+            Endpoint::from_v4([10, 0, 0, 3], 8080, 1),
         ];
 
         let balancer = RingHash::new();
         let key = 987654321u64;
         let ctx = SelectionContext::with_hash(key);
 
-        let initial_choice = balancer.select(&endpoints, &ctx).unwrap().address;
+        let initial_choice = *balancer.select(&endpoints, &ctx).unwrap();
 
         for _ in 0..1_000 {
-            let choice = balancer.select(&endpoints, &ctx).unwrap().address;
+            let choice = *balancer.select(&endpoints, &ctx).unwrap();
             assert_eq!(choice, initial_choice);
         }
     }

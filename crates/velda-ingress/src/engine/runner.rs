@@ -113,7 +113,7 @@ impl IngressEngine {
         let mut contexts = Vec::with_capacity(count);
 
         let (resolved_tx, resolved_rx) =
-            watch::channel::<Option<HashMap<String, std::net::SocketAddr>>>(None);
+            watch::channel::<Option<HashMap<String, (u128, u16)>>>(None);
         let resolved_publisher = Arc::new(resolved_tx);
 
         for shard_id in 0..count {
@@ -270,12 +270,14 @@ impl IngressEngine {
 }
 
 /// Execution context and cross-shard synchronization for an ingress shard.
+pub type ResolvedAddrMap = HashMap<String, (u128, u16)>;
+
 pub struct ShardContext {
     pub shard_id: usize,
     pub total_shards: usize,
     pub reconcile_rx: mpsc::Receiver<Vec<IngressBinding>>,
-    pub resolved_publisher: Arc<watch::Sender<Option<HashMap<String, std::net::SocketAddr>>>>,
-    pub resolved_subscriber: watch::Receiver<Option<HashMap<String, std::net::SocketAddr>>>,
+    pub resolved_publisher: Arc<watch::Sender<Option<ResolvedAddrMap>>>,
+    pub resolved_subscriber: watch::Receiver<Option<ResolvedAddrMap>>,
 }
 
 impl ShardContext {
@@ -284,8 +286,8 @@ impl ShardContext {
         shard_id: usize,
         total_shards: usize,
         reconcile_rx: mpsc::Receiver<Vec<IngressBinding>>,
-        resolved_publisher: Arc<watch::Sender<Option<HashMap<String, std::net::SocketAddr>>>>,
-        resolved_subscriber: watch::Receiver<Option<HashMap<String, std::net::SocketAddr>>>,
+        resolved_publisher: Arc<watch::Sender<Option<ResolvedAddrMap>>>,
+        resolved_subscriber: watch::Receiver<Option<ResolvedAddrMap>>,
     ) -> Self {
         Self {
             shard_id,
@@ -329,7 +331,7 @@ where
     // 1. Initial listener bind:
     // Shard 0 determines actual ephemeral ports when port == 0, publishing them via watch channel.
     // Shard 1..N-1 await the resolved map and bind to the exact same port with SO_REUSEPORT.
-    let overrides: HashMap<String, std::net::SocketAddr> = if shard_id == 0 {
+    let overrides: HashMap<String, (u128, u16)> = if shard_id == 0 {
         let mut resolved = HashMap::new();
         for binding in &initial_bindings {
             let id = binding.id().to_string();

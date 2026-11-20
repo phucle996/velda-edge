@@ -67,7 +67,7 @@ impl LoadBalancer for PeakEwma {
 
         let cost_of = |ep: &Endpoint| -> (u64, u64) {
             let w = ep.weight.max(1) as u64;
-            if let Some(m) = metrics_map.get(&ep.address) {
+            if let Some(m) = metrics_map.get(&(ep.ip, ep.port_be)) {
                 let latency = m.latency_ewma_nanos().max(1_000);
                 let inflight = m.inflight_requests() as u64;
                 let cost = latency.saturating_mul(inflight.saturating_add(1));
@@ -93,14 +93,13 @@ mod tests {
     use super::*;
     use crate::metrics::EndpointMetrics;
     use std::collections::HashMap;
-    use std::net::SocketAddr;
 
     #[test]
     fn test_peak_ewma_prefers_lower_latency() {
-        let ep1: SocketAddr = "10.0.0.1:8080".parse().unwrap();
-        let ep2: SocketAddr = "10.0.0.2:8080".parse().unwrap();
+        let ep1 = Endpoint::from_v4([10, 0, 0, 1], 8080, 1);
+        let ep2 = Endpoint::from_v4([10, 0, 0, 2], 8080, 1);
 
-        let endpoints = vec![Endpoint::new("e1", ep1, 1), Endpoint::new("e2", ep2, 1)];
+        let endpoints = vec![ep1, ep2];
 
         let mut metrics = HashMap::new();
         let m1 = EndpointMetrics::new();
@@ -112,23 +111,23 @@ mod tests {
         // ep2 has fast latency (5 ms)
         m2.record_latency_nanos(5_000_000);
 
-        metrics.insert(ep1, m1);
-        metrics.insert(ep2, m2);
+        metrics.insert((ep1.ip, ep1.port_be), m1);
+        metrics.insert((ep2.ip, ep2.port_be), m2);
 
         let ctx = SelectionContext::NONE.with_metrics(&metrics);
         let balancer = PeakEwma::new();
 
         for _ in 0..100 {
             let chosen = balancer.select(&endpoints, &ctx).unwrap();
-            assert_eq!(chosen.address, ep2);
+            assert_eq!((chosen.ip, chosen.port_be), (ep2.ip, ep2.port_be));
         }
     }
 
     #[test]
     fn test_peak_ewma_overflow_resilience() {
-        let ep1: SocketAddr = "10.0.0.1:8080".parse().unwrap();
-        let ep2: SocketAddr = "10.0.0.2:8080".parse().unwrap();
-        let endpoints = vec![Endpoint::new("e1", ep1, 1), Endpoint::new("e2", ep2, 1)];
+        let ep1 = Endpoint::from_v4([10, 0, 0, 1], 8080, 1);
+        let ep2 = Endpoint::from_v4([10, 0, 0, 2], 8080, 1);
+        let endpoints = vec![ep1, ep2];
 
         let mut metrics = HashMap::new();
         let m1 = EndpointMetrics::new();
@@ -140,8 +139,8 @@ mod tests {
 
         m2.record_latency_nanos(10_000);
 
-        metrics.insert(ep1, m1);
-        metrics.insert(ep2, m2);
+        metrics.insert((ep1.ip, ep1.port_be), m1);
+        metrics.insert((ep2.ip, ep2.port_be), m2);
 
         let ctx = SelectionContext::NONE.with_metrics(&metrics);
         let balancer = PeakEwma::new();

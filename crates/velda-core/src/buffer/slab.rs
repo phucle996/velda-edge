@@ -621,39 +621,39 @@ pub fn copy_non_temporal(src: &[u8], dst: &mut [u8]) {
         dst[..len].copy_from_slice(&src[..len]);
         return;
     }
-    #[cfg(target_arch = "x86_64")]
+    #[cfg(all(target_arch = "x86_64", target_feature = "avx2"))]
     {
-        if is_x86_feature_detected!("avx2") {
-            #[target_feature(enable = "avx2")]
-            #[allow(clippy::cast_ptr_alignment)]
-            unsafe fn stream_avx2(src: &[u8], dst: &mut [u8], len: usize) {
-                use std::arch::x86_64::*;
-                let dst_addr = dst.as_mut_ptr() as usize;
-                let lead = (32usize.wrapping_sub(dst_addr & 31)) & 31;
-                if lead > 0 {
-                    dst[..lead].copy_from_slice(&src[..lead]);
-                }
-                let stream_bytes = ((len - lead) / 32) * 32;
-                let end_stream = lead + stream_bytes;
-                let mut offset = lead;
-                while offset < end_stream {
-                    unsafe {
-                        let v = _mm256_loadu_si256(src.as_ptr().add(offset) as *const __m256i);
-                        _mm256_stream_si256(dst.as_mut_ptr().add(offset) as *mut __m256i, v);
-                    }
-                    offset += 32;
-                }
-                if end_stream < len {
-                    dst[end_stream..len].copy_from_slice(&src[end_stream..len]);
-                }
-                _mm_sfence();
+        #[target_feature(enable = "avx2")]
+        #[allow(clippy::cast_ptr_alignment)]
+        unsafe fn stream_avx2(src: &[u8], dst: &mut [u8], len: usize) {
+            use std::arch::x86_64::*;
+            let dst_addr = dst.as_mut_ptr() as usize;
+            let lead = (32usize.wrapping_sub(dst_addr & 31)) & 31;
+            if lead > 0 {
+                dst[..lead].copy_from_slice(&src[..lead]);
             }
-            unsafe {
-                stream_avx2(src, dst, len);
+            let stream_bytes = ((len - lead) / 32) * 32;
+            let end_stream = lead + stream_bytes;
+            let mut offset = lead;
+            while offset < end_stream {
+                unsafe {
+                    let v = _mm256_loadu_si256(src.as_ptr().add(offset) as *const __m256i);
+                    _mm256_stream_si256(dst.as_mut_ptr().add(offset) as *mut __m256i, v);
+                }
+                offset += 32;
             }
-            return;
+            if end_stream < len {
+                dst[end_stream..len].copy_from_slice(&src[end_stream..len]);
+            }
+            _mm_sfence();
         }
+        unsafe {
+            stream_avx2(src, dst, len);
+        }
+    }
 
+    #[cfg(all(target_arch = "x86_64", not(target_feature = "avx2")))]
+    {
         #[target_feature(enable = "sse2")]
         #[allow(clippy::cast_ptr_alignment)]
         unsafe fn stream_sse2(src: &[u8], dst: &mut [u8], len: usize) {
@@ -716,39 +716,39 @@ pub fn zero_non_temporal(dst: &mut [u8]) {
         dst.fill(0);
         return;
     }
-    #[cfg(target_arch = "x86_64")]
+    #[cfg(all(target_arch = "x86_64", target_feature = "avx2"))]
     {
-        if is_x86_feature_detected!("avx2") {
-            #[target_feature(enable = "avx2")]
-            #[allow(clippy::cast_ptr_alignment)]
-            unsafe fn zero_avx2(dst: &mut [u8], len: usize) {
-                use std::arch::x86_64::*;
-                let dst_addr = dst.as_mut_ptr() as usize;
-                let lead = (32usize.wrapping_sub(dst_addr & 31)) & 31;
-                if lead > 0 {
-                    dst[..lead].fill(0);
-                }
-                let stream_bytes = ((len - lead) / 32) * 32;
-                let end_stream = lead + stream_bytes;
-                unsafe {
-                    let zero = _mm256_setzero_si256();
-                    let mut offset = lead;
-                    while offset < end_stream {
-                        _mm256_stream_si256(dst.as_mut_ptr().add(offset) as *mut __m256i, zero);
-                        offset += 32;
-                    }
-                }
-                if end_stream < len {
-                    dst[end_stream..len].fill(0);
-                }
-                _mm_sfence();
+        #[target_feature(enable = "avx2")]
+        #[allow(clippy::cast_ptr_alignment)]
+        unsafe fn zero_avx2(dst: &mut [u8], len: usize) {
+            use std::arch::x86_64::*;
+            let dst_addr = dst.as_mut_ptr() as usize;
+            let lead = (32usize.wrapping_sub(dst_addr & 31)) & 31;
+            if lead > 0 {
+                dst[..lead].fill(0);
             }
+            let stream_bytes = ((len - lead) / 32) * 32;
+            let end_stream = lead + stream_bytes;
             unsafe {
-                zero_avx2(dst, len);
+                let zero = _mm256_setzero_si256();
+                let mut offset = lead;
+                while offset < end_stream {
+                    _mm256_stream_si256(dst.as_mut_ptr().add(offset) as *mut __m256i, zero);
+                    offset += 32;
+                }
             }
-            return;
+            if end_stream < len {
+                dst[end_stream..len].fill(0);
+            }
+            _mm_sfence();
         }
+        unsafe {
+            zero_avx2(dst, len);
+        }
+    }
 
+    #[cfg(all(target_arch = "x86_64", not(target_feature = "avx2")))]
+    {
         #[target_feature(enable = "sse2")]
         #[allow(clippy::cast_ptr_alignment)]
         unsafe fn zero_sse2(dst: &mut [u8], len: usize) {

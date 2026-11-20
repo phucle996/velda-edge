@@ -25,11 +25,11 @@
 //! 4. **Handoff**: The OOB TCP stream is cleanly closed or detached; the active, verified `RdmaChannel` is
 //!    returned to the upstream pool for hot-path leasing.
 
-use std::net::SocketAddr;
 use std::sync::Arc;
 use std::time::Duration;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::{TcpListener, TcpStream};
+use velda_core::lut::ip::{is_v4_u128, v4_to_u128, v4itoaddr, v6itoaddr};
 
 use crate::channel::{HardwareChannel, RdmaChannel, RdmaStream};
 use crate::config::RdmaConfig;
@@ -47,21 +47,22 @@ const OOB_MAGIC: &[u8; 4] = b"VRDM";
 pub struct RdmaConnector;
 
 impl RdmaConnector {
-    /// Connects to the upstream target, establishes an RDMA Queue Pair, and returns a ready `RdmaChannel`.
-    /// Connects to the upstream target, establishes an RDMA Queue Pair, and returns a ready `RdmaChannel`.
+    /// Connects to the upstream target `(target_ip, target_port_be)`, establishes an RDMA Queue Pair, and returns a ready `RdmaChannel`.
     pub async fn connect(
-        target: SocketAddr,
+        target_ip: u128,
+        target_port_be: u16,
         config: &RdmaConfig,
     ) -> Result<RdmaChannel, RdmaError> {
-        Self::connect_with_pd(target, config, None).await
+        Self::connect_with_pd(target_ip, target_port_be, config, None).await
     }
 
-    /// Connects to the upstream target, binding the Queue Pair to an optional shared Protection Domain.
+    /// Connects to the upstream target `(target_ip, target_port_be)`, binding the Queue Pair to an optional shared Protection Domain.
     ///
     /// When `shared_pd` is provided (e.g. from `RdmaSlabArena::pd()`), the QP is registered within the
     /// same Protection Domain as pre-registered zero-copy memory slabs, preventing `IBV_WC_LOC_PROT_ERR`.
     pub async fn connect_with_pd(
-        target: SocketAddr,
+        target_ip: u128,
+        target_port_be: u16,
         config: &RdmaConfig,
         shared_pd: Option<Arc<ProtectionDomain>>,
     ) -> Result<RdmaChannel, RdmaError> {
@@ -145,7 +146,8 @@ impl RdmaConnector {
         // Step 3: Out-of-Band (OOB) TCP handshake to exchange binary QpAddress with remote peer.
         // Resolves the chicken-and-egg bootstrap since RDMA cannot communicate prior to RTS.
         let remote_addr = exchange_oob(
-            target,
+            target_ip,
+            target_port_be,
             &local_addr,
             Duration::from_millis(config.timeout_ms),
         )
@@ -164,10 +166,11 @@ impl RdmaConnector {
 
     /// Helper to connect and immediately return an `RdmaStream` compatible with `AsyncRead + AsyncWrite`.
     pub async fn connect_stream(
-        target: SocketAddr,
+        target_ip: u128,
+        target_port_be: u16,
         config: &RdmaConfig,
     ) -> Result<RdmaStream, RdmaError> {
-        let channel = Self::connect(target, config).await?;
+        let channel = Self::connect(target_ip, target_port_be, config).await?;
         Ok(RdmaStream::new(channel))
     }
 }
@@ -190,12 +193,17 @@ fn rand_psn() -> u32 {
 
 /// Exchanges QpAddress over a short-lived out-of-band TCP socket.
 pub async fn exchange_oob(
-    target: SocketAddr,
+    target_ip: u128,
+    target_port_be: u16,
     local: &QpAddress,
     timeout: Duration,
 ) -> Result<QpAddress, RdmaError> {
     let handshake_fut = async {
-        let mut stream = TcpStream::connect(target).await?;
+        let mut stream = if is_v4_u128(target_ip) {
+            TcpStream::connect(v4itoaddr(target_ip, target_port_be)).await?
+        } else {
+            TcpStream::connect(v6itoaddr(target_ip, target_port_be)).await?
+        };
 
         // Format 32-byte bootstrap frame:
         // [0..4]: Magic b"VRDM"
@@ -264,9 +272,13 @@ pub struct RdmaListener {
 }
 
 impl RdmaListener {
-    /// Binds an out-of-band TCP listener on the specified socket address.
-    pub async fn bind(addr: SocketAddr, config: RdmaConfig) -> Result<Self, RdmaError> {
-        let listener = TcpListener::bind(addr).await?;
+    /// Binds an out-of-band TCP listener on the specified `(ip: u128, port_be: u16)` address.
+    pub async fn bind(ip: u128, port_be: u16, config: RdmaConfig) -> Result<Self, RdmaError> {
+        let listener = if is_v4_u128(ip) {
+            TcpListener::bind(v4itoaddr(ip, port_be)).await?
+        } else {
+            TcpListener::bind(v6itoaddr(ip, port_be)).await?
+        };
         Ok(Self {
             listener,
             config,
@@ -275,14 +287,22 @@ impl RdmaListener {
         })
     }
 
-    /// Returns the local socket address to which this listener is bound.
-    pub fn local_addr(&self) -> Result<SocketAddr, RdmaError> {
-        Ok(self.listener.local_addr()?)
+    /// Returns the local `(ip: u128, port_be: u16)` to which this listener is bound.
+    pub fn local_addr(&self) -> Result<(u128, u16), RdmaError> {
+        let addr = self.listener.local_addr()?;
+        Ok(match addr {
+            std::net::SocketAddr::V4(v4) => (v4_to_u128(v4.ip().to_bits()), v4.port().to_be()),
+            std::net::SocketAddr::V6(v6) => (v6.ip().to_bits(), v6.port().to_be()),
+        })
     }
 
-    /// Accepts an incoming connection, performs the OOB handshake, and yields an `RdmaChannel`.
-    pub async fn accept(&self) -> Result<(RdmaChannel, SocketAddr), RdmaError> {
+    /// Accepts an incoming connection, performs the OOB handshake, and yields `(RdmaChannel, peer_ip, peer_port_be)`.
+    pub async fn accept(&self) -> Result<(RdmaChannel, u128, u16), RdmaError> {
         let (mut stream, peer_addr) = self.listener.accept().await?;
+        let (peer_ip, peer_port_be) = match peer_addr {
+            std::net::SocketAddr::V4(v4) => (v4_to_u128(v4.ip().to_bits()), v4.port().to_be()),
+            std::net::SocketAddr::V6(v6) => (v6.ip().to_bits(), v6.port().to_be()),
+        };
         let timeout = Duration::from_millis(self.config.timeout_ms);
 
         let handshake_fut = async {
@@ -419,12 +439,12 @@ impl RdmaListener {
             Err(_) => return Err(RdmaError::Timeout("OOB accept handshake timed out".into())),
         };
 
-        Ok((channel, peer_addr))
+        Ok((channel, peer_ip, peer_port_be))
     }
 
-    /// Accepts an incoming connection and yields an `RdmaStream`.
-    pub async fn accept_stream(&self) -> Result<(RdmaStream, SocketAddr), RdmaError> {
-        let (ch, addr) = self.accept().await?;
-        Ok((RdmaStream::new(ch), addr))
+    /// Accepts an incoming connection and yields `(RdmaStream, peer_ip, peer_port_be)`.
+    pub async fn accept_stream(&self) -> Result<(RdmaStream, u128, u16), RdmaError> {
+        let (ch, ip, port_be) = self.accept().await?;
+        Ok((RdmaStream::new(ch), ip, port_be))
     }
 }

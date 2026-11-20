@@ -8,39 +8,39 @@ use std::net::SocketAddr;
 
 use bytes::Bytes;
 use http::{HeaderMap, Method, Uri, Version};
-use velda_core::l4::request::{ConnectionId, TransportProtocol};
+use velda_core::l4::request::TransportProtocol;
 use velda_core::l7::request::Body;
-use velda_core::{
-    ConnectionContext, Error, ErrorKind, L4Request, L7Request, RequestId, RequestState, RouteId,
-    UpstreamId,
-};
+use velda_core::{Error, ErrorKind, L4Request, L7Request, RequestState};
 
 #[test]
 fn test_extreme_integer_boundaries() {
     // 0 values
-    let zero_req = RequestId::new(0);
-    let zero_route = RouteId::new(0);
-    let zero_upstream = UpstreamId::new(0);
-    let zero_conn = ConnectionId(0);
+    let zero_req: u128 = 0;
+    let zero_route: u16 = 0;
+    let zero_upstream: u16 = 0;
+    let zero_conn: u64 = 0;
 
-    assert_eq!(zero_req.value(), 0);
-    assert_eq!(zero_route.value(), 0);
-    assert_eq!(zero_upstream.value(), 0);
-    assert_eq!(zero_conn.0, 0);
+    assert_eq!(zero_req, 0);
+    assert_eq!(zero_route, 0);
+    assert_eq!(zero_upstream, 0);
+    assert_eq!(zero_conn, 0);
 
     // Maximum possible bounds
-    let max_req = RequestId::new(u128::MAX);
-    let max_route = RouteId::new(u16::MAX);
-    let max_upstream = UpstreamId::new(u16::MAX);
-    let max_conn = ConnectionId(u64::MAX);
+    let max_req: u128 = u128::MAX;
+    let max_route: u16 = u16::MAX;
+    let max_upstream: u16 = u16::MAX;
+    let max_conn: u64 = u64::MAX;
 
-    assert_eq!(max_req.value(), u128::MAX);
-    assert_eq!(max_route.value(), u16::MAX);
-    assert_eq!(max_upstream.value(), u16::MAX);
-    assert_eq!(max_conn.0, u64::MAX);
+    assert_eq!(max_req, u128::MAX);
+    assert_eq!(max_route, u16::MAX);
+    assert_eq!(max_upstream, u16::MAX);
+    assert_eq!(max_conn, u64::MAX);
 
     // Formatter checks for extreme numbers
-    assert_eq!(max_req.to_string(), "ffffffffffffffffffffffffffffffff");
+    assert_eq!(
+        format!("{max_req:032x}"),
+        "ffffffffffffffffffffffffffffffff"
+    );
     assert_eq!(max_route.to_string(), u16::MAX.to_string());
 }
 
@@ -68,17 +68,18 @@ fn test_dirty_and_extreme_socket_addresses() {
     for (raw_addr, expected_ip, expected_port) in test_addrs {
         let addr: SocketAddr = raw_addr.parse().expect("Valid socket address");
         let l4 = L4Request::new(
-            ConnectionId(1),
+            1,
             TransportProtocol::Tcp,
-            addr,
-            "127.0.0.1:80".parse().unwrap(),
+            velda_core::lut::ip::encode_ip_u128(addr.ip()),
+            addr.port().to_be(),
+            velda_core::lut::ip::v4_to_u128(0x7F00_0001),
+            80u16.to_be(),
         );
 
-        assert_eq!(l4.client_ip().to_string(), expected_ip);
-        assert_eq!(l4.client_port(), expected_port);
-
-        let conn = ConnectionContext::new(l4);
-        assert_eq!(conn.client_ip().to_string(), expected_ip);
+        let (buf, len) = velda_core::lut::ip::format_ip_bytes(l4.peer_ip);
+        assert_eq!(std::str::from_utf8(&buf[..len]).unwrap(), expected_ip);
+        assert_eq!(u16::from_be(l4.peer_port_be), expected_port);
+        assert_eq!(l4.peer_ip, velda_core::lut::ip::encode_ip_u128(addr.ip()));
     }
 }
 
@@ -137,21 +138,21 @@ fn test_unusual_and_dirty_l7_requests() {
 
 #[test]
 fn test_repeated_and_conflicting_state_mutations() {
-    let mut state = RequestState::new(RequestId(100));
+    let mut state = RequestState::new(100);
 
     // Overwriting route multiple times (e.g. internal redirects / rewrites)
-    state.set_route(RouteId(1));
-    assert_eq!(state.route, Some(RouteId(1)));
+    state.set_route(1);
+    assert_eq!(state.route_id, 1);
 
-    state.set_route(RouteId(2));
-    assert_eq!(state.route, Some(RouteId(2)));
+    state.set_route(2);
+    assert_eq!(state.route_id, 2);
 
     // Setting upstream before or after routing
-    state.set_upstream(UpstreamId(10));
-    assert_eq!(state.upstream, Some(UpstreamId(10)));
+    state.set_upstream(10);
+    assert_eq!(state.upstream_id, 10);
 
-    state.set_upstream(UpstreamId(20));
-    assert_eq!(state.upstream, Some(UpstreamId(20)));
+    state.set_upstream(20);
+    assert_eq!(state.upstream_id, 20);
 
     // Out-of-order flag transitions
     state.mark_upstream_completed();

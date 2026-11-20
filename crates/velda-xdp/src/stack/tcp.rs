@@ -20,8 +20,6 @@
 //! on recyclable pre-allocated slabs. Malicious or uncompleted SYNs are discarded in nanoseconds
 //! without allocating system RAM or impacting the kernel.
 
-use std::net::SocketAddr;
-
 use rustc_hash::FxHashMap;
 
 use crate::error::{Result, XdpError};
@@ -112,51 +110,39 @@ pub struct TcpSegment<'a> {
     pub payload: &'a [u8],
 }
 
-/// 4-tuple key uniquely identifying a bidirectional TCP connection.
+/// 4-tuple key uniquely identifying a bidirectional TCP connection in pure integer layout.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct TcpConnectionKey {
-    pub client: SocketAddr,
-    pub server: SocketAddr,
+    pub client_ip: u128,
+    pub server_ip: u128,
+    pub client_port_be: u16,
+    pub server_port_be: u16,
 }
 
 impl TcpConnectionKey {
     #[inline]
-    pub fn new(client: SocketAddr, server: SocketAddr) -> Self {
-        Self { client, server }
+    pub const fn new(
+        client_ip: u128,
+        client_port_be: u16,
+        server_ip: u128,
+        server_port_be: u16,
+    ) -> Self {
+        Self {
+            client_ip,
+            server_ip,
+            client_port_be,
+            server_port_be,
+        }
     }
 }
 
 impl std::hash::Hash for TcpConnectionKey {
     #[inline]
     fn hash<H: std::hash::Hasher>(&self, state: &mut H) {
-        match (&self.client, &self.server) {
-            (SocketAddr::V4(c), SocketAddr::V4(s)) => {
-                // Packed 12-byte IPv4 4-tuple hashing:
-                // Evaluates two 32-bit IPs packed into a 64-bit integer, followed by
-                // two 16-bit ports packed into a 32-bit integer.
-                // Dispatches directly into FxHasher (2 multiplies, 0 SipHash state rounds).
-                let c_ip = u32::from_ne_bytes(c.ip().octets());
-                let s_ip = u32::from_ne_bytes(s.ip().octets());
-                let ips = (c_ip as u64) | ((s_ip as u64) << 32);
-                let ports = (c.port() as u32) | ((s.port() as u32) << 16);
-                state.write_u64(ips);
-                state.write_u32(ports);
-            }
-            (c, s) => {
-                // Generic fallback for IPv6 / mixed sockets
-                state.write_u8(1);
-                match c.ip() {
-                    std::net::IpAddr::V4(ip) => state.write_u32(u32::from_ne_bytes(ip.octets())),
-                    std::net::IpAddr::V6(ip) => state.write(&ip.octets()),
-                }
-                state.write_u16(c.port());
-                match s.ip() {
-                    std::net::IpAddr::V4(ip) => state.write_u32(u32::from_ne_bytes(ip.octets())),
-                    std::net::IpAddr::V6(ip) => state.write(&ip.octets()),
-                }
-                state.write_u16(s.port());
-            }
-        }
+        state.write_u128(self.client_ip);
+        state.write_u128(self.server_ip);
+        let ports = (self.client_port_be as u32) | ((self.server_port_be as u32) << 16);
+        state.write_u32(ports);
     }
 }
 
@@ -344,13 +330,19 @@ pub fn parse_tcp_header(data: &[u8]) -> Result<(TcpHeader, &[u8])> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::net::{IpAddr, Ipv4Addr};
+
+    const fn v4(a: u8, b: u8, c: u8, d: u8) -> u128 {
+        0x0000_FFFF_0000_0000_u128 | (u32::from_be_bytes([a, b, c, d]) as u128)
+    }
 
     #[test]
     fn test_tcp_three_way_handshake_and_data_flow() {
-        let client_addr = SocketAddr::new(IpAddr::V4(Ipv4Addr::new(192, 168, 1, 100)), 54321);
-        let server_addr = SocketAddr::new(IpAddr::V4(Ipv4Addr::new(10, 0, 0, 1)), 8080);
-        let key = TcpConnectionKey::new(client_addr, server_addr);
+        let key = TcpConnectionKey::new(
+            v4(192, 168, 1, 100),
+            54321u16.to_be(),
+            v4(10, 0, 0, 1),
+            8080u16.to_be(),
+        );
 
         let mut table = TcpConnectionTable::new();
         let conn = table.get_or_create(key);
@@ -425,13 +417,18 @@ mod tests {
         use rustc_hash::FxHasher;
         use std::hash::{Hash, Hasher};
 
-        let client1 = SocketAddr::new(IpAddr::V4(Ipv4Addr::new(10, 0, 0, 1)), 12345);
-        let server1 = SocketAddr::new(IpAddr::V4(Ipv4Addr::new(10, 0, 0, 2)), 80);
-        let key1 = TcpConnectionKey::new(client1, server1);
-
-        let client2 = SocketAddr::new(IpAddr::V4(Ipv4Addr::new(10, 0, 0, 1)), 12345);
-        let server2 = SocketAddr::new(IpAddr::V4(Ipv4Addr::new(10, 0, 0, 2)), 80);
-        let key2 = TcpConnectionKey::new(client2, server2);
+        let key1 = TcpConnectionKey::new(
+            v4(10, 0, 0, 1),
+            12345u16.to_be(),
+            v4(10, 0, 0, 2),
+            80u16.to_be(),
+        );
+        let key2 = TcpConnectionKey::new(
+            v4(10, 0, 0, 1),
+            12345u16.to_be(),
+            v4(10, 0, 0, 2),
+            80u16.to_be(),
+        );
 
         // Identical keys produce identical hashes
         let hash_key = |k: &TcpConnectionKey| {
@@ -444,31 +441,34 @@ mod tests {
 
         // Different client port produces distinct hash
         let key_diff_cport = TcpConnectionKey::new(
-            SocketAddr::new(IpAddr::V4(Ipv4Addr::new(10, 0, 0, 1)), 12346),
-            server1,
+            v4(10, 0, 0, 1),
+            12346u16.to_be(),
+            v4(10, 0, 0, 2),
+            80u16.to_be(),
         );
         assert_ne!(hash_key(&key1), hash_key(&key_diff_cport));
 
         // Different server port produces distinct hash
         let key_diff_sport = TcpConnectionKey::new(
-            client1,
-            SocketAddr::new(IpAddr::V4(Ipv4Addr::new(10, 0, 0, 2)), 443),
+            v4(10, 0, 0, 1),
+            12345u16.to_be(),
+            v4(10, 0, 0, 2),
+            443u16.to_be(),
         );
         assert_ne!(hash_key(&key1), hash_key(&key_diff_sport));
 
         // Different IP produces distinct hash
         let key_diff_ip = TcpConnectionKey::new(
-            SocketAddr::new(IpAddr::V4(Ipv4Addr::new(10, 0, 0, 99)), 12345),
-            server1,
+            v4(10, 0, 0, 99),
+            12345u16.to_be(),
+            v4(10, 0, 0, 2),
+            80u16.to_be(),
         );
         assert_ne!(hash_key(&key1), hash_key(&key_diff_ip));
 
         // IPv6 key hashing works consistently
-        use std::net::Ipv6Addr;
-        let v6_client = SocketAddr::new(IpAddr::V6(Ipv6Addr::LOCALHOST), 5000);
-        let v6_server = SocketAddr::new(IpAddr::V6(Ipv6Addr::LOCALHOST), 8080);
-        let v6_key1 = TcpConnectionKey::new(v6_client, v6_server);
-        let v6_key2 = TcpConnectionKey::new(v6_client, v6_server);
+        let v6_key1 = TcpConnectionKey::new(1u128, 5000u16.to_be(), 1u128, 8080u16.to_be());
+        let v6_key2 = TcpConnectionKey::new(1u128, 5000u16.to_be(), 1u128, 8080u16.to_be());
         assert_eq!(hash_key(&v6_key1), hash_key(&v6_key2));
 
         // TcpConnectionTable lookup and removal
