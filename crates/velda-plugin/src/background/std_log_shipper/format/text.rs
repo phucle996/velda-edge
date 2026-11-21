@@ -1,7 +1,7 @@
 //! Text & Common Log Format (CLF) Access Log Formatting (`std_log_shipper::format::text`).
 
 use velda_core::WireProtocol;
-use velda_observability::{AccessLogRecord, LogBatch};
+use velda_observability::{TelemetryBatch, TelemetryRecord};
 
 use super::fast_write_iso8601_utc;
 use velda_core::lut::decimal::fast_write_u64;
@@ -26,10 +26,10 @@ const TEXT_BYTES_TX: &[u8] = b" bytes_tx=";
 const TEXT_POST: &[u8] = b"POST ";
 const CLF_PREFIX: &[u8] = b" - - [";
 
-/// Formats batches of [`AccessLogRecord`] into Extended Text format directly into `out`.
+/// Formats batches of [`TelemetryRecord`] into Extended Text format directly into `out`.
 ///
 /// Pre-reserves buffer capacity to guarantee 0 heap reallocations.
-pub fn format_text_records(batches: &[LogBatch], total_recs: usize, out: &mut Vec<u8>) {
+pub fn format_text_records(batches: &[TelemetryBatch], total_recs: usize, out: &mut Vec<u8>) {
     out.reserve(total_recs * 340);
 
     for batch in batches {
@@ -40,7 +40,7 @@ pub fn format_text_records(batches: &[LogBatch], total_recs: usize, out: &mut Ve
                 unsafe {
                     use core::arch::x86_64::*;
                     let next_rec =
-                        recs.get_unchecked(idx + 4) as *const AccessLogRecord as *const i8;
+                        recs.get_unchecked(idx + 4) as *const TelemetryRecord as *const i8;
                     _mm_prefetch(next_rec, _MM_HINT_T1);
                     _mm_prefetch(next_rec.add(64), _MM_HINT_T1);
                     _mm_prefetch(next_rec.add(128), _MM_HINT_T1);
@@ -160,8 +160,8 @@ pub fn format_text_records(batches: &[LogBatch], total_recs: usize, out: &mut Ve
     }
 }
 
-/// Formats batches of [`AccessLogRecord`] into Standard Common Log Format (CLF) directly into `out`.
-pub fn format_clf_records(batches: &[LogBatch], total_recs: usize, out: &mut Vec<u8>) {
+/// Formats batches of [`TelemetryRecord`] into Standard Common Log Format (CLF) directly into `out`.
+pub fn format_clf_records(batches: &[TelemetryBatch], total_recs: usize, out: &mut Vec<u8>) {
     out.reserve(total_recs * 160);
 
     for batch in batches {
@@ -172,7 +172,7 @@ pub fn format_clf_records(batches: &[LogBatch], total_recs: usize, out: &mut Vec
                 unsafe {
                     use core::arch::x86_64::*;
                     let next_rec =
-                        recs.get_unchecked(idx + 4) as *const AccessLogRecord as *const i8;
+                        recs.get_unchecked(idx + 4) as *const TelemetryRecord as *const i8;
                     _mm_prefetch(next_rec, _MM_HINT_T1);
                     _mm_prefetch(next_rec.add(64), _MM_HINT_T1);
                     _mm_prefetch(next_rec.add(128), _MM_HINT_T1);

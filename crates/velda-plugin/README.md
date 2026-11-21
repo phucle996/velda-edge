@@ -146,6 +146,8 @@ To prevent [`factory.rs`](src/factory.rs) from becoming a monolithic "God Factor
 | [`std_log_shipper`](src/background/std_log_shipper/) | `background` | All Protocols | Lock-free standard stream log exporter (`stdout`, `stderr`, file) across all protocols. |
 | [`otlp_log_shipper`](src/background/otlp_log_shipper/) | `background` | All Protocols | OpenTelemetry Access Log shipper over persistent HTTP/1.1 or HTTP/2 gRPC. |
 | [`loki_log_shipper`](src/background/loki_log_shipper/) | `background` | All Protocols | Grafana Loki multi-stream access log shipper with zero hot-path contention. |
+| [`clickhouse_log_shipper`](src/background/clickhouse_log_shipper/) | `background` | All Protocols | High-throughput access log shipper to ClickHouse MergeTree tables over HTTP RowBinary/JSON. |
+| [`kafka_log_shipper`](src/background/kafka_log_shipper/) | `background` | All Protocols | Native Kafka RecordBatch v2 shipper with zstd compression and dynamic node partition routing. |
 | [`prometheus_exporter`](src/background/prometheus_exporter/) | `background` | Management (:9090) | High-performance lock-free OpenMetrics telemetry exporter running on Shadow Worker. |
 | [`otlp_metrics_exporter`](src/background/otlp_metrics_exporter/) | `background` | Management | OpenTelemetry Metrics exporter pushing atomic snapshots to OTLP collector. |
 | [`health_probe`](src/background/health_probe/) | `background` | Management (:9091) | Kubernetes liveness and readiness probe HTTP endpoint. |

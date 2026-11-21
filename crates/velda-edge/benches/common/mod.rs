@@ -204,6 +204,7 @@ pub fn build_mock_listeners(count: usize) -> Vec<ListenerConfig> {
             grpc: None,
             http3: None,
             raw: None,
+            observability: None,
         });
     }
 

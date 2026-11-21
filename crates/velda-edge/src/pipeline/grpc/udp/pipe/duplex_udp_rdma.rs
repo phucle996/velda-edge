@@ -13,7 +13,6 @@
 //!
 //! Self-contained pipeline adhering to the Hourglass Architecture & Flat Workflow.
 
-use std::net::SocketAddr;
 use std::sync::Arc;
 
 use velda_core::{L7Request, L7Response};
@@ -27,7 +26,7 @@ pub async fn serve(
     req: &L7Request,
     upstream: &Arc<GrpcRdmaUpstream>,
     config: &GrpcConfig,
-) -> Result<(L7Response, Option<SocketAddr>), GrpcError> {
+) -> Result<(L7Response, Option<(u128, u16)>), GrpcError> {
     // Step 1: Adapt inbound L7 UDP datagram into typed GrpcClientRequest projection.
     let client_req = GrpcClientRequest::from_l7(req);
 

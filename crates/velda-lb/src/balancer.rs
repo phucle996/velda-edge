@@ -1,6 +1,5 @@
 //! Unified load balancer contract and target backend decision making.
 
-use std::net::SocketAddr;
 use std::sync::Arc;
 
 use crate::context::SelectionContext;
@@ -15,7 +14,7 @@ pub trait LoadBalancer: Send + Sync {
     /// Returning `usize` allows the caller to index directly with zero allocations or data copies.
     fn select_index(&self, endpoints: &[Endpoint], ctx: &SelectionContext<'_>) -> Option<usize>;
 
-    /// Decides and returns the physical backend socket address (`IP:Port`) directly.
+    /// Decides and returns the physical backend `(ip, port_be)` directly.
     ///
     /// This is the primary zero-copy method used by Stage 2 (`velda-upstream`)
     /// to immediately construct a `ConnectionKey` for Stage 4 (`velda-connection-pool`).  
@@ -24,9 +23,9 @@ pub trait LoadBalancer: Send + Sync {
         &self,
         endpoints: &[Endpoint],
         ctx: &SelectionContext<'_>,
-    ) -> Option<SocketAddr> {
+    ) -> Option<(u128, u16)> {
         self.select_index(endpoints, ctx)
-            .and_then(|idx| endpoints.get(idx).map(|ep| ep.address))
+            .and_then(|idx| endpoints.get(idx).map(|ep| (ep.ip, ep.port_be)))
     }
 
     /// Zero-copy convenience method returning a borrowed reference to the selected endpoint.
@@ -52,7 +51,7 @@ impl<T: LoadBalancer + ?Sized> LoadBalancer for Arc<T> {
         &self,
         endpoints: &[Endpoint],
         ctx: &SelectionContext<'_>,
-    ) -> Option<SocketAddr> {
+    ) -> Option<(u128, u16)> {
         (**self).select_addr(endpoints, ctx)
     }
 
@@ -77,7 +76,7 @@ impl<T: LoadBalancer + ?Sized> LoadBalancer for Box<T> {
         &self,
         endpoints: &[Endpoint],
         ctx: &SelectionContext<'_>,
-    ) -> Option<SocketAddr> {
+    ) -> Option<(u128, u16)> {
         (**self).select_addr(endpoints, ctx)
     }
 
@@ -98,10 +97,10 @@ mod tests {
 
     #[test]
     fn test_select_addr_physical_socket() {
-        let ep1: SocketAddr = "10.0.0.1:8080".parse().unwrap();
-        let ep2: SocketAddr = "10.0.0.2:8080".parse().unwrap();
+        let ep1 = Endpoint::from_v4([10, 0, 0, 1], 8080, 1);
+        let ep2 = Endpoint::from_v4([10, 0, 0, 2], 8080, 1);
 
-        let endpoints = vec![Endpoint::new("e1", ep1, 1), Endpoint::new("e2", ep2, 1)];
+        let endpoints = vec![ep1, ep2];
 
         let lb = RoundRobin::new();
         let ctx = SelectionContext::NONE;
@@ -109,7 +108,7 @@ mod tests {
         let addr1 = lb.select_addr(&endpoints, &ctx).unwrap();
         let addr2 = lb.select_addr(&endpoints, &ctx).unwrap();
 
-        assert_eq!(addr1, ep1);
-        assert_eq!(addr2, ep2);
+        assert_eq!(addr1, (ep1.ip, ep1.port_be));
+        assert_eq!(addr2, (ep2.ip, ep2.port_be));
     }
 }

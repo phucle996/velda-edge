@@ -40,6 +40,18 @@
       "pre_route": [
         "ip_filter"
       ],
+      "observability": {
+        "sampling": {
+          "http": {
+            "1xx": 0.0,
+            "2xx": 0.01,
+            "3xx": 0.05,
+            "4xx": 1.0,
+            "5xx": 1.0,
+            "shed": 0.01
+          }
+        }
+      },
       "http1": {
         "max_body_size": 10485760,
         "max_header_size": 65536,
@@ -72,6 +84,16 @@
       },
       "tls": {
         "enabled": true
+      },
+      "observability": {
+        "sampling": {
+          "grpc": {
+            "default": 1.0,
+            "ok": 0.01,
+            "not_found": 0.1,
+            "shed": 0.01
+          }
+        }
       },
       "grpc": {
         "max_message_size": 8388608,

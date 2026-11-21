@@ -48,15 +48,15 @@ impl StatsdTransport {
         };
 
         // 2. Select bind domain based on destination family (IPv4 vs IPv6 ephemeral port 0)
-        let bind_addr: SocketAddr = if destination.is_ipv6() {
-            "[::]:0".parse().unwrap()
+        let bind_ip: u128 = if destination.is_ipv6() {
+            0
         } else {
-            "0.0.0.0:0".parse().unwrap()
+            velda_core::lut::ip::v4_to_u128(0)
         };
 
-        // 3. Acquire UDP socket through Core SocketManager (Single Source of Truth)
-        let std_socket = velda_core::socket::global_socket_manager()
-            .acquire_shadow_udp(bind_addr, &plugin_id)
+        // 3. Acquire UDP socket through velda-sock SocketManager (Single Source of Truth)
+        let std_socket = velda_sock::socket::global_socket_manager()
+            .acquire_shadow_udp(bind_ip, 0, &plugin_id)
             .map_err(|e| {
                 PluginError::Config(format!("Failed to acquire shadow UDP socket: {e}"))
             })?;
@@ -153,7 +153,7 @@ impl StatsdTransport {
 
     /// Releases socket registration from the Core SocketManager.
     pub fn release(&self) {
-        velda_core::socket::global_socket_manager().release_shadow_udp(&self.plugin_id);
+        velda_sock::socket::global_socket_manager().release_shadow_udp(&self.plugin_id);
     }
 }
 

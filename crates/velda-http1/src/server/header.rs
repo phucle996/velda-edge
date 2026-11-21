@@ -6,8 +6,6 @@
 //! - Validation and canonical lookup of downstream header names.
 //! - Authoritative extraction of Host / :authority.
 
-use std::net::SocketAddr;
-
 use http::header::{CONTENT_LENGTH, HeaderName, HeaderValue};
 use http::{HeaderMap, Uri};
 
@@ -69,51 +67,16 @@ pub fn enrich_headers_cached(
 pub fn enrich_headers(
     headers: &mut HeaderMap,
     uri: &Uri,
-    peer: SocketAddr,
-    local_addr: SocketAddr,
+    peer_ip: u128,
+    local_ip: u128,
+    local_port_be: u16,
     is_tls: bool,
 ) {
     // 1. Inject authoritative client IP (directly overwriting any client-supplied spoofed values)
-    let client_ip = peer.ip();
     let proto = if is_tls { "https" } else { "http" };
-
-    let mut ip_buf = [0u8; 64];
-    let client_ip_bytes: &[u8] = match client_ip {
-        std::net::IpAddr::V4(v4) => {
-            let octets = v4.octets();
-            let mut cursor = 0;
-            for (idx, &octet) in octets.iter().enumerate() {
-                if idx > 0 {
-                    ip_buf[cursor] = b'.';
-                    cursor += 1;
-                }
-                if octet >= 100 {
-                    ip_buf[cursor] = b'0' + octet / 100;
-                    cursor += 1;
-                    ip_buf[cursor] = b'0' + (octet / 10) % 10;
-                    cursor += 1;
-                    ip_buf[cursor] = b'0' + octet % 10;
-                    cursor += 1;
-                } else if octet >= 10 {
-                    ip_buf[cursor] = b'0' + octet / 10;
-                    cursor += 1;
-                    ip_buf[cursor] = b'0' + octet % 10;
-                    cursor += 1;
-                } else {
-                    ip_buf[cursor] = b'0' + octet;
-                    cursor += 1;
-                }
-            }
-            &ip_buf[..cursor]
-        }
-        std::net::IpAddr::V6(v6) => {
-            use std::io::Write;
-            let mut cursor = std::io::Cursor::new(&mut ip_buf[..]);
-            let _ = write!(cursor, "{}", v6);
-            let len = cursor.position() as usize;
-            &ip_buf[..len]
-        }
-    };
+    let (ip_buf, ip_len) = velda_core::lut::ip::format_ip_bytes(peer_ip);
+    let client_ip_bytes = &ip_buf[..ip_len];
+    let peer_is_v4 = velda_core::lut::ip::is_v4_u128(peer_ip);
 
     if let Ok(val) = HeaderValue::from_bytes(client_ip_bytes) {
         if let Some(existing) = headers.get(HeaderName::from_static("x-forwarded-for")) {
@@ -139,7 +102,7 @@ pub fn enrich_headers(
 
     headers.insert(
         HeaderName::from_static("x-forwarded-port"),
-        HeaderValue::from(local_addr.port()),
+        HeaderValue::from(u16::from_be(local_port_be)),
     );
 
     let host_hdr = headers.get(http::header::HOST).cloned();
@@ -160,19 +123,16 @@ pub fn enrich_headers(
 
     fwd_buf[cursor..cursor + 4].copy_from_slice(b"for=");
     cursor += 4;
-    match client_ip {
-        std::net::IpAddr::V4(_) => {
-            fwd_buf[cursor..cursor + client_ip_bytes.len()].copy_from_slice(client_ip_bytes);
-            cursor += client_ip_bytes.len();
-        }
-        std::net::IpAddr::V6(_) => {
-            fwd_buf[cursor..cursor + 2].copy_from_slice(b"\"[");
-            cursor += 2;
-            fwd_buf[cursor..cursor + client_ip_bytes.len()].copy_from_slice(client_ip_bytes);
-            cursor += client_ip_bytes.len();
-            fwd_buf[cursor..cursor + 2].copy_from_slice(b"]\"");
-            cursor += 2;
-        }
+    if peer_is_v4 {
+        fwd_buf[cursor..cursor + client_ip_bytes.len()].copy_from_slice(client_ip_bytes);
+        cursor += client_ip_bytes.len();
+    } else {
+        fwd_buf[cursor..cursor + 2].copy_from_slice(b"\"[");
+        cursor += 2;
+        fwd_buf[cursor..cursor + client_ip_bytes.len()].copy_from_slice(client_ip_bytes);
+        cursor += client_ip_bytes.len();
+        fwd_buf[cursor..cursor + 2].copy_from_slice(b"]\"");
+        cursor += 2;
     }
 
     fwd_buf[cursor..cursor + 7].copy_from_slice(b";proto=");
@@ -183,38 +143,17 @@ pub fn enrich_headers(
 
     fwd_buf[cursor..cursor + 4].copy_from_slice(b";by=");
     cursor += 4;
-    match local_addr.ip() {
-        std::net::IpAddr::V4(v4) => {
-            let octets = v4.octets();
-            for (idx, &octet) in octets.iter().enumerate() {
-                if idx > 0 {
-                    fwd_buf[cursor] = b'.';
-                    cursor += 1;
-                }
-                if octet >= 100 {
-                    fwd_buf[cursor] = b'0' + octet / 100;
-                    cursor += 1;
-                    fwd_buf[cursor] = b'0' + (octet / 10) % 10;
-                    cursor += 1;
-                    fwd_buf[cursor] = b'0' + octet % 10;
-                    cursor += 1;
-                } else if octet >= 10 {
-                    fwd_buf[cursor] = b'0' + octet / 10;
-                    cursor += 1;
-                    fwd_buf[cursor] = b'0' + octet % 10;
-                    cursor += 1;
-                } else {
-                    fwd_buf[cursor] = b'0' + octet;
-                    cursor += 1;
-                }
-            }
-        }
-        std::net::IpAddr::V6(v6) => {
-            use std::io::Write;
-            let mut c = std::io::Cursor::new(&mut fwd_buf[cursor..]);
-            let _ = write!(c, "\"[{v6}]\"");
-            cursor += c.position() as usize;
-        }
+    let (local_buf, local_len) = velda_core::lut::ip::format_ip_bytes(local_ip);
+    if velda_core::lut::ip::is_v4_u128(local_ip) {
+        fwd_buf[cursor..cursor + local_len].copy_from_slice(&local_buf[..local_len]);
+        cursor += local_len;
+    } else {
+        fwd_buf[cursor..cursor + 2].copy_from_slice(b"\"[");
+        cursor += 2;
+        fwd_buf[cursor..cursor + local_len].copy_from_slice(&local_buf[..local_len]);
+        cursor += local_len;
+        fwd_buf[cursor..cursor + 2].copy_from_slice(b"]\"");
+        cursor += 2;
     }
 
     if let Some(h) = host_str {
@@ -325,10 +264,10 @@ mod tests {
         );
 
         let uri: Uri = "/test".parse().unwrap();
-        let peer: SocketAddr = "192.168.1.50:12345".parse().unwrap();
-        let local: SocketAddr = "10.0.0.1:80".parse().unwrap();
+        let peer_ip = velda_core::lut::ip::v4_to_u128(u32::from_be_bytes([192, 168, 1, 50]));
+        let local_ip = velda_core::lut::ip::v4_to_u128(u32::from_be_bytes([10, 0, 0, 1]));
 
-        enrich_headers(&mut headers, &uri, peer, local, false);
+        enrich_headers(&mut headers, &uri, peer_ip, local_ip, 80u16.to_be(), false);
 
         assert_eq!(
             headers.get("x-forwarded-for").unwrap().to_str().unwrap(),

@@ -10,18 +10,15 @@
 //!         ┌───────────┴───────────┐                   │
 //!         ▼                       ▼                   ▼
 //!  route_to_upstream      RouteCatalog          UpstreamCatalog
-//!   Box<[UpstreamId]>    (GLOBAL ArcSwap)      (GLOBAL ArcSwap)
+//!   Box<[u16]>    (GLOBAL ArcSwap)      (GLOBAL ArcSwap)
 //! ```
 
-use velda_core::UpstreamId;
+use u16;
 use velda_sync::post_sync::route::RouteConfig;
 use velda_sync::post_sync::upstream::UpstreamConfig;
 
 /// Compiles `route_to_upstream` mapping and publishes 4KB page-aligned route/upstream byte catalogs.
-pub fn build_runtime_luts(
-    routes: &[RouteConfig],
-    upstreams: &[UpstreamConfig],
-) -> Box<[UpstreamId]> {
+pub fn build_runtime_luts(routes: &[RouteConfig], upstreams: &[UpstreamConfig]) -> Box<[u16]> {
     let route_catalog = velda_router::RouteCatalog::build(routes.iter().map(|r| r.id.as_str()));
     let upstream_catalog =
         velda_upstream::UpstreamCatalog::build(upstreams.iter().map(|u| u.id.as_str()));
@@ -32,12 +29,11 @@ pub fn build_runtime_luts(
     routes
         .iter()
         .map(|r| {
-            let up_idx = upstreams
+            upstreams
                 .iter()
                 .position(|u| u.id == r.upstream)
                 .map(|i| i as u16)
-                .unwrap_or(velda_core::UNASSIGNED_UPSTREAM_ID);
-            UpstreamId(up_idx)
+                .unwrap_or(velda_core::UNASSIGNED_UPSTREAM_ID)
         })
         .collect::<Vec<_>>()
         .into_boxed_slice()
@@ -119,8 +115,8 @@ mod tests {
         let route_to_upstream = build_runtime_luts(&routes, &upstreams);
 
         assert_eq!(route_to_upstream.len(), 2);
-        assert_eq!(route_to_upstream[0], UpstreamId(0));
-        assert_eq!(route_to_upstream[1], UpstreamId(1));
+        assert_eq!(route_to_upstream[0], 0);
+        assert_eq!(route_to_upstream[1], 1);
 
         velda_router::with_route_bytes(0, |b| assert_eq!(b, b"route-orders"));
         velda_router::with_route_bytes(1, |b| assert_eq!(b, b"route-payments"));

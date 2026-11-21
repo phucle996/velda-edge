@@ -14,7 +14,7 @@ use std::sync::Arc;
 use prost::Message;
 use serde_json::Value;
 use velda_core::{CompletionReason, GrpcStatus, HttpMethod, PipeKind, WireProtocol};
-use velda_observability::{AccessLogRecord, LogBatch};
+use velda_observability::{TelemetryBatch, TelemetryRecord};
 
 use velda_plugin::background::loki_log_shipper::json::{
     LokiJsonFormatter, LokiStreamTemplate, format_loki_push_payload,
@@ -23,7 +23,7 @@ use velda_plugin::background::loki_log_shipper::proto::{
     LokiProtoFormatter, LokiProtoLabels, PushRequest, format_loki_records_proto,
 };
 
-/// Helper: constructs a test `AccessLogRecord` with given parameters.
+/// Helper: constructs a test `TelemetryRecord` with given parameters.
 fn build_record(
     id: u64,
     ts: u32,
@@ -31,9 +31,9 @@ fn build_record(
     proto: WireProtocol,
     method: HttpMethod,
     grpc_status: GrpcStatus,
-) -> AccessLogRecord {
+) -> TelemetryRecord {
     let peer: SocketAddr = peer_str.parse().expect("Valid socket address");
-    let mut rec = AccessLogRecord::zeroed();
+    let mut rec = TelemetryRecord::zeroed();
     rec.request_id = id;
     rec.ingress_time_nanos = (ts as u64) * 1_000_000_000;
     rec.duration_ns = 320;
@@ -86,7 +86,7 @@ fn test_chaos_request_id_boundaries() {
             HttpMethod::Get,
             GrpcStatus::NonGrpc,
         );
-        let batches = vec![LogBatch::from_arc(Arc::from(vec![rec]))];
+        let batches = vec![TelemetryBatch::from_arc(Arc::from(vec![rec]))];
 
         // 1.1 JSON Formatting
         let mut json_buf = Vec::new();
@@ -167,7 +167,7 @@ fn test_chaos_ip_formatting() {
             HttpMethod::Get,
             GrpcStatus::NonGrpc,
         );
-        let batches = vec![LogBatch::from_arc(Arc::from(vec![rec]))];
+        let batches = vec![TelemetryBatch::from_arc(Arc::from(vec![rec]))];
 
         // JSON check
         let mut json_out = Vec::new();
@@ -230,7 +230,7 @@ fn test_chaos_stream_partitioning() {
     }
     assert_eq!(records.len(), 700);
 
-    let batches = vec![LogBatch::from_arc(Arc::from(records))];
+    let batches = vec![TelemetryBatch::from_arc(Arc::from(records))];
 
     let mut labels = HashMap::new();
     labels.insert("env".to_string(), "chaos".to_string());
@@ -375,7 +375,7 @@ fn test_chaos_roundtrip_decode() {
         ));
     }
 
-    let batches = vec![LogBatch::from_arc(Arc::from(records))];
+    let batches = vec![TelemetryBatch::from_arc(Arc::from(records))];
 
     // 4.1 format_loki_push_payload (Thread-local scratch path)
     let mut standalone_json = Vec::new();
@@ -481,7 +481,7 @@ fn test_chaos_stress_10k() {
             ));
         }
 
-        let batches = vec![LogBatch::from_arc(Arc::from(cycle_records))];
+        let batches = vec![TelemetryBatch::from_arc(Arc::from(cycle_records))];
 
         // JSON Cycle
         let n_json = json_formatter.format_batches(&batches, &mut json_out);

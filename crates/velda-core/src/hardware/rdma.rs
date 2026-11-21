@@ -1,10 +1,12 @@
-//! RDMA hardware probe (`velda_core::hardware::rdma`).
+//! RDMA Hardware Probe (`velda_core::hardware::rdma`).
 //!
 //! ```text
-//!  Cold-Start Probe (/sys/class/infiniband/ | VELDA_RDMA=disabled)
-//!        │
-//!        ├── [No RNIC] ──► RdmaProfile::none() (Standard Kernel Sockets)
-//!        └── [RNIC]    ──► InfiniBand │ RoCE v2 │ RoCE v1 │ iWARP │ AWS EFA
+//! ┌─────────────────────────────────────────────────────────────────────────────────────────┐
+//! │                  COLD-START RDMA HARDWARE PROBE (/sys/class/infiniband/)                │
+//! ├─────────────────────────────────────────────────────────────────────────────────────────┤
+//! │  VELDA_RDMA=disabled | No RNIC ──► RdmaProfile::none() (Standard Kernel Sockets)        │
+//! │  RNIC detected                 ──► InfiniBand │ RoCE v2 │ RoCE v1 │ iWARP │ AWS EFA     │
+//! └─────────────────────────────────────────────────────────────────────────────────────────┘
 //! ```
 
 use std::path::Path;

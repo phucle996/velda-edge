@@ -29,7 +29,7 @@
 //! ```
 
 use velda_core::GrpcStatus;
-use velda_observability::{AccessLogRecord, LogBatch};
+use velda_observability::{TelemetryBatch, TelemetryRecord};
 
 use velda_core::lut::decimal::fast_write_u64;
 use velda_core::lut::ip::fast_write_ip;
@@ -89,11 +89,11 @@ const OTLP_K17: &[u8] = b"\"}},{\"key\":\"user_agent.major_version\",\"value\":{
 const OTLP_K18: &[u8] = b"\"}},{\"key\":\"user_agent.os\",\"value\":{\"stringValue\":\"";
 const OTLP_REC_END: &[u8] = b"\"}}]}";
 
-/// Formats batches of reference-counted [`AccessLogRecord`] into standard OTLP JSON bytes directly.
+/// Formats batches of reference-counted [`TelemetryRecord`] into standard OTLP JSON bytes directly.
 ///
 /// Pre-reserves capacity to guarantee 0 heap reallocations during formatting.
 pub fn format_otlp_records_json(
-    batches: &[LogBatch],
+    batches: &[TelemetryBatch],
     envelope: &OtlpJsonEnvelope,
     out: &mut Vec<u8>,
 ) -> usize {
@@ -116,7 +116,7 @@ pub fn format_otlp_records_json(
                 unsafe {
                     use core::arch::x86_64::*;
                     let next_rec =
-                        recs.get_unchecked(idx + 4) as *const AccessLogRecord as *const i8;
+                        recs.get_unchecked(idx + 4) as *const TelemetryRecord as *const i8;
                     _mm_prefetch(next_rec, _MM_HINT_T1);
                     _mm_prefetch(next_rec.add(64), _MM_HINT_T1);
                     _mm_prefetch(next_rec.add(128), _MM_HINT_T1);
@@ -232,7 +232,7 @@ mod tests {
     #[test]
     fn test_otlp_json_schema() {
         let envelope = OtlpJsonEnvelope::new("edge-test");
-        let mut rec = AccessLogRecord::zeroed();
+        let mut rec = TelemetryRecord::zeroed();
         rec.request_id = 0x4bf9_2f35_77b3_4da6;
         rec.ingress_time_nanos = 1_710_000_000_000_000_000;
         rec.duration_ns = 1500;
@@ -249,7 +249,7 @@ mod tests {
         rec.ua_family = fam;
         rec.ua_os = os;
         rec.ua_major_version = ver;
-        let batches = vec![LogBatch::from_arc(Arc::from(vec![rec]))];
+        let batches = vec![TelemetryBatch::from_arc(Arc::from(vec![rec]))];
         let mut out = Vec::new();
         let count = format_otlp_records_json(&batches, &envelope, &mut out);
         assert_eq!(count, 1);

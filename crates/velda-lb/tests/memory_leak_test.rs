@@ -8,7 +8,6 @@
 //! 5. Sharded EndpointMetrics lock-free concurrency and zero-leak lifecycle.
 
 use std::alloc::{GlobalAlloc, Layout, System};
-use std::net::SocketAddr;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicI64, AtomicU64, Ordering};
 
@@ -62,10 +61,7 @@ static TRACKER: TrackingAllocator = TrackingAllocator::new();
 
 fn make_test_endpoints(count: usize) -> Vec<Endpoint> {
     (0..count)
-        .map(|i| {
-            let addr: SocketAddr = format!("10.0.0.{}:8080", i + 1).parse().unwrap();
-            Endpoint::new(format!("ep-{}", i), addr, ((i % 5) + 1) as u32)
-        })
+        .map(|i| Endpoint::from_v4([10, 0, 0, (i + 1) as u8], 8080, ((i % 5) + 1) as u32))
         .collect()
 }
 

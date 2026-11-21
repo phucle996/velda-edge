@@ -14,7 +14,7 @@ use prost::Message;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::TcpListener;
 use velda_core::{CompletionReason, GrpcStatus, HttpMethod, PipeKind};
-use velda_observability::{AccessLogRecord, LogBatch, MetricsStore};
+use velda_observability::{MetricsStore, TelemetryBatch, TelemetryRecord};
 use velda_plugin::OutboundTlsConfig;
 
 use velda_plugin::background::otlp_log_shipper::json::{
@@ -204,7 +204,7 @@ async fn test_otlp_log_shipper_batching_and_send() {
     )
     .expect("Client initialized");
 
-    let mut rec1 = AccessLogRecord::zeroed();
+    let mut rec1 = TelemetryRecord::zeroed();
     rec1.request_id = 0x4bf9_2f35_77b3_4da6;
     rec1.ingress_time_nanos = 1_710_000_000;
     rec1.duration_ns = 2500;
@@ -224,7 +224,7 @@ async fn test_otlp_log_shipper_batching_and_send() {
     rec1.ua_os = os;
     rec1.ua_major_version = ver;
 
-    let mut rec2 = AccessLogRecord::zeroed();
+    let mut rec2 = TelemetryRecord::zeroed();
     rec2.request_id = 0x5fb3_97be_34d2_3b0f;
     rec2.ingress_time_nanos = 1_710_000_001;
     rec2.duration_ns = 15200;
@@ -244,7 +244,7 @@ async fn test_otlp_log_shipper_batching_and_send() {
     rec2.ua_os = os;
     rec2.ua_major_version = ver;
 
-    let batches = vec![LogBatch::from_arc(Arc::from(vec![rec1, rec2]))];
+    let batches = vec![TelemetryBatch::from_arc(Arc::from(vec![rec1, rec2]))];
     let envelope = OtlpJsonEnvelope::new("test-edge");
     let mut payload = Vec::with_capacity(1024);
     format_otlp_records_json(&batches, &envelope, &mut payload);
@@ -352,7 +352,7 @@ async fn test_otlp_logs_grpc_export() {
     let (logs_endpoint, logs_count, _logs_shutdown) =
         spawn_mock_grpc_collector(OtlpLogsGrpcClient::RPC_PATH).await;
 
-    let mut rec = AccessLogRecord::zeroed();
+    let mut rec = TelemetryRecord::zeroed();
     rec.request_id = 0x4bf9_2f35_77b3_4da6;
     rec.ingress_time_nanos = 1_729_579_200;
     rec.duration_ns = 2100;
@@ -372,7 +372,7 @@ async fn test_otlp_logs_grpc_export() {
     rec.ua_os = os;
     rec.ua_major_version = ver;
 
-    let batches = vec![LogBatch::from_arc(Arc::from(vec![rec]))];
+    let batches = vec![TelemetryBatch::from_arc(Arc::from(vec![rec]))];
     let (req, _) = format_otlp_records_proto(&batches, "pay-service");
     let mut log_proto_bytes = Vec::new();
     req.encode(&mut log_proto_bytes).unwrap();

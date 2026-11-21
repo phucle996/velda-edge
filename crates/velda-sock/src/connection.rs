@@ -1,30 +1,32 @@
 //! L4 TCP connection lifecycle and byte tracking.
 
-use std::net::SocketAddr;
 use std::pin::Pin;
 use std::sync::Arc;
 use std::task::{Context, Poll};
 use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt, ReadBuf};
 use tokio::net::TcpStream;
 use tokio::net::tcp::{OwnedReadHalf, OwnedWriteHalf};
-use velda_core::{ConnectionContext, ConnectionId, L4Request, TransportProtocol};
+use velda_core::{L4Request, TransportProtocol};
 
+use crate::connect::socket_addr_to_raw;
 use crate::error::{Result, SockError};
 
 /// An active L4 TCP connection.
 ///
-/// Owns the underlying [`TcpStream`], its unique [`ConnectionId`],
-/// socket endpoints, and tracks transferred byte counts.
+/// Owns the underlying [`TcpStream`], its unique `u64` connection ID,
+/// raw integer socket endpoints (`ip: u128`, `port_be: u16`), and tracks transferred byte counts.
 ///
 /// Implements [`AsyncRead`] and [`AsyncWrite`] so higher layers (such
 /// as TLS or HTTP) can operate directly over it while byte counters
 /// update automatically.
 #[derive(Debug)]
 pub struct Connection {
-    pub id: ConnectionId,
+    pub id: u64,
     pub stream: TcpStream,
-    pub peer: SocketAddr,
-    pub local_addr: SocketAddr,
+    pub peer_ip: u128,
+    pub peer_port_be: u16,
+    pub local_ip: u128,
+    pub local_port_be: u16,
     pub bytes_read: u64,
     pub bytes_written: u64,
     /// Listener identifier shared across all connections of a listener (refcount clone, no alloc).
@@ -41,39 +43,43 @@ thread_local! {
     static LOCAL_ID_RANGE: Cell<(u64, u64)> = const { Cell::new((0, 0)) };
 }
 
-/// Generates a globally monotonically increasing [`ConnectionId`].
+/// Generates a globally monotonically increasing `u64` connection ID.
 ///
 /// Uses thread-local batching (512 IDs per batch) to eliminate atomic cache-line
 /// contention (`MESI` invalidation ping-pong) across concurrent worker threads.
 #[inline]
-pub fn next_connection_id() -> ConnectionId {
+pub fn next_connection_id() -> u64 {
     LOCAL_ID_RANGE.with(|range| {
         let (curr, max) = range.get();
         if curr < max {
             range.set((curr + 1, max));
-            ConnectionId::new(curr)
+            curr
         } else {
             let base = NEXT_CONNECTION_ID.fetch_add(ID_BATCH_SIZE, Ordering::Relaxed);
             range.set((base + 1, base + ID_BATCH_SIZE));
-            ConnectionId::new(base)
+            base
         }
     })
 }
 
 impl Connection {
-    /// Creates a new connection with explicit identifiers and addresses.
+    /// Creates a new connection with explicit identifiers and raw integer addresses.
     #[inline]
     pub fn new(
-        id: ConnectionId,
+        id: u64,
         stream: TcpStream,
-        peer: SocketAddr,
-        local_addr: SocketAddr,
+        peer_ip: u128,
+        peer_port_be: u16,
+        local_ip: u128,
+        local_port_be: u16,
     ) -> Self {
         Self {
             id,
             stream,
-            peer,
-            local_addr,
+            peer_ip,
+            peer_port_be,
+            local_ip,
+            local_port_be,
             bytes_read: 0,
             bytes_written: 0,
             listener_id: None,
@@ -83,27 +89,24 @@ impl Connection {
     /// Creates a new connection from a raw [`TcpStream`], inspecting its peer
     /// and local socket addresses, and assigning a fresh [`ConnectionId`].
     pub fn from_stream(stream: TcpStream) -> Result<Self> {
-        let peer = stream.peer_addr().map_err(SockError::Io)?;
-        let local_addr = stream.local_addr().map_err(SockError::Io)?;
-        Ok(Self::new(next_connection_id(), stream, peer, local_addr))
+        let (peer_ip, peer_port_be) =
+            socket_addr_to_raw(stream.peer_addr().map_err(SockError::Io)?);
+        let (local_ip, local_port_be) =
+            socket_addr_to_raw(stream.local_addr().map_err(SockError::Io)?);
+        Ok(Self::new(
+            next_connection_id(),
+            stream,
+            peer_ip,
+            peer_port_be,
+            local_ip,
+            local_port_be,
+        ))
     }
 
     /// Returns the unique connection identifier.
     #[inline]
-    pub const fn id(&self) -> ConnectionId {
+    pub const fn id(&self) -> u64 {
         self.id
-    }
-
-    /// Returns the client peer address.
-    #[inline]
-    pub const fn peer(&self) -> SocketAddr {
-        self.peer
-    }
-
-    /// Returns the local address on which the connection was accepted.
-    #[inline]
-    pub const fn local_addr(&self) -> SocketAddr {
-        self.local_addr
     }
 
     /// Attaches an ingress listener identifier to this connection.
@@ -158,12 +161,14 @@ impl Connection {
 
     /// Converts this connection into a [`L4Request`] metadata descriptor.
     pub fn to_l4_request(&self) -> L4Request {
-        L4Request::new(self.id, TransportProtocol::Tcp, self.peer, self.local_addr)
-    }
-
-    /// Converts this connection into a [`ConnectionContext`].
-    pub fn to_connection_context(&self) -> ConnectionContext {
-        ConnectionContext::new(self.to_l4_request())
+        L4Request::new(
+            self.id,
+            TransportProtocol::Tcp,
+            self.peer_ip,
+            self.peer_port_be,
+            self.local_ip,
+            self.local_port_be,
+        )
     }
 
     /// Reads incoming bytes into the provided buffer, tracking the read count.
@@ -199,8 +204,15 @@ impl Connection {
 
     /// Consumes the connection, returning its constituent components
     /// for zero-copy handover to higher layers (e.g. TLS, HTTP).
-    pub fn into_inner(self) -> (ConnectionId, TcpStream, SocketAddr, SocketAddr) {
-        (self.id, self.stream, self.peer, self.local_addr)
+    pub fn into_inner(self) -> (u64, TcpStream, u128, u16, u128, u16) {
+        (
+            self.id,
+            self.stream,
+            self.peer_ip,
+            self.peer_port_be,
+            self.local_ip,
+            self.local_port_be,
+        )
     }
 
     /// Consumes the connection, returning the raw [`TcpStream`].
@@ -293,7 +305,7 @@ impl AsyncWrite for Connection {
 /// Owned read half of a split [`Connection`].
 #[derive(Debug)]
 pub struct ConnectionReader {
-    id: ConnectionId,
+    id: u64,
     read_half: OwnedReadHalf,
     bytes_read: u64,
 }
@@ -301,7 +313,7 @@ pub struct ConnectionReader {
 impl ConnectionReader {
     /// Returns the connection identifier.
     #[inline]
-    pub const fn id(&self) -> ConnectionId {
+    pub const fn id(&self) -> u64 {
         self.id
     }
 
@@ -345,7 +357,7 @@ impl AsyncRead for ConnectionReader {
 /// Owned write half of a split [`Connection`].
 #[derive(Debug)]
 pub struct ConnectionWriter {
-    id: ConnectionId,
+    id: u64,
     write_half: OwnedWriteHalf,
     bytes_written: u64,
 }
@@ -353,7 +365,7 @@ pub struct ConnectionWriter {
 impl ConnectionWriter {
     /// Returns the connection identifier.
     #[inline]
-    pub const fn id(&self) -> ConnectionId {
+    pub const fn id(&self) -> u64 {
         self.id
     }
 

@@ -2,7 +2,7 @@
 //!
 //! ### Canonical Monorepo Vocabulary: Standard Pipe vs. Acceleration Pipe
 //! - **Standard Pipe (`*_tcp_tcp`)**: Outbound traffic is managed by the Linux kernel TCP stack,
-//!   accelerated in kernel space via `TcpAccelerationPath` / `GrpcAccelerationPath` (`TCP_NODELAY`,
+//!   accelerated in kernel space (`TCP_NODELAY`,
 //!   `TCP_FASTOPEN_CONNECT`, `SO_BUSY_POLL`, `TCP_QUICKACK`, `BBR`).
 //! - **Acceleration Pipe (`*_tcp_rdma`)**: Outbound traffic completely bypasses the OS kernel using
 //!   `velda-rdma` hardware Verbs (RoCEv2 / InfiniBand). Memory is DMA-transferred directly between host

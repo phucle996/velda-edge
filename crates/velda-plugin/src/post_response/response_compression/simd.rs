@@ -11,6 +11,7 @@ use std::sync::LazyLock;
 pub type StreamingCopyFn = fn(src: &[u8], dst: &mut [u8]);
 
 /// Scalar fallback for non-temporal streaming copy when SIMD is unavailable.
+#[cfg(any(not(target_arch = "x86_64"), test))]
 fn scalar_streaming_copy(src: &[u8], dst: &mut [u8]) {
     debug_assert_eq!(src.len(), dst.len());
     dst.copy_from_slice(src);
@@ -19,7 +20,7 @@ fn scalar_streaming_copy(src: &[u8], dst: &mut [u8]) {
 /// SSE2 (128-bit) Non-Temporal Streaming Store implementation.
 ///
 /// Flushes 16-byte chunks directly to RAM via Write-Combining buffers, bypassing L1/L2/L3 cache.
-#[cfg(target_arch = "x86_64")]
+#[cfg(all(target_arch = "x86_64", not(target_feature = "avx2")))]
 #[target_feature(enable = "sse2")]
 unsafe fn sse2_streaming_copy_impl(src: &[u8], dst: &mut [u8]) {
     use core::arch::x86_64::*;
@@ -65,7 +66,7 @@ unsafe fn sse2_streaming_copy_impl(src: &[u8], dst: &mut [u8]) {
 /// AVX2 (256-bit) Non-Temporal Streaming Store implementation.
 ///
 /// Flushes 32-byte chunks directly to RAM via Write-Combining buffers, bypassing L1/L2/L3 cache.
-#[cfg(target_arch = "x86_64")]
+#[cfg(all(target_arch = "x86_64", target_feature = "avx2"))]
 #[target_feature(enable = "avx2")]
 unsafe fn avx2_streaming_copy_impl(src: &[u8], dst: &mut [u8]) {
     use core::arch::x86_64::*;
@@ -108,18 +109,20 @@ unsafe fn avx2_streaming_copy_impl(src: &[u8], dst: &mut [u8]) {
     }
 }
 
-/// Detects CPU architecture and hardware features at startup, returning the optimal function pointer.
+/// Detects CPU architecture and hardware features at compile-time, returning the optimal function pointer.
 fn detect_streaming_copy_fn() -> StreamingCopyFn {
-    #[cfg(target_arch = "x86_64")]
+    #[cfg(all(target_arch = "x86_64", target_feature = "avx2"))]
     {
-        if is_x86_feature_detected!("avx2") {
-            return |src, dst| unsafe { avx2_streaming_copy_impl(src, dst) };
-        }
-        if is_x86_feature_detected!("sse2") {
-            return |src, dst| unsafe { sse2_streaming_copy_impl(src, dst) };
-        }
+        |src, dst| unsafe { avx2_streaming_copy_impl(src, dst) }
     }
-    scalar_streaming_copy
+    #[cfg(all(target_arch = "x86_64", not(target_feature = "avx2")))]
+    {
+        |src, dst| unsafe { sse2_streaming_copy_impl(src, dst) }
+    }
+    #[cfg(not(target_arch = "x86_64"))]
+    {
+        scalar_streaming_copy
+    }
 }
 
 /// Hardware-optimized non-temporal memory streaming copy.
@@ -127,16 +130,18 @@ fn detect_streaming_copy_fn() -> StreamingCopyFn {
 /// Inlined direct execution eliminating indirect function pointer overhead.
 #[inline(always)]
 pub fn streaming_copy(src: &[u8], dst: &mut [u8]) {
-    #[cfg(target_arch = "x86_64")]
+    #[cfg(all(target_arch = "x86_64", target_feature = "avx2"))]
     {
-        if is_x86_feature_detected!("avx2") {
-            return unsafe { avx2_streaming_copy_impl(src, dst) };
-        }
-        if is_x86_feature_detected!("sse2") {
-            return unsafe { sse2_streaming_copy_impl(src, dst) };
-        }
+        unsafe { avx2_streaming_copy_impl(src, dst) };
     }
-    scalar_streaming_copy(src, dst);
+    #[cfg(all(target_arch = "x86_64", not(target_feature = "avx2")))]
+    {
+        unsafe { sse2_streaming_copy_impl(src, dst) };
+    }
+    #[cfg(not(target_arch = "x86_64"))]
+    {
+        scalar_streaming_copy(src, dst);
+    }
 }
 
 /// Globally bound, hardware-optimized non-temporal memory streaming copy function pointer.

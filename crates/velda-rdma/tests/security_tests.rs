@@ -73,7 +73,7 @@ async fn test_channel_health_and_mark_broken() {
 #[tokio::test]
 async fn test_oob_handshake_rejects_invalid_magic() {
     let config = RdmaConfig::mock();
-    let listener = RdmaListener::bind("127.0.0.1:0".parse().unwrap(), config)
+    let listener = RdmaListener::bind(velda_core::lut::ip::v4_to_u128(0x7F00_0001), 0, config)
         .await
         .expect("Failed binding listener");
     let addr = listener.local_addr().unwrap();
@@ -81,7 +81,9 @@ async fn test_oob_handshake_rejects_invalid_magic() {
     let accept_task = tokio::spawn(async move { listener.accept().await });
 
     // Client connects and injects invalid magic
-    let mut stream = TcpStream::connect(addr).await.unwrap();
+    let mut stream = TcpStream::connect(velda_core::lut::ip::v4itoaddr(addr.0, addr.1))
+        .await
+        .unwrap();
     let mut malicious_frame = [0u8; 32];
     malicious_frame[0..4].copy_from_slice(b"HACK");
     stream.write_all(&malicious_frame).await.unwrap();
@@ -99,14 +101,16 @@ async fn test_oob_handshake_rejects_invalid_magic() {
 #[tokio::test]
 async fn test_oob_handshake_rejects_zero_qpn() {
     let config = RdmaConfig::mock();
-    let listener = RdmaListener::bind("127.0.0.1:0".parse().unwrap(), config)
+    let listener = RdmaListener::bind(velda_core::lut::ip::v4_to_u128(0x7F00_0001), 0, config)
         .await
         .expect("Failed binding listener");
     let addr = listener.local_addr().unwrap();
 
     let accept_task = tokio::spawn(async move { listener.accept().await });
 
-    let mut stream = TcpStream::connect(addr).await.unwrap();
+    let mut stream = TcpStream::connect(velda_core::lut::ip::v4itoaddr(addr.0, addr.1))
+        .await
+        .unwrap();
     let mut frame = [0u8; 32];
     frame[0..4].copy_from_slice(b"VRDM");
     // qpn = 0 (invalid)
@@ -127,14 +131,16 @@ async fn test_oob_handshake_rejects_zero_qpn() {
 #[tokio::test]
 async fn test_oob_handshake_rejects_empty_gid_and_lid() {
     let config = RdmaConfig::mock();
-    let listener = RdmaListener::bind("127.0.0.1:0".parse().unwrap(), config)
+    let listener = RdmaListener::bind(velda_core::lut::ip::v4_to_u128(0x7F00_0001), 0, config)
         .await
         .expect("Failed binding listener");
     let addr = listener.local_addr().unwrap();
 
     let accept_task = tokio::spawn(async move { listener.accept().await });
 
-    let mut stream = TcpStream::connect(addr).await.unwrap();
+    let mut stream = TcpStream::connect(velda_core::lut::ip::v4itoaddr(addr.0, addr.1))
+        .await
+        .unwrap();
     let mut frame = [0u8; 32];
     frame[0..4].copy_from_slice(b"VRDM");
     frame[4..8].copy_from_slice(&1234u32.to_be_bytes()); // valid qpn
@@ -223,7 +229,16 @@ async fn test_client_oob_handshake_rejects_zero_qpn() {
         gid: velda_rdma::ffi::ibv_gid { raw: [1; 16] },
     };
 
-    let res = exchange_oob(addr, &local_addr, Duration::from_secs(1)).await;
+    let res = exchange_oob(
+        match addr {
+            std::net::SocketAddr::V4(v4) => velda_core::lut::ip::v4_to_u128(v4.ip().to_bits()),
+            std::net::SocketAddr::V6(v6) => v6.ip().to_bits(),
+        },
+        addr.port().to_be(),
+        &local_addr,
+        Duration::from_secs(1),
+    )
+    .await;
     server_task.await.unwrap();
 
     assert!(res.is_err(), "Client should reject QPN 0");
@@ -262,7 +277,16 @@ async fn test_client_oob_handshake_rejects_empty_gid_and_lid() {
         gid: velda_rdma::ffi::ibv_gid { raw: [1; 16] },
     };
 
-    let res = exchange_oob(addr, &local_addr, Duration::from_secs(1)).await;
+    let res = exchange_oob(
+        match addr {
+            std::net::SocketAddr::V4(v4) => velda_core::lut::ip::v4_to_u128(v4.ip().to_bits()),
+            std::net::SocketAddr::V6(v6) => v6.ip().to_bits(),
+        },
+        addr.port().to_be(),
+        &local_addr,
+        Duration::from_secs(1),
+    )
+    .await;
     server_task.await.unwrap();
 
     assert!(res.is_err(), "Client should reject empty GID and LID");

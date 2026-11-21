@@ -36,7 +36,7 @@ fn bench_protocol_latencies_on_large_dataset() {
     ALLOCATOR.reset();
     let start = Instant::now();
     for _ in 0..iters {
-        let r = router.route_tcp("l4-in-0");
+        let r = router.route_tcp(velda_core::fnv1a_hash_32("l4-in-0"));
         let _ = std::hint::black_box(r);
     }
     let elapsed = start.elapsed();
@@ -54,7 +54,9 @@ fn bench_protocol_latencies_on_large_dataset() {
     ALLOCATOR.reset();
     let start = Instant::now();
     for _ in 0..iters {
-        let r = router.route_udp("l4-in-9").unwrap();
+        let r = router
+            .route_udp(velda_core::fnv1a_hash_32("l4-in-9"))
+            .unwrap();
         let target = r.id;
         let _ = std::hint::black_box(target);
     }
@@ -75,7 +77,7 @@ fn bench_protocol_latencies_on_large_dataset() {
     ALLOCATOR.reset();
     let start = Instant::now();
     for _ in 0..iters {
-        let r = router.route_http1("https-in", &req_exact);
+        let r = router.route_http1(velda_core::fnv1a_hash_32("https-in"), &req_exact);
         let _ = std::hint::black_box(r);
     }
     let elapsed = start.elapsed();
@@ -96,7 +98,7 @@ fn bench_protocol_latencies_on_large_dataset() {
     ALLOCATOR.reset();
     let start = Instant::now();
     for _ in 0..iters {
-        let r = router.route_http1("https-in", &req_prefix);
+        let r = router.route_http1(velda_core::fnv1a_hash_32("https-in"), &req_prefix);
         let _ = std::hint::black_box(r);
     }
     let elapsed = start.elapsed();
@@ -117,7 +119,7 @@ fn bench_protocol_latencies_on_large_dataset() {
     ALLOCATOR.reset();
     let start = Instant::now();
     for _ in 0..iters {
-        let r = router.route_http1("https-in", &req_miss);
+        let r = router.route_http1(velda_core::fnv1a_hash_32("https-in"), &req_miss);
         let _ = std::hint::black_box(r);
     }
     let elapsed = start.elapsed();
@@ -138,7 +140,7 @@ fn bench_protocol_latencies_on_large_dataset() {
     ALLOCATOR.reset();
     let start = Instant::now();
     for _ in 0..iters {
-        let r = router.route_grpc("https-in", &req_grpc);
+        let r = router.route_grpc(velda_core::fnv1a_hash_32("https-in"), &req_grpc);
         let _ = std::hint::black_box(r);
     }
     let elapsed = start.elapsed();
@@ -159,7 +161,7 @@ fn bench_protocol_latencies_on_large_dataset() {
     let start = Instant::now();
     for _ in 0..iters {
         let parsed = GrpcRouteRequest::from_path(grpc_path, None).unwrap();
-        let r = router.route_grpc("https-in", &parsed);
+        let r = router.route_grpc(velda_core::fnv1a_hash_32("https-in"), &parsed);
         let _ = std::hint::black_box(r);
     }
     let elapsed = start.elapsed();
@@ -195,7 +197,7 @@ fn bench_prefix_scaling_large_datasets() {
         ALLOCATOR.reset();
         let start = Instant::now();
         for _ in 0..iters {
-            let r = router.route_http1("https-in", &req);
+            let r = router.route_http1(velda_core::fnv1a_hash_32("https-in"), &req);
             let _ = std::hint::black_box(r);
         }
         let elapsed = start.elapsed();

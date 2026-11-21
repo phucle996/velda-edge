@@ -4,19 +4,14 @@
 //! offload flags to `super::udp_connector`. Upstream strictly owns endpoint topology
 //! and health tracking.
 
-use std::net::SocketAddr;
-
-use super::udp_connector::{UdpAccelerationPath, connect_udp_socket};
+use super::udp_connector::connect_udp_socket;
 use crate::upstream::lb::EdgeUpstream;
 
 /// Layer 4 UDP Upstream managing physical backend endpoint targets.
-///
-/// Pre-compiled with static load balancer, physical discovery endpoints, and socket acceleration profile.
 pub struct UdpUpstream {
     /// [PRE-COMPILED]: Pre-assembled upstream core holding discovery, health tracker,
     /// timeouts, and the selected `LbAlgorithm` enum variant.
     inner: EdgeUpstream,
-    acceleration: UdpAccelerationPath,
     last_probe_sec: std::sync::atomic::AtomicU64,
 }
 
@@ -24,17 +19,15 @@ impl std::fmt::Debug for UdpUpstream {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("UdpUpstream")
             .field("id", &self.inner.id())
-            .field("acceleration", &self.acceleration)
             .finish()
     }
 }
 
 impl UdpUpstream {
     /// Creates a new [`UdpUpstream`] instance.
-    pub fn new(inner: EdgeUpstream, acceleration: UdpAccelerationPath) -> Self {
+    pub fn new(inner: EdgeUpstream) -> Self {
         Self {
             inner,
-            acceleration,
             last_probe_sec: std::sync::atomic::AtomicU64::new(0),
         }
     }
@@ -45,34 +38,29 @@ impl UdpUpstream {
         self.inner.id()
     }
 
-    /// Returns the pre-compiled socket acceleration path.
+    /// Selects an eligible backend `(ip: u128, port_be: u16)` via configured load balancing.
     #[inline]
-    pub fn acceleration(&self) -> &UdpAccelerationPath {
-        &self.acceleration
-    }
-
-    /// Selects an eligible backend endpoint via configured load balancing.
-    #[inline]
-    pub fn select_target(&self) -> Option<SocketAddr> {
+    pub fn select_target(&self) -> Option<(u128, u16)> {
         self.inner.select_endpoint().ok()
     }
 
-    /// Selects an eligible backend endpoint via configured load balancing with contextual affinity attributes.
+    /// Selects an eligible backend `(ip: u128, port_be: u16)` via configured load balancing with contextual affinity attributes.
     #[inline]
     pub fn select_target_with_context(
         &self,
         ctx: &velda_lb::SelectionContext<'_>,
-    ) -> Option<SocketAddr> {
+    ) -> Option<(u128, u16)> {
         self.inner.select_endpoint_with_context(ctx).ok()
     }
 
-    /// Connects an ephemeral UDP socket to the given target endpoint using pre-compiled acceleration.
+    /// Connects an ephemeral UDP socket to `(target_ip, target_port_be)` via `velda-sock`.
     #[inline]
     pub fn connect_socket(
         &self,
-        target: SocketAddr,
+        target_ip: u128,
+        target_port_be: u16,
     ) -> Result<tokio::net::UdpSocket, std::io::Error> {
-        connect_udp_socket(target, &self.acceleration)
+        connect_udp_socket(target_ip, target_port_be)
     }
 
     /// Performs periodic active health check across all physical endpoints for `lane`.
@@ -105,13 +93,13 @@ impl UdpUpstream {
         }
 
         for ep in all_eps {
-            let addr = ep.address;
+            let addr = velda_sock::raw_to_socket_addr(ep.ip, ep.port_be);
             let success = if let Some(sock) = heal_sock {
                 sock.try_send_to(b"ping", addr).is_ok()
             } else {
                 false
             };
-            health.record_active_result(&addr, success);
+            health.record_active_result(&(ep.ip, ep.port_be), success);
         }
     }
 }

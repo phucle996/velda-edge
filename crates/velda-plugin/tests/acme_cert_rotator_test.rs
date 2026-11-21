@@ -14,7 +14,7 @@ use std::sync::RwLock;
 
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::TcpListener;
-use velda_core::{ListenerId, RouteId};
+use velda_core::fnv1a_hash_32;
 use velda_plugin::background::acme_cert_rotator::hot_swap::TlsHotSwapper;
 use velda_plugin::background::acme_cert_rotator::storage::CertStorage;
 use velda_plugin::background::acme_cert_rotator::{AcmeCertRotatorConfig, AcmeCertRotatorPlugin};
@@ -229,32 +229,34 @@ async fn test_acme_cert_rotator_e2e_lifecycle() {
         tls: Default::default(),
     };
 
-    // 1. Setup in-memory Router and dynamic SniResolver
-    let listener_id = ListenerId::from("ingress-http");
-    let http1 =
-        Http1Router::new(vec![Http1Route::new(RouteId::new(1), listener_id, "/api")]).unwrap();
+    // 1. Setup immutable in-memory Router (with static ACME bootstrap route) and dynamic SniResolver
+    let listener_id = fnv1a_hash_32("ingress-http");
+    let http1 = Http1Router::new(vec![
+        Http1Route::new(1, listener_id, "/api"),
+        Http1Route::new(
+            velda_plugin::background::acme_cert_rotator::route_guard::ACME_CHALLENGE_ROUTE_ID,
+            listener_id,
+            velda_plugin::background::acme_cert_rotator::challenge::CHALLENGE_PATH_PREFIX,
+        )
+        .with_method("GET"),
+    ])
+    .unwrap();
 
-    let router = Arc::new(RwLock::new(Router::new(
+    let router = Router::new(
         Default::default(),
         Default::default(),
         http1,
         Default::default(),
         Default::default(),
         Default::default(),
-    )));
+    );
 
     let sni_resolver = Arc::new(RwLock::new(SniResolver::new()));
     let hot_swapper = TlsHotSwapper::new(Some(Arc::clone(&sni_resolver)));
 
-    // 2. Instantiate AcmeCertRotatorPlugin
-    let plugin = AcmeCertRotatorPlugin::new(
-        "acme_cert_rotator",
-        config.clone(),
-        Some(Arc::clone(&router)),
-        Some("ingress-http".to_string()),
-        hot_swapper,
-    )
-    .unwrap();
+    // 2. Instantiate AcmeCertRotatorPlugin (no mutable Router reference needed)
+    let plugin =
+        AcmeCertRotatorPlugin::new("acme_cert_rotator", config.clone(), hot_swapper).unwrap();
 
     // 3. Before renewal: SniResolver has no certificate for api.velda.local
     {
@@ -284,19 +286,18 @@ async fn test_acme_cert_rotator_e2e_lifecycle() {
     let privkey_pem = storage.read_privkey_pem("api.velda.local").unwrap();
     assert!(privkey_pem.contains("PRIVATE KEY"));
 
-    // 7. Verify ephemeral route was completely purged from Router (zero route leakage!)
-    {
-        let r = router.read().unwrap();
-        let acme_req = Http1RouteRequest::new("/.well-known/acme-challenge/mock_token_abc_123");
-        assert!(r.route_http1(listener_id, &acme_req).is_none());
+    // 7. Verify ChallengeStore was purged on Drop while immutable Router keeps static routes intact
+    assert!(plugin.challenge_store().is_empty());
+    let acme_req =
+        Http1RouteRequest::new("/.well-known/acme-challenge/mock_token_abc_123").with_method("GET");
+    assert_eq!(
+        router.route_http1(listener_id, &acme_req).unwrap().id,
+        velda_plugin::background::acme_cert_rotator::route_guard::ACME_CHALLENGE_ROUTE_ID
+    );
 
-        // Regular traffic route remains untouched and functional
-        let api_req = Http1RouteRequest::new("/api/users");
-        assert_eq!(
-            r.route_http1(listener_id, &api_req).unwrap().id,
-            RouteId::new(1)
-        );
-    }
+    // Regular traffic route remains untouched and functional
+    let api_req = Http1RouteRequest::new("/api/users");
+    assert_eq!(router.route_http1(listener_id, &api_req).unwrap().id, 1);
 
     // 8. Idempotency test: check_and_renew() on healthy cert skips without renewal
     let second_run = plugin.check_and_renew().await.unwrap();

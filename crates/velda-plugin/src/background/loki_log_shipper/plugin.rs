@@ -8,13 +8,13 @@
 //! │   ┌────────────────────────────────────────────────────────────────────────────────┐   │
 //! │   │ Client Ingress -> Route Matching -> Upstream Proxying -> Client Response       │   │
 //! │   │ [Hot-Path Telemetry Hook]                                                      │   │
-//! │   │ 64-byte AccessLogRecord ──► Core-Local SPSC Ring (Zero-lock push)             │   │
+//! │   │ 64-byte TelemetryRecord ──► Core-Local SPSC Ring (Zero-lock push)             │   │
 //! │   └───────────────────────────────────────┬────────────────────────────────────────┘   │
 //! │                                           │ Atomic In-Memory Hand-off                  │
 //! │                                           ▼                                            │
 //! │   SHADOW LOGISTICS WORKER (velda-shadow-{i}, SCHED_IDLE, Assigned Core i)              │
 //! │   ┌────────────────────────────────────────────────────────────────────────────────┐   │
-//! │   │ LogStore::flush_all_lanes() ──► Batched Arc<[AccessLogRecord]> Slices          │   │
+//! │   │ TelemetryStore::flush_all_lanes() ──► Batched Arc<[TelemetryRecord]> Slices          │   │
 //! │   │                                                                                │   │
 //! │   │ LokiLogShipperPlugin::run()                                                    │   │
 //! │   │  ├── is_grpc?                                                                  │   │
@@ -34,7 +34,7 @@ use std::time::Duration;
 use crate::config::PluginConfig;
 use http::HeaderMap;
 use tokio::sync::watch;
-use velda_observability::{LogStore, global_log_store};
+use velda_observability::{TelemetryStore, global_telemetry_store};
 
 pub use super::config::LokiLogShipperConfig;
 use super::json::{LokiJsonFormatter, LokiLogClient};
@@ -47,28 +47,28 @@ use crate::error::PluginError;
 pub struct LokiLogShipperPlugin {
     pub id: String,
     pub config: LokiLogShipperConfig,
-    log_store: Arc<LogStore>,
+    telemetry_store: Arc<TelemetryStore>,
     custom_headers: HeaderMap,
     shipped_records: Arc<AtomicU64>,
     failed_pushes: Arc<AtomicU64>,
 }
 
 impl LokiLogShipperPlugin {
-    /// Constructs a new Loki log shipper bound to global singleton [`LogStore`].
+    /// Constructs a new Loki log shipper bound to global singleton [`TelemetryStore`].
     pub fn new(id: impl Into<String>, config: LokiLogShipperConfig) -> Result<Self, PluginError> {
-        Self::with_store(id, config, global_log_store())
+        Self::with_store(id, config, Arc::clone(global_telemetry_store()))
     }
 
-    /// Constructs a new shipper bound to an explicit [`LogStore`] (for testing & multi-tenant isolation).
+    /// Constructs a new shipper bound to an explicit [`TelemetryStore`] (for testing & multi-tenant isolation).
     pub fn with_store(
         id: impl Into<String>,
         config: LokiLogShipperConfig,
-        log_store: Arc<LogStore>,
+        telemetry_store: Arc<TelemetryStore>,
     ) -> Result<Self, PluginError> {
         Ok(Self {
             id: id.into(),
             config,
-            log_store,
+            telemetry_store,
             custom_headers: HeaderMap::new(),
             shipped_records: Arc::new(AtomicU64::new(0)),
             failed_pushes: Arc::new(AtomicU64::new(0)),
@@ -81,7 +81,7 @@ impl LokiLogShipperPlugin {
             super::validation::validate_loki_log_shipper_config(&config.id, &config.config)
                 .map_err(|e| PluginError::Config(e.to_string()))?;
 
-        Self::with_store(&config.id, validated, global_log_store())
+        Self::with_store(&config.id, validated, Arc::clone(global_telemetry_store()))
     }
 
     /// Returns cumulative total of successfully shipped log records.
@@ -114,7 +114,7 @@ impl BackgroundPlugin for LokiLogShipperPlugin {
                 || self.config.endpoint.starts_with("grpc://")
                 || self.config.endpoint.starts_with("grpcs://");
 
-            let subscriber = self.log_store.subscribe(256);
+            let subscriber = self.telemetry_store.subscribe(256);
             let mut interval =
                 tokio::time::interval(Duration::from_millis(self.config.flush_interval_ms.max(50)));
             interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
@@ -363,7 +363,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_loki_log_shipper_shutdown() {
-        let store = Arc::new(LogStore::new());
+        let store = Arc::new(TelemetryStore::new());
         let config = LokiLogShipperConfig {
             protocol: "http".to_string(),
             endpoint: "http://127.0.0.1:3100/loki/api/v1/push".to_string(),

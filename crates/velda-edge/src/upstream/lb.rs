@@ -82,7 +82,6 @@ pub type EdgeUpstream = Upstream<LbAlgorithm>;
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::net::SocketAddr;
 
     #[test]
     fn test_lb_algorithm_from_name_and_debug() {
@@ -110,8 +109,8 @@ mod tests {
 
     #[test]
     fn test_lb_algorithm_selection() {
-        let ep1 = Endpoint::new("ep1", "127.0.0.1:8081".parse::<SocketAddr>().unwrap(), 1);
-        let ep2 = Endpoint::new("ep2", "127.0.0.1:8082".parse::<SocketAddr>().unwrap(), 1);
+        let ep1 = Endpoint::from_v4([127, 0, 0, 1], 8081, 1);
+        let ep2 = Endpoint::from_v4([127, 0, 0, 1], 8082, 1);
         let endpoints = vec![ep1, ep2];
 
         for name in &[

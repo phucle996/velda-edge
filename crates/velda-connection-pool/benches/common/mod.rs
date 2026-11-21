@@ -3,7 +3,6 @@
 #![allow(dead_code)]
 
 use std::alloc::{GlobalAlloc, Layout, System};
-use std::net::SocketAddr;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::time::{Duration, Instant};
@@ -143,14 +142,14 @@ pub fn calculate_big_o(results: &[(usize, Duration)]) -> (String, f64) {
 
 #[derive(Debug)]
 pub struct BenchResource {
-    pub peer: SocketAddr,
+    pub peer: (u128, u16),
     pub created_at: Instant,
     pub last_used: Instant,
     pub healthy: Arc<AtomicBool>,
 }
 
 impl BenchResource {
-    pub fn new(peer: SocketAddr) -> Self {
+    pub fn new(peer: (u128, u16)) -> Self {
         Self {
             peer,
             created_at: Instant::now(),

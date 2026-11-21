@@ -1,7 +1,15 @@
-//! Memory topology and RAM capacity probe.
+//! Memory Topology & RAM Capacity Probe (`velda_core::hardware::memory`).
 //!
-//! Owns host memory size discovery, container cgroups limits (v1 & v2),
-//! environment overrides, and memory profile detection.
+//! ```text
+//! ┌─────────────────────────────────────────────────────────────────────────────────────────┐
+//! │                         COLD-START MEMORY CAPACITY PROBE PRIORITY                       │
+//! ├─────────────────────────────────────────────────────────────────────────────────────────┤
+//! │  [1] /sys/fs/cgroup/memory.max (cgroup v2)                                              │
+//! │   └──► [2] /sys/fs/cgroup/memory/memory.limit_in_bytes (cgroup v1)                      │
+//! │         └──► [3] /proc/meminfo (Host physical RAM)                                      │
+//! │               └──► MemoryProfile { total_bytes: usize, source: &'static str }           │
+//! └─────────────────────────────────────────────────────────────────────────────────────────┘
+//! ```
 
 /// Discovered memory capacity and allocation profile.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

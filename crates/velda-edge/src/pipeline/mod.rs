@@ -18,7 +18,7 @@ pub struct PipeOutcome {
     pub status_code: u16,
     pub bytes_rx: u64,
     pub bytes_tx: u64,
-    pub upstream_addr: Option<std::net::SocketAddr>,
+    pub upstream_addr: Option<(u128, u16)>,
     pub grpc_status: velda_core::GrpcStatus,
     pub completion: velda_core::CompletionReason,
 }
@@ -30,7 +30,7 @@ impl PipeOutcome {
         status_code: u16,
         bytes_rx: u64,
         bytes_tx: u64,
-        upstream_addr: Option<std::net::SocketAddr>,
+        upstream_addr: Option<(u128, u16)>,
         completion: velda_core::CompletionReason,
     ) -> Self {
         Self {
@@ -50,7 +50,7 @@ impl PipeOutcome {
         grpc_status: velda_core::GrpcStatus,
         bytes_rx: u64,
         bytes_tx: u64,
-        upstream_addr: Option<std::net::SocketAddr>,
+        upstream_addr: Option<(u128, u16)>,
         completion: velda_core::CompletionReason,
     ) -> Self {
         Self {
@@ -100,9 +100,10 @@ use crate::runtime::pipeline::{TcpPipeline, UdpPipeline};
 #[derive(Debug, Clone)]
 pub struct DownstreamMeta {
     pub listener_id: Arc<str>,
-    pub peer: SocketAddr,
     pub peer_ip: u128,
-    pub local_addr: SocketAddr,
+    pub peer_port_be: u16,
+    pub local_ip: u128,
+    pub local_port_be: u16,
     pub is_tls: bool,
     pub client_ip_header: http::HeaderValue,
     pub listener_port_header: http::HeaderValue,
@@ -149,7 +150,8 @@ impl DownstreamMeta {
         alt_svc_header: Option<http::HeaderValue>,
         buffer_pool: &velda_core::buffer::ShardedBufferPool,
     ) -> Self {
-        let peer_ip = velda_core::lut::ip::encode_ip_u128(peer.ip());
+        let (peer_ip, peer_port_be) = velda_sock::socket_addr_to_raw(peer);
+        let (local_ip, local_port_be) = velda_sock::socket_addr_to_raw(local_addr);
         let (ip_buf, ip_len) = velda_core::lut::ip::format_ip_bytes(peer_ip);
         let client_ip_header = http::HeaderValue::from_bytes(&ip_buf[..ip_len])
             .unwrap_or_else(|_| http::HeaderValue::from_static("127.0.0.1"));
@@ -161,9 +163,10 @@ impl DownstreamMeta {
         );
         Self {
             listener_id,
-            peer,
             peer_ip,
-            local_addr,
+            peer_port_be,
+            local_ip,
+            local_port_be,
             is_tls,
             client_ip_header,
             listener_port_header,
@@ -202,7 +205,9 @@ pub fn build_tcp_pipeline_runner(listener_id: &str, runtime: SharedRuntime) -> D
     let lid: Arc<str> = Arc::from(listener_id);
     let pipeline = {
         let rt = runtime.load();
-        rt.pipelines.tcp_pipeline(listener_id).cloned()
+        rt.pipelines
+            .tcp_pipeline(velda_core::fnv1a_hash_32(listener_id))
+            .cloned()
     };
 
     match pipeline {
@@ -211,6 +216,7 @@ pub fn build_tcp_pipeline_runner(listener_id: &str, runtime: SharedRuntime) -> D
             tls_enabled,
             streaming,
             alt_svc,
+            sampling,
         }) => {
             let lid = Arc::clone(&lid);
             Arc::new(move |connection: Connection| {
@@ -225,6 +231,7 @@ pub fn build_tcp_pipeline_runner(listener_id: &str, runtime: SharedRuntime) -> D
                         tls_enabled,
                         streaming,
                         alt_svc,
+                        sampling,
                         rt,
                     )
                     .await;
@@ -236,6 +243,7 @@ pub fn build_tcp_pipeline_runner(listener_id: &str, runtime: SharedRuntime) -> D
             tls_enabled,
             streaming: _,
             alt_svc,
+            sampling,
         }) => {
             let lid = Arc::clone(&lid);
             Arc::new(move |connection: Connection| {
@@ -243,8 +251,16 @@ pub fn build_tcp_pipeline_runner(listener_id: &str, runtime: SharedRuntime) -> D
                 let lid = Arc::clone(&lid);
                 let alt_svc = alt_svc.clone();
                 Box::pin(async move {
-                    http2::handle_http2_stream(connection, lid, config, tls_enabled, alt_svc, rt)
-                        .await;
+                    http2::handle_http2_stream(
+                        connection,
+                        lid,
+                        config,
+                        tls_enabled,
+                        alt_svc,
+                        sampling,
+                        rt,
+                    )
+                    .await;
                 })
             })
         }
@@ -254,6 +270,7 @@ pub fn build_tcp_pipeline_runner(listener_id: &str, runtime: SharedRuntime) -> D
             http1_config,
             http2_config,
             alt_svc,
+            sampling,
         }) => {
             let lid = Arc::clone(&lid);
             let auto_config = HttpAutoConfig {
@@ -262,6 +279,7 @@ pub fn build_tcp_pipeline_runner(listener_id: &str, runtime: SharedRuntime) -> D
                 tls_enabled,
                 streaming,
                 alt_svc,
+                sampling,
             };
             Arc::new(move |connection: Connection| {
                 let rt = runtime.clone();
@@ -276,13 +294,14 @@ pub fn build_tcp_pipeline_runner(listener_id: &str, runtime: SharedRuntime) -> D
             config,
             tls_enabled,
             streaming: _,
+            sampling,
         }) => {
             let lid = Arc::clone(&lid);
             Arc::new(move |connection: Connection| {
                 let rt = runtime.clone();
                 let lid = Arc::clone(&lid);
                 Box::pin(async move {
-                    grpc::handle_grpc_tcp(connection, lid, config, tls_enabled, rt).await;
+                    grpc::handle_grpc_tcp(connection, lid, config, tls_enabled, sampling, rt).await;
                 })
             })
         }
@@ -299,7 +318,7 @@ pub fn build_tcp_pipeline_runner(listener_id: &str, runtime: SharedRuntime) -> D
         None => {
             let lid = Arc::clone(&lid);
             Arc::new(move |connection: Connection| {
-                let peer = connection.peer();
+                let peer = velda_sock::format_raw_addr(connection.peer_ip, connection.peer_port_be);
                 tracing::warn!(
                     listener = %lid,
                     peer = %peer,
@@ -320,11 +339,15 @@ pub fn build_udp_pipeline_runner(listener_id: &str, runtime: SharedRuntime) -> D
     let lid: Arc<str> = Arc::from(listener_id);
     let pipeline = {
         let rt = runtime.load();
-        rt.pipelines.udp_pipeline(listener_id).cloned()
+        rt.pipelines
+            .udp_pipeline(velda_core::fnv1a_hash_32(listener_id))
+            .cloned()
     };
 
     match pipeline {
-        Some(UdpPipeline::Http3 { config, .. }) => {
+        Some(UdpPipeline::Http3 {
+            config, sampling, ..
+        }) => {
             let lid = Arc::clone(&lid);
             let workers = http3::get_or_init_h3_workers(&lid, &runtime);
             Arc::new(
@@ -338,6 +361,7 @@ pub fn build_udp_pipeline_runner(listener_id: &str, runtime: SharedRuntime) -> D
                             socket,
                             datagram,
                             config,
+                            sampling,
                             &rt,
                             workers.as_ref(),
                         )
@@ -346,14 +370,16 @@ pub fn build_udp_pipeline_runner(listener_id: &str, runtime: SharedRuntime) -> D
                 },
             )
         }
-        Some(UdpPipeline::Grpc { config, .. }) => {
+        Some(UdpPipeline::Grpc {
+            config, sampling, ..
+        }) => {
             let lid = Arc::clone(&lid);
             Arc::new(
                 move |_id: Arc<str>, socket: Arc<UdpSocket>, datagram: Datagram| {
                     let rt = runtime.clone();
                     let lid = Arc::clone(&lid);
                     Box::pin(async move {
-                        grpc::handle_grpc_udp(lid, socket, datagram, config, &rt).await;
+                        grpc::handle_grpc_udp(lid, socket, datagram, config, sampling, &rt).await;
                     })
                 },
             )
@@ -375,7 +401,7 @@ pub fn build_udp_pipeline_runner(listener_id: &str, runtime: SharedRuntime) -> D
             let lid = Arc::clone(&lid);
             Arc::new(
                 move |_id: Arc<str>, _socket: Arc<UdpSocket>, datagram: Datagram| {
-                    let peer = datagram.peer();
+                    let peer = velda_sock::format_raw_addr(datagram.peer_ip, datagram.peer_port_be);
                     tracing::warn!(
                         listener = %lid,
                         peer = %peer,
@@ -396,6 +422,7 @@ struct HttpAutoConfig {
     tls_enabled: bool,
     streaming: velda_core::StreamingMode,
     alt_svc: Option<http::HeaderValue>,
+    sampling: velda_observability::sampling::http::HttpSampling,
 }
 
 /// Unified HTTP stream worker for listeners declaring the `http` family.
@@ -416,6 +443,7 @@ async fn handle_http_auto_stream(
             false,
             config.streaming,
             config.alt_svc,
+            config.sampling,
             runtime,
         )
         .await;
@@ -424,8 +452,8 @@ async fn handle_http_auto_stream(
 
     let _conn_guard = ConnMetricGuard::enter();
     let rt = runtime.load();
-    let peer = connection.peer();
-    let local_addr = connection.local_addr();
+    let peer = velda_sock::raw_to_socket_addr(connection.peer_ip, connection.peer_port_be);
+    let local_addr = velda_sock::raw_to_socket_addr(connection.local_ip, connection.local_port_be);
 
     let Some(tls_server) = rt.tls_server.as_ref() else {
         tracing::error!(
@@ -463,7 +491,14 @@ async fn handle_http_auto_stream(
             // When ALPN is omitted by the client, default to HTTP/1.1 as per RFC 7301.
             match alpn.as_deref() {
                 Some("h2") => {
-                    http2::run_http2_loop(tls_stream, meta, config.http2_config, runtime).await;
+                    http2::run_http2_loop(
+                        tls_stream,
+                        meta,
+                        config.http2_config,
+                        config.sampling,
+                        runtime,
+                    )
+                    .await;
                 }
                 None | Some("http/1.1") => {
                     http1::run_http1_loop(
@@ -471,6 +506,7 @@ async fn handle_http_auto_stream(
                         meta,
                         config.streaming,
                         config.http1_config,
+                        config.sampling,
                         runtime,
                     )
                     .await;

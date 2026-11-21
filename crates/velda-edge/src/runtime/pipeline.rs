@@ -11,6 +11,8 @@ use velda_grpc::GrpcConfig;
 use velda_http1::Http1Config;
 use velda_http2::Http2Config;
 use velda_http3::Http3Config;
+use velda_observability::sampling::grpc::GrpcSampling;
+use velda_observability::sampling::http::HttpSampling;
 use velda_sync::post_sync::listener::ListenerConfig;
 
 use crate::error::EdgeError;
@@ -117,12 +119,14 @@ pub enum TcpPipeline {
         streaming: StreamingMode,
         config: Http1Config,
         alt_svc: Option<http::HeaderValue>,
+        sampling: HttpSampling,
     },
     Http2 {
         tls_enabled: bool,
         streaming: StreamingMode,
         config: Http2Config,
         alt_svc: Option<http::HeaderValue>,
+        sampling: HttpSampling,
     },
     HttpAuto {
         tls_enabled: bool,
@@ -130,11 +134,13 @@ pub enum TcpPipeline {
         http1_config: Http1Config,
         http2_config: Http2Config,
         alt_svc: Option<http::HeaderValue>,
+        sampling: HttpSampling,
     },
     Grpc {
         tls_enabled: bool,
         streaming: StreamingMode,
         config: GrpcConfig,
+        sampling: GrpcSampling,
     },
     Raw {
         config: L4TcpConfig,
@@ -198,11 +204,13 @@ pub enum UdpPipeline {
         tls_enabled: bool,
         streaming: StreamingMode,
         config: Http3Config,
+        sampling: HttpSampling,
     },
     Grpc {
         tls_enabled: bool,
         streaming: StreamingMode,
         config: GrpcConfig,
+        sampling: GrpcSampling,
     },
     Raw {
         config: L4UdpConfig,
@@ -248,8 +256,8 @@ impl UdpPipeline {
 /// Built once during bootstrap/reload and stored in `Runtime` for single-lookup O(1) hot-path resolution.
 #[derive(Debug, Clone, Default)]
 pub struct PipelineTable {
-    tcp: FxHashMap<velda_core::ListenerId, TcpPipeline>,
-    udp: FxHashMap<velda_core::ListenerId, UdpPipeline>,
+    tcp: FxHashMap<u32, TcpPipeline>,
+    udp: FxHashMap<u32, UdpPipeline>,
 }
 
 impl PipelineTable {
@@ -320,23 +328,27 @@ impl PipelineTable {
                 match app.as_str() {
                     "http" | "http3" => {
                         let config = resolve_http3_config(listener, cores, ram_bytes);
+                        let sampling = resolve_http_sampling(listener);
                         udp.insert(
                             lid,
                             UdpPipeline::Http3 {
                                 tls_enabled: is_tls,
                                 streaming,
                                 config,
+                                sampling,
                             },
                         );
                     }
                     "grpc" => {
                         let config = resolve_grpc_config(listener, cores, ram_bytes);
+                        let sampling = resolve_grpc_sampling(listener);
                         udp.insert(
                             lid,
                             UdpPipeline::Grpc {
                                 tls_enabled: is_tls,
                                 streaming,
                                 config,
+                                sampling,
                             },
                         );
                     }
@@ -355,6 +367,7 @@ impl PipelineTable {
                         let http1_config = resolve_http1_config(listener, cores, ram_bytes);
                         let http2_config = resolve_http2_config(listener, cores, ram_bytes);
                         let alt_svc = resolve_alt_svc_header(listener);
+                        let sampling = resolve_http_sampling(listener);
                         if is_tls {
                             tcp.insert(
                                 lid,
@@ -364,6 +377,7 @@ impl PipelineTable {
                                     http1_config,
                                     http2_config,
                                     alt_svc,
+                                    sampling,
                                 },
                             );
                         } else {
@@ -374,6 +388,7 @@ impl PipelineTable {
                                     streaming,
                                     config: http1_config,
                                     alt_svc,
+                                    sampling,
                                 },
                             );
                         }
@@ -381,6 +396,7 @@ impl PipelineTable {
                     "http1" => {
                         let config = resolve_http1_config(listener, cores, ram_bytes);
                         let alt_svc = resolve_alt_svc_header(listener);
+                        let sampling = resolve_http_sampling(listener);
                         tcp.insert(
                             lid,
                             TcpPipeline::Http1 {
@@ -388,12 +404,14 @@ impl PipelineTable {
                                 streaming,
                                 config,
                                 alt_svc,
+                                sampling,
                             },
                         );
                     }
                     "http2" => {
                         let config = resolve_http2_config(listener, cores, ram_bytes);
                         let alt_svc = resolve_alt_svc_header(listener);
+                        let sampling = resolve_http_sampling(listener);
                         tcp.insert(
                             lid,
                             TcpPipeline::Http2 {
@@ -401,17 +419,20 @@ impl PipelineTable {
                                 streaming,
                                 config,
                                 alt_svc,
+                                sampling,
                             },
                         );
                     }
                     "grpc" => {
                         let config = resolve_grpc_config(listener, cores, ram_bytes);
+                        let sampling = resolve_grpc_sampling(listener);
                         tcp.insert(
                             lid,
                             TcpPipeline::Grpc {
                                 tls_enabled: is_tls,
                                 streaming,
                                 config,
+                                sampling,
                             },
                         );
                     }
@@ -440,20 +461,14 @@ impl PipelineTable {
 
     /// Returns the pre-compiled TCP pipeline for a listener, if registered.
     #[inline]
-    pub fn tcp_pipeline(
-        &self,
-        listener_id: impl Into<velda_core::ListenerId>,
-    ) -> Option<&TcpPipeline> {
-        self.tcp.get(&listener_id.into())
+    pub fn tcp_pipeline(&self, listener_id: u32) -> Option<&TcpPipeline> {
+        self.tcp.get(&listener_id)
     }
 
     /// Returns the pre-compiled UDP pipeline for a listener, if registered.
     #[inline]
-    pub fn udp_pipeline(
-        &self,
-        listener_id: impl Into<velda_core::ListenerId>,
-    ) -> Option<&UdpPipeline> {
-        self.udp.get(&listener_id.into())
+    pub fn udp_pipeline(&self, listener_id: u32) -> Option<&UdpPipeline> {
+        self.udp.get(&listener_id)
     }
 }
 
@@ -612,6 +627,79 @@ fn resolve_http3_config(listener: &ListenerConfig, cores: usize, ram_bytes: usiz
     config
 }
 
+fn resolve_http_sampling(listener: &ListenerConfig) -> HttpSampling {
+    let Some(ref obs) = listener.observability else {
+        return HttpSampling::keep_all();
+    };
+    let Some(ref sampling) = obs.sampling else {
+        return HttpSampling::keep_all();
+    };
+    let Some(ref http) = sampling.http else {
+        return HttpSampling::keep_all();
+    };
+    HttpSampling::from_rates(
+        http.r1xx.unwrap_or(1.0),
+        http.r2xx.unwrap_or(1.0),
+        http.r3xx.unwrap_or(1.0),
+        http.r4xx.unwrap_or(1.0),
+        http.r5xx.unwrap_or(1.0),
+        http.shed,
+    )
+}
+
+fn resolve_grpc_sampling(listener: &ListenerConfig) -> GrpcSampling {
+    let Some(ref obs) = listener.observability else {
+        return GrpcSampling::keep_all();
+    };
+    let Some(ref sampling) = obs.sampling else {
+        return GrpcSampling::keep_all();
+    };
+    let Some(ref g) = sampling.grpc else {
+        return GrpcSampling::keep_all();
+    };
+    let def = g.default.unwrap_or(1.0);
+    let mut overrides = [(velda_core::GrpcStatus::Ok, def); 17];
+    let pairs = [
+        (velda_core::GrpcStatus::Ok, g.ok),
+        (velda_core::GrpcStatus::Cancelled, g.cancelled),
+        (velda_core::GrpcStatus::Unknown, g.unknown),
+        (velda_core::GrpcStatus::InvalidArgument, g.invalid_argument),
+        (
+            velda_core::GrpcStatus::DeadlineExceeded,
+            g.deadline_exceeded,
+        ),
+        (velda_core::GrpcStatus::NotFound, g.not_found),
+        (velda_core::GrpcStatus::AlreadyExists, g.already_exists),
+        (
+            velda_core::GrpcStatus::PermissionDenied,
+            g.permission_denied,
+        ),
+        (
+            velda_core::GrpcStatus::ResourceExhausted,
+            g.resource_exhausted,
+        ),
+        (
+            velda_core::GrpcStatus::FailedPrecondition,
+            g.failed_precondition,
+        ),
+        (velda_core::GrpcStatus::Aborted, g.aborted),
+        (velda_core::GrpcStatus::OutOfRange, g.out_of_range),
+        (velda_core::GrpcStatus::Unimplemented, g.unimplemented),
+        (velda_core::GrpcStatus::Internal, g.internal),
+        (velda_core::GrpcStatus::Unavailable, g.unavailable),
+        (velda_core::GrpcStatus::DataLoss, g.data_loss),
+        (velda_core::GrpcStatus::Unauthenticated, g.unauthenticated),
+    ];
+    let mut count = 0;
+    for (status, rate) in pairs {
+        if let Some(r) = rate {
+            overrides[count] = (status, r);
+            count += 1;
+        }
+    }
+    GrpcSampling::from_default_and_overrides(def, &overrides[..count], g.shed)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -643,6 +731,7 @@ mod tests {
             grpc: None,
             http3: None,
             raw: None,
+            observability: None,
         }
     }
 
@@ -659,33 +748,45 @@ mod tests {
 
         let table = PipelineTable::build(&listeners).unwrap();
 
-        let h1 = table.tcp_pipeline("h1-clear").unwrap();
+        let h1 = table
+            .tcp_pipeline(velda_core::fnv1a_hash_32("h1-clear"))
+            .unwrap();
         assert_eq!(h1.protocol(), TcpProtocol::Http1);
         assert_eq!(h1.protocol_family(), ProtocolFamily::Http);
         assert!(!h1.tls_enabled());
         assert_eq!(h1.protocol().as_str(), "http1");
 
-        let h2 = table.tcp_pipeline("h2-tls").unwrap();
+        let h2 = table
+            .tcp_pipeline(velda_core::fnv1a_hash_32("h2-tls"))
+            .unwrap();
         assert_eq!(h2.protocol(), TcpProtocol::Http2);
         assert_eq!(h2.protocol_family(), ProtocolFamily::Http);
         assert!(h2.tls_enabled());
         assert_eq!(h2.protocol().as_str(), "http2");
 
-        let grpc = table.tcp_pipeline("grpc-clear").unwrap();
+        let grpc = table
+            .tcp_pipeline(velda_core::fnv1a_hash_32("grpc-clear"))
+            .unwrap();
         assert_eq!(grpc.protocol(), TcpProtocol::Grpc);
         assert_eq!(grpc.protocol_family(), ProtocolFamily::Grpc);
         assert!(!grpc.tls_enabled());
 
-        let h3 = table.udp_pipeline("h3-udp").unwrap();
+        let h3 = table
+            .udp_pipeline(velda_core::fnv1a_hash_32("h3-udp"))
+            .unwrap();
         assert_eq!(h3.protocol(), UdpProtocol::Http3);
         assert_eq!(h3.protocol_family(), ProtocolFamily::Http);
         assert!(!h3.tls_enabled());
 
-        let raw_tcp = table.tcp_pipeline("raw-tcp").unwrap();
+        let raw_tcp = table
+            .tcp_pipeline(velda_core::fnv1a_hash_32("raw-tcp"))
+            .unwrap();
         assert_eq!(raw_tcp.protocol(), TcpProtocol::Raw);
         assert_eq!(raw_tcp.protocol_family(), ProtocolFamily::Raw);
 
-        let raw_udp = table.udp_pipeline("raw-udp").unwrap();
+        let raw_udp = table
+            .udp_pipeline(velda_core::fnv1a_hash_32("raw-udp"))
+            .unwrap();
         assert_eq!(raw_udp.protocol(), UdpProtocol::Raw);
         assert_eq!(raw_udp.protocol_family(), ProtocolFamily::Raw);
     }
@@ -701,19 +802,25 @@ mod tests {
         let table = PipelineTable::build(&listeners).unwrap();
 
         // TLS HTTP family listener compiles to HttpAuto with Dual-ALPN
-        let web_tls = table.tcp_pipeline("web-tls").unwrap();
+        let web_tls = table
+            .tcp_pipeline(velda_core::fnv1a_hash_32("web-tls"))
+            .unwrap();
         assert_eq!(web_tls.protocol(), TcpProtocol::HttpAuto);
         assert_eq!(web_tls.protocol_family(), ProtocolFamily::Http);
         assert!(web_tls.tls_enabled());
 
         // Cleartext HTTP family listener compiles to Http1
-        let web_clear = table.tcp_pipeline("web-clear").unwrap();
+        let web_clear = table
+            .tcp_pipeline(velda_core::fnv1a_hash_32("web-clear"))
+            .unwrap();
         assert_eq!(web_clear.protocol(), TcpProtocol::Http1);
         assert_eq!(web_clear.protocol_family(), ProtocolFamily::Http);
         assert!(!web_clear.tls_enabled());
 
         // UDP HTTP family listener compiles to Http3
-        let web_udp = table.udp_pipeline("web-udp").unwrap();
+        let web_udp = table
+            .udp_pipeline(velda_core::fnv1a_hash_32("web-udp"))
+            .unwrap();
         assert_eq!(web_udp.protocol(), UdpProtocol::Http3);
         assert_eq!(web_udp.protocol_family(), ProtocolFamily::Http);
     }
@@ -733,7 +840,92 @@ mod tests {
 
         let table =
             PipelineTable::build_with_hardware(&listeners, 4, 8 * 1024 * 1024 * 1024).unwrap();
-        assert!(table.tcp_pipeline("h1").is_some());
-        assert!(table.tcp_pipeline("h2").is_some());
+        assert!(
+            table
+                .tcp_pipeline(velda_core::fnv1a_hash_32("h1"))
+                .is_some()
+        );
+        assert!(
+            table
+                .tcp_pipeline(velda_core::fnv1a_hash_32("h2"))
+                .is_some()
+        );
+    }
+
+    #[test]
+    fn test_pipeline_table_compiles_observability_sampling() {
+        use velda_sync::post_sync::listener::{
+            GrpcSamplingConfig, HttpSamplingConfig, ListenerObservabilityConfig,
+            ListenerSamplingConfig,
+        };
+
+        let mut web = cfg("web-sampled", "tcp", "http", None, true);
+        web.observability = Some(ListenerObservabilityConfig {
+            sampling: Some(ListenerSamplingConfig {
+                http: Some(HttpSamplingConfig {
+                    r1xx: Some(0.0),
+                    r2xx: Some(0.0),
+                    r3xx: Some(0.5),
+                    r4xx: Some(1.0),
+                    r5xx: Some(1.0),
+                    shed: Some(0.0),
+                }),
+                grpc: None,
+            }),
+        });
+
+        let mut grpc = cfg("grpc-sampled", "tcp", "grpc", None, false);
+        grpc.observability = Some(ListenerObservabilityConfig {
+            sampling: Some(ListenerSamplingConfig {
+                http: None,
+                grpc: Some(GrpcSamplingConfig {
+                    default: Some(1.0),
+                    ok: Some(0.0),
+                    not_found: Some(0.0),
+                    shed: Some(0.0),
+                    ..Default::default()
+                }),
+            }),
+        });
+
+        let default_h1 = cfg("web-default", "tcp", "http1", None, false);
+
+        let table = PipelineTable::build(&[web, grpc, default_h1]).unwrap();
+
+        match table
+            .tcp_pipeline(velda_core::fnv1a_hash_32("web-sampled"))
+            .unwrap()
+        {
+            TcpPipeline::HttpAuto { sampling, .. } => {
+                assert!(!sampling.keep(200));
+                assert!(sampling.keep(404));
+                assert!(sampling.keep(500));
+                assert!(!sampling.keep_shed());
+            }
+            other => panic!("Expected HttpAuto, got {other:?}"),
+        }
+
+        match table
+            .tcp_pipeline(velda_core::fnv1a_hash_32("grpc-sampled"))
+            .unwrap()
+        {
+            TcpPipeline::Grpc { sampling, .. } => {
+                assert!(!sampling.keep(velda_core::GrpcStatus::Ok));
+                assert!(!sampling.keep(velda_core::GrpcStatus::NotFound));
+                assert!(sampling.keep(velda_core::GrpcStatus::Internal));
+                assert!(!sampling.keep_shed());
+            }
+            other => panic!("Expected Grpc, got {other:?}"),
+        }
+
+        match table
+            .tcp_pipeline(velda_core::fnv1a_hash_32("web-default"))
+            .unwrap()
+        {
+            TcpPipeline::Http1 { sampling, .. } => {
+                assert_eq!(*sampling, HttpSampling::keep_all());
+            }
+            other => panic!("Expected Http1, got {other:?}"),
+        }
     }
 }

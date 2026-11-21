@@ -64,11 +64,19 @@ impl Http1ServerRequestHead {
     #[inline]
     pub fn enrich_forwarded_headers(
         &mut self,
-        peer: std::net::SocketAddr,
-        local_addr: std::net::SocketAddr,
+        peer_ip: u128,
+        local_ip: u128,
+        local_port_be: u16,
         is_tls: bool,
     ) {
-        super::header::enrich_headers(&mut self.headers, &self.uri, peer, local_addr, is_tls);
+        super::header::enrich_headers(
+            &mut self.headers,
+            &self.uri,
+            peer_ip,
+            local_ip,
+            local_port_be,
+            is_tls,
+        );
     }
 }
 

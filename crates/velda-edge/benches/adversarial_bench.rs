@@ -10,7 +10,6 @@
 mod common;
 
 use std::fs;
-use std::net::SocketAddr;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::thread;
@@ -22,7 +21,7 @@ use velda_discovery::Discovery;
 use velda_edge::pipeline::udp::{SessionAcquisition, UdpSessionKey, get_udp_session_table};
 use velda_edge::resolve_runtime_profile;
 use velda_edge::runtime::{Runtime, new_shared_runtime};
-use velda_edge::upstream::{LbAlgorithm, UdpAccelerationPath, UdpUpstream};
+use velda_edge::upstream::{LbAlgorithm, UdpUpstream};
 use velda_upstream::{Upstream, UpstreamTimeouts};
 
 #[global_allocator]
@@ -55,7 +54,7 @@ fn bench_unregistered_listener_flooding_storm(rt: &Runtime) {
     for i in 0..iters {
         let idx = (i ^ (i >> 3)) % hostile_pool.len();
         let target = &hostile_pool[idx];
-        let p_res = rt.pipelines.tcp_pipeline(target);
+        let p_res = rt.pipelines.tcp_pipeline(velda_core::fnv1a_hash_32(target));
         assert!(p_res.is_none());
         let _ = std::hint::black_box(p_res);
     }
@@ -153,7 +152,9 @@ fn bench_high_frequency_reload_contention() {
             for _ in 0..ops_per_reader {
                 let rt = s.load();
                 observed_revisions = observed_revisions.max(rt.revision);
-                let pipe = rt.pipelines.tcp_pipeline(&target_listener);
+                let pipe = rt
+                    .pipelines
+                    .tcp_pipeline(velda_core::fnv1a_hash_32(&target_listener));
                 let _ = std::hint::black_box(pipe);
             }
 
@@ -304,12 +305,13 @@ fn bench_l4_udp_queue_saturation_storm() {
     let table = get_udp_session_table();
     table.clear();
 
-    let client_addr: SocketAddr = "192.168.1.100:54321".parse().unwrap();
-    let key = UdpSessionKey {
-        listener_id: Arc::from("listener_udp_saturation"),
-        client_addr,
-        token: None,
-    };
+    let (client_ip, client_port_be) =
+        velda_sock::socket_addr_to_raw("192.168.1.100:54321".parse().unwrap());
+    let key = UdpSessionKey::peer(
+        Arc::from("listener_udp_saturation"),
+        client_ip,
+        client_port_be,
+    );
 
     // 1. Establish session and fill channel buffer (capacity = 128)
     // Retain `_rx` in scope so the channel remains open during the benchmark.
@@ -422,7 +424,7 @@ fn bench_depleted_upstream_fail_fast_storm() {
     );
     let balancer = LbAlgorithm::from_name("round_robin");
     let inner = Upstream::new("depleted_upstream", "udp", discovery, balancer, timeouts);
-    let depleted_udp = UdpUpstream::new(inner, UdpAccelerationPath::default());
+    let depleted_udp = UdpUpstream::new(inner);
 
     let iters = 1_000_000;
 
@@ -488,11 +490,11 @@ fn bench_depleted_upstream_fail_fast_storm() {
     // Warm up shard table bucket capacity so we measure steady-state flow allocation & teardown
     let cap_b = table.max_sessions();
     for s in 0..64 {
-        let dummy_key = UdpSessionKey {
-            listener_id: Arc::clone(&listener_id),
-            client_addr: SocketAddr::from(([127, 0, 0, (s + 1) as u8], 9999)),
-            token: None,
-        };
+        let dummy_key = UdpSessionKey::peer(
+            Arc::clone(&listener_id),
+            velda_core::lut::ip::v4_to_u128(u32::from_be_bytes([127, 0, 0, (s + 1) as u8])),
+            9999u16.to_be(),
+        );
         let _ = table.get_or_create(&dummy_key, cap_b);
         table.remove(&dummy_key);
     }
@@ -503,12 +505,16 @@ fn bench_depleted_upstream_fail_fast_storm() {
 
     for i in 0..iters {
         let port = (1024 + (i % 64000)) as u16;
-        let client_addr = SocketAddr::from(([10, 0, (i >> 8) as u8, (i & 0xff) as u8], port));
-        let key = UdpSessionKey {
-            listener_id: Arc::clone(&listener_id),
-            client_addr,
-            token: None,
-        };
+        let key = UdpSessionKey::peer(
+            Arc::clone(&listener_id),
+            velda_core::lut::ip::v4_to_u128(u32::from_be_bytes([
+                10,
+                0,
+                (i >> 8) as u8,
+                (i & 0xff) as u8,
+            ])),
+            port.to_be(),
+        );
 
         // Mimic hardened handle_l4_udp flow:
         // 1. Fast path: check existing active session

@@ -23,7 +23,7 @@ pub use http::{
     Http1Lease, Http1Upstream, Http2Upstream, Http3Upstream, LeaseGuard, UpstreamHttp1Stream,
 };
 pub use lb::{EdgeUpstream, LbAlgorithm};
-pub use raw::{TcpAccelerationPath, TcpUpstream, UdpAccelerationPath, UdpUpstream};
+pub use raw::{TcpUpstream, UdpUpstream};
 pub use rdma::{RdmaClientResource, RdmaLease, RdmaUpstream};
 pub use table::{GrpcUpstream, HttpUpstream, RawUpstream, SubUpstreamTable, UpstreamTable};
 pub use velda_upstream::AdaptiveConcurrencyGate;

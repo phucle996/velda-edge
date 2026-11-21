@@ -5,15 +5,14 @@
 //! are managed downstream by `velda-upstream`.
 
 use std::collections::HashMap;
-use std::net::SocketAddr;
 
-pub use velda_core::{Endpoint, EndpointId};
+pub use velda_core::Endpoint;
 
 /// Immutable snapshot of discovered endpoints for a given generation.
 #[derive(Debug, Clone)]
 pub struct EndpointSet {
     endpoints: Vec<Endpoint>,
-    by_addr: HashMap<SocketAddr, usize>,
+    by_addr: HashMap<(u128, u16), usize>,
     generation: u64,
 }
 
@@ -22,7 +21,7 @@ impl EndpointSet {
     pub fn new(endpoints: Vec<Endpoint>, generation: u64) -> Self {
         let mut by_addr = HashMap::with_capacity(endpoints.len());
         for (idx, ep) in endpoints.iter().enumerate() {
-            by_addr.insert(ep.address, idx);
+            by_addr.insert((ep.ip, ep.port_be), idx);
         }
         Self {
             endpoints,
@@ -46,28 +45,30 @@ impl EndpointSet {
         &self.endpoints
     }
 
-    /// Returns an iterator over all discovered socket addresses.
+    /// Returns an iterator over all discovered `(ip, port_be)` pairs.
     #[inline]
-    pub fn addresses(&self) -> impl Iterator<Item = SocketAddr> + '_ {
-        self.endpoints.iter().map(|ep| ep.address)
+    pub fn addresses(&self) -> impl Iterator<Item = (u128, u16)> + '_ {
+        self.endpoints.iter().map(|ep| (ep.ip, ep.port_be))
     }
 
-    /// Returns an iterator over all discovered IP addresses.
+    /// Returns an iterator over all discovered `u128` IP addresses.
     #[inline]
-    pub fn ips(&self) -> impl Iterator<Item = std::net::IpAddr> + '_ {
-        self.endpoints.iter().map(|ep| ep.address.ip())
+    pub fn ips(&self) -> impl Iterator<Item = u128> + '_ {
+        self.endpoints.iter().map(|ep| ep.ip)
     }
 
-    /// Finds an endpoint by its socket address.
+    /// Finds an endpoint by its `(ip, port_be)`.
     #[inline]
-    pub fn find_by_addr(&self, addr: &SocketAddr) -> Option<&Endpoint> {
-        self.by_addr.get(addr).map(|&idx| &self.endpoints[idx])
+    pub fn find_by_addr(&self, ip: u128, port_be: u16) -> Option<&Endpoint> {
+        self.by_addr
+            .get(&(ip, port_be))
+            .map(|&idx| &self.endpoints[idx])
     }
 
-    /// Returns `true` if the given address is present in this set.
+    /// Returns `true` if the given `(ip, port_be)` is present in this set.
     #[inline]
-    pub fn contains_addr(&self, addr: &SocketAddr) -> bool {
-        self.by_addr.contains_key(addr)
+    pub fn contains_addr(&self, ip: u128, port_be: u16) -> bool {
+        self.by_addr.contains_key(&(ip, port_be))
     }
 
     /// Returns the number of endpoints in this set.

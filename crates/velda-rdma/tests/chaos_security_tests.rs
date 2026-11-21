@@ -22,7 +22,7 @@ use velda_rdma::{
 #[tokio::test]
 async fn test_fuzz_malformed_oob_handshake_matrix() {
     let config = RdmaConfig::mock();
-    let listener = RdmaListener::bind("127.0.0.1:0".parse().unwrap(), config)
+    let listener = RdmaListener::bind(velda_core::lut::ip::v4_to_u128(0x7F00_0001), 0, config)
         .await
         .expect("Failed binding listener");
     let addr = listener.local_addr().unwrap();
@@ -73,7 +73,9 @@ async fn test_fuzz_malformed_oob_handshake_matrix() {
         });
 
         // Client connects and pushes malformed payload
-        if let Ok(mut stream) = TcpStream::connect(addr).await {
+        if let Ok(mut stream) =
+            TcpStream::connect(velda_core::lut::ip::v4itoaddr(addr.0, addr.1)).await
+        {
             if !payload.is_empty() {
                 let _ = stream.write_all(&payload).await;
                 let _ = stream.flush().await;
@@ -113,7 +115,7 @@ async fn test_fuzz_malformed_oob_handshake_matrix() {
 #[tokio::test]
 async fn test_chaos_rapid_oob_connect_drop_storm() {
     let config = RdmaConfig::mock();
-    let listener = RdmaListener::bind("127.0.0.1:0".parse().unwrap(), config)
+    let listener = RdmaListener::bind(velda_core::lut::ip::v4_to_u128(0x7F00_0001), 0, config)
         .await
         .expect("Failed binding listener");
     let addr = listener.local_addr().unwrap();
@@ -137,7 +139,8 @@ async fn test_chaos_rapid_oob_connect_drop_storm() {
 
     // Client storm: 50 connections that connect and drop immediately
     for _ in 0..50 {
-        if let Ok(stream) = TcpStream::connect(addr).await {
+        if let Ok(stream) = TcpStream::connect(velda_core::lut::ip::v4itoaddr(addr.0, addr.1)).await
+        {
             drop(stream);
         }
     }

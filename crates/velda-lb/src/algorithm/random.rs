@@ -128,14 +128,13 @@ impl LoadBalancer for WeightedRandom {
 mod tests {
     use super::*;
     use std::collections::HashMap;
-    use std::net::SocketAddr;
 
     #[test]
     fn test_random_distribution() {
-        let ep1: SocketAddr = "10.0.0.1:8080".parse().unwrap();
-        let ep2: SocketAddr = "10.0.0.2:8080".parse().unwrap();
+        let ep1 = Endpoint::from_v4([10, 0, 0, 1], 8080, 1);
+        let ep2 = Endpoint::from_v4([10, 0, 0, 2], 8080, 1);
 
-        let endpoints = vec![Endpoint::new("e1", ep1, 1), Endpoint::new("e2", ep2, 1)];
+        let endpoints = vec![ep1, ep2];
 
         let balancer = Random::new();
         let ctx = SelectionContext::NONE;
@@ -145,7 +144,7 @@ mod tests {
 
         for _ in 0..10_000 {
             let selected = balancer.select(&endpoints, &ctx).unwrap();
-            if selected.address == ep1 {
+            if *selected == ep1 {
                 count1 += 1;
             } else {
                 count2 += 1;
@@ -159,11 +158,11 @@ mod tests {
 
     #[test]
     fn test_weighted_random_distribution() {
-        let ep1: SocketAddr = "10.0.0.1:8080".parse().unwrap();
-        let ep2: SocketAddr = "10.0.0.2:8080".parse().unwrap();
+        let ep1 = Endpoint::from_v4([10, 0, 0, 1], 8080, 3);
+        let ep2 = Endpoint::from_v4([10, 0, 0, 2], 8080, 1);
 
         // 3:1 ratio
-        let endpoints = vec![Endpoint::new("e1", ep1, 3), Endpoint::new("e2", ep2, 1)];
+        let endpoints = vec![ep1, ep2];
 
         let balancer = WeightedRandom::new();
         let ctx = SelectionContext::NONE;
@@ -171,11 +170,11 @@ mod tests {
         let mut counts = HashMap::new();
         for _ in 0..10_000 {
             let selected = balancer.select(&endpoints, &ctx).unwrap();
-            *counts.entry(selected.address).or_insert(0) += 1;
+            *counts.entry((selected.ip, selected.port_be)).or_insert(0) += 1;
         }
 
-        let c1 = *counts.get(&ep1).unwrap();
-        let c2 = *counts.get(&ep2).unwrap();
+        let c1 = *counts.get(&(ep1.ip, ep1.port_be)).unwrap();
+        let c2 = *counts.get(&(ep2.ip, ep2.port_be)).unwrap();
 
         // c1 should be ~7500, c2 ~2500
         assert!(c1 > 6_800 && c1 < 8_200);

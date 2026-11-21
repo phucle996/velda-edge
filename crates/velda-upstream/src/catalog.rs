@@ -17,7 +17,6 @@ use std::ptr::NonNull;
 use std::sync::Arc;
 
 use arc_swap::ArcSwapOption;
-use velda_core::UpstreamId;
 
 static GLOBAL_UPSTREAM_CATALOG: ArcSwapOption<UpstreamCatalog> = ArcSwapOption::const_empty();
 
@@ -37,7 +36,7 @@ pub fn with_upstream_bytes<R>(id: u16, f: impl FnOnce(&[u8]) -> R) -> R {
     }
     let guard = GLOBAL_UPSTREAM_CATALOG.load();
     if let Some(cat) = guard.as_ref()
-        && let Some(bytes) = cat.get_bytes(UpstreamId(id))
+        && let Some(bytes) = cat.get_bytes(id)
     {
         return f(bytes);
     }
@@ -118,10 +117,10 @@ impl UpstreamCatalog {
         }
     }
 
-    /// Resolves the raw byte slice of an upstream name in O(1) by [`UpstreamId`].
+    /// Resolves the raw byte slice of an upstream name in O(1) by `upstream_id` (`u16`).
     #[inline(always)]
-    pub fn get_bytes(&self, id: UpstreamId) -> Option<&[u8]> {
-        let idx = id.0 as usize;
+    pub fn get_bytes(&self, id: u16) -> Option<&[u8]> {
+        let idx = id as usize;
         if idx >= self.entry_count {
             return None;
         }
@@ -147,12 +146,9 @@ mod tests {
         assert_eq!(catalog.capacity, PAGE_SIZE);
         assert_eq!((catalog.ptr.as_ptr() as usize) % PAGE_SIZE, 0);
 
-        assert_eq!(
-            catalog.get_bytes(UpstreamId(0)),
-            Some(b"grpc-payment".as_slice())
-        );
-        assert_eq!(catalog.get_bytes(UpstreamId(3)), Some(b"ai".as_slice()));
-        assert_eq!(catalog.get_bytes(UpstreamId(4)), None);
+        assert_eq!(catalog.get_bytes(0), Some(b"grpc-payment".as_slice()));
+        assert_eq!(catalog.get_bytes(3), Some(b"ai".as_slice()));
+        assert_eq!(catalog.get_bytes(4), None);
     }
 
     #[test]

@@ -1,7 +1,5 @@
 //! Unified top-level Router coordinating L4 (TCP, UDP) and L7 (HTTP/1.1, HTTP/2, HTTP/3, and gRPC) routing.
 
-use velda_core::ListenerId;
-
 use crate::error::RouterError;
 use crate::l4::tcp::{TcpRoute, TcpRouter};
 use crate::l4::udp::{UdpRoute, UdpRouter};
@@ -46,23 +44,19 @@ impl Router {
 
     /// Resolves an L4 TCP route by `listener_id`.
     #[inline]
-    pub fn route_tcp(&self, listener_id: impl Into<ListenerId>) -> Option<&TcpRoute> {
+    pub fn route_tcp(&self, listener_id: u32) -> Option<&TcpRoute> {
         self.tcp.route(listener_id)
     }
 
     /// Resolves an L4 UDP route by `listener_id`.
     #[inline]
-    pub fn route_udp(&self, listener_id: impl Into<ListenerId>) -> Option<&UdpRoute> {
+    pub fn route_udp(&self, listener_id: u32) -> Option<&UdpRoute> {
         self.udp.route(listener_id)
     }
 
     /// Resolves an HTTP/1.1 route by `listener_id` and request view.
     #[inline]
-    pub fn route_http1(
-        &self,
-        listener_id: impl Into<ListenerId>,
-        req: &Http1RouteRequest<'_>,
-    ) -> Option<&Http1Route> {
+    pub fn route_http1(&self, listener_id: u32, req: &Http1RouteRequest<'_>) -> Option<Http1Route> {
         self.http1.route(listener_id, req)
     }
 
@@ -70,90 +64,26 @@ impl Router {
     #[inline]
     pub fn http1_listener(
         &self,
-        listener_id: impl Into<ListenerId>,
+        listener_id: u32,
     ) -> Option<&crate::l7::http1::ListenerHttp1Router> {
         self.http1.listener(listener_id)
     }
 
-    /// Dynamically inserts an ephemeral HTTP/1.1 exact-path route for a specific listener.
-    ///
-    /// Enables background logistics plugins (such as `acme_cert_rotator`) to register temporary
-    /// in-memory endpoints (e.g. `/.well-known/acme-challenge/<token>`) directly in the router table
-    /// without full configuration recompilation or disk I/O.
-    #[inline]
-    pub fn insert_http1_exact_route(
-        &mut self,
-        listener_id: impl Into<ListenerId>,
-        exact_path: String,
-        route: Http1Route,
-    ) {
-        self.http1
-            .insert_exact_route(listener_id, exact_path, route, crate::MethodMask::GET);
-    }
-
-    /// Dynamically removes an ephemeral HTTP/1.1 exact-path route for a specific listener.
-    #[inline]
-    pub fn remove_http1_exact_route(
-        &mut self,
-        listener_id: impl Into<ListenerId>,
-        exact_path: &str,
-        route_id: velda_core::RouteId,
-    ) {
-        self.http1
-            .remove_exact_route(listener_id, exact_path, route_id);
-    }
-
     /// Resolves an HTTP/2 route by `listener_id` and request view.
     #[inline]
-    pub fn route_http2(
-        &self,
-        listener_id: impl Into<ListenerId>,
-        req: &Http2RouteRequest<'_>,
-    ) -> Option<&Http2Route> {
+    pub fn route_http2(&self, listener_id: u32, req: &Http2RouteRequest<'_>) -> Option<Http2Route> {
         self.http2.route(listener_id, req)
-    }
-
-    /// Dynamically inserts an ephemeral HTTP/2 exact-path route for a specific listener.
-    #[inline]
-    pub fn insert_http2_exact_route(
-        &mut self,
-        listener_id: impl Into<ListenerId>,
-        exact_path: String,
-        route: Http2Route,
-    ) {
-        self.http2
-            .insert_exact_route(listener_id, exact_path, route, crate::MethodMask::GET);
-    }
-
-    /// Dynamically removes an ephemeral HTTP/2 exact-path route for a specific listener.
-    #[inline]
-    pub fn remove_http2_exact_route(
-        &mut self,
-        listener_id: impl Into<ListenerId>,
-        exact_path: &str,
-        route_id: velda_core::RouteId,
-    ) {
-        self.http2
-            .remove_exact_route(listener_id, exact_path, route_id);
     }
 
     /// Resolves an HTTP/3 route by `listener_id` and request view.
     #[inline]
-    pub fn route_http3(
-        &self,
-        listener_id: impl Into<ListenerId>,
-        req: &Http3RouteRequest<'_>,
-    ) -> Option<&Http3Route> {
+    pub fn route_http3(&self, listener_id: u32, req: &Http3RouteRequest<'_>) -> Option<Http3Route> {
         self.http3.route(listener_id, req)
     }
 
     /// Resolves a gRPC route by `listener_id` and request view.
     #[inline]
-    pub fn route_grpc(
-        &self,
-        listener_id: impl Into<ListenerId>,
-        req: &GrpcRouteRequest<'_>,
-    ) -> Option<&GrpcRoute> {
+    pub fn route_grpc(&self, listener_id: u32, req: &GrpcRouteRequest<'_>) -> Option<GrpcRoute> {
         self.grpc.route(listener_id, req)
     }
 

@@ -1,4 +1,3 @@
-use std::net::SocketAddr;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU32, Ordering};
 use std::time::Duration;
@@ -7,8 +6,11 @@ use tokio::net::TcpStream;
 use tokio::sync::watch;
 use tokio::task::JoinSet;
 
+use velda_core::lut::ip::v4_to_u128;
 use velda_ingress::{TcpBinding, TcpIngress, UdpBinding, UdpIngress};
-use velda_sock::{Datagram, TcpListenerConfig, UdpSocket, UdpSocketConfig};
+use velda_sock::{Datagram, TcpListenerConfig, UdpSocket, UdpSocketConfig, raw_to_socket_addr};
+
+const LOOPBACK_IP: u128 = v4_to_u128(u32::from_be_bytes([127, 0, 0, 1]));
 
 #[tokio::test]
 async fn test_tcp_ingress_multi_shard_accept_loop() {
@@ -16,14 +18,14 @@ async fn test_tcp_ingress_multi_shard_accept_loop() {
         .with_reuseport(true)
         .with_concurrency_shards(4);
 
-    let binding = TcpBinding::new("sharded-test", "127.0.0.1:0".parse().unwrap(), false)
-        .with_config(tcp_config);
+    let binding = TcpBinding::new("sharded-test", LOOPBACK_IP, 0, false).with_config(tcp_config);
 
     let ingress = Arc::new(TcpIngress::bind(binding).unwrap());
     #[cfg(unix)]
     assert_eq!(ingress.shard_count(), 4);
 
-    let bound_addr = ingress.local_addr();
+    let (bound_ip, bound_port_be) = ingress.local_addr();
+    let bound_addr = raw_to_socket_addr(bound_ip, bound_port_be);
     let mut tasks = JoinSet::new();
     let (shutdown_tx, shutdown_rx) = watch::channel(false);
     let counter = Arc::new(AtomicU32::new(0));
@@ -68,10 +70,9 @@ async fn test_tcp_ingress_multi_shard_accept_loop() {
 
 #[tokio::test]
 async fn test_udp_ingress_delivers_datagram_with_listener_id() {
-    let dummy_addr: SocketAddr = "127.0.0.1:0".parse().unwrap();
-    let binding = UdpBinding::new("h3-ingress", dummy_addr, true);
+    let binding = UdpBinding::new("h3-ingress", LOOPBACK_IP, 0, true);
     let ingress = Arc::new(UdpIngress::bind(binding).unwrap());
-    let local_addr = ingress.local_addr();
+    let (local_ip, local_port_be) = ingress.local_addr();
 
     let (shutdown_tx, shutdown_rx) = watch::channel(false);
     let (received_tx, mut received_rx) = tokio::sync::mpsc::channel(1);
@@ -89,7 +90,7 @@ async fn test_udp_ingress_delivers_datagram_with_listener_id() {
                 assert_eq!(dgram.data(), b"QUIC-Client-Hello");
 
                 socket
-                    .send_to(b"QUIC-Server-Hello", dgram.peer())
+                    .send_to(b"QUIC-Server-Hello", dgram.peer_ip, dgram.peer_port_be)
                     .await
                     .unwrap();
                 let _ = tx.send(()).await;
@@ -100,18 +101,17 @@ async fn test_udp_ingress_delivers_datagram_with_listener_id() {
     tokio::time::sleep(Duration::from_millis(50)).await;
 
     // Send packet using client UDP socket
-    let client =
-        UdpSocket::bind("127.0.0.1:0".parse().unwrap(), UdpSocketConfig::default()).unwrap();
+    let client = UdpSocket::bind(LOOPBACK_IP, 0, UdpSocketConfig::default()).unwrap();
 
     client
-        .send_to(b"QUIC-Client-Hello", local_addr)
+        .send_to(b"QUIC-Client-Hello", local_ip, local_port_be)
         .await
         .unwrap();
 
     let mut buf = [0u8; 64];
-    let (n, from) = client.recv_from(&mut buf).await.unwrap();
+    let (n, from_ip, from_port_be) = client.recv_from(&mut buf).await.unwrap();
     assert_eq!(&buf[..n], b"QUIC-Server-Hello");
-    assert_eq!(from, local_addr);
+    assert_eq!((from_ip, from_port_be), (local_ip, local_port_be));
 
     received_rx.recv().await.unwrap();
 
@@ -121,29 +121,37 @@ async fn test_udp_ingress_delivers_datagram_with_listener_id() {
 
 #[tokio::test]
 async fn test_udp_binding_and_datagram_response_roundtrip() {
-    let client =
-        UdpSocket::bind("127.0.0.1:0".parse().unwrap(), UdpSocketConfig::default()).unwrap();
-    let server = Arc::new(
-        UdpSocket::bind("127.0.0.1:0".parse().unwrap(), UdpSocketConfig::default()).unwrap(),
-    );
+    let client = UdpSocket::bind(LOOPBACK_IP, 0, UdpSocketConfig::default()).unwrap();
+    let server = Arc::new(UdpSocket::bind(LOOPBACK_IP, 0, UdpSocketConfig::default()).unwrap());
 
-    let h3_binding = UdpBinding::new("h3-listener", server.local_addr(), true);
+    let h3_binding = UdpBinding::new("h3-listener", server.local_ip, server.local_port_be, true);
     assert_eq!(h3_binding.id, "h3-listener");
     assert!(h3_binding.tls_enabled);
 
     let dgram = Datagram::new(
-        client.local_addr(),
-        server.local_addr(),
+        client.local_ip,
+        client.local_port_be,
+        server.local_ip,
+        server.local_port_be,
         b"HTTP/3-Initial-Packet".to_vec(),
     );
 
-    assert_eq!(dgram.peer(), client.local_addr());
+    assert_eq!(
+        (dgram.peer_ip, dgram.peer_port_be),
+        (client.local_ip, client.local_port_be)
+    );
     assert_eq!(dgram.data(), b"HTTP/3-Initial-Packet");
 
-    server.send_to(b"HTTP/3-Ack", dgram.peer()).await.unwrap();
+    server
+        .send_to(b"HTTP/3-Ack", dgram.peer_ip, dgram.peer_port_be)
+        .await
+        .unwrap();
 
     let mut buf = [0u8; 64];
-    let (n, from) = client.recv_from(&mut buf).await.unwrap();
+    let (n, from_ip, from_port_be) = client.recv_from(&mut buf).await.unwrap();
     assert_eq!(&buf[..n], b"HTTP/3-Ack");
-    assert_eq!(from, server.local_addr());
+    assert_eq!(
+        (from_ip, from_port_be),
+        (server.local_ip, server.local_port_be)
+    );
 }

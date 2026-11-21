@@ -3,7 +3,6 @@
 use std::sync::Arc;
 
 use rustc_hash::FxHashMap;
-use velda_core::UpstreamId;
 
 use super::grpc::{GrpcRdmaUpstream, GrpcTcpUpstream, GrpcUdpUpstream};
 use super::http::{Http1Upstream, Http2Upstream, Http3Upstream};
@@ -12,10 +11,10 @@ use super::rdma::RdmaUpstream;
 
 /// Pre-compiled single-protocol lookup table providing lock-free O(1) reads.
 ///
-/// Pre-constructed during snapshot build; maps dense `UpstreamId(u16)` -> `Arc<T>`
+/// Pre-constructed during snapshot build; maps dense `u16` -> `Arc<T>`
 /// via a contiguous flat array in L1D cache without hash collisions or pointer chasing.
 pub struct SubUpstreamTable<T> {
-    /// [PRE-COMPILED]: Flat dense array indexed directly by `UpstreamId(u16)`.
+    /// [PRE-COMPILED]: Flat dense array indexed directly by `u16`.
     entries: Box<[Option<Arc<T>>]>,
 }
 
@@ -46,21 +45,21 @@ impl<T> std::fmt::Debug for SubUpstreamTable<T> {
 
 impl<T> SubUpstreamTable<T> {
     /// Creates a new protocol sub-table from an owned entry map.
-    pub fn new(entries: FxHashMap<UpstreamId, Arc<T>>) -> Self {
+    pub fn new(entries: FxHashMap<u16, Arc<T>>) -> Self {
         Self::from_map(entries)
     }
 
     /// Converts a sparse or dense `FxHashMap` into a dense, flat array.
-    pub fn from_map(map: FxHashMap<UpstreamId, Arc<T>>) -> Self {
+    pub fn from_map(map: FxHashMap<u16, Arc<T>>) -> Self {
         if map.is_empty() {
             return Self {
                 entries: Box::new([]),
             };
         }
-        let max_id = map.keys().map(|k| k.as_usize()).max().unwrap_or(0);
+        let max_id = map.keys().map(|&k| k as usize).max().unwrap_or(0);
         let mut entries: Vec<Option<Arc<T>>> = (0..=max_id).map(|_| None).collect();
         for (k, v) in map {
-            entries[k.as_usize()] = Some(v);
+            entries[k as usize] = Some(v);
         }
         Self {
             entries: entries.into_boxed_slice(),
@@ -74,14 +73,13 @@ impl<T> SubUpstreamTable<T> {
 
     /// Retrieves an upstream processor in $O(1)$ by dense identifier.
     #[inline(always)]
-    pub fn get(&self, id: impl Into<UpstreamId>) -> Option<&Arc<T>> {
-        let uid = id.into();
-        self.entries.get(uid.as_usize())?.as_ref()
+    pub fn get(&self, id: u16) -> Option<&Arc<T>> {
+        self.entries.get(id as usize)?.as_ref()
     }
 
     /// Returns whether this sub-table contains an entry for the given identifier.
     #[inline(always)]
-    pub fn contains_key(&self, id: &UpstreamId) -> bool {
+    pub fn contains_key(&self, id: &u16) -> bool {
         self.get(*id).is_some()
     }
 
@@ -256,25 +254,25 @@ impl UpstreamTable {
 
     /// Retrieves an upstream processor in the Raw family.
     #[inline]
-    pub fn get_raw(&self, id: impl Into<UpstreamId>) -> Option<&Arc<RawUpstream>> {
+    pub fn get_raw(&self, id: u16) -> Option<&Arc<RawUpstream>> {
         self.raw.get(id)
     }
 
     /// Retrieves an upstream processor in the HTTP family.
     #[inline]
-    pub fn get_http(&self, id: impl Into<UpstreamId>) -> Option<&Arc<HttpUpstream>> {
+    pub fn get_http(&self, id: u16) -> Option<&Arc<HttpUpstream>> {
         self.http.get(id)
     }
 
     /// Retrieves an upstream processor in the gRPC family.
     #[inline]
-    pub fn get_grpc(&self, id: impl Into<UpstreamId>) -> Option<&Arc<GrpcUpstream>> {
+    pub fn get_grpc(&self, id: u16) -> Option<&Arc<GrpcUpstream>> {
         self.grpc.get(id)
     }
 
     /// Retrieves an upstream processor in the RDMA family.
     #[inline]
-    pub fn get_rdma(&self, id: impl Into<UpstreamId>) -> Option<&Arc<RdmaUpstream>> {
+    pub fn get_rdma(&self, id: u16) -> Option<&Arc<RdmaUpstream>> {
         self.rdma.get(id)
     }
 

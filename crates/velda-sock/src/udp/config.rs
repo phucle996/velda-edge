@@ -112,17 +112,16 @@ impl UdpSocketConfig {
             concurrency_shards: topo.available_cores().max(1),
             ..Self::default()
         };
-        let ladder = topo.acceleration_ladder();
-        if ladder.udp_offload == velda_core::hardware::UdpOffloadTier::GenericReceiveOffload {
+        if topo.kernel.supports_udp_gro() {
             cfg.gro = true;
             cfg.rxq_ovfl = true;
-        } else if ladder.udp_offload == velda_core::hardware::UdpOffloadTier::QueueMonitored {
+        } else if topo.kernel.supports_so_rxq_ovfl() {
             cfg.rxq_ovfl = true;
         }
-        if ladder.udp_egress >= velda_core::hardware::UdpEgressTier::GenericSegmentationOffload {
+        if topo.kernel.supports_udp_segment() {
             cfg.gso = true;
         }
-        if ladder.busy_poll >= velda_core::hardware::BusyPollTier::PreferBusyPoll {
+        if topo.kernel.supports_so_prefer_busy_poll() {
             cfg.prefer_busy_poll = true;
         }
         cfg
@@ -161,16 +160,10 @@ mod tests {
     }
 
     #[test]
-    fn test_udp_evolutionary_ladder_for_topology() {
-        use velda_core::hardware::{
-            AccelerationTier, HardwareTopology, KernelProfile, KernelVersion,
-        };
+    fn test_udp_kernel_capabilities_for_topology() {
+        use velda_core::hardware::{HardwareTopology, KernelProfile, KernelVersion};
 
-        let kernel_5_11 = KernelProfile::new(
-            KernelVersion::new(5, 11, 0),
-            AccelerationTier::Standard,
-            "test_5_11",
-        );
+        let kernel_5_11 = KernelProfile::new(KernelVersion::new(5, 11, 0));
         let topo = HardwareTopology::with_workers_and_memory(16, 16 * 1024 * 1024 * 1024)
             .with_kernel(kernel_5_11);
 

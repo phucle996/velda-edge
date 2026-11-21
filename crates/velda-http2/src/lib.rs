@@ -20,8 +20,8 @@ pub mod strategy;
 
 // Top-level public re-exports
 pub use client::{
-    Http2AccelerationPath, Http2ClientRequest, Http2ClientRequestHead, Http2ClientResponse,
-    Http2ClientResponseHead, connect, connect_stream,
+    Http2ClientRequest, Http2ClientRequestHead, Http2ClientResponse, Http2ClientResponseHead,
+    connect, connect_stream,
 };
 pub use config::Http2Config;
 pub use error::Http2Error;

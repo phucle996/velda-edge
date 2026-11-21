@@ -98,7 +98,16 @@ fn bench_malformed_datagram_flooding() {
         let idx = (i as usize ^ (i as usize >> 3)) % hostile_payloads.len();
         let payload = &hostile_payloads[idx];
         let now = Instant::now();
-        let (outgoing, requests) = engine.handle_datagram(now, remote, None, payload);
+        let (outgoing, requests) = engine.handle_datagram(
+            now,
+            match remote {
+                std::net::SocketAddr::V4(v4) => velda_core::lut::ip::v4_to_u128(v4.ip().to_bits()),
+                std::net::SocketAddr::V6(v6) => v6.ip().to_bits(),
+            },
+            remote.port().to_be(),
+            None,
+            payload,
+        );
         std::hint::black_box((outgoing, requests));
     }
 

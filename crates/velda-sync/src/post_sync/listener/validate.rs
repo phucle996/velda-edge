@@ -9,7 +9,7 @@ use super::host_port::{
 };
 use super::schema::{
     GrpcListenerConfig, Http1ListenerConfig, Http2ListenerConfig, Http3ListenerConfig,
-    ListenerConfig, RawListenerConfig,
+    ListenerConfig, ListenerObservabilityConfig, RawListenerConfig,
 };
 
 #[inline]
@@ -230,6 +230,98 @@ pub(crate) fn validate_http3(id: &str, h3: &Http3ListenerConfig) -> Result<(), S
     Ok(())
 }
 
+fn validate_rate(id: &str, key: &str, v: Option<f64>) -> Result<(), SyncError> {
+    if let Some(rate) = v
+        && (!rate.is_finite() || !(0.0..=1.0).contains(&rate))
+    {
+        return Err(SyncError::Validation {
+            domain: "listeners".into(),
+            reason: format!(
+                "Listener '{id}' has invalid sampling rate for '{key}': {rate}; must be finite in 0.0..=1.0"
+            ),
+        });
+    }
+    Ok(())
+}
+
+pub(crate) fn validate_observability(
+    id: &str,
+    app_protocol: &str,
+    obs: &ListenerObservabilityConfig,
+) -> Result<(), SyncError> {
+    let Some(ref sampling) = obs.sampling else {
+        return Ok(());
+    };
+
+    if app_protocol == "raw" {
+        return Err(SyncError::Validation {
+            domain: "listeners".into(),
+            reason: format!(
+                "Listener '{id}' has protocol 'raw' which does not support observability sampling"
+            ),
+        });
+    }
+
+    if app_protocol == "grpc" && sampling.http.is_some() {
+        return Err(SyncError::Validation {
+            domain: "listeners".into(),
+            reason: format!(
+                "Listener '{id}' has protocol 'grpc' but configures 'observability.sampling.http'"
+            ),
+        });
+    }
+
+    if app_protocol != "grpc" && sampling.grpc.is_some() {
+        return Err(SyncError::Validation {
+            domain: "listeners".into(),
+            reason: format!(
+                "Listener '{id}' has protocol '{app_protocol}' but configures 'observability.sampling.grpc'"
+            ),
+        });
+    }
+
+    if let Some(ref http) = sampling.http {
+        for (k, v) in [
+            ("http.1xx", http.r1xx),
+            ("http.2xx", http.r2xx),
+            ("http.3xx", http.r3xx),
+            ("http.4xx", http.r4xx),
+            ("http.5xx", http.r5xx),
+            ("http.shed", http.shed),
+        ] {
+            validate_rate(id, k, v)?;
+        }
+    }
+
+    if let Some(ref grpc) = sampling.grpc {
+        for (k, v) in [
+            ("grpc.default", grpc.default),
+            ("grpc.ok", grpc.ok),
+            ("grpc.cancelled", grpc.cancelled),
+            ("grpc.unknown", grpc.unknown),
+            ("grpc.invalid_argument", grpc.invalid_argument),
+            ("grpc.deadline_exceeded", grpc.deadline_exceeded),
+            ("grpc.not_found", grpc.not_found),
+            ("grpc.already_exists", grpc.already_exists),
+            ("grpc.permission_denied", grpc.permission_denied),
+            ("grpc.resource_exhausted", grpc.resource_exhausted),
+            ("grpc.failed_precondition", grpc.failed_precondition),
+            ("grpc.aborted", grpc.aborted),
+            ("grpc.out_of_range", grpc.out_of_range),
+            ("grpc.unimplemented", grpc.unimplemented),
+            ("grpc.internal", grpc.internal),
+            ("grpc.unavailable", grpc.unavailable),
+            ("grpc.data_loss", grpc.data_loss),
+            ("grpc.unauthenticated", grpc.unauthenticated),
+            ("grpc.shed", grpc.shed),
+        ] {
+            validate_rate(id, k, v)?;
+        }
+    }
+
+    Ok(())
+}
+
 pub(crate) fn validate_raw(id: &str, raw: &RawListenerConfig) -> Result<(), SyncError> {
     if let Some(0) = raw.copy_buffer_size {
         return Err(SyncError::Validation {
@@ -265,8 +357,7 @@ pub fn validate_listeners_with_lkg(
     current_lkg: &[ListenerConfig],
 ) -> Result<(), SyncError> {
     let mut seen_ids = HashSet::with_capacity(listeners.len());
-    let mut seen_hash_ids: HashMap<velda_core::ListenerId, &str> =
-        HashMap::with_capacity(listeners.len());
+    let mut seen_hash_ids: HashMap<u32, &str> = HashMap::with_capacity(listeners.len());
     let mut parsed_bindings: Vec<(&str, L4Protocol, SocketAddr)> =
         Vec::with_capacity(listeners.len());
 
@@ -497,6 +588,10 @@ pub fn validate_listeners_with_lkg(
                     listener.application.streaming.as_str()
                 ),
             });
+        }
+
+        if let Some(ref obs) = listener.observability {
+            validate_observability(&listener.id, &listener.application.protocol, obs)?;
         }
 
         // ====================================================================

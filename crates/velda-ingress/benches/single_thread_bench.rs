@@ -8,13 +8,11 @@
 
 mod common;
 
-use std::net::SocketAddr;
 use std::sync::Arc;
 use std::time::Instant;
 
 use common::CountingAllocator;
 use tokio::net::{TcpListener, TcpStream};
-use velda_core::ConnectionId;
 use velda_ingress::ingress::IngressBinding;
 use velda_ingress::udp::datagram::Datagram;
 use velda_ingress::{Connection, next_connection_id};
@@ -46,7 +44,8 @@ fn bench_binding_resolution() {
     println!("| :--- | :--- | :--- | :--- | :--- |");
 
     let iters = 1_000_000;
-    let dummy_addr: SocketAddr = "127.0.0.1:443".parse().unwrap();
+    let dummy_ip = velda_core::lut::ip::v4_to_u128(u32::from_be_bytes([127, 0, 0, 1]));
+    let dummy_port_be = 443u16.to_be();
 
     let scenarios = [
         ("TCP Cleartext", "tcp", false),
@@ -62,7 +61,8 @@ fn bench_binding_resolution() {
         for _ in 0..iters {
             let binding = IngressBinding::from_transport(
                 "listener-prod-01",
-                dummy_addr,
+                dummy_ip,
+                dummy_port_be,
                 transport_proto,
                 tls,
             )
@@ -76,7 +76,8 @@ fn bench_binding_resolution() {
         let ops_sec = (iters as f64 / elapsed.as_secs_f64()) as u64;
 
         let binding =
-            IngressBinding::from_transport("t", dummy_addr, transport_proto, tls).unwrap();
+            IngressBinding::from_transport("t", dummy_ip, dummy_port_be, transport_proto, tls)
+                .unwrap();
         assert_eq!(binding.is_tcp(), transport_proto == "tcp");
         assert_eq!(binding.is_udp(), transport_proto == "udp");
         assert_eq!(binding.tls_enabled(), tls);
@@ -142,6 +143,8 @@ async fn bench_connection_lifecycle() {
     let client = tokio::spawn(async move { TcpStream::connect(addr).await.unwrap() });
     let (server_stream, peer) = listener.accept().await.unwrap();
     let _ = client.await.unwrap();
+    let (peer_ip, peer_port_be) = velda_sock::socket_addr_to_raw(peer);
+    let (local_ip, local_port_be) = velda_sock::socket_addr_to_raw(addr);
 
     let iters = 1_000_000;
 
@@ -149,8 +152,8 @@ async fn bench_connection_lifecycle() {
     ALLOCATOR.reset();
     let start = Instant::now();
     for i in 0..iters {
-        let conn_id = ConnectionId::new(i as u64);
-        let _ = std::hint::black_box((conn_id, peer, addr));
+        let conn_id = i as u64;
+        let _ = std::hint::black_box((conn_id, peer_ip, peer_port_be, local_ip, local_port_be));
     }
     let elapsed = start.elapsed();
     let ns_op = elapsed.as_nanos() as f64 / iters as f64;
@@ -161,7 +164,14 @@ async fn bench_connection_lifecycle() {
     );
 
     // 2. Listener-id tagging on the accepted connection (Arc<str> refcount clone)
-    let conn = Connection::new(ConnectionId::new(42), server_stream, peer, addr);
+    let conn = Connection::new(
+        42,
+        server_stream,
+        peer_ip,
+        peer_port_be,
+        local_ip,
+        local_port_be,
+    );
     let listener_id: Arc<str> = Arc::from("listener-http1-01");
     ALLOCATOR.reset();
     let start = Instant::now();
@@ -192,15 +202,23 @@ async fn bench_udp_datagram_handoff() {
     println!("| :--- | :--- | :--- | :--- | :--- |");
 
     let iters = 1_000_000;
-    let peer: SocketAddr = "10.0.0.1:44321".parse().unwrap();
-    let local: SocketAddr = "127.0.0.1:443".parse().unwrap();
+    let peer_ip = velda_core::lut::ip::v4_to_u128(u32::from_be_bytes([10, 0, 0, 1]));
+    let peer_port_be = 44321u16.to_be();
+    let local_ip = velda_core::lut::ip::v4_to_u128(u32::from_be_bytes([127, 0, 0, 1]));
+    let local_port_be = 443u16.to_be();
     let payload = vec![0xABu8; 1200]; // 1200 bytes QUIC initial datagram
 
     // 1. Datagram::new with pre-allocated buffer
     ALLOCATOR.reset();
     let start = Instant::now();
     for _ in 0..iters {
-        let dgram = Datagram::new(peer, local, payload.clone());
+        let dgram = Datagram::new(
+            peer_ip,
+            peer_port_be,
+            local_ip,
+            local_port_be,
+            payload.clone(),
+        );
         let _ = std::hint::black_box(dgram);
     }
     let elapsed = start.elapsed();

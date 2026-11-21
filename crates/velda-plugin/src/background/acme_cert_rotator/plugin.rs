@@ -6,8 +6,9 @@
 //! 2. **Cron Scheduled Loop**: Evaluates strictly on user-defined 5-field UTC cron schedules (zero interval polling).
 //! 3. **Exponential Backoff**: In case of transient CA or network failure, automatically retries up to 3 times
 //!    with exponential backoff and jitter before falling back to the cron schedule.
-//! 4. **Ephemeral Route Injection**: Pre-bakes the HTTP-01 wire response and injects the challenge route into
-//!    [`Router`] with RAII teardown, guaranteeing zero memory or route leakage on success, failure, or timeout.
+//! 4. **Zero-Lock Challenge Publishing**: Pre-bakes the HTTP-01 wire response and publishes it into
+//!    [`ChallengeStore`] with RAII [`ChallengeGuard`] teardown, while the `/.well-known/acme-challenge/`
+//!    route remains statically pre-compiled in the immutable 4KB `RouteArena` from bootstrap.
 //! 5. **Zero-Downtime Hot-Swap**: Atomically hot-swaps renewed certificates into `velda-tls::SniResolver`.
 //!
 //! # Architecture & Execution Mechanics
@@ -27,24 +28,18 @@
 //!  |                 v                                   |                                  |
 //!  |       [ Pre-bake Response Chunk ]                   |                                  |
 //!  |                 |                                   |                                  |
-//!  |                 +---------------+                   |                                  |
-//!  |                 |               |                   |                                  |
-//!  |                 v               v                   |                                  |
-//!  |     +--------------------+   +-------------------+  |                                  |
-//!  |     |   ChallengeStore   |   |   RouterRegistry  |  |                                  |
-//!  |     | (Store Pre-baked)  |   | (Inject Ephemeral)|  |                                  |
-//!  |     +--------------------+   +-------------------+  |                                  |
-//!  |                 |                      |            |                                  |
-//!  |                 |    +-----------------+            |                                  |
-//!  |                 |    | (RAII EphemeralRouteGuard)   |                                  |
-//!  |                 v    v                              |                                  |
-//!  +=================|====|==============================|==================================+
-//!                    |    |                              |
-//!  +=================|====|==============================|==================================+
-//!  |                 |    |   FRONTLINE TRAFFIC WORKER   |                                  |
-//!  |                 |    |                              |                                  |
-//!  |                 v    v                              |                                  |
-//!  |        [ velda-router::Router ]                     |                                  |
+//!  |                 v                                   |                                  |
+//!  |     +--------------------+                          |                                  |
+//!  |     |   ChallengeStore   |                          |                                  |
+//!  |     | (RAII ChallengeGuard)                         |                                  |
+//!  |     +--------------------+                          |                                  |
+//!  |                 |                                   |                                  |
+//!  +=================|===================================|==================================+
+//!                    |                                   |
+//!  +=================|===================================|==================================+
+//!  |                 |       FRONTLINE TRAFFIC WORKER    |                                  |
+//!  |                 v                                   |                                  |
+//!  |        [ Immutable RouteArena ]                     |                                  |
 //!  |             ^                                       |                                  |
 //!  |             | HTTP-01 Ingress                       |                                  |
 //!  |             | (/.well-known/acme-challenge/<token>) |                                  |
@@ -82,13 +77,11 @@
 use std::future::Future;
 use std::pin::Pin;
 use std::sync::Arc;
-use std::sync::RwLock;
 use std::time::Duration;
 
 use super::validation::AcmeCertRotatorConfig;
 use tokio::sync::watch;
 use velda_core::clock::coarse_sec;
-use velda_router::Router;
 
 use super::challenge::ChallengeStore;
 use super::client::AcmeClient;
@@ -96,7 +89,6 @@ use super::cron::CronSchedule;
 use super::crypto::generate_csr_and_key;
 use super::expiry::{needs_renewal, not_after_unix};
 use super::hot_swap::TlsHotSwapper;
-use super::route_guard::RouterRegistry;
 use super::storage::CertStorage;
 use crate::background::BackgroundPlugin;
 use crate::error::PluginError;
@@ -109,7 +101,6 @@ pub struct AcmeCertRotatorPlugin {
     storage: CertStorage,
     client: AcmeClient,
     challenge_store: Arc<ChallengeStore>,
-    router_registry: Option<RouterRegistry>,
     hot_swapper: TlsHotSwapper,
 }
 
@@ -118,8 +109,6 @@ impl AcmeCertRotatorPlugin {
     pub fn new(
         id: impl Into<String>,
         config: AcmeCertRotatorConfig,
-        router: Option<Arc<RwLock<Router>>>,
-        listener_id: Option<String>,
         hot_swapper: TlsHotSwapper,
     ) -> Result<Self, PluginError> {
         let cron = CronSchedule::parse(&config.schedule)?;
@@ -131,11 +120,6 @@ impl AcmeCertRotatorPlugin {
         )?;
         let challenge_store = ChallengeStore::new();
 
-        let router_registry = match (router, listener_id) {
-            (Some(r), Some(lid)) => Some(RouterRegistry::new(r, lid)),
-            _ => None,
-        };
-
         Ok(Self {
             id: id.into(),
             config,
@@ -143,7 +127,6 @@ impl AcmeCertRotatorPlugin {
             storage,
             client,
             challenge_store,
-            router_registry,
             hot_swapper,
         })
     }
@@ -153,17 +136,7 @@ impl AcmeCertRotatorPlugin {
         let cfg = super::validation::validate_acme_cert_rotator_config(&config.id, &config.config)
             .map_err(|e| PluginError::Config(format!("Invalid acme_cert_rotator config: {e}")))?;
 
-        Self::new(config.id.clone(), cfg, None, None, TlsHotSwapper::new(None))
-    }
-
-    /// Attaches an active `Router` and `listener_id` for ephemeral HTTP-01 route injection.
-    pub fn with_router_registry(
-        mut self,
-        router: Arc<RwLock<Router>>,
-        listener_id: impl Into<String>,
-    ) -> Self {
-        self.router_registry = Some(RouterRegistry::new(router, listener_id.into()));
-        self
+        Self::new(config.id.clone(), cfg, TlsHotSwapper::new(None))
     }
 
     /// Attaches a custom `TlsHotSwapper` controller.
@@ -324,21 +297,8 @@ impl AcmeCertRotatorPlugin {
 
             let key_auth = account_key.key_authorization(&challenge.token);
 
-            // RAII Ephemeral Route & Pre-baked response injection
-            let _guard = if let Some(ref registry) = self.router_registry {
-                Some(registry.register_challenge(
-                    &challenge.token,
-                    &key_auth,
-                    &self.challenge_store,
-                ))
-            } else {
-                None
-            };
-            let _store_guard = if self.router_registry.is_none() {
-                Some(self.challenge_store.publish(&challenge.token, &key_auth))
-            } else {
-                None
-            };
+            // RAII ChallengeStore Guard (publishes response into RAM and purges on Drop)
+            let _store_guard = self.challenge_store.publish(&challenge.token, &key_auth);
 
             // Trigger CA verification
             self.client

@@ -1,37 +1,34 @@
 //! UDP datagram model.
 
-use std::net::SocketAddr;
-use velda_core::{ConnectionId, L4Request, TransportProtocol};
+use velda_core::{L4Request, TransportProtocol};
 
-/// An individual UDP datagram with network endpoint metadata.
+/// An individual UDP datagram with raw integer network endpoint metadata.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Datagram {
-    pub peer: SocketAddr,
-    pub local_addr: SocketAddr,
+    pub peer_ip: u128,
+    pub peer_port_be: u16,
+    pub local_ip: u128,
+    pub local_port_be: u16,
     pub data: bytes::Bytes,
 }
 
 impl Datagram {
     /// Creates a new UDP datagram.
     #[inline]
-    pub fn new(peer: SocketAddr, local_addr: SocketAddr, data: impl Into<bytes::Bytes>) -> Self {
+    pub fn new(
+        peer_ip: u128,
+        peer_port_be: u16,
+        local_ip: u128,
+        local_port_be: u16,
+        data: impl Into<bytes::Bytes>,
+    ) -> Self {
         Self {
-            peer,
-            local_addr,
+            peer_ip,
+            peer_port_be,
+            local_ip,
+            local_port_be,
             data: data.into(),
         }
-    }
-
-    /// Returns the remote peer address (sender or destination).
-    #[inline]
-    pub const fn peer(&self) -> SocketAddr {
-        self.peer
-    }
-
-    /// Returns the local socket address.
-    #[inline]
-    pub const fn local_addr(&self) -> SocketAddr {
-        self.local_addr
     }
 
     /// Returns a slice over the datagram payload bytes.
@@ -65,12 +62,14 @@ impl Datagram {
     }
 
     /// Converts this datagram into a [`L4Request`] metadata descriptor with [`TransportProtocol::Udp`].
-    pub fn to_l4_request(&self, connection_id: ConnectionId) -> L4Request {
+    pub fn to_l4_request(&self, connection_id: u64) -> L4Request {
         L4Request::new(
             connection_id,
             TransportProtocol::Udp,
-            self.peer,
-            self.local_addr,
+            self.peer_ip,
+            self.peer_port_be,
+            self.local_ip,
+            self.local_port_be,
         )
     }
 }
@@ -81,22 +80,34 @@ mod tests {
 
     #[test]
     fn test_datagram_properties() {
-        let peer: SocketAddr = "192.168.1.100:5353".parse().unwrap();
-        let local: SocketAddr = "127.0.0.1:53".parse().unwrap();
+        let peer_ip = velda_core::lut::ip::v4_to_u128(0xC0A8_0164);
+        let peer_port_be = 5353u16.to_be();
+        let local_ip = velda_core::lut::ip::v4_to_u128(0x7F00_0001);
+        let local_port_be = 53u16.to_be();
         let payload = b"dns-query-packet".to_vec();
 
-        let dgram = Datagram::new(peer, local, payload.clone());
-        assert_eq!(dgram.peer(), peer);
-        assert_eq!(dgram.local_addr(), local);
+        let dgram = Datagram::new(
+            peer_ip,
+            peer_port_be,
+            local_ip,
+            local_port_be,
+            payload.clone(),
+        );
+        assert_eq!(dgram.peer_ip, peer_ip);
+        assert_eq!(dgram.peer_port_be, peer_port_be);
+        assert_eq!(dgram.local_ip, local_ip);
+        assert_eq!(dgram.local_port_be, local_port_be);
         assert_eq!(dgram.data(), payload.as_slice());
         assert_eq!(dgram.len(), 16);
         assert!(!dgram.is_empty());
 
-        let l4_req = dgram.to_l4_request(ConnectionId::new(99));
-        assert_eq!(l4_req.connection_id, ConnectionId::new(99));
+        let l4_req = dgram.to_l4_request(99);
+        assert_eq!(l4_req.connection_id, 99);
         assert_eq!(l4_req.protocol, TransportProtocol::Udp);
-        assert_eq!(l4_req.peer.address, peer);
-        assert_eq!(l4_req.local_addr, local);
+        assert_eq!(l4_req.peer_ip, peer_ip);
+        assert_eq!(l4_req.peer_port_be, peer_port_be);
+        assert_eq!(l4_req.local_ip, local_ip);
+        assert_eq!(l4_req.local_port_be, local_port_be);
 
         assert_eq!(dgram.into_data(), payload);
     }

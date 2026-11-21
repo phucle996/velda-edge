@@ -8,7 +8,7 @@
 //!
 //!   Ingress Intake ──► clock::now_unix_nanos() ──┐
 //!                                                ▼
-//!   Thread-Local Entropy Pool ──► Pop Token ──► Assemble RequestId & HeaderValue
+//!   Thread-Local Entropy Pool ──► Pop Token ──► Assemble u128 ID & HeaderValue
 //! ```
 
 use std::cell::RefCell;
@@ -16,7 +16,29 @@ use std::sync::atomic::{AtomicU16, Ordering};
 
 use http::HeaderValue;
 
-use crate::types::RequestId;
+/// Returns the high 64 bits Unix Epoch timestamp in nanoseconds from a 128-bit request ID.
+#[inline(always)]
+pub const fn timestamp_nanos(id: u128) -> u64 {
+    (id >> 64) as u64
+}
+
+/// Returns the high 64 bits Unix Epoch timestamp in seconds from a 128-bit request ID.
+#[inline(always)]
+pub const fn timestamp_secs(id: u128) -> u64 {
+    ((id >> 64) as u64) / 1_000_000_000
+}
+
+/// Returns the low 64 bits (Worker ID + Monotonic Sequence Entropy) from a 128-bit request ID.
+#[inline(always)]
+pub const fn entropy(id: u128) -> u64 {
+    id as u64
+}
+
+/// Formats a 128-bit request ID as a canonical 32-character lowercase hex byte array.
+#[inline(always)]
+pub fn to_hex_bytes(id: u128) -> [u8; 32] {
+    format_hex32_bytes(timestamp_nanos(id), entropy(id))
+}
 
 /// Maximum number of pre-generated entropy tokens cached in the thread-local pool.
 pub const ID_POOL_CAPACITY: usize = 64;
@@ -189,9 +211,9 @@ impl RequestIdPool {
         }
     }
 
-    /// Retrieves the next Request ID assembled with the given ingress timestamp in nanoseconds.
+    /// Retrieves the next Request ID (`u128`) assembled with the given ingress timestamp in nanoseconds.
     #[inline]
-    pub fn next_id(&mut self, ingress_nanos: u64) -> (RequestId, HeaderValue) {
+    pub fn next_id(&mut self, ingress_nanos: u64) -> (u128, HeaderValue) {
         if self.count < ID_POOL_LOW_WATERMARK {
             self.refill();
         }
@@ -199,8 +221,7 @@ impl RequestIdPool {
         self.count -= 1;
         let token = self.tokens[self.count];
 
-        let raw_u128 = ((ingress_nanos as u128) << 64) | (token.entropy as u128);
-        let request_id = RequestId::new(raw_u128);
+        let request_id = ((ingress_nanos as u128) << 64) | (token.entropy as u128);
 
         let mut hex = [0u8; 32];
         format_hex_16(ingress_nanos, (&mut hex[0..16]).try_into().unwrap());
@@ -227,10 +248,10 @@ thread_local! {
     );
 }
 
-/// Generates the next unique W3C-compliant Request ID and its HTTP [`HeaderValue`]
+/// Generates the next unique W3C-compliant Request ID (`u128`) and its HTTP [`HeaderValue`]
 /// using the supplied ingress hardware timestamp in nanoseconds.
 #[inline(always)]
-pub fn next_request_id(ingress_nanos: u64) -> (RequestId, HeaderValue) {
+pub fn next_request_id(ingress_nanos: u64) -> (u128, HeaderValue) {
     LOCAL_POOL.with(|pool| pool.borrow_mut().next_id(ingress_nanos))
 }
 
@@ -262,8 +283,9 @@ mod tests {
         for _ in 0..50 {
             let (req_id, header_val) = pool.next_id(1_710_000_000_123_456_789);
             assert_eq!(header_val.as_bytes().len(), 32);
-            assert_eq!(req_id.to_string().len(), 32);
-            assert_eq!(req_id.to_string().as_bytes(), header_val.as_bytes());
+            let hex = format!("{req_id:032x}");
+            assert_eq!(hex.len(), 32);
+            assert_eq!(hex.as_bytes(), header_val.as_bytes());
         }
 
         assert!(pool.available() >= ID_POOL_LOW_WATERMARK);
@@ -275,7 +297,7 @@ mod tests {
         let ingress_nanos = 0x1234_5678_9abc_def0_u64;
         let (id, header) = pool.next_id(ingress_nanos);
 
-        assert_eq!(id.timestamp_nanos(), ingress_nanos);
+        assert_eq!(timestamp_nanos(id), ingress_nanos);
         let header_str = header.to_str().unwrap();
         assert!(header_str.starts_with("123456789abcdef0"));
     }
@@ -299,8 +321,8 @@ mod tests {
 
                 let mut lock = ids_clone.lock().unwrap();
                 for (id, hex) in local_ids {
-                    assert_eq!(id.to_string(), hex);
-                    assert!(lock.insert(id), "Detected duplicate RequestId: {id}");
+                    assert_eq!(format!("{id:032x}"), hex);
+                    assert!(lock.insert(id), "Detected duplicate RequestId: {id:032x}");
                 }
             }));
         }

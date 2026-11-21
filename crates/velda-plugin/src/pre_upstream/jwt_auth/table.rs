@@ -176,43 +176,9 @@ impl JwksKeyTable {
     }
 
     /// Writes all 8 key identifier hashes (64 bytes = 1 L1D cache line) in a single batch.
-    ///
-    /// On x86_64 targets with AVX2 support, this utilizes two 256-bit aligned vector stores
-    /// (`_mm256_store_si256`), committing 32 bytes per instruction into the 64-byte aligned
-    /// `kid_index` array without generating 8 individual scalar `movq` store micro-ops.
     #[inline]
     pub fn set_kid_index_batch(&mut self, hashes: &[u64; MAX_JWKS_SLOTS]) {
-        #[cfg(target_arch = "x86_64")]
-        {
-            if is_x86_feature_detected!("avx2") {
-                // SAFETY: `self` is `#[repr(C, align(64))]`, so `self.kid_index` is 64-byte aligned.
-                // Both `src` and `dst` hold exactly `MAX_JWKS_SLOTS` (8) u64 elements (64 bytes).
-                unsafe {
-                    Self::write_kid_index_avx2(&mut self.kid_index, hashes);
-                }
-                return;
-            }
-        }
         self.kid_index.copy_from_slice(hashes);
-    }
-
-    #[cfg(target_arch = "x86_64")]
-    #[target_feature(enable = "avx2")]
-    #[inline]
-    unsafe fn write_kid_index_avx2(dst: &mut [u64; MAX_JWKS_SLOTS], src: &[u64; MAX_JWKS_SLOTS]) {
-        use core::arch::x86_64::*;
-        let s = src.as_ptr() as *const __m256i;
-        let d = dst.as_mut_ptr() as *mut __m256i;
-
-        // SAFETY: Caller guarantees `src` and `dst` point to 64 bytes (8x u64).
-        // `dst` is 64-byte aligned (due to `#[repr(C, align(64))]`).
-        unsafe {
-            let v0 = _mm256_loadu_si256(s);
-            let v1 = _mm256_loadu_si256(s.add(1));
-
-            _mm256_store_si256(d, v0);
-            _mm256_store_si256(d.add(1), v1);
-        }
     }
 
     /// Batch-populates multiple slots and commits their 64-byte hash index in a single operation.

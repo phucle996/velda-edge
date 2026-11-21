@@ -1,7 +1,5 @@
 //! Downstream HTTP/2 Header Processing, Anti-Spoofing, and Proxy Enrichment (RFC 9113).
 
-use std::net::SocketAddr;
-
 use http::Uri;
 use http::header::{HeaderMap, HeaderName, HeaderValue};
 
@@ -11,25 +9,19 @@ use http::header::{HeaderMap, HeaderName, HeaderValue};
 pub fn enrich_headers(
     headers: &mut HeaderMap,
     uri: &Uri,
-    peer: SocketAddr,
-    local_addr: SocketAddr,
+    peer_ip: u128,
+    local_ip: u128,
+    local_port_be: u16,
     is_tls: bool,
 ) {
     // 1. Strip prohibited connection-specific headers per RFC 9113 Section 8.2.2
     crate::headers::sanitize_h2_headers(headers);
 
     // 2. Inject authoritative client IP (directly overwriting any client-supplied values)
-    let client_ip = peer.ip();
     let proto = if is_tls { "https" } else { "http" };
-
-    let mut ip_buf = [0u8; 64];
-    let ip_len = {
-        use std::io::Write;
-        let mut cursor = std::io::Cursor::new(&mut ip_buf[..]);
-        let _ = write!(cursor, "{}", client_ip);
-        cursor.position() as usize
-    };
+    let (ip_buf, ip_len) = velda_core::lut::ip::format_ip_bytes(peer_ip);
     let client_ip_bytes = &ip_buf[..ip_len];
+    let peer_is_v4 = velda_core::lut::ip::is_v4_u128(peer_ip);
 
     if let Ok(val) = HeaderValue::from_bytes(client_ip_bytes) {
         if let Some(existing) = headers.get(HeaderName::from_static("x-forwarded-for")) {
@@ -55,7 +47,7 @@ pub fn enrich_headers(
 
     headers.insert(
         HeaderName::from_static("x-forwarded-port"),
-        HeaderValue::from(local_addr.port()),
+        HeaderValue::from(u16::from_be(local_port_be)),
     );
 
     let host_hdr = headers.get(http::header::HOST).cloned();
@@ -76,22 +68,26 @@ pub fn enrich_headers(
     let fwd_len = {
         use std::io::Write;
         let mut cursor = std::io::Cursor::new(&mut fwd_buf[..]);
-        match client_ip {
-            std::net::IpAddr::V4(v4) => {
-                let _ = write!(cursor, "for={v4}");
-            }
-            std::net::IpAddr::V6(v6) => {
-                let _ = write!(cursor, "for=\"[{v6}]\"");
-            }
+        if peer_is_v4 {
+            let _ = write!(
+                cursor,
+                "for={}",
+                std::str::from_utf8(client_ip_bytes).unwrap_or("")
+            );
+        } else {
+            let _ = write!(
+                cursor,
+                "for=\"[{}]\"",
+                std::str::from_utf8(client_ip_bytes).unwrap_or("")
+            );
         }
         let _ = write!(cursor, ";proto={proto};by=");
-        match local_addr.ip() {
-            std::net::IpAddr::V4(v4) => {
-                let _ = write!(cursor, "{v4}");
-            }
-            std::net::IpAddr::V6(v6) => {
-                let _ = write!(cursor, "\"[{v6}]\"");
-            }
+        let (local_buf, local_len) = velda_core::lut::ip::format_ip_bytes(local_ip);
+        let local_str = std::str::from_utf8(&local_buf[..local_len]).unwrap_or("");
+        if velda_core::lut::ip::is_v4_u128(local_ip) {
+            let _ = write!(cursor, "{local_str}");
+        } else {
+            let _ = write!(cursor, "\"[{local_str}]\"");
         }
         if let Some(h) = host_str {
             let _ = write!(cursor, ";host=\"{h}\"");
@@ -184,10 +180,10 @@ mod tests {
         headers.insert("x-forwarded-for", "1.2.3.4".parse().unwrap());
 
         let uri: Uri = "/".parse().unwrap();
-        let peer: SocketAddr = "192.168.1.1:1000".parse().unwrap();
-        let local: SocketAddr = "10.0.0.1:443".parse().unwrap();
+        let peer_ip = velda_core::lut::ip::v4_to_u128(u32::from_be_bytes([192, 168, 1, 1]));
+        let local_ip = velda_core::lut::ip::v4_to_u128(u32::from_be_bytes([10, 0, 0, 1]));
 
-        enrich_headers(&mut headers, &uri, peer, local, true);
+        enrich_headers(&mut headers, &uri, peer_ip, local_ip, 443u16.to_be(), true);
 
         assert_eq!(
             headers.get("x-forwarded-for").unwrap().to_str().unwrap(),

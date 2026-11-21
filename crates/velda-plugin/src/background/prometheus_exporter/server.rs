@@ -280,8 +280,9 @@ impl PrometheusExporter {
                     self.config.listen
                 ))
             })?;
-        let std_listener = velda_core::socket::global_socket_manager()
-            .acquire_shadow_tcp(addr, "prometheus_exporter")
+        let (ip, port_be) = velda_sock::socket_addr_to_raw(addr);
+        let std_listener = velda_sock::socket::global_socket_manager()
+            .acquire_shadow_tcp(ip, port_be, "prometheus_exporter")
             .map_err(|e| PluginError::Config(format!("Failed to acquire shadow socket: {e}")))?;
         std_listener.set_nonblocking(true).map_err(|e| {
             PluginError::Config(format!(
@@ -347,7 +348,7 @@ impl PrometheusExporter {
             }
         }
 
-        velda_core::socket::global_socket_manager().release_shadow_tcp("prometheus_exporter");
+        velda_sock::socket::global_socket_manager().release_shadow_tcp("prometheus_exporter");
         Ok(())
     }
 

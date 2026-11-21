@@ -44,7 +44,11 @@ fn bench_steady_state_serving_zero_leak(rt: &Runtime) {
     // Warm-up to ensure thread-local runtime and ArcSwap structures are initialized
     for _ in 0..10_000 {
         let guard = shared.load();
-        let _ = std::hint::black_box(guard.pipelines.tcp_pipeline("listener_http1_0000"));
+        let _ = std::hint::black_box(
+            guard
+                .pipelines
+                .tcp_pipeline(velda_core::fnv1a_hash_32("listener_http1_0000")),
+        );
     }
 
     ALLOCATOR.reset();
@@ -54,7 +58,9 @@ fn bench_steady_state_serving_zero_leak(rt: &Runtime) {
     for i in 0..iters {
         let listener_id = target_listeners[i % target_listeners.len()];
         let guard = shared.load();
-        let pipe = guard.pipelines.tcp_pipeline(listener_id);
+        let pipe = guard
+            .pipelines
+            .tcp_pipeline(velda_core::fnv1a_hash_32(listener_id));
         let _ = std::hint::black_box(pipe);
     }
 
@@ -250,7 +256,9 @@ fn bench_concurrent_storm_live_reload_audit() {
 
             for _ in 0..ops_per_worker {
                 let guard = s.load();
-                let pipe = guard.pipelines.tcp_pipeline(&target);
+                let pipe = guard
+                    .pipelines
+                    .tcp_pipeline(velda_core::fnv1a_hash_32(&target));
                 let _ = std::hint::black_box(pipe);
             }
         }));

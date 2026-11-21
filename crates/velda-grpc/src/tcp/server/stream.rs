@@ -236,8 +236,9 @@ impl GrpcServerStream {
     /// and injects authoritative proxy forwarding headers (RFC 7239 + `X-Forwarded-*`).
     pub fn enrich_forwarded_headers(
         &mut self,
-        peer: std::net::SocketAddr,
-        local_addr: std::net::SocketAddr,
+        peer_ip: u128,
+        local_ip: u128,
+        local_port_be: u16,
         is_tls: bool,
     ) {
         let auth_hdr = self.parts.headers.get(":authority").cloned();
@@ -248,8 +249,9 @@ impl GrpcServerStream {
 
         super::header::enrich_headers(
             &mut self.parts.headers,
-            peer,
-            local_addr,
+            peer_ip,
+            local_ip,
+            local_port_be,
             is_tls,
             authority_str,
         );

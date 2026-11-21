@@ -117,10 +117,10 @@ pub struct RouteConfig {
 }
 
 impl RouteConfig {
-    /// Returns the deterministic 32-bit `ListenerId` compiled from `self.listener`.
+    /// Returns the deterministic 32-bit FNV-1a listener ID compiled from `self.listener`.
     #[inline]
-    pub const fn listener_id(&self) -> velda_core::ListenerId {
-        velda_core::ListenerId::from_name(self.listener.as_str())
+    pub const fn listener_id(&self) -> u32 {
+        velda_core::fnv1a_hash_32(self.listener.as_str())
     }
 }
 
@@ -877,6 +877,7 @@ mod tests {
                 http3: None,
                 grpc: None,
                 raw: None,
+                observability: None,
             },
             ListenerConfig {
                 id: "http-in".into(),
@@ -895,6 +896,7 @@ mod tests {
                 http3: None,
                 grpc: None,
                 raw: None,
+                observability: None,
             },
         ];
 

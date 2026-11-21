@@ -1,4 +1,3 @@
-use std::net::SocketAddr;
 use std::sync::Arc;
 use std::time::Instant;
 
@@ -58,7 +57,7 @@ fn generate_test_crypto() -> (ServerConfig, ClientConfig) {
 async fn spawn_echo_server(
     mut engine: Http3Engine,
 ) -> (
-    SocketAddr,
+    std::net::SocketAddr,
     tokio::sync::oneshot::Sender<()>,
     tokio::task::JoinHandle<()>,
 ) {
@@ -78,14 +77,18 @@ async fn spawn_echo_server(
                         Err(_) => break,
                     };
                     let now = Instant::now();
-                    let (outgoing, requests) = engine.handle_datagram(now, remote, None, &buf[..len]);
+                    let (r_ip, r_port_be) = match remote {
+                        std::net::SocketAddr::V4(v4) => (velda_core::lut::ip::v4_to_u128(v4.ip().to_bits()), v4.port().to_be()),
+                        std::net::SocketAddr::V6(v6) => (v6.ip().to_bits(), v6.port().to_be()),
+                    };
+                    let (outgoing, requests) = engine.handle_datagram(now, r_ip, r_port_be, None, &buf[..len]);
                     for out in outgoing {
                         if let Some(seg) = out.segment_size {
                             for chunk in out.payload.chunks(seg as usize) {
-                                let _ = s_socket.send_to(chunk, out.peer).await;
+                                let _ = s_socket.send_to(chunk, velda_core::lut::ip::v4itoaddr(out.peer_ip, out.peer_port_be)).await;
                             }
                         } else {
-                            let _ = s_socket.send_to(&out.payload, out.peer).await;
+                            let _ = s_socket.send_to(&out.payload, velda_core::lut::ip::v4itoaddr(out.peer_ip, out.peer_port_be)).await;
                         }
                     }
                     for req_event in requests {
@@ -117,10 +120,10 @@ async fn spawn_echo_server(
                             for out in resp_outgoing {
                                 if let Some(seg) = out.segment_size {
                                     for chunk in out.payload.chunks(seg as usize) {
-                                        let _ = s_socket.send_to(chunk, out.peer).await;
+                                        let _ = s_socket.send_to(chunk, velda_core::lut::ip::v4itoaddr(out.peer_ip, out.peer_port_be)).await;
                                     }
                                 } else {
-                                    let _ = s_socket.send_to(&out.payload, out.peer).await;
+                                    let _ = s_socket.send_to(&out.payload, velda_core::lut::ip::v4itoaddr(out.peer_ip, out.peer_port_be)).await;
                                 }
                             }
                         }
@@ -148,7 +151,8 @@ fn test_http3_frame_roundtrip() {
 fn test_http3_engine_adversarial_flood() {
     let (server_config, _) = generate_test_crypto();
     let mut engine = Http3Engine::new(Arc::new(server_config));
-    let remote: SocketAddr = "192.0.2.1:54321".parse().unwrap();
+    let remote_ip = velda_core::lut::ip::v4_to_u128(0xC000_0201);
+    let remote_port_be = 54321u16.to_be();
 
     // Flood engine with 5,000 pseudo-random corrupted UDP packets
     for i in 0..5_000 {
@@ -157,7 +161,8 @@ fn test_http3_engine_adversarial_flood() {
             *b = ((i * 31 + idx * 17) & 0xff) as u8;
         }
         let now = Instant::now();
-        let (outgoing, requests) = engine.handle_datagram(now, remote, None, &corrupted);
+        let (outgoing, requests) =
+            engine.handle_datagram(now, remote_ip, remote_port_be, None, &corrupted);
         assert_eq!(requests.len(), 0);
         let _ = outgoing;
     }
@@ -173,8 +178,16 @@ async fn test_http3_roundtrip_requests() {
     let (server_addr, shutdown_tx, server_task) = spawn_echo_server(engine).await;
 
     let config = velda_http3::Http3Config::auto();
+    let (srv_ip, srv_port_be) = match server_addr {
+        std::net::SocketAddr::V4(v4) => (
+            velda_core::lut::ip::v4_to_u128(v4.ip().to_bits()),
+            v4.port().to_be(),
+        ),
+        std::net::SocketAddr::V6(v6) => (v6.ip().to_bits(), v6.port().to_be()),
+    };
     let client = velda_http3::connect(
-        server_addr,
+        srv_ip,
+        srv_port_be,
         "localhost",
         &config,
         velda_http3::default_client_config().unwrap(),
@@ -278,8 +291,16 @@ async fn test_http3_payload_limit_enforced() {
     let (server_addr, shutdown_tx, server_task) = spawn_echo_server(engine).await;
 
     let client_cfg = velda_http3::Http3Config::auto();
+    let (srv_ip, srv_port_be) = match server_addr {
+        std::net::SocketAddr::V4(v4) => (
+            velda_core::lut::ip::v4_to_u128(v4.ip().to_bits()),
+            v4.port().to_be(),
+        ),
+        std::net::SocketAddr::V6(v6) => (v6.ip().to_bits(), v6.port().to_be()),
+    };
     let client = velda_http3::connect(
-        server_addr,
+        srv_ip,
+        srv_port_be,
         "localhost",
         &client_cfg,
         velda_http3::default_client_config().unwrap(),

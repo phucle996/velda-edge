@@ -1,6 +1,5 @@
 //! Socket subsystem errors and standard conversions.
 
-use std::net::SocketAddr;
 use thiserror::Error;
 use velda_core::{Error as CoreError, ErrorKind};
 
@@ -12,9 +11,10 @@ pub enum SockError {
     Io(#[from] std::io::Error),
 
     /// Failed to bind to a local socket address.
-    #[error("failed to bind to address {addr}: {source}")]
+    #[error("failed to bind to address {}: {source}", crate::connect::format_raw_addr(*ip, *port_be))]
     Bind {
-        addr: SocketAddr,
+        ip: u128,
+        port_be: u16,
         #[source]
         source: std::io::Error,
     },
@@ -24,9 +24,10 @@ pub enum SockError {
     Accept(std::io::Error),
 
     /// Failed to connect to a target address.
-    #[error("failed to connect to target {addr}: {source}")]
+    #[error("failed to connect to target {}: {source}", crate::connect::format_raw_addr(*ip, *port_be))]
     Connect {
-        addr: SocketAddr,
+        ip: u128,
+        port_be: u16,
         #[source]
         source: std::io::Error,
     },
@@ -46,17 +47,31 @@ impl From<SockError> for CoreError {
             SockError::Io(e) => {
                 CoreError::with_source(ErrorKind::Connection, "socket I/O error", e)
             }
-            SockError::Bind { addr, source } => CoreError::with_source(
+            SockError::Bind {
+                ip,
+                port_be,
+                source,
+            } => CoreError::with_source(
                 ErrorKind::Connection,
-                format!("failed to bind listener on {addr}"),
+                format!(
+                    "failed to bind listener on {}",
+                    crate::connect::format_raw_addr(ip, port_be)
+                ),
                 source,
             ),
             SockError::Accept(e) => {
                 CoreError::with_source(ErrorKind::Connection, "failed to accept connection", e)
             }
-            SockError::Connect { addr, source } => CoreError::with_source(
+            SockError::Connect {
+                ip,
+                port_be,
+                source,
+            } => CoreError::with_source(
                 ErrorKind::UpstreamUnavailable,
-                format!("failed to connect to target {addr}"),
+                format!(
+                    "failed to connect to target {}",
+                    crate::connect::format_raw_addr(ip, port_be)
+                ),
                 source,
             ),
             SockError::Forward(e) => CoreError::with_source(
@@ -84,9 +99,11 @@ mod tests {
         assert_eq!(core_err.kind(), ErrorKind::Connection);
         assert_eq!(core_err.message(), "socket connection closed");
 
-        let addr: SocketAddr = "127.0.0.1:9090".parse().unwrap();
+        let ip = velda_core::lut::ip::v4_to_u128(0x7F00_0001);
+        let port_be = 9090u16.to_be();
         let bind_err = SockError::Bind {
-            addr,
+            ip,
+            port_be,
             source: IoError::new(IoErrorKind::AddrInUse, "address in use"),
         };
         let core_bind: CoreError = bind_err.into();
@@ -94,7 +111,8 @@ mod tests {
         assert!(core_bind.message().contains("127.0.0.1:9090"));
 
         let conn_err = SockError::Connect {
-            addr,
+            ip,
+            port_be,
             source: IoError::new(IoErrorKind::ConnectionRefused, "refused"),
         };
         let core_conn: CoreError = conn_err.into();

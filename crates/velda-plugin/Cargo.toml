@@ -9,6 +9,7 @@ velda-core = { path = "../velda-core" }
 velda-grpc = { path = "../velda-grpc" }
 velda-observability = { path = "../velda-observability" }
 velda-router = { path = "../velda-router" }
+velda-sock = { path = "../velda-sock" }
 velda-upstream = { path = "../velda-upstream" }
 velda-tls = { path = "../velda-tls" }
 tokio = { version = "1.43", features = ["full"] }

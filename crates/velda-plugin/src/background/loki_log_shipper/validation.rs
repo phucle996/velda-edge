@@ -1,7 +1,7 @@
 //! Grafana Loki Log Shipper Schema & Semantic Validation (`phase: "background"`).
 //!
 //! Validates configuration for the background Loki exporter (`loki_log_shipper`), which drains
-//! reference-counted 64-byte [`velda_observability::AccessLogRecord`] batches and ships them to
+//! reference-counted 64-byte [`velda_observability::TelemetryRecord`] batches and ships them to
 //! `/loki/api/v1/push` partitioned by protocol family stream labels.
 
 use serde::{Deserialize, Serialize};

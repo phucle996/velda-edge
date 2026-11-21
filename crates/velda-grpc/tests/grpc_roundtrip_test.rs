@@ -39,9 +39,18 @@ async fn test_grpc_unary_roundtrip() {
     tokio::time::sleep(Duration::from_millis(20)).await;
 
     let test_config = GrpcConfig::default();
-    let mut connector = GrpcUpstreamConnector::connect(server_addr, None, &test_config, None, None)
-        .await
-        .unwrap();
+    let mut connector = GrpcUpstreamConnector::connect(
+        match server_addr {
+            std::net::SocketAddr::V4(v4) => velda_core::lut::ip::v4_to_u128(v4.ip().to_bits()),
+            std::net::SocketAddr::V6(v6) => v6.ip().to_bits(),
+        },
+        server_addr.port().to_be(),
+        None,
+        &test_config,
+        None,
+    )
+    .await
+    .unwrap();
 
     let mut req_body = BytesMut::new();
     encode_grpc_frame(b"hello_unary", false, &mut req_body);
@@ -99,9 +108,18 @@ async fn test_grpc_server_trailers_only_response() {
     tokio::time::sleep(Duration::from_millis(20)).await;
 
     let test_config = GrpcConfig::default();
-    let mut connector = GrpcUpstreamConnector::connect(server_addr, None, &test_config, None, None)
-        .await
-        .unwrap();
+    let mut connector = GrpcUpstreamConnector::connect(
+        match server_addr {
+            std::net::SocketAddr::V4(v4) => velda_core::lut::ip::v4_to_u128(v4.ip().to_bits()),
+            std::net::SocketAddr::V6(v6) => v6.ip().to_bits(),
+        },
+        server_addr.port().to_be(),
+        None,
+        &test_config,
+        None,
+    )
+    .await
+    .unwrap();
 
     let mut headers = HeaderMap::new();
     headers.insert("content-type", "application/grpc".parse().unwrap());
@@ -166,9 +184,18 @@ async fn test_grpc_server_streaming_roundtrip() {
     tokio::time::sleep(Duration::from_millis(20)).await;
 
     let test_config = GrpcConfig::default();
-    let mut connector = GrpcUpstreamConnector::connect(server_addr, None, &test_config, None, None)
-        .await
-        .unwrap();
+    let mut connector = GrpcUpstreamConnector::connect(
+        match server_addr {
+            std::net::SocketAddr::V4(v4) => velda_core::lut::ip::v4_to_u128(v4.ip().to_bits()),
+            std::net::SocketAddr::V6(v6) => v6.ip().to_bits(),
+        },
+        server_addr.port().to_be(),
+        None,
+        &test_config,
+        None,
+    )
+    .await
+    .unwrap();
 
     let req = http::Request::builder()
         .method("POST")
@@ -239,9 +266,18 @@ async fn test_grpc_client_streaming_roundtrip() {
     tokio::time::sleep(Duration::from_millis(20)).await;
 
     let test_config = GrpcConfig::default();
-    let mut connector = GrpcUpstreamConnector::connect(server_addr, None, &test_config, None, None)
-        .await
-        .unwrap();
+    let mut connector = GrpcUpstreamConnector::connect(
+        match server_addr {
+            std::net::SocketAddr::V4(v4) => velda_core::lut::ip::v4_to_u128(v4.ip().to_bits()),
+            std::net::SocketAddr::V6(v6) => v6.ip().to_bits(),
+        },
+        server_addr.port().to_be(),
+        None,
+        &test_config,
+        None,
+    )
+    .await
+    .unwrap();
 
     let req = http::Request::builder()
         .method("POST")
@@ -324,9 +360,18 @@ async fn test_grpc_bidirectional_streaming_roundtrip() {
     tokio::time::sleep(Duration::from_millis(20)).await;
 
     let test_config = GrpcConfig::default();
-    let mut connector = GrpcUpstreamConnector::connect(server_addr, None, &test_config, None, None)
-        .await
-        .unwrap();
+    let mut connector = GrpcUpstreamConnector::connect(
+        match server_addr {
+            std::net::SocketAddr::V4(v4) => velda_core::lut::ip::v4_to_u128(v4.ip().to_bits()),
+            std::net::SocketAddr::V6(v6) => v6.ip().to_bits(),
+        },
+        server_addr.port().to_be(),
+        None,
+        &test_config,
+        None,
+    )
+    .await
+    .unwrap();
 
     let req = http::Request::builder()
         .method("POST")
@@ -406,10 +451,18 @@ async fn test_grpc_server_payload_too_large() {
 
     tokio::time::sleep(Duration::from_millis(20)).await;
 
-    let mut connector =
-        GrpcUpstreamConnector::connect(server_addr, None, &restricted_config, None, None)
-            .await
-            .unwrap();
+    let mut connector = GrpcUpstreamConnector::connect(
+        match server_addr {
+            std::net::SocketAddr::V4(v4) => velda_core::lut::ip::v4_to_u128(v4.ip().to_bits()),
+            std::net::SocketAddr::V6(v6) => v6.ip().to_bits(),
+        },
+        server_addr.port().to_be(),
+        None,
+        &restricted_config,
+        None,
+    )
+    .await
+    .unwrap();
 
     // 100 bytes payload exceeds 32 bytes limit
     let large_payload = vec![42u8; 100];

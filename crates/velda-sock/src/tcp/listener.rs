@@ -1,10 +1,13 @@
 //! High-performance TCP listener implementation.
 
-use std::net::SocketAddr;
 use tokio::net::{TcpListener as TokioTcpListener, TcpSocket};
 use tokio::sync::watch;
+use velda_core::lut::ip::is_v4_u128;
 
 use super::config::TcpListenerConfig;
+use crate::connect::{
+    format_raw_addr, raw_to_socket_addr, sockaddr_storage_to_raw, socket_addr_to_raw,
+};
 use crate::connection::Connection;
 use crate::error::{Result, SockError};
 
@@ -12,14 +15,16 @@ use crate::error::{Result, SockError};
 #[derive(Debug)]
 pub struct TcpListener {
     listener: TokioTcpListener,
-    local_addr: SocketAddr,
+    pub local_ip: u128,
+    pub local_port_be: u16,
     config: TcpListenerConfig,
 }
 
 impl TcpListener {
-    /// Binds a new TCP listener to the specified address with the given configuration.
-    pub fn bind(addr: SocketAddr, config: TcpListenerConfig) -> Result<Self> {
-        let socket = if addr.is_ipv4() {
+    /// Binds a new TCP listener to `(ip, port_be)` with the given configuration.
+    pub fn bind(ip: u128, port_be: u16, config: TcpListenerConfig) -> Result<Self> {
+        let is_v4 = is_v4_u128(ip);
+        let socket = if is_v4 {
             TcpSocket::new_v4().map_err(SockError::Io)?
         } else {
             TcpSocket::new_v6().map_err(SockError::Io)?
@@ -43,7 +48,7 @@ impl TcpListener {
             use std::os::fd::AsRawFd;
             let fd = socket.as_raw_fd();
             let val: libc::c_int = 1;
-            let (level, optname) = if addr.is_ipv4() {
+            let (level, optname) = if is_v4 {
                 (libc::IPPROTO_IP, libc::IP_FREEBIND)
             } else {
                 (libc::IPPROTO_IPV6, libc::IPV6_FREEBIND)
@@ -110,21 +115,30 @@ impl TcpListener {
             let _ = socket.set_send_buffer_size(send_buf as u32);
         }
 
-        socket
-            .bind(addr)
-            .map_err(|e| SockError::Bind { addr, source: e })?;
+        let addr = raw_to_socket_addr(ip, port_be);
+        socket.bind(addr).map_err(|e| SockError::Bind {
+            ip,
+            port_be,
+            source: e,
+        })?;
 
-        let listener = socket
-            .listen(config.backlog)
-            .map_err(|e| SockError::Bind { addr, source: e })?;
+        let listener = socket.listen(config.backlog).map_err(|e| SockError::Bind {
+            ip,
+            port_be,
+            source: e,
+        })?;
 
-        let local_addr = listener
-            .local_addr()
-            .map_err(|e| SockError::Bind { addr, source: e })?;
+        let local_addr = listener.local_addr().map_err(|e| SockError::Bind {
+            ip,
+            port_be,
+            source: e,
+        })?;
+        let (local_ip, local_port_be) = socket_addr_to_raw(local_addr);
 
         Ok(Self {
             listener,
-            local_addr,
+            local_ip,
+            local_port_be,
             config,
         })
     }
@@ -164,17 +178,19 @@ impl TcpListener {
 
     /// Binds a single TCP listener shard affined to a specific worker/CPU core.
     pub fn bind_shard(
-        addr: SocketAddr,
+        ip: u128,
+        port_be: u16,
         config: TcpListenerConfig,
         worker_id: usize,
     ) -> Result<Self> {
-        let listener = Self::bind(addr, config.clone())?;
+        let listener = Self::bind(ip, port_be, config.clone())?;
         // Only when NIC hardware RSS is proven to cover every worker core do we let the NIC's
         // queue->CPU choice win (SO_INCOMING_CPU = real physical core). Otherwise the kernel
         // SO_REUSEPORT software hash distributes flows; binding SO_INCOMING_CPU on a NIC that does
         // not spread flows would funnel all connections into one worker.
+        let is_loopback = ip == velda_core::lut::ip::v4_to_u128(0x7F00_0001) || ip == 1;
         if config.incoming_cpu
-            && !addr.ip().is_loopback()
+            && !is_loopback
             && let Some(core) = velda_core::hardware::ingress_steering_cpu(worker_id)
         {
             listener.apply_incoming_cpu(core);
@@ -182,14 +198,15 @@ impl TcpListener {
         Ok(listener)
     }
 
-    /// Binds multiple TCP listener shards to the specified address with `SO_REUSEPORT`.
+    /// Binds multiple TCP listener shards to `(ip, port_be)` with `SO_REUSEPORT`.
     ///
     /// If `config.concurrency_shards > 1` and `config.reuseport` is enabled, binds up to
     /// `config.concurrency_shards` sockets to the same port.
-    /// The first socket determines the exact assigned address (critical when `addr.port() == 0`).
-    pub fn bind_shards(addr: SocketAddr, config: TcpListenerConfig) -> Result<Vec<Self>> {
-        let first = Self::bind_shard(addr, config.clone(), 0)?;
-        let actual_addr = first.local_addr();
+    /// The first socket determines the exact assigned address (critical when `port_be == 0`).
+    pub fn bind_shards(ip: u128, port_be: u16, config: TcpListenerConfig) -> Result<Vec<Self>> {
+        let first = Self::bind_shard(ip, port_be, config.clone(), 0)?;
+        let actual_ip = first.local_ip;
+        let actual_port_be = first.local_port_be;
         let target_shards = if config.reuseport {
             config.concurrency_shards.max(1)
         } else {
@@ -204,12 +221,12 @@ impl TcpListener {
         shards.push(first);
 
         for shard_idx in 1..target_shards {
-            match Self::bind_shard(actual_addr, config.clone(), shard_idx) {
+            match Self::bind_shard(actual_ip, actual_port_be, config.clone(), shard_idx) {
                 Ok(shard) => shards.push(shard),
                 Err(err) => {
                     tracing::warn!(
                         shard = shard_idx,
-                        listen_addr = %actual_addr,
+                        listen_addr = %format_raw_addr(actual_ip, actual_port_be),
                         error = %err,
                         "Failed to bind SO_REUSEPORT listener shard; continuing with existing shards"
                     );
@@ -224,17 +241,13 @@ impl TcpListener {
     /// Wraps an existing Tokio [`TokioTcpListener`] with configuration.
     pub fn from_tokio(listener: TokioTcpListener, config: TcpListenerConfig) -> Result<Self> {
         let local_addr = listener.local_addr().map_err(SockError::Io)?;
+        let (local_ip, local_port_be) = socket_addr_to_raw(local_addr);
         Ok(Self {
             listener,
-            local_addr,
+            local_ip,
+            local_port_be,
             config,
         })
-    }
-
-    /// Returns the local address this listener is bound to.
-    #[inline]
-    pub const fn local_addr(&self) -> SocketAddr {
-        self.local_addr
     }
 
     /// Returns the configuration applied to this listener and its accepted sockets.
@@ -246,8 +259,8 @@ impl TcpListener {
     /// Accepts an incoming connection and applies socket options.
     pub async fn accept(&self) -> Result<Connection> {
         let (stream, peer_addr) = self.listener.accept().await.map_err(SockError::Accept)?;
-
-        self.setup_accepted_stream(stream, peer_addr)
+        let (peer_ip, peer_port_be) = socket_addr_to_raw(peer_addr);
+        self.setup_accepted_stream(stream, peer_ip, peer_port_be)
     }
 
     /// Attempts to accept a pending connection without waiting.
@@ -278,8 +291,9 @@ impl TcpListener {
             }
             let std_stream = unsafe { std::net::TcpStream::from_raw_fd(res) };
             let stream = tokio::net::TcpStream::from_std(std_stream).map_err(SockError::Accept)?;
-            let peer_addr = stream.peer_addr().map_err(SockError::Accept)?;
-            self.setup_accepted_stream(stream, peer_addr).map(Some)
+            let (peer_ip, peer_port_be) = sockaddr_storage_to_raw(&storage);
+            self.setup_accepted_stream(stream, peer_ip, peer_port_be)
+                .map(Some)
         }
         #[cfg(not(target_os = "linux"))]
         {
@@ -291,7 +305,8 @@ impl TcpListener {
     fn setup_accepted_stream(
         &self,
         stream: tokio::net::TcpStream,
-        peer_addr: SocketAddr,
+        peer_ip: u128,
+        peer_port_be: u16,
     ) -> Result<Connection> {
         if self.config.nodelay {
             let _ = stream.set_nodelay(true);
@@ -512,14 +527,26 @@ impl TcpListener {
         }
 
         // Avoid a getsockname() syscall if the bound address is already specific (non-unspecified).
-        let local_addr = if self.local_addr.ip().is_unspecified() {
-            stream.local_addr().unwrap_or(self.local_addr)
+        let is_unspecified =
+            self.local_ip == velda_core::lut::ip::v4_to_u128(0) || self.local_ip == 0;
+        let (local_ip, local_port_be) = if is_unspecified {
+            stream
+                .local_addr()
+                .map(socket_addr_to_raw)
+                .unwrap_or((self.local_ip, self.local_port_be))
         } else {
-            self.local_addr
+            (self.local_ip, self.local_port_be)
         };
         let id = crate::connection::next_connection_id();
 
-        Ok(Connection::new(id, stream, peer_addr, local_addr))
+        Ok(Connection::new(
+            id,
+            stream,
+            peer_ip,
+            peer_port_be,
+            local_ip,
+            local_port_be,
+        ))
     }
 
     /// Accepts an incoming connection, or returns `None` if a graceful shutdown
@@ -559,7 +586,10 @@ impl TcpListener {
         F: Fn(Connection) -> Fut + Send + Sync + 'static,
         Fut: std::future::Future<Output = ()> + Send + 'static,
     {
-        tracing::info!(listen_addr = %self.local_addr, "TCP listener started serving");
+        tracing::info!(
+            listen_addr = %format_raw_addr(self.local_ip, self.local_port_be),
+            "TCP listener started serving"
+        );
 
         // Exponential backoff on accept errors (e.g. EMFILE) to avoid a CPU-spinning error loop.
         let mut backoff = std::time::Duration::from_millis(5);
@@ -570,7 +600,7 @@ impl TcpListener {
                     backoff = std::time::Duration::from_millis(5);
                     tracing::debug!(
                         connection_id = %conn.id(),
-                        peer = %conn.peer(),
+                        peer = %format_raw_addr(conn.peer_ip, conn.peer_port_be),
                         "Accepted TCP connection"
                     );
                     tokio::spawn(handler(conn));
@@ -591,11 +621,18 @@ impl TcpListener {
                     }
                 }
                 Ok(None) => {
-                    tracing::info!(listen_addr = %self.local_addr, "TCP listener shutting down gracefully");
+                    tracing::info!(
+                        listen_addr = %format_raw_addr(self.local_ip, self.local_port_be),
+                        "TCP listener shutting down gracefully"
+                    );
                     break;
                 }
                 Err(err) => {
-                    tracing::error!(listen_addr = %self.local_addr, error = %err, "Accept loop error encountered");
+                    tracing::error!(
+                        listen_addr = %format_raw_addr(self.local_ip, self.local_port_be),
+                        error = %err,
+                        "Accept loop error encountered"
+                    );
                     tokio::select! {
                         _ = tokio::time::sleep(backoff) => {}
                         _ = shutdown.changed() => {}

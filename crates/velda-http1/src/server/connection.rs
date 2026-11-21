@@ -35,7 +35,8 @@ pub struct Http1ServerConnection<IO> {
     pub last_status: u16,
     pub last_bytes_rx: u64,
     pub last_bytes_tx: u64,
-    pub last_upstream_addr: Option<std::net::SocketAddr>,
+    pub last_upstream_ip: u128,
+    pub last_upstream_port_be: u16,
     config: Http1Config,
 }
 
@@ -57,7 +58,8 @@ where
             last_status: 0,
             last_bytes_rx: 0,
             last_bytes_tx: 0,
-            last_upstream_addr: None,
+            last_upstream_ip: 0,
+            last_upstream_port_be: 0,
             config,
         }
     }

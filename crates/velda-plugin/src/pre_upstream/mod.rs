@@ -8,7 +8,7 @@
 //! - **Target Context Available**: The router has already resolved the target upstream pool and endpoint.
 
 use std::sync::Arc;
-use velda_core::{Action, L7Request, UpstreamId};
+use velda_core::{Action, L7Request};
 
 use crate::capability::{Direction, PluginCapability, SupportedProtocols};
 
@@ -79,7 +79,7 @@ pub trait PreUpstreamPlugin: Send + Sync {
     ///
     /// Allows mutating the request, short-circuiting, or dynamically re-routing to an
     /// alternate target upstream (e.g. Canary traffic splitting) by mutating `target_upstream`.
-    fn on_upstream_request(&self, req: &mut L7Request, target_upstream: &mut UpstreamId) -> Action;
+    fn on_upstream_request(&self, req: &mut L7Request, target_upstream: &mut u16) -> Action;
 
     /// Declares the reverse-permission capabilities required by this plugin.
     fn capability(&self) -> PluginCapability;
@@ -110,7 +110,7 @@ pub trait PreUpstreamPlugin: Send + Sync {
 pub fn run_pre_upstream_plugins(
     chain: &[Arc<dyn PreUpstreamPlugin>],
     req: &mut L7Request,
-    target_upstream: &mut UpstreamId,
+    target_upstream: &mut u16,
 ) -> Action {
     for (idx, plugin) in chain.iter().enumerate() {
         match plugin.on_upstream_request(req, target_upstream) {
@@ -208,7 +208,7 @@ mod tests {
             Body::Empty,
         );
 
-        let mut target = UpstreamId::new(1);
+        let mut target = 1;
         let action = run_pre_upstream_plugins(&chain, &mut req, &mut target);
         assert!(matches!(action, Action::Continue));
         assert!(!req.headers.contains_key("x-internal-secret"));
@@ -231,7 +231,7 @@ mod tests {
             HeaderMap::new(),
             Body::Empty,
         );
-        let mut target1 = UpstreamId::new(1);
+        let mut target1 = 1;
         let action1 = run_pre_upstream_plugins(&chain, &mut req1, &mut target1);
         assert!(matches!(action1, Action::Continue));
 
@@ -242,7 +242,7 @@ mod tests {
             HeaderMap::new(),
             Body::Empty,
         );
-        let mut target2 = UpstreamId::new(1);
+        let mut target2 = 1;
         let action2 = run_pre_upstream_plugins(&chain, &mut req2, &mut target2);
         match action2 {
             Action::Reject(reason) => {
@@ -282,7 +282,7 @@ mod tests {
             Body::Empty,
         );
 
-        let mut target = UpstreamId::new(1);
+        let mut target = 1;
         let action = run_pre_upstream_plugins(&chain, &mut req, &mut target);
         assert!(matches!(action, Action::Continue));
         assert_eq!(req.uri.path(), "/customers/100");
@@ -321,7 +321,7 @@ mod tests {
             Body::Empty,
         );
 
-        let mut target = UpstreamId::new(1);
+        let mut target = 1;
         let action = run_pre_upstream_plugins(&chain, &mut req, &mut target);
         match action {
             Action::Respond(resp) => {

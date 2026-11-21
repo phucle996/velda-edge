@@ -47,14 +47,16 @@ fn listener_to_binding(
             reason: format!("{e}"),
         })?;
 
+    let (ip, port_be) = velda_sock::socket_addr_to_raw(addr);
+
     if config.transport.protocol.eq_ignore_ascii_case("tcp") {
-        let mut tcp = TcpBinding::new(&config.id, addr, config.tls.enabled);
+        let mut tcp = TcpBinding::new(&config.id, ip, port_be, config.tls.enabled);
         if let Some(cfg) = tcp_config {
             tcp.config = cfg.clone();
         }
         Ok(IngressBinding::Tcp(tcp))
     } else if config.transport.protocol.eq_ignore_ascii_case("udp") {
-        let mut udp = UdpBinding::new(&config.id, addr, config.tls.enabled);
+        let mut udp = UdpBinding::new(&config.id, ip, port_be, config.tls.enabled);
         if let Some(cfg) = udp_config {
             udp.config = cfg.clone();
         }
@@ -96,6 +98,7 @@ mod tests {
             grpc: None,
             http3: None,
             raw: None,
+            observability: None,
         };
         let binding = listener_to_binding(&raw_tcp, None, None).unwrap();
         assert!(binding.is_tcp());
@@ -119,6 +122,7 @@ mod tests {
             grpc: None,
             http3: None,
             raw: None,
+            observability: None,
         };
         let binding = listener_to_binding(&http1, None, None).unwrap();
         assert!(binding.is_tcp());
@@ -142,6 +146,7 @@ mod tests {
             grpc: None,
             http3: None,
             raw: None,
+            observability: None,
         };
         let binding = listener_to_binding(&http2, None, None).unwrap();
         assert!(binding.is_tcp());
@@ -164,6 +169,7 @@ mod tests {
             grpc: None,
             http3: None,
             raw: None,
+            observability: None,
         };
         let binding = listener_to_binding(&http3, None, None).unwrap();
         assert!(binding.is_udp());

@@ -117,7 +117,8 @@ where
             return Err(Http1Error::ConnectionClosed);
         }
     };
-    conn.last_upstream_addr = Some(upstream_lease.endpoint);
+    conn.last_upstream_ip = upstream_lease.endpoint.0;
+    conn.last_upstream_port_be = upstream_lease.endpoint.1;
 
     let cfg = *conn.config();
     let mut req = Http1ServerRequest::from_parts(req_head, body);
@@ -152,7 +153,8 @@ where
 
                 match upstream.acquire_fresh().await {
                     Ok(mut fresh_lease) => {
-                        conn.last_upstream_addr = Some(fresh_lease.endpoint);
+                        conn.last_upstream_ip = fresh_lease.endpoint.0;
+                        conn.last_upstream_port_be = fresh_lease.endpoint.1;
                         let retry_res = async {
                             send_request(&req, &mut *fresh_lease, &mut conn.upstream_write_buf)
                                 .await?;

@@ -172,7 +172,14 @@ async fn test_http2_upstream_connector() {
 
     let config = TEST_CONFIG.with_max_concurrent_streams(512);
 
-    let mut client = client::connect(backend_addr, None, &config, None, None)
+    let (ip, port_be) = match backend_addr {
+        std::net::SocketAddr::V4(v4) => (
+            velda_core::lut::ip::v4_to_u128(v4.ip().to_bits()),
+            v4.port().to_be(),
+        ),
+        std::net::SocketAddr::V6(v6) => (v6.ip().to_bits(), v6.port().to_be()),
+    };
+    let mut client = client::connect(ip, port_be, None, &config, None)
         .await
         .unwrap();
     let http_req = http::Request::builder()

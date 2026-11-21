@@ -55,7 +55,7 @@ pub async fn run_gateway(
     );
 
     // Register UDS IPC socket claim in host SocketManager
-    if let Err(e) = velda_core::socket::global_socket_manager()
+    if let Err(e) = velda_sock::socket::global_socket_manager()
         .register_management_uds(socket_path.to_string_lossy().to_string(), "gateway_ipc")
     {
         tracing::warn!(error = %e, "Gateway IPC UDS socket claim collision");

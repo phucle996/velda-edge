@@ -85,7 +85,8 @@ where
             return Err(Http1Error::ConnectionClosed);
         }
     };
-    conn.last_upstream_addr = Some(upstream_lease.endpoint);
+    conn.last_upstream_ip = upstream_lease.endpoint.0;
+    conn.last_upstream_port_be = upstream_lease.endpoint.1;
 
     let cfg = *conn.config();
     sanitize_headers(&mut req_head.headers);

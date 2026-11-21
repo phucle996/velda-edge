@@ -4,7 +4,7 @@
 //! ┌────────────────────────────────────────────────────────────────────────────────────────┐
 //! │                OTLP PROTOBUF PRE-BAKED WIRE SKELETON ARCHITECTURE                      │
 //! │                                                                                        │
-//! │               AccessLogRecord (64-byte integer scalar from SPSC Ring)                  │
+//! │               TelemetryRecord (64-byte integer scalar from SPSC Ring)                  │
 //! │             ┌─────────────────────────────────────────────────────────┐                │
 //! │             │ timestamp_sec: u32, duration_us: u32, peer_ip: u128 ... │                │
 //! │             └────────────────────────────┬────────────────────────────┘                │
@@ -32,7 +32,7 @@
 //! ```
 
 use velda_core::GrpcStatus;
-use velda_observability::{AccessLogRecord, LogBatch};
+use velda_observability::{TelemetryBatch, TelemetryRecord};
 
 /// Canonical OpenTelemetry Schema URL byte constant (zero heap allocation).
 pub const OTLP_SCHEMA_URL: &[u8] = b"https://opentelemetry.io/schemas/1.26.0";
@@ -252,9 +252,9 @@ impl OtlpProtoWireEnvelope {
         }
     }
 
-    /// Serializes a single [`AccessLogRecord`] directly into `out` with pre-baked wire skeleton and SIMD stamping.
+    /// Serializes a single [`TelemetryRecord`] directly into `out` with pre-baked wire skeleton and SIMD stamping.
     #[inline(always)]
-    pub fn encode_log_record_wire(&self, rec: &AccessLogRecord, out: &mut Vec<u8>) {
+    pub fn encode_log_record_wire(&self, rec: &TelemetryRecord, out: &mut Vec<u8>) {
         out.reserve(MAX_LOG_RECORD_BYTES);
 
         let grpc_st = rec.grpc_status;
@@ -365,11 +365,11 @@ impl OtlpProtoWireEnvelope {
         }
     }
 
-    /// Serializes a batch of [`AccessLogRecord`] directly into compliant Protobuf wire bytes (`out`).
+    /// Serializes a batch of [`TelemetryRecord`] directly into compliant Protobuf wire bytes (`out`).
     #[inline(always)]
     pub fn format_records_wire(
         &self,
-        batches: &[LogBatch],
+        batches: &[TelemetryBatch],
         records_buf: &mut Vec<u8>,
         out: &mut Vec<u8>,
     ) -> usize {
@@ -391,7 +391,7 @@ impl OtlpProtoWireEnvelope {
                     unsafe {
                         use core::arch::x86_64::*;
                         let next_rec =
-                            recs.get_unchecked(idx + 4) as *const AccessLogRecord as *const i8;
+                            recs.get_unchecked(idx + 4) as *const TelemetryRecord as *const i8;
                         _mm_prefetch(next_rec, _MM_HINT_T1);
                         _mm_prefetch(next_rec.add(64), _MM_HINT_T1);
                         _mm_prefetch(next_rec.add(128), _MM_HINT_T1);
@@ -431,7 +431,7 @@ mod tests {
     #[test]
     fn test_otlp_proto_wire_template() {
         let envelope = OtlpProtoWireEnvelope::new("edge-prod");
-        let mut rec = AccessLogRecord::zeroed();
+        let mut rec = TelemetryRecord::zeroed();
         rec.request_id = 0x4bf9_2f35_77b3_4da6;
         rec.ingress_time_nanos = 1_710_000_000_000_000_000;
         rec.duration_ns = 2500;
@@ -451,7 +451,7 @@ mod tests {
         rec.ua_os = os;
         rec.ua_major_version = ver;
 
-        let batches = vec![LogBatch::from_arc(Arc::from(vec![rec]))];
+        let batches = vec![TelemetryBatch::from_arc(Arc::from(vec![rec]))];
         let mut records_buf = Vec::new();
         let mut out = Vec::new();
 
@@ -534,7 +534,7 @@ mod tests {
     #[test]
     fn test_max_log_record_fits_reserve() {
         let envelope = OtlpProtoWireEnvelope::new("edge-prod");
-        let mut rec = AccessLogRecord::zeroed();
+        let mut rec = TelemetryRecord::zeroed();
         rec.request_id = u64::MAX;
         rec.ingress_time_nanos = u64::MAX;
         rec.duration_ns = u64::MAX;
@@ -562,7 +562,7 @@ mod tests {
     #[test]
     fn test_otlp_proto_severity() {
         let envelope = OtlpProtoWireEnvelope::new("edge-prod");
-        let mut warn_rec = AccessLogRecord::zeroed();
+        let mut warn_rec = TelemetryRecord::zeroed();
         warn_rec.request_id = 1;
         warn_rec.ingress_time_nanos = 1_710_000_000;
         warn_rec.duration_ns = 100;
@@ -578,7 +578,7 @@ mod tests {
         warn_rec.ua_os = os;
         warn_rec.ua_major_version = ver;
 
-        let mut err_rec = AccessLogRecord::zeroed();
+        let mut err_rec = TelemetryRecord::zeroed();
         err_rec.request_id = 2;
         err_rec.ingress_time_nanos = 1_710_000_001;
         err_rec.duration_ns = 200;
@@ -593,7 +593,7 @@ mod tests {
         err_rec.ua_family = fam;
         err_rec.ua_os = os;
         err_rec.ua_major_version = ver;
-        let batches = vec![LogBatch::from_arc(Arc::from(vec![warn_rec, err_rec]))];
+        let batches = vec![TelemetryBatch::from_arc(Arc::from(vec![warn_rec, err_rec]))];
         let mut records_buf = Vec::new();
         let mut out = Vec::new();
         let count = envelope.format_records_wire(&batches, &mut records_buf, &mut out);

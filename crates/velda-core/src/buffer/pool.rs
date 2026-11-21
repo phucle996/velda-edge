@@ -1,14 +1,19 @@
-//! Core buffer pool implementations: HeaderPool, CoreBufferPool, and ShardedBufferPool.
+//! Core Buffer Pool Implementations (`velda_core::buffer::pool`).
 //!
-//! # Deliberate Hardware Cache Hierarchy Decision
-//! - **L1D Cache (`_MM_HINT_T0`)** is strictly reserved for `velda-router` hot routing tables.
-//! - **L2 Cache (`_MM_HINT_T1` / `pldl2keep`)** houses [`HeaderPool`] management structures,
-//!   [`HeaderWorkspace`] instances, and [`PayloadSlabPool`] 24-byte descriptor queues.
-//! - **LIFO Burst Acquisition (`guard.burst.pop_back()`)**: During traffic bursts, workers pop from
-//!   the back of the `VecDeque` (most recently recycled workspace) rather than the front (FIFO).
-//!   This keeps the active working set of 1-2 burst workspaces warm in L2 cache instead of rotating
-//!   through hundreds of cold workspaces in DRAM, while `maintain()` / `sweep_expired()` continues
-//!   evicting the oldest untouched items from `guard.burst.front()`.
+//! ```text
+//! ┌─────────────────────────────────────────────────────────────────────────────────────────┐
+//! │                     TWO-TIER HEADER & SLAB POOL ACQUISITION FLOW                        │
+//! ├─────────────────────────────────────────────────────────────────────────────────────────┤
+//! │  L1D (_MM_HINT_T0) : Reserved for velda-router tables                                   │
+//! │  L2  (_MM_HINT_T1) : HeaderPool, HeaderWorkspace & PayloadSlabPool descriptor queues    │
+//! │                                                                                         │
+//! │  acquire() ──► [1] baseline.pop()       (Pre-warmed permanent floor)                    │
+//! │            ──► [2] burst.pop_back()     (LIFO: warmest workspace stays in L2 cache)     │
+//! │            ──► [3] allocate_new()       (If active_leases < max_burst_limit)            │
+//! │                                                                                         │
+//! │  maintain() / sweep_expired() ──► evict oldest idle items from burst.front() (> TTL)    │
+//! └─────────────────────────────────────────────────────────────────────────────────────────┘
+//! ```
 
 use std::collections::VecDeque;
 use std::ops::{Deref, DerefMut};

@@ -51,12 +51,12 @@ fn bench_mixed_traffic_worker_scaling(router: Arc<Router>) {
                     match (i + w) % 4 {
                         0 => {
                             // L4 TCP route lookup
-                            let route = r.route_tcp("l4-in-0");
+                            let route = r.route_tcp(velda_core::fnv1a_hash_32("l4-in-0"));
                             let _ = std::hint::black_box(route);
                         }
                         1 => {
                             // L4 UDP route lookup + round-robin target select
-                            if let Some(route) = r.route_udp("l4-in-9") {
+                            if let Some(route) = r.route_udp(velda_core::fnv1a_hash_32("l4-in-9")) {
                                 let target = route.id;
                                 let _ = std::hint::black_box(target);
                             }
@@ -69,13 +69,13 @@ fn bench_mixed_traffic_worker_scaling(router: Arc<Router>) {
                                 exact_path
                             };
                             let req = Http1RouteRequest::new(path).with_host(host);
-                            let route = r.route_http1("https-in", &req);
+                            let route = r.route_http1(velda_core::fnv1a_hash_32("https-in"), &req);
                             let _ = std::hint::black_box(route);
                         }
                         _ => {
                             // L7 gRPC lookup
                             let req = GrpcRouteRequest::new(grpc_service, None);
-                            let route = r.route_grpc("https-in", &req);
+                            let route = r.route_grpc(velda_core::fnv1a_hash_32("https-in"), &req);
                             let _ = std::hint::black_box(route);
                         }
                     }
@@ -139,7 +139,7 @@ fn bench_pure_http_contention(router: Arc<Router>) {
 
                 b.wait();
                 for _ in 0..ops_per_worker {
-                    let route = r.route_http1("https-in", &req);
+                    let route = r.route_http1(velda_core::fnv1a_hash_32("https-in"), &req);
                     let _ = std::hint::black_box(route);
                 }
             }));

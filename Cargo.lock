@@ -2267,7 +2267,6 @@ dependencies = [
  "libc",
  "serde",
  "serde_json",
- "socket2 0.6.5",
 ]
 
 [[package]]
@@ -2342,6 +2341,7 @@ dependencies = [
  "tokio",
  "tracing",
  "velda-core",
+ "velda-sock",
  "velda-tls",
 ]
 
@@ -2359,6 +2359,7 @@ dependencies = [
  "tokio",
  "tracing",
  "velda-core",
+ "velda-sock",
  "velda-tls",
 ]
 
@@ -2374,6 +2375,7 @@ dependencies = [
  "tokio",
  "tracing",
  "velda-core",
+ "velda-sock",
  "velda-tls",
 ]
 
@@ -2465,6 +2467,7 @@ dependencies = [
  "velda-grpc",
  "velda-observability",
  "velda-router",
+ "velda-sock",
  "velda-tls",
  "velda-upstream",
  "x509-parser",
@@ -2491,7 +2494,6 @@ dependencies = [
  "arc-swap",
  "bincode",
  "memchr",
- "rustc-hash",
  "serde",
  "serde_json",
  "sha2",

@@ -157,11 +157,7 @@ impl PreUpstreamPlugin for ApiKeyAuthPlugin {
         &self.id
     }
 
-    fn on_upstream_request(
-        &self,
-        req: &mut L7Request,
-        _target_upstream: &mut velda_core::UpstreamId,
-    ) -> Action {
+    fn on_upstream_request(&self, req: &mut L7Request, _target_upstream: &mut u16) -> Action {
         let (entry, matched_source) = {
             let (token_str, location) = match extract_token_ref(&self.sources, req) {
                 Some(res) => res,
@@ -351,7 +347,7 @@ mod tests {
         );
         let mut req = build_test_request(headers, None);
 
-        let mut target = velda_core::UpstreamId::new(1);
+        let mut target = 1;
         let action = plugin.on_upstream_request(&mut req, &mut target);
         assert!(matches!(action, Action::Continue));
 
@@ -377,7 +373,7 @@ mod tests {
         );
 
         let mut req = build_test_request(HeaderMap::new(), None);
-        let mut target = velda_core::UpstreamId::new(1);
+        let mut target = 1;
         let action = plugin.on_upstream_request(&mut req, &mut target);
         assert!(matches!(action, Action::Reject(RejectReason::Unauthorized)));
         assert_eq!(
@@ -407,7 +403,7 @@ mod tests {
         headers.insert("x-api-key", bad_key.parse().unwrap());
         let mut req = build_test_request(headers, None);
 
-        let mut target = velda_core::UpstreamId::new(1);
+        let mut target = 1;
         let action = plugin.on_upstream_request(&mut req, &mut target);
         assert!(matches!(action, Action::Reject(RejectReason::Unauthorized)));
         assert_eq!(
@@ -453,7 +449,7 @@ mod tests {
             "ApiKey secret-query-token".parse().unwrap(),
         );
         let mut req_hdr = build_test_request(headers, None);
-        let mut target_hdr = velda_core::UpstreamId::new(1);
+        let mut target_hdr = 1;
         assert!(matches!(
             plugin.on_upstream_request(&mut req_hdr, &mut target_hdr),
             Action::Continue
@@ -463,7 +459,7 @@ mod tests {
         // 2. Query parameter: ?key=secret-query-token
         let mut req_query =
             build_test_request(HeaderMap::new(), Some("key=secret-query-token&mode=raw"));
-        let mut target_query = velda_core::UpstreamId::new(1);
+        let mut target_query = 1;
         assert!(matches!(
             plugin.on_upstream_request(&mut req_query, &mut target_query),
             Action::Continue
@@ -520,7 +516,7 @@ mod tests {
         headers.insert("x-consumer-role", "superuser".parse().unwrap());
         let mut req = build_test_request(headers, None);
 
-        let mut target = velda_core::UpstreamId::new(1);
+        let mut target = 1;
         assert!(matches!(
             plugin.on_upstream_request(&mut req, &mut target),
             Action::Continue
@@ -553,7 +549,7 @@ mod tests {
             HeaderMap::new(),
             Some("page=1&api_key=secret-token-xyz&sort=desc"),
         );
-        let mut target = velda_core::UpstreamId::new(1);
+        let mut target = 1;
         assert!(matches!(
             plugin.on_upstream_request(&mut req, &mut target),
             Action::Continue
@@ -586,7 +582,7 @@ mod tests {
         let mut headers = HeaderMap::new();
         headers.insert("x-api-key", "a".parse().unwrap());
         let mut req = build_test_request(headers, None);
-        let mut target = velda_core::UpstreamId::new(1);
+        let mut target = 1;
         assert!(matches!(
             plugin.on_upstream_request(&mut req, &mut target),
             Action::Reject(RejectReason::Unauthorized)
@@ -596,7 +592,7 @@ mod tests {
         let mut headers2 = HeaderMap::new();
         headers2.insert("x-api-key", "x".repeat(100).parse().unwrap());
         let mut req2 = build_test_request(headers2, None);
-        let mut target2 = velda_core::UpstreamId::new(1);
+        let mut target2 = 1;
         assert!(matches!(
             plugin.on_upstream_request(&mut req2, &mut target2),
             Action::Reject(RejectReason::Unauthorized)
@@ -645,7 +641,7 @@ mod tests {
         let mut headers = HeaderMap::new();
         headers.insert("x-api-key", "sk-live-alpha-1234".parse().unwrap());
         let mut req = build_test_request(headers, None);
-        let mut target = velda_core::UpstreamId::new(1);
+        let mut target = 1;
         assert!(matches!(
             plugin.on_upstream_request(&mut req, &mut target),
             Action::Continue

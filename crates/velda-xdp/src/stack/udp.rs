@@ -11,7 +11,6 @@
 //!   [`XdpDatagram`] reference, allowing [`velda-http3`] to decrypt payloads in-place without
 //!   heap allocations or memory copies.
 
-use std::net::{IpAddr, SocketAddr};
 use std::ops::{Deref, DerefMut};
 
 use crate::error::{Result, XdpError};
@@ -31,8 +30,10 @@ pub struct UdpHeader {
 /// Implements `Deref<Target = [u8]>` to allow downstream L7 protocol engines
 /// to access packet bytes transparently without managing underlying slab offsets.
 pub struct XdpDatagram {
-    pub src: SocketAddr,
-    pub dst: SocketAddr,
+    pub src_ip: u128,
+    pub src_port_be: u16,
+    pub dst_ip: u128,
+    pub dst_port_be: u16,
     pub lease: XdpSlabLease,
     pub payload_offset: usize,
     pub payload_len: usize,
@@ -41,15 +42,19 @@ pub struct XdpDatagram {
 impl XdpDatagram {
     /// Constructs a datagram wrapping a leased slab frame.
     pub fn new(
-        src: SocketAddr,
-        dst: SocketAddr,
+        src_ip: u128,
+        src_port_be: u16,
+        dst_ip: u128,
+        dst_port_be: u16,
         lease: XdpSlabLease,
         payload_offset: usize,
         payload_len: usize,
     ) -> Self {
         Self {
-            src,
-            dst,
+            src_ip,
+            src_port_be,
+            dst_ip,
+            dst_port_be,
             lease,
             payload_offset,
             payload_len,
@@ -121,8 +126,8 @@ pub fn parse_udp_header(data: &[u8]) -> Result<(UdpHeader, &[u8])> {
 
 /// Identifies an inbound UDP frame and encapsulates it into an [`XdpDatagram`] without copying.
 pub fn parse_inbound_datagram(
-    src_ip: IpAddr,
-    dst_ip: IpAddr,
+    src_ip: u128,
+    dst_ip: u128,
     l3_offset: usize,
     mut lease: XdpSlabLease,
 ) -> Result<XdpDatagram> {
@@ -138,16 +143,16 @@ pub fn parse_inbound_datagram(
     let udp_bytes = &raw[l3_offset..];
     let (header, _) = parse_udp_header(udp_bytes)?;
 
-    let src = SocketAddr::new(src_ip, header.src_port);
-    let dst = SocketAddr::new(dst_ip, header.dst_port);
     let payload_offset = l3_offset + 8;
     let payload_len = ((header.length as usize) - 8).min(raw.len() - payload_offset);
 
     lease.set_payload_len(payload_offset + payload_len);
 
     Ok(XdpDatagram::new(
-        src,
-        dst,
+        src_ip,
+        header.src_port.to_be(),
+        dst_ip,
+        header.dst_port.to_be(),
         lease,
         payload_offset,
         payload_len,

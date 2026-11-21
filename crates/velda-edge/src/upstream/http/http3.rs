@@ -1,6 +1,5 @@
 //! Layer 7 HTTP/3 Upstream managing persistent QUIC client multiplexing and request forwarding (RFC 9114).
 
-use std::net::SocketAddr;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
 
@@ -52,7 +51,7 @@ pub struct Http3Upstream {
     /// `streaming` at compile time; eliminates runtime enum branching.
     pub strategy: Http3PipeStrategy,
     /// Lock-sharded persistent HTTP/3 QUIC client connection pool.
-    pool: Arc<MultiplexedPool<SocketAddr, Http3ClientResource>>,
+    pool: Arc<MultiplexedPool<(u128, u16), Http3ClientResource>>,
     /// Maximum concurrent connections permitted per physical endpoint.
     pub max_connections_per_key: usize,
     /// Maximum concurrent streams per multiplexed connection.
@@ -164,10 +163,15 @@ impl Http3Upstream {
                         return Ok::<_, String>(((lease.client.clone(), lease), endpoint));
                     }
 
-                    let client =
-                        velda_http3::client::connect(endpoint, &sni, config, (*quic_tls).clone())
-                            .await
-                            .map_err(|e| e.to_string())?;
+                    let client = velda_http3::client::connect(
+                        endpoint.0,
+                        endpoint.1,
+                        &sni,
+                        config,
+                        (*quic_tls).clone(),
+                    )
+                    .await
+                    .map_err(|e| e.to_string())?;
 
                     let res = Http3ClientResource {
                         client: client.clone(),
@@ -210,10 +214,15 @@ impl Http3Upstream {
                         return Ok::<_, String>(((lease.client.clone(), lease), endpoint));
                     }
 
-                    let client =
-                        velda_http3::client::connect(endpoint, &sni, config, (*quic_tls).clone())
-                            .await
-                            .map_err(|e| e.to_string())?;
+                    let client = velda_http3::client::connect(
+                        endpoint.0,
+                        endpoint.1,
+                        &sni,
+                        config,
+                        (*quic_tls).clone(),
+                    )
+                    .await
+                    .map_err(|e| e.to_string())?;
 
                     let res = Http3ClientResource {
                         client: client.clone(),
@@ -241,7 +250,7 @@ impl Http3Upstream {
         }
 
         for ep in all_eps {
-            let addr = ep.address;
+            let addr = (ep.ip, ep.port_be);
             if !self.inner.health().is_healthy(&addr) {
                 continue;
             }
@@ -253,7 +262,15 @@ impl Http3Upstream {
                 let sni = Arc::clone(&self.target_sni);
                 let quic_tls = Arc::clone(&self.quic_config);
 
-                match velda_http3::client::connect(addr, &sni, config, (*quic_tls).clone()).await {
+                match velda_http3::client::connect(
+                    addr.0,
+                    addr.1,
+                    &sni,
+                    config,
+                    (*quic_tls).clone(),
+                )
+                .await
+                {
                     Ok(client) => {
                         let res = Http3ClientResource { client };
                         self.pool.register_warmed_to_lane(
@@ -262,10 +279,10 @@ impl Http3Upstream {
                             res,
                             self.max_concurrent_streams,
                         );
-                        tracing::debug!(endpoint = %addr, lane, "Shadow Worker pre-warmed HTTP/3 connection");
+                        tracing::debug!(endpoint = ?addr, lane, "Shadow Worker pre-warmed HTTP/3 connection");
                     }
                     Err(e) => {
-                        tracing::debug!(endpoint = %addr, lane, error = %e, "Shadow Worker pre-warm connect failed for HTTP/3");
+                        tracing::debug!(endpoint = ?addr, lane, error = %e, "Shadow Worker pre-warm connect failed for HTTP/3");
                     }
                 }
             }
@@ -298,7 +315,7 @@ impl Http3Upstream {
         let idle_timeout = self.inner.timeouts().idle;
 
         for ep in all_eps {
-            let addr = ep.address;
+            let addr = (ep.ip, ep.port_be);
             let leased = self.pool.acquire_stream(&addr, idle_timeout);
 
             let success = if let Some(lease) = leased {
@@ -313,7 +330,13 @@ impl Http3Upstream {
                 let quic_tls = Arc::clone(&self.quic_config);
                 match tokio::time::timeout(
                     timeout,
-                    velda_http3::client::connect(addr, &sni, &self.config, (*quic_tls).clone()),
+                    velda_http3::client::connect(
+                        addr.0,
+                        addr.1,
+                        &sni,
+                        &self.config,
+                        (*quic_tls).clone(),
+                    ),
                 )
                 .await
                 {

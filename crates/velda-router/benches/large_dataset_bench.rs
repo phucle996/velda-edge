@@ -15,7 +15,7 @@ use std::sync::Arc;
 use std::time::Instant;
 
 use common::{CountingAllocator, format_duration};
-use velda_core::{RouteId, TransportProtocol, UpstreamId};
+use velda_core::TransportProtocol;
 use velda_router::{
     GrpcRoute, GrpcRouteRequest, Http1Route, Http1RouteRequest, Router, RouterBuilder, TcpRoute,
     UdpRoute,
@@ -183,12 +183,12 @@ fn compile_to_runtime_router(
     let mut builder = RouterBuilder::new();
 
     for (idx, route) in routes.iter().enumerate() {
-        let route_id = RouteId::new(idx as u16);
+        let route_id = idx as u16;
         let up_idx = upstreams
             .iter()
             .position(|u| u.id == route.upstream)
             .unwrap_or(0);
-        let upstream_id = UpstreamId::new(up_idx as u16);
+        let upstream_id = up_idx as u16;
 
         if route.kind.eq_ignore_ascii_case("l4") {
             let proto = match route.match_rule.protocol.as_deref().unwrap_or("tcp") {
@@ -207,11 +207,19 @@ fn compile_to_runtime_router(
 
             match proto {
                 TransportProtocol::Tcp => {
-                    let tcp = TcpRoute::new(route_id, &route.listener, upstream_id);
+                    let tcp = TcpRoute::new(
+                        route_id,
+                        velda_core::fnv1a_hash_32(&route.listener),
+                        upstream_id,
+                    );
                     builder = builder.add_tcp_route(tcp);
                 }
                 TransportProtocol::Udp => {
-                    let udp = UdpRoute::new(route_id, &route.listener, upstream_id);
+                    let udp = UdpRoute::new(
+                        route_id,
+                        velda_core::fnv1a_hash_32(&route.listener),
+                        upstream_id,
+                    );
                     builder = builder.add_udp_route(udp);
                 }
             }
@@ -232,7 +240,11 @@ fn compile_to_runtime_router(
                     .unwrap_or("*");
                 let service = raw_service.strip_prefix('/').unwrap_or(raw_service);
 
-                let mut grpc_route = GrpcRoute::new(route_id, &route.listener, service);
+                let mut grpc_route = GrpcRoute::new(
+                    route_id,
+                    velda_core::fnv1a_hash_32(&route.listener),
+                    service,
+                );
 
                 if let Some(ref host) = route.match_rule.host {
                     grpc_route = grpc_route.with_authority(host.clone());
@@ -241,11 +253,19 @@ fn compile_to_runtime_router(
                 builder = builder.add_grpc_route(grpc_route);
             } else {
                 let mut http_route = if let Some(ref exact) = route.match_rule.path {
-                    Http1Route::new_exact(route_id, &route.listener, exact.clone())
+                    Http1Route::new_exact(
+                        route_id,
+                        velda_core::fnv1a_hash_32(&route.listener),
+                        exact.clone(),
+                    )
                 } else if let Some(ref prefix) = route.match_rule.path_prefix {
-                    Http1Route::new(route_id, &route.listener, prefix.clone())
+                    Http1Route::new(
+                        route_id,
+                        velda_core::fnv1a_hash_32(&route.listener),
+                        prefix.clone(),
+                    )
                 } else {
-                    Http1Route::new(route_id, &route.listener, "/")
+                    Http1Route::new(route_id, velda_core::fnv1a_hash_32(&route.listener), "/")
                 };
 
                 if let Some(ref host) = route.match_rule.host {
@@ -363,7 +383,7 @@ fn bench_pipeline_scale(scale_routes: usize, scale_upstreams: usize) {
     ALLOCATOR.reset();
     let start = Instant::now();
     for _ in 0..iters {
-        let r = router.route_http1("https-in", &req_prefix);
+        let r = router.route_http1(velda_core::fnv1a_hash_32("https-in"), &req_prefix);
         let _ = std::hint::black_box(r);
     }
     let elapsed = start.elapsed();
@@ -386,7 +406,7 @@ fn bench_pipeline_scale(scale_routes: usize, scale_upstreams: usize) {
     ALLOCATOR.reset();
     let start = Instant::now();
     for _ in 0..iters {
-        let r = router.route_http1("https-in", &req_exact);
+        let r = router.route_http1(velda_core::fnv1a_hash_32("https-in"), &req_exact);
         let _ = std::hint::black_box(r);
     }
     let elapsed = start.elapsed();
@@ -408,7 +428,7 @@ fn bench_pipeline_scale(scale_routes: usize, scale_upstreams: usize) {
     ALLOCATOR.reset();
     let start = Instant::now();
     for _ in 0..iters {
-        let r = router.route_http1("https-in", &req_miss);
+        let r = router.route_http1(velda_core::fnv1a_hash_32("https-in"), &req_miss);
         let _ = std::hint::black_box(r);
     }
     let elapsed = start.elapsed();
@@ -431,7 +451,7 @@ fn bench_pipeline_scale(scale_routes: usize, scale_upstreams: usize) {
     ALLOCATOR.reset();
     let start = Instant::now();
     for _ in 0..iters {
-        let r = router.route_grpc("https-in", &req_grpc);
+        let r = router.route_grpc(velda_core::fnv1a_hash_32("https-in"), &req_grpc);
         let _ = std::hint::black_box(r);
     }
     let elapsed = start.elapsed();
@@ -450,7 +470,9 @@ fn bench_pipeline_scale(scale_routes: usize, scale_upstreams: usize) {
     ALLOCATOR.reset();
     let start = Instant::now();
     for _ in 0..iters {
-        let r = router.route_udp("l4-in-9").unwrap();
+        let r = router
+            .route_udp(velda_core::fnv1a_hash_32("l4-in-9"))
+            .unwrap();
         let target = r.id;
         let _ = std::hint::black_box(target);
     }
@@ -485,21 +507,21 @@ fn bench_pipeline_scale(scale_routes: usize, scale_upstreams: usize) {
                 match (i + w) % 4 {
                     0 => {
                         let req = Http1RouteRequest::new(&p_path);
-                        let route = r.route_http1("https-in", &req);
+                        let route = r.route_http1(velda_core::fnv1a_hash_32("https-in"), &req);
                         let _ = std::hint::black_box(route);
                     }
                     1 => {
                         let req = Http1RouteRequest::new(&e_path).with_host("api.example.com");
-                        let route = r.route_http1("https-in", &req);
+                        let route = r.route_http1(velda_core::fnv1a_hash_32("https-in"), &req);
                         let _ = std::hint::black_box(route);
                     }
                     2 => {
                         let req = GrpcRouteRequest::new(&g_srv, None);
-                        let route = r.route_grpc("https-in", &req);
+                        let route = r.route_grpc(velda_core::fnv1a_hash_32("https-in"), &req);
                         let _ = std::hint::black_box(route);
                     }
                     _ => {
-                        if let Some(route) = r.route_udp("l4-in-9") {
+                        if let Some(route) = r.route_udp(velda_core::fnv1a_hash_32("l4-in-9")) {
                             let ep = route.id;
                             let _ = std::hint::black_box(ep);
                         }

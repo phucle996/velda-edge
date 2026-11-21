@@ -1,7 +1,17 @@
-//! Layer 7 HTTP request model.
+//! Layer 7 HTTP Request & Zero-Copy Body Model (`velda_core::l7::request`).
 //!
-//! This module contains HTTP semantics used by routing, plugins,
-//! authentication, WAF, rate limiting, and upstream processing.
+//! ```text
+//! ┌─────────────────────────────────────────────────────────────────────────────────────────┐
+//! │                        L7Request & ZERO-COPY BODY STORAGE                               │
+//! ├─────────────────────────────────────────────────────────────────────────────────────────┤
+//! │  L7Request { method: Method, uri: Uri, version: Version, headers: HeaderWorkspace, body}│
+//! │                                                                                         │
+//! │  Body Variants:                                                                         │
+//! │    ├── Empty                           (0B payload)                                     │
+//! │    ├── Slab { lease, len }             (Pre-warmed PayloadSlabPool, auto-recycled)      │
+//! │    └── Bytes(Bytes)                    (Ref-counted zero-copy slice)                    │
+//! └─────────────────────────────────────────────────────────────────────────────────────────┘
+//! ```
 
 use std::sync::Arc;
 

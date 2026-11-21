@@ -83,7 +83,7 @@ pub struct Runtime {
     /// Pre-compiled upstream table holding protocol-isolated tables (tcp, udp, http1, http2, http3, grpc).
     pub upstreams: UpstreamTable,
     /// Direct O(1) integer mapping from dense route index to dense upstream index.
-    pub route_to_upstream: Box<[velda_core::UpstreamId]>,
+    pub route_to_upstream: Box<[u16]>,
     /// Pre-compiled downstream TLS server engine for O(1) hot-path handshake execution.
     pub tls_server: Option<TlsServerEngine>,
     /// Pre-compiled upstream TLS client engine for O(1) hot-path backend handshake execution.

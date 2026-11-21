@@ -1,6 +1,5 @@
 //! Layer 7 gRPC over RDMA Upstream managing connection multiplexing and hardware pooling.
 
-use std::net::SocketAddr;
 use std::sync::Arc;
 
 use velda_connection_pool::MultiplexedPool;
@@ -25,7 +24,7 @@ pub struct GrpcRdmaUpstream {
     /// Pre-computed wire forwarding strategy.
     pub strategy: GrpcPipeStrategy,
     /// Persistent multiplexed client connection pool.
-    pool: Arc<MultiplexedPool<SocketAddr, GrpcTcpClientResource>>,
+    pool: Arc<MultiplexedPool<(u128, u16), GrpcTcpClientResource>>,
     /// Maximum concurrent streams per multiplexed connection.
     pub max_concurrent_streams: u32,
 }
@@ -69,7 +68,7 @@ impl GrpcRdmaUpstream {
 
     /// Returns the number of multiplexed connections currently cached in a specific core lane.
     #[inline(always)]
-    pub fn connection_count_for_lane(&self, endpoint: &SocketAddr, lane: usize) -> usize {
+    pub fn connection_count_for_lane(&self, endpoint: &(u128, u16), lane: usize) -> usize {
         self.pool.connection_count_for_lane(endpoint, lane)
     }
 
@@ -99,9 +98,10 @@ impl GrpcRdmaUpstream {
                         }
 
                         // Connect RDMA kernel-bypass stream
-                        let stream = RdmaConnector::connect_stream(endpoint, &rdma_config)
-                            .await
-                            .map_err(|e| e.to_string())?;
+                        let stream =
+                            RdmaConnector::connect_stream(endpoint.0, endpoint.1, &rdma_config)
+                                .await
+                                .map_err(|e| e.to_string())?;
 
                         // Run gRPC HTTP/2 framing handshake over RDMA stream
                         let mut fresh = GrpcUpstreamConnector::handshake_stream(
@@ -111,7 +111,7 @@ impl GrpcRdmaUpstream {
                         )
                         .await
                         .map_err(|e| e.to_string())?
-                        .with_target(endpoint);
+                        .with_target(endpoint.0, endpoint.1);
 
                         fresh.ready().await.map_err(|err| {
                             format!("Reconnected gRPC RDMA client not ready: {err}")
@@ -148,9 +148,10 @@ impl GrpcRdmaUpstream {
             .execute(move |endpoint| {
                 let rdma_config = rdma_config.clone();
                 async move {
-                    let stream = RdmaConnector::connect_stream(endpoint, &rdma_config)
-                        .await
-                        .map_err(|e| e.to_string())?;
+                    let stream =
+                        RdmaConnector::connect_stream(endpoint.0, endpoint.1, &rdma_config)
+                            .await
+                            .map_err(|e| e.to_string())?;
 
                     let mut fresh = GrpcUpstreamConnector::handshake_stream(
                         stream,
@@ -159,7 +160,7 @@ impl GrpcRdmaUpstream {
                     )
                     .await
                     .map_err(|e| e.to_string())?
-                    .with_target(endpoint);
+                    .with_target(endpoint.0, endpoint.1);
 
                     fresh
                         .ready()
@@ -182,12 +183,13 @@ impl GrpcRdmaUpstream {
             let connect_timeout = self.inner.timeouts().connect;
             let max_streams = self.max_concurrent_streams;
 
-            if let Ok(stream) = RdmaConnector::connect_stream(endpoint, &rdma_config).await
+            if let Ok(stream) =
+                RdmaConnector::connect_stream(endpoint.0, endpoint.1, &rdma_config).await
                 && let Ok(connector) =
                     GrpcUpstreamConnector::handshake_stream(stream, config, Some(connect_timeout))
                         .await
             {
-                let mut connector = connector.with_target(endpoint);
+                let mut connector = connector.with_target(endpoint.0, endpoint.1);
                 if connector.ready().await.is_ok() {
                     self.pool.register_warmed_to_lane(
                         endpoint,

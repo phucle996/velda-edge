@@ -4,7 +4,7 @@
 //! ┌────────────────────────────────────────────────────────────────────────────────────────┐
 //! │                              FORMATTING PIPELINE ARCHITECTURE                          │
 //! │                                                                                        │
-//! │  batches: &[Arc<[AccessLogRecord]>]                                                    │
+//! │  batches: &[Arc<[TelemetryRecord]>]                                                    │
 //! │        │                                                                               │
 //! │        ├─► Total Records Count Scan (O(batches)) ──► Pre-reserve out buffer capacity   │
 //! │        │                                                                               │
@@ -26,7 +26,7 @@
 pub mod json;
 pub mod text;
 
-use velda_observability::LogBatch;
+use velda_observability::TelemetryBatch;
 
 pub use json::format_ndjson_records;
 pub use text::{format_clf_records, format_text_records};
@@ -76,9 +76,13 @@ pub fn fast_write_iso8601_utc(buf: &mut Vec<u8>, ts: u32) {
     buf.extend_from_slice(&out);
 }
 
-/// Formats reference-counted 64-byte [`AccessLogRecord`] batches directly into bytes
+/// Formats reference-counted 64-byte [`TelemetryRecord`] batches directly into bytes
 /// by splicing static frame chunks and LUT-converted integers (zero runtime format parsing).
-pub fn format_std_log_payload(batches: &[LogBatch], format: &str, out: &mut Vec<u8>) -> usize {
+pub fn format_std_log_payload(
+    batches: &[TelemetryBatch],
+    format: &str,
+    out: &mut Vec<u8>,
+) -> usize {
     out.clear();
     let total_recs: usize = batches.iter().map(|b| b.len()).sum();
     if total_recs == 0 {
@@ -101,11 +105,11 @@ mod tests {
     use super::*;
     use std::sync::Arc;
     use velda_core::{CompletionReason, GrpcStatus, HttpMethod, PipeKind};
-    use velda_observability::AccessLogRecord;
+    use velda_observability::TelemetryRecord;
 
     #[test]
     fn test_format_std_log_payload_all_modes() {
-        let mut http_rec = AccessLogRecord::zeroed();
+        let mut http_rec = TelemetryRecord::zeroed();
         http_rec.request_id = 0x1234_5678;
         http_rec.ingress_time_nanos = 1_710_000_000_000_000_000;
         http_rec.duration_ns = 250;
@@ -126,8 +130,8 @@ mod tests {
         http_rec.ua_os = os;
         http_rec.ua_major_version = ver;
 
-        let batch: Arc<[AccessLogRecord]> = Arc::from(vec![http_rec]);
-        let batches = vec![LogBatch::from_arc(batch)];
+        let batch: Arc<[TelemetryRecord]> = Arc::from(vec![http_rec]);
+        let batches = vec![TelemetryBatch::from_arc(batch)];
 
         // 1. Text Format
         let mut text_out = Vec::new();

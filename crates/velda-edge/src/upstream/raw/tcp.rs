@@ -6,18 +6,15 @@
 
 use tokio::net::TcpStream;
 
-use super::tcp_connector::{TcpAccelerationPath, connect_tcp_stream};
+use super::tcp_connector::connect_tcp_stream;
 use crate::error::EdgeError;
 use crate::upstream::lb::EdgeUpstream;
 
 /// Layer 4 TCP Upstream managing connection acquisition and stream forwarding.
-///
-/// Pre-compiled with static load balancer, physical discovery endpoints, and pre-computed socket acceleration.
 pub struct TcpUpstream {
     /// [PRE-COMPILED]: Pre-assembled upstream core holding discovery, health tracker,
     /// timeouts, and the selected `LbAlgorithm` enum variant.
     inner: EdgeUpstream,
-    acceleration: TcpAccelerationPath,
     last_probe_sec: std::sync::atomic::AtomicU64,
 }
 
@@ -25,17 +22,15 @@ impl std::fmt::Debug for TcpUpstream {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("TcpUpstream")
             .field("id", &self.inner.id())
-            .field("acceleration", &self.acceleration)
             .finish()
     }
 }
 
 impl TcpUpstream {
     /// Creates a new [`TcpUpstream`] instance.
-    pub fn new(inner: EdgeUpstream, acceleration: TcpAccelerationPath) -> Self {
+    pub fn new(inner: EdgeUpstream) -> Self {
         Self {
             inner,
-            acceleration,
             last_probe_sec: std::sync::atomic::AtomicU64::new(0),
         }
     }
@@ -59,13 +54,12 @@ impl TcpUpstream {
         Fut: std::future::Future<Output = Result<T, E>>,
         E: std::fmt::Display,
     {
-        let socket_accel = self.acceleration;
         let connect_timeout = self.inner.timeouts().connect;
 
         let stream = self
             .inner
-            .execute(|endpoint| async move {
-                connect_tcp_stream(endpoint, &socket_accel, connect_timeout)
+            .execute(|(target_ip, target_port_be)| async move {
+                connect_tcp_stream(target_ip, target_port_be, connect_timeout)
                     .await
                     .map_err(|e| e.to_string())
             })
@@ -104,17 +98,16 @@ impl TcpUpstream {
 
         let timeout = active_cfg.timeout;
         for ep in all_eps {
-            let addr = ep.address;
-            let success =
-                match tokio::time::timeout(timeout, tokio::net::TcpStream::connect(addr)).await {
-                    Ok(Ok(stream)) => {
-                        let _ = stream
-                            .into_std()
-                            .and_then(|s| s.shutdown(std::net::Shutdown::Both));
-                        true
-                    }
-                    _ => false,
-                };
+            let addr = (ep.ip, ep.port_be);
+            let success = match velda_sock::connect_tcp_endpoint(ep, timeout).await {
+                Ok(stream) => {
+                    let _ = stream
+                        .into_std()
+                        .and_then(|s| s.shutdown(std::net::Shutdown::Both));
+                    true
+                }
+                Err(_) => false,
+            };
             health.record_active_result(&addr, success);
         }
     }

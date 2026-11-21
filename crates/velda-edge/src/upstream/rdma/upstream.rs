@@ -2,7 +2,6 @@
 //!
 //! Owns connection lifecycle, endpoint topology, and core lane pre-warming ("WHEN & WHO").
 
-use std::net::SocketAddr;
 use std::sync::Arc;
 use std::sync::atomic::AtomicBool;
 use std::time::Instant;
@@ -24,7 +23,7 @@ pub struct RdmaUpstream {
     /// RDMA hardware and transport configuration.
     pub config: RdmaConfig,
     /// Core-lane sharded connection pool.
-    pub pool: Arc<PoolManager<SocketAddr, RdmaClientResource>>,
+    pub pool: Arc<PoolManager<(u128, u16), RdmaClientResource>>,
     /// Pre-registered zero-copy slab memory arena.
     pub arena: Arc<RdmaSlabArena>,
 }
@@ -115,9 +114,10 @@ impl RdmaUpstream {
 
                     // Share the Protection Domain from RdmaSlabArena so zero-copy slab sends
                     // and QP share identical memory protection credentials (eliminating IBV_WC_LOC_PROT_ERR).
-                    let fresh_channel = RdmaConnector::connect_with_pd(endpoint, &config, arena_pd)
-                        .await
-                        .map_err(|e| e.to_string())?;
+                    let fresh_channel =
+                        RdmaConnector::connect_with_pd(endpoint.0, endpoint.1, &config, arena_pd)
+                            .await
+                            .map_err(|e| e.to_string())?;
 
                     Ok::<_, String>((fresh_channel, endpoint, Instant::now(), false))
                 }
@@ -137,7 +137,7 @@ impl RdmaUpstream {
 
     /// Returns the number of idle RDMA connections currently cached in a specific core lane.
     #[inline(always)]
-    pub fn idle_conns_for_lane(&self, endpoint: &SocketAddr, lane: usize) -> usize {
+    pub fn idle_conns_for_lane(&self, endpoint: &(u128, u16), lane: usize) -> usize {
         self.pool.idle_conns_for_lane(endpoint, lane)
     }
 
@@ -152,9 +152,10 @@ impl RdmaUpstream {
                 let config = config.clone();
                 let arena_pd = arena_pd.clone();
                 async move {
-                    let fresh = RdmaConnector::connect_with_pd(endpoint, &config, arena_pd)
-                        .await
-                        .map_err(|e| e.to_string())?;
+                    let fresh =
+                        RdmaConnector::connect_with_pd(endpoint.0, endpoint.1, &config, arena_pd)
+                            .await
+                            .map_err(|e| e.to_string())?;
 
                     Ok::<_, String>((fresh, endpoint))
                 }
@@ -179,8 +180,13 @@ impl RdmaUpstream {
             let config = self.config.clone();
             let arena_pd = self.arena.pd();
             for _ in 0..count {
-                if let Ok(channel) =
-                    RdmaConnector::connect_with_pd(endpoint, &config, arena_pd.clone()).await
+                if let Ok(channel) = RdmaConnector::connect_with_pd(
+                    endpoint.0,
+                    endpoint.1,
+                    &config,
+                    arena_pd.clone(),
+                )
+                .await
                 {
                     self.pool.release_to_lane(
                         &endpoint,

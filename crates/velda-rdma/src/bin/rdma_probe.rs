@@ -103,6 +103,13 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     let mode = &args[1];
     let addr: SocketAddr = args[2].parse()?;
+    let (ip, port_be) = match addr {
+        SocketAddr::V4(v4) => (
+            velda_core::lut::ip::v4_to_u128(v4.ip().to_bits()),
+            v4.port().to_be(),
+        ),
+        SocketAddr::V6(v6) => (v6.ip().to_bits(), v6.port().to_be()),
+    };
 
     match mode.as_str() {
         "server" => {
@@ -129,13 +136,15 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 config.device_name
             );
 
-            let listener = RdmaListener::bind(addr, config.clone()).await?;
+            let listener = RdmaListener::bind(ip, port_be, config.clone()).await?;
             println!(
-                ">>> RDMA Listener bound on {}. Awaiting client connection...",
+                ">>> RDMA Listener bound on {:?}. Awaiting client connection...",
                 listener.local_addr()?
             );
-            let (channel, peer) = listener.accept().await?;
-            println!(">>> [Channel 1] Established physical RDMA channel with peer: {peer}");
+            let (channel, peer_ip, peer_port_be) = listener.accept().await?;
+            println!(
+                ">>> [Channel 1] Established physical RDMA channel with peer: {peer_ip:#x} port_be={peer_port_be}"
+            );
 
             let (sender, receiver) = channel.split();
 
@@ -212,8 +221,10 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             println!(
                 ">>> [Server Phase 3] Awaiting Channel 2 for full-duplex sustained stream test..."
             );
-            let (channel2, peer2) = listener.accept().await?;
-            println!(">>> [Channel 2] Established physical RDMA channel with peer: {peer2}");
+            let (channel2, peer2_ip, peer2_port_be) = listener.accept().await?;
+            println!(
+                ">>> [Channel 2] Established physical RDMA channel with peer: {peer2_ip:#x} port_be={peer2_port_be}"
+            );
 
             let (mut stream_reader, mut stream_writer) = channel2.into_stream().into_split();
 
@@ -285,7 +296,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             );
 
             let start_conn = Instant::now();
-            let channel = RdmaConnector::connect(addr, &config).await?;
+            let channel = RdmaConnector::connect(ip, port_be, &config).await?;
             println!(
                 ">>> [Channel 1] Connected in {:.2} ms",
                 start_conn.elapsed().as_secs_f64() * 1000.0
@@ -382,7 +393,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 ">>> [Client Phase 3] Connecting Channel 2 for full-duplex sustained stream test..."
             );
             let start_conn2 = Instant::now();
-            let channel2 = RdmaConnector::connect(addr, &config).await?;
+            let channel2 = RdmaConnector::connect(ip, port_be, &config).await?;
             println!(
                 ">>> [Channel 2] Connected in {:.2} ms",
                 start_conn2.elapsed().as_secs_f64() * 1000.0

@@ -1,7 +1,7 @@
 //! OpenTelemetry Log Shipper Background Plugin (`otlp_log_shipper`).
 //!
-//! Subscribes to reference-counted 64-byte [`velda_observability::AccessLogRecord`] batches from
-//! [`velda_observability::LogStore`] across all protocols and ships them to OpenTelemetry Collectors
+//! Subscribes to reference-counted 64-byte [`velda_observability::TelemetryRecord`] batches from
+//! [`velda_observability::TelemetryStore`] across all protocols and ships them to OpenTelemetry Collectors
 //! over persistent HTTP/1.1 Keep-Alive or HTTP/2 gRPC connections.
 //!
 //! # Architecture Subsystems

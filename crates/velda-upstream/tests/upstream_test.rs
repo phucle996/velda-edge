@@ -1,6 +1,5 @@
 //! Integration tests for Upstream traffic, lifecycle, discovery, and health failover.
 
-use std::net::SocketAddr;
 use std::time::Duration;
 
 use velda_core::Endpoint;
@@ -10,14 +9,23 @@ use velda_upstream::{Upstream, UpstreamTimeouts};
 
 #[tokio::test]
 async fn test_upstream_explicit_discovery_and_round_robin() {
-    let ep1: SocketAddr = "10.0.0.1:8080".parse().unwrap();
-    let ep2: SocketAddr = "10.0.0.2:8080".parse().unwrap();
-    let ep3: SocketAddr = "10.0.0.3:8080".parse().unwrap();
+    let ep1 = (
+        velda_core::lut::ip::v4_to_u128(0x0A00_0001),
+        8080u16.to_be(),
+    );
+    let ep2 = (
+        velda_core::lut::ip::v4_to_u128(0x0A00_0002),
+        8080u16.to_be(),
+    );
+    let ep3 = (
+        velda_core::lut::ip::v4_to_u128(0x0A00_0003),
+        8080u16.to_be(),
+    );
 
     let endpoints = vec![
-        Endpoint::new("e1", ep1, 1),
-        Endpoint::new("e2", ep2, 1),
-        Endpoint::new("e3", ep3, 1),
+        Endpoint::from_v4([10, 0, 0, 1], 8080, 1),
+        Endpoint::from_v4([10, 0, 0, 2], 8080, 1),
+        Endpoint::from_v4([10, 0, 0, 3], 8080, 1),
     ];
 
     let discovery = Discovery::new_explicit(endpoints);
@@ -42,12 +50,18 @@ async fn test_upstream_explicit_discovery_and_round_robin() {
 
 #[tokio::test]
 async fn test_upstream_passive_health_and_failover() {
-    let ep1: SocketAddr = "10.0.0.1:8080".parse().unwrap();
-    let ep2: SocketAddr = "10.0.0.2:8080".parse().unwrap();
+    let ep1 = (
+        velda_core::lut::ip::v4_to_u128(0x0A00_0001),
+        8080u16.to_be(),
+    );
+    let ep2 = (
+        velda_core::lut::ip::v4_to_u128(0x0A00_0002),
+        8080u16.to_be(),
+    );
 
     let discovery = Discovery::new_explicit(vec![
-        Endpoint::new("e1", ep1, 1),
-        Endpoint::new("e2", ep2, 1),
+        Endpoint::from_v4([10, 0, 0, 1], 8080, 1),
+        Endpoint::from_v4([10, 0, 0, 2], 8080, 1),
     ]);
 
     let timeouts = UpstreamTimeouts::tcp(Duration::from_millis(500), Duration::from_secs(30));
@@ -82,11 +96,13 @@ async fn test_upstream_passive_health_and_failover() {
 
 #[tokio::test]
 async fn test_upstream_prune_retired_endpoints() {
-    let ep1: SocketAddr = "127.0.0.1:8080".parse().unwrap();
-    let ep2: SocketAddr = "127.0.0.1:8081".parse().unwrap();
+    let ep2 = (
+        velda_core::lut::ip::v4_to_u128(0x7F00_0001),
+        8081u16.to_be(),
+    );
     let discovery = Discovery::new_explicit(vec![
-        Endpoint::new("e1", ep1, 1),
-        Endpoint::new("e2", ep2, 1),
+        Endpoint::from_v4([127, 0, 0, 1], 8080, 1),
+        Endpoint::from_v4([127, 0, 0, 1], 8081, 1),
     ]);
 
     let timeouts = UpstreamTimeouts::tcp(Duration::from_millis(500), Duration::from_secs(30));
@@ -105,7 +121,7 @@ async fn test_upstream_prune_retired_endpoints() {
     assert!(upstream.health().has_record(&ep2));
 
     // Update discovery removing ep2
-    discovery.update_endpoints(vec![Endpoint::new("e1", ep1, 1)], 2);
+    discovery.update_endpoints(vec![Endpoint::from_v4([127, 0, 0, 1], 8080, 1)], 2);
     upstream.prune_retired_endpoints();
     assert!(!upstream.health().has_record(&ep2));
 }

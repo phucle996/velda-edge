@@ -57,10 +57,10 @@ impl LoadBalancer for PowerOfTwoChoices {
         let ep2 = &endpoints[r2];
 
         let load1 = metrics_map
-            .get(&ep1.address)
+            .get(&(ep1.ip, ep1.port_be))
             .map_or(0, |m| m.total_load() as u64);
         let load2 = metrics_map
-            .get(&ep2.address)
+            .get(&(ep2.ip, ep2.port_be))
             .map_or(0, |m| m.total_load() as u64);
 
         let w1 = ep1.weight.max(1) as u64;
@@ -79,14 +79,13 @@ mod tests {
     use super::*;
     use crate::metrics::EndpointMetrics;
     use std::collections::HashMap;
-    use std::net::SocketAddr;
 
     #[test]
     fn test_p2c_selection_prefers_lower_load() {
-        let ep1: SocketAddr = "10.0.0.1:8080".parse().unwrap();
-        let ep2: SocketAddr = "10.0.0.2:8080".parse().unwrap();
+        let ep1 = Endpoint::from_v4([10, 0, 0, 1], 8080, 1);
+        let ep2 = Endpoint::from_v4([10, 0, 0, 2], 8080, 1);
 
-        let endpoints = vec![Endpoint::new("e1", ep1, 1), Endpoint::new("e2", ep2, 1)];
+        let endpoints = vec![ep1, ep2];
 
         let mut metrics = HashMap::new();
         let m1 = EndpointMetrics::new();
@@ -97,8 +96,8 @@ mod tests {
             m1.inc_inflight();
         }
 
-        metrics.insert(ep1, m1);
-        metrics.insert(ep2, m2);
+        metrics.insert((ep1.ip, ep1.port_be), m1);
+        metrics.insert((ep2.ip, ep2.port_be), m2);
 
         let ctx = SelectionContext::NONE.with_metrics(&metrics);
         let balancer = PowerOfTwoChoices::new();
@@ -106,7 +105,7 @@ mod tests {
         // P2C should choose the unloaded ep2
         for _ in 0..50 {
             let selected = balancer.select(&endpoints, &ctx).unwrap();
-            assert_eq!(selected.address, ep2);
+            assert_eq!((selected.ip, selected.port_be), (ep2.ip, ep2.port_be));
         }
     }
 }

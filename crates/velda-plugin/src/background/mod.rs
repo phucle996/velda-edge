@@ -20,6 +20,7 @@ pub mod acme_cert_rotator;
 pub mod clickhouse_log_shipper;
 pub mod health_probe;
 pub mod jwks_rotator;
+pub mod kafka_log_shipper;
 pub mod loki_log_shipper;
 pub mod otlp_log_shipper;
 pub mod otlp_metrics_exporter;
@@ -33,6 +34,7 @@ pub use acme_cert_rotator::{AcmeCertRotatorConfig, AcmeCertRotatorPlugin};
 pub use clickhouse_log_shipper::{ClickHouseLogShipperConfig, ClickHouseLogShipperPlugin};
 pub use health_probe::{HealthProbeConfig, HealthProbePlugin, HealthState};
 pub use jwks_rotator::{JwksRotatorConfig, JwksRotatorPlugin};
+pub use kafka_log_shipper::{KafkaLogShipperConfig, KafkaLogShipperPlugin};
 pub use loki_log_shipper::{LokiLogShipperConfig, LokiLogShipperPlugin};
 pub use otlp_log_shipper::{OtlpLogShipperConfig, OtlpLogShipperPlugin};
 pub use otlp_metrics_exporter::{OtlpMetricsExporterConfig, OtlpMetricsExporterPlugin};
@@ -167,6 +169,10 @@ pub fn instantiate(
         }
         "clickhouse_log_shipper" => {
             let shipper = ClickHouseLogShipperPlugin::from_config(config)?;
+            Ok(Arc::new(shipper))
+        }
+        "kafka_log_shipper" => {
+            let shipper = KafkaLogShipperPlugin::from_config(config)?;
             Ok(Arc::new(shipper))
         }
         "otlp_trace_exporter" => {

@@ -1,7 +1,15 @@
-//! Host Worker Thread & Concurrency Management (`worker`).
+//! Host Worker Thread & Core-Pinned Concurrency Registry (`velda_core::worker`).
 //!
-//! Provides the process-wide Single Source of Truth for all active Data Plane
-//! worker threads, core assignments, operational states, and roles.
+//! ```text
+//! ┌─────────────────────────────────────────────────────────────────────────────────────────┐
+//! │                    FRONTLINE TRAFFIC vs SHADOW LOGISTICS PER CORE                       │
+//! ├─────────────────────────────────────────────────────────────────────────────────────────┤
+//! │  Core N ──┬──► velda-worker-{N}  (WorkerRole::Traffic, SCHED_OTHER, Request Hot Path)   │
+//! │           └──► velda-shadow-{N}  (WorkerRole::Shadow,  SCHED_IDLE,  Pool/DNS/Telemetry) │
+//! │                                                                                         │
+//! │  WorkerRegistry (OnceLock<RwLock<...>>): Process-wide SSOT for core & role state        │
+//! └─────────────────────────────────────────────────────────────────────────────────────────┘
+//! ```
 
 use std::sync::{OnceLock, RwLock};
 

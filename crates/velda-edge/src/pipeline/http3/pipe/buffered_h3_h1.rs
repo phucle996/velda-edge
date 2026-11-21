@@ -27,7 +27,7 @@ pub async fn serve(
     upstream: &Arc<Http1Upstream>,
 ) -> (
     L7Response,
-    Option<std::net::SocketAddr>,
+    Option<(u128, u16)>,
     velda_core::CompletionReason,
 ) {
     // 1. Ensure mandatory Host header (RFC 9112 §7.1) for upstream HTTP/1.1

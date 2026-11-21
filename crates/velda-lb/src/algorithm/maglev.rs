@@ -89,10 +89,7 @@ impl Maglev {
     fn compute_fingerprint(endpoints: &[Endpoint]) -> u64 {
         let mut fp = 0xcbf29ce484222325u64;
         for ep in endpoints {
-            let addr_hash = match ep.address {
-                std::net::SocketAddr::V4(v4) => fnv1a_hash(&v4.ip().octets()) ^ (v4.port() as u64),
-                std::net::SocketAddr::V6(v6) => fnv1a_hash(&v6.ip().octets()) ^ (v6.port() as u64),
-            };
+            let addr_hash = fnv1a_hash(&ep.ip.to_be_bytes()) ^ (u16::from_be(ep.port_be) as u64);
             fp ^= addr_hash ^ (ep.weight as u64);
             fp = fp.wrapping_mul(0x100000001b3);
         }
@@ -111,10 +108,7 @@ impl Maglev {
         let mut skip = Vec::with_capacity(n);
 
         for ep in endpoints {
-            let h1 = match ep.address {
-                std::net::SocketAddr::V4(v4) => fnv1a_hash(&v4.ip().octets()),
-                std::net::SocketAddr::V6(v6) => fnv1a_hash(&v6.ip().octets()),
-            };
+            let h1 = fnv1a_hash(&ep.ip.to_be_bytes()) ^ (u16::from_be(ep.port_be) as u64);
             let h2 = h1.wrapping_mul(0x517cc1b727220a95).wrapping_add(1);
 
             offset.push((h1 as usize) % m);
@@ -263,38 +257,34 @@ impl LoadBalancer for Maglev {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::net::SocketAddr;
 
     #[test]
     fn test_maglev_consistency_and_stability() {
-        let ep1: SocketAddr = "10.0.0.1:8080".parse().unwrap();
-        let ep2: SocketAddr = "10.0.0.2:8080".parse().unwrap();
-        let ep3: SocketAddr = "10.0.0.3:8080".parse().unwrap();
-
         let endpoints = vec![
-            Endpoint::new("e1", ep1, 1),
-            Endpoint::new("e2", ep2, 1),
-            Endpoint::new("e3", ep3, 1),
+            Endpoint::from_v4([10, 0, 0, 1], 8080, 1),
+            Endpoint::from_v4([10, 0, 0, 2], 8080, 1),
+            Endpoint::from_v4([10, 0, 0, 3], 8080, 1),
         ];
 
         let balancer = Maglev::new(257); // Small prime for fast test
         let key = 123456789u64;
         let ctx = SelectionContext::with_hash(key);
 
-        let initial_choice = balancer.select(&endpoints, &ctx).unwrap().address;
+        let initial_choice = *balancer.select(&endpoints, &ctx).unwrap();
 
         // Repeat 1,000 times: must return identical target
         for _ in 0..1_000 {
-            let choice = balancer.select(&endpoints, &ctx).unwrap().address;
+            let choice = *balancer.select(&endpoints, &ctx).unwrap();
             assert_eq!(choice, initial_choice);
         }
     }
 
     #[test]
     fn test_table_size_auto_prime() {
-        let ep1: SocketAddr = "10.0.0.1:8080".parse().unwrap();
-        let ep2: SocketAddr = "10.0.0.2:8080".parse().unwrap();
-        let endpoints = vec![Endpoint::new("e1", ep1, 1), Endpoint::new("e2", ep2, 1)];
+        let endpoints = vec![
+            Endpoint::from_v4([10, 0, 0, 1], 8080, 1),
+            Endpoint::from_v4([10, 0, 0, 2], 8080, 1),
+        ];
 
         // 100 is composite; must auto-upgrade to 101 without infinite looping or hanging
         let balancer = Maglev::new(100);

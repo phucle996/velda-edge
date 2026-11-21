@@ -1,4 +1,17 @@
-//! Directional streaming configuration for L7 application protocols.
+//! Directional Streaming Configuration for L7 Protocols (`velda_core::streaming`).
+//!
+//! ```text
+//! ┌─────────────────────────────────────────────────────────────────────────────────────────┐
+//! │                        DIRECTIONAL STREAMING MODE MATRIX (2x BOOL)                      │
+//! ├────────────────────────┬────────┬────────┬──────────────────────────────────────────────┤
+//! │ StreamingMode          │ client │ server │ Pipeline Execution Strategy                  │
+//! ├────────────────────────┼────────┼────────┼──────────────────────────────────────────────┤
+//! │ DISABLED  ("disable")  │ false  │ false  │ Buffer request + response (REST / full WAF)  │
+//! │ SERVER    (["server"]) │ false  │ true   │ Buffer request, stream response (SSE / LLM)  │
+//! │ CLIENT    (["client"]) │ true   │ false  │ Stream request, buffer response (uploads)    │
+//! │ DUPLEX    (both)       │ true   │ true   │ Concurrent bidirectional streaming           │
+//! └────────────────────────┴────────┴────────┴──────────────────────────────────────────────┘
+//! ```
 
 use serde::{Deserialize, Deserializer, Serialize, Serializer};
 

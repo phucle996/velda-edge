@@ -12,8 +12,8 @@ pub mod strategy;
 pub use strategy::GrpcPipeStrategy;
 
 pub use client::{
-    GrpcAccelerationPath, GrpcClientRequest, GrpcClientRequestHead, GrpcClientResponse,
-    GrpcClientResponseHead, GrpcUpstreamConnector,
+    GrpcClientRequest, GrpcClientRequestHead, GrpcClientResponse, GrpcClientResponseHead,
+    GrpcUpstreamConnector,
 };
 pub use server::{
     GrpcResponder, GrpcServerConnection, GrpcServerRequest, GrpcServerRequestHead,

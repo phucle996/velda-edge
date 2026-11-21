@@ -194,13 +194,14 @@ pub async fn serve(
     route: &UdpRoute,
     config: &L4UdpConfig,
 ) {
-    let client_addr = key.client_addr;
+    let client_ip = key.client_ip;
+    let client_port_be = key.client_port_be;
+    let client_addr = velda_sock::raw_to_socket_addr(client_ip, client_port_be);
     let token = key.token;
     let is_unidirectional = route.is_unidirectional();
     let udp_idle_timeout = route.udp_idle_timeout;
     let route_id = route.id;
     let upstream_id = route.upstream_id;
-    let client_ip = velda_core::lut::ip::encode_ip_u128(client_addr.ip());
     // Step 1: Resolve physical backend target endpoint using load balancer context.
     // Uses token hash affinity if available; falls back to client IP affinity.
     let selection_ctx = match token {
@@ -224,36 +225,45 @@ pub async fn serve(
     if is_unidirectional {
         tracing::debug!(
             listener = %key.listener_id,
-            target = %target_addr,
+            target_ip = format_args!("{:#x}", target_addr.0), target_port = u16::from_be(target_addr.1),
             peer = %client_addr,
             "Forwarding UDP datagram unidirectionally"
         );
         let ingress_nanos = velda_core::clock::now_unix_nanos();
         let (request_id, _) = velda_core::request_id::next_request_id(ingress_nanos);
-        let completion = match downstream_socket.send_to(&initial_bytes, target_addr).await {
+        let (target_ip, target_port_be) = target_addr;
+        let completion = match downstream_socket
+            .send_to(&initial_bytes, target_ip, target_port_be)
+            .await
+        {
             Ok(_) => velda_core::CompletionReason::Complete,
             Err(e) => {
                 tracing::trace!(
                     error = %e,
                     listener = %key.listener_id,
-                    target = %target_addr,
+                    target_ip = format_args!("{:#x}", target_addr.0), target_port = u16::from_be(target_addr.1),
                     peer = %client_addr,
                     "Failed to forward UDP datagram (unidirectional)"
                 );
                 velda_core::CompletionReason::UpstreamError
             }
         };
-        velda_observability::global_log_store().emit(&velda_observability::AccessLogRecord {
-            request_id: request_id.entropy(),
+        velda_observability::global_telemetry_store().emit(&velda_observability::TelemetryRecord {
+            request_id: velda_core::request_id::entropy(request_id),
             ingress_time_nanos: ingress_nanos,
             duration_ns: velda_core::clock::now_unix_nanos().saturating_sub(ingress_nanos),
             peer_ip: client_ip,
             bytes_rx: initial_bytes.len().min(u32::MAX as usize) as u32,
             bytes_tx: 0,
-            upstream_ip: velda_observability::encode_upstream_ip_u32(target_addr.ip()),
-            upstream_port: target_addr.port(),
+            upstream_ip: if velda_core::lut::ip::is_v4_u128(target_addr.0) {
+                (target_addr.0 & 0xFFFF_FFFF) as u32
+            } else {
+                0
+            },
+            upstream_port: u16::from_be(target_addr.1),
             status_code: 0,
-            route_id: route_id.0,
+            route_id,
+            upstream_id,
             ua_major_version: 0,
             rpc_msgs_or_flags: 0,
             pipe: velda_core::PipeKind::UdpUdp,
@@ -263,7 +273,7 @@ pub async fn serve(
             ua_family: velda_core::UaFamily::None,
             ua_os: velda_core::UaOs::Unknown,
             url_len: 0,
-            url_bytes: [0; 186],
+            url_bytes: [0; 184],
         });
         return;
     }
@@ -292,12 +302,12 @@ pub async fn serve(
     // Step 4: Extract shared client peer address handle to support dynamic NAT rebinding.
     let session_peer = session_table
         .get_peer(&key)
-        .unwrap_or_else(|| Arc::new(parking_lot::RwLock::new(client_addr)));
+        .unwrap_or_else(|| Arc::new(parking_lot::RwLock::new((client_ip, client_port_be))));
     let session_key = key;
 
     tracing::debug!(
         listener = %session_key.listener_id,
-        target = %target_addr,
+        target_ip = format_args!("{:#x}", target_addr.0), target_port = u16::from_be(target_addr.1),
         client = %client_addr,
         token = ?token,
         "Established new bidirectional L4 UDP session"
@@ -311,50 +321,51 @@ pub async fn serve(
     tokio::spawn(async move {
         let ingress_nanos = velda_core::clock::now_unix_nanos();
         let (request_id, _) = velda_core::request_id::next_request_id(ingress_nanos);
-        let emit_log = |peer: std::net::SocketAddr,
-                        rx: u64,
-                        tx: u64,
-                        completion: velda_core::CompletionReason| {
-            velda_observability::global_log_store().emit(&velda_observability::AccessLogRecord {
-                request_id: request_id.entropy(),
-                ingress_time_nanos: ingress_nanos,
-                duration_ns: velda_core::clock::now_unix_nanos().saturating_sub(ingress_nanos),
-                peer_ip: velda_observability::encode_ip_u128(peer.ip()),
-                bytes_rx: rx.min(u32::MAX as u64) as u32,
-                bytes_tx: tx.min(u32::MAX as u64) as u32,
-                upstream_ip: velda_observability::encode_upstream_ip_u32(target_addr.ip()),
-                upstream_port: target_addr.port(),
-                status_code: 0,
-                route_id: route_id.0,
-                ua_major_version: 0,
-                rpc_msgs_or_flags: 0,
-                pipe: velda_core::PipeKind::UdpUdp,
-                completion,
-                method: velda_core::HttpMethod::Unknown,
-                grpc_status: velda_core::GrpcStatus::NonGrpc,
-                ua_family: velda_core::UaFamily::None,
-                ua_os: velda_core::UaOs::Unknown,
-                url_len: 0,
-                url_bytes: [0; 186],
-            });
-        };
+        let emit_telemetry =
+            |peer_ip: u128, rx: u64, tx: u64, completion: velda_core::CompletionReason| {
+                velda_observability::global_telemetry_store().emit(
+                    &velda_observability::TelemetryRecord {
+                        request_id: velda_core::request_id::entropy(request_id),
+                        ingress_time_nanos: ingress_nanos,
+                        duration_ns: velda_core::clock::now_unix_nanos()
+                            .saturating_sub(ingress_nanos),
+                        peer_ip,
+                        bytes_rx: rx.min(u32::MAX as u64) as u32,
+                        bytes_tx: tx.min(u32::MAX as u64) as u32,
+                        upstream_ip: if velda_core::lut::ip::is_v4_u128(target_addr.0) {
+                            (target_addr.0 & 0xFFFF_FFFF) as u32
+                        } else {
+                            0
+                        },
+                        upstream_port: u16::from_be(target_addr.1),
+                        status_code: 0,
+                        route_id,
+                        upstream_id,
+                        ua_major_version: 0,
+                        rpc_msgs_or_flags: 0,
+                        pipe: velda_core::PipeKind::UdpUdp,
+                        completion,
+                        method: velda_core::HttpMethod::Unknown,
+                        grpc_status: velda_core::GrpcStatus::NonGrpc,
+                        ua_family: velda_core::UaFamily::None,
+                        ua_os: velda_core::UaOs::Unknown,
+                        url_len: 0,
+                        url_bytes: [0; 184],
+                    },
+                );
+            };
         // Step 5a: Open accelerated kernel UDP socket connected to upstream target.
-        let upstream_socket = match up_clone.connect_socket(target_addr) {
+        let upstream_socket = match up_clone.connect_socket(target_addr.0, target_addr.1) {
             Ok(s) => s,
             Err(e) => {
                 tracing::error!(
                     error = %e,
                     listener = %session_key.listener_id,
-                    target = %target_addr,
+                    target_ip = format_args!("{:#x}", target_addr.0), target_port = u16::from_be(target_addr.1),
                     "Failed to connect accelerated upstream UDP socket for L4 session"
                 );
                 get_udp_session_table().remove(&session_key);
-                emit_log(
-                    client_addr,
-                    0,
-                    0,
-                    velda_core::CompletionReason::UpstreamError,
-                );
+                emit_telemetry(client_ip, 0, 0, velda_core::CompletionReason::UpstreamError);
                 return;
             }
         };
@@ -366,16 +377,11 @@ pub async fn serve(
             tracing::warn!(
                 error = %e,
                 listener = %session_key.listener_id,
-                target = %target_addr,
+                target_ip = format_args!("{:#x}", target_addr.0), target_port = u16::from_be(target_addr.1),
                 "Failed to send initial UDP datagram to upstream"
             );
             get_udp_session_table().remove(&session_key);
-            emit_log(
-                client_addr,
-                0,
-                0,
-                velda_core::CompletionReason::UpstreamError,
-            );
+            emit_telemetry(client_ip, 0, 0, velda_core::CompletionReason::UpstreamError);
             return;
         }
 
@@ -424,8 +430,8 @@ pub async fn serve(
 
                     let mut drained_any = false;
                     let mut fallback_packet: Option<(bytes::Bytes, Option<u16>)> = None;
-                    let current_peer = *session_peer.read();
-
+                    let (peer_ip, peer_port_be) = *session_peer.read();
+                    let current_peer = velda_sock::raw_to_socket_addr(peer_ip, peer_port_be);
                     GRO_SCRATCH.with(|cell| {
                         let mut buf = cell.borrow_mut();
                         while let Ok(Some((n, gso_size))) = try_recv_gro(&upstream_socket, &mut buf[..]) {
@@ -434,7 +440,12 @@ pub async fn serve(
                             }
                             drained_any = true;
                             // Fast path: non-blocking GSO / batch send directly to downstream socket
-                            match downstream_socket.try_send_gso_aware(&buf[..n], gso_size, current_peer) {
+                            match downstream_socket.try_send_gso_aware(
+                                &buf[..n],
+                                gso_size,
+                                peer_ip,
+                                peer_port_be,
+                            ) {
                                 Some(Ok(_)) => {
                                     bytes_tx += n as u64;
                                 }
@@ -458,7 +469,7 @@ pub async fn serve(
                     if let Some((pkt, gso_size)) = fallback_packet {
                         let pkt_len = pkt.len() as u64;
                         if let Err(e) = downstream_socket
-                            .send_gso_aware(&pkt, gso_size, current_peer)
+                            .send_gso_aware(&pkt, gso_size, peer_ip, peer_port_be)
                             .await
                         {
                             tracing::trace!(
@@ -496,10 +507,11 @@ pub async fn serve(
                     };
 
                     if elapsed >= limit {
-                        let current_peer = *session_peer.read();
+                        let (p_ip, p_port_be) = *session_peer.read();
                         tracing::debug!(
-                            client = %current_peer,
-                            target = %target_addr,
+                            client_ip = %p_ip,
+                            client_port = u16::from_be(p_port_be),
+                            target_ip = format_args!("{:#x}", target_addr.0), target_port = u16::from_be(target_addr.1),
                             assured,
                             "UDP L4 session timeout elapsed ({limit:?}); closing session"
                         );
@@ -510,10 +522,10 @@ pub async fn serve(
         }
 
         // Step 6: Evict session key and emit exactly one session-level access log record.
-        let final_peer = *session_peer.read();
+        let (final_peer_ip, _) = *session_peer.read();
         get_udp_session_table().remove(&session_key);
-        emit_log(
-            final_peer,
+        emit_telemetry(
+            final_peer_ip,
             bytes_rx,
             bytes_tx,
             velda_core::CompletionReason::Complete,

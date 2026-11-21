@@ -148,12 +148,11 @@ impl ConnectionProfile {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::net::SocketAddr;
+    use velda_core::lut::ip::v4_to_u128;
 
     #[test]
     fn test_profile_explicit_constructors() {
-        let addr: SocketAddr = "127.0.0.1:8080".parse().unwrap();
-        let key = ConnectionKey::tcp(addr);
+        let key = ConnectionKey::tcp(v4_to_u128(0x7F00_0001), 8080u16.to_be());
         let timeout = Duration::from_secs(30);
 
         let excl = ConnectionProfile::exclusive(key.clone(), timeout);
@@ -178,16 +177,14 @@ mod tests {
     #[test]
     #[should_panic(expected = "idle_timeout must be > 0")]
     fn test_profile_rejects_zero_idle_timeout() {
-        let addr: SocketAddr = "127.0.0.1:8080".parse().unwrap();
-        let key = ConnectionKey::tcp(addr);
+        let key = ConnectionKey::tcp(v4_to_u128(0x7F00_0001), 8080u16.to_be());
         ConnectionProfile::new(key, ReuseMode::Sequential, Duration::ZERO, 1);
     }
 
     #[test]
     #[should_panic(expected = "max_concurrent_streams must be > 0")]
     fn test_profile_rejects_zero_max_streams() {
-        let addr: SocketAddr = "127.0.0.1:8080".parse().unwrap();
-        let key = ConnectionKey::tcp(addr);
+        let key = ConnectionKey::tcp(v4_to_u128(0x7F00_0001), 8080u16.to_be());
         ConnectionProfile::new(key, ReuseMode::Multiplexed, Duration::from_secs(30), 0);
     }
 

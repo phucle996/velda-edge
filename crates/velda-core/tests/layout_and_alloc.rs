@@ -4,16 +4,15 @@
 //! and operations like querying or mutating state must be strictly zero-allocation.
 
 use std::alloc::{GlobalAlloc, Layout, System};
-use std::mem::{align_of, size_of};
-use std::net::SocketAddr;
+use std::mem::size_of;
 use std::sync::atomic::{AtomicUsize, Ordering};
 
 use http::{HeaderMap, Method, Uri, Version};
-use velda_core::l4::request::{ConnectionId, TransportProtocol};
+use velda_core::l4::request::TransportProtocol;
 use velda_core::l7::request::Body;
 use velda_core::{
-    Action, ConnectionContext, ErrorKind, HookPhase, L4Action, L4Request, L7Request, Phase,
-    RequestContext, RequestId, RequestState, RouteId, UpstreamId,
+    Action, ErrorKind, HookPhase, L4Action, L4Request, L7Request, Phase, RequestContext,
+    RequestState, UNASSIGNED_UPSTREAM_ID, UNMATCHED_ROUTE_ID,
 };
 
 /// Custom counting allocator to verify zero heap allocation on the hot path.
@@ -76,18 +75,10 @@ static TEST_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
 #[test]
 fn type_sizes() {
     let _lock = TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
-    // 1. Strongly Typed IDs must have 0 overhead over raw primitives
-    assert_eq!(size_of::<RequestId>(), 16);
-    assert_eq!(align_of::<RequestId>(), 16);
-
-    assert_eq!(size_of::<ConnectionId>(), 8);
-    assert_eq!(align_of::<ConnectionId>(), 8);
-
-    assert_eq!(size_of::<RouteId>(), 2);
-    assert_eq!(align_of::<RouteId>(), 2);
-
-    assert_eq!(size_of::<UpstreamId>(), 2);
-    assert_eq!(align_of::<UpstreamId>(), 2);
+    // 1. Primitive IDs sizes
+    assert_eq!(size_of::<u128>(), 16);
+    assert_eq!(size_of::<u64>(), 8);
+    assert_eq!(size_of::<u16>(), 2);
 
     // 2. RequestState must be compact and easily fit in a single 64-byte L1 Cacheline!
     // request_id (8) + route Option<u32> (8) + upstream Option<u32> (8) + 3 bools (3) + padding = 32 bytes
@@ -110,29 +101,31 @@ fn zero_alloc_hot_path() {
     A.reset();
     CountingAllocator::enable_tracking();
 
-    // 1. Creating and querying strongly typed IDs
-    let req_id = RequestId::new(42);
-    let route_id = RouteId::new(100);
-    let upstream_id = UpstreamId::new(200);
+    // 1. Creating and querying flat integer IDs
+    let req_id: u128 = 42;
+    let route_id: u16 = 100;
+    let upstream_id: u16 = 200;
 
-    assert_eq!(req_id.value(), 42);
-    assert_eq!(route_id.value(), 100);
-    assert_eq!(upstream_id.value(), 200);
+    assert_eq!(req_id, 42);
+    assert_eq!(route_id, 100);
+    assert_eq!(upstream_id, 200);
     assert_eq!(A.allocations(), 0, "ID operations must not allocate");
 
     // 2. RequestState operations (Creation, state mutations, getters)
     let mut state = RequestState::new(req_id);
     assert_eq!(state.request_id, req_id);
     assert!(!state.routed);
+    assert_eq!(state.route_id, UNMATCHED_ROUTE_ID);
+    assert_eq!(state.upstream_id, UNASSIGNED_UPSTREAM_ID);
     assert!(!state.upstream_started);
     assert!(!state.upstream_completed);
 
     state.set_route(route_id);
     assert!(state.routed);
-    assert_eq!(state.route, Some(route_id));
+    assert_eq!(state.route_id, route_id);
 
     state.set_upstream(upstream_id);
-    assert_eq!(state.upstream, Some(upstream_id));
+    assert_eq!(state.upstream_id, upstream_id);
 
     state.mark_upstream_started();
     assert!(state.upstream_started);
@@ -165,14 +158,18 @@ fn zero_alloc_hot_path() {
 #[test]
 fn test_zero_allocation_context_lookups() {
     // Setup stack data
-    let client_addr: SocketAddr = "127.0.0.1:45678".parse().unwrap();
-    let local_addr: SocketAddr = "127.0.0.1:80".parse().unwrap();
+    let client_ip = velda_core::lut::ip::v4_to_u128(0x7F00_0001);
+    let client_port_be = 45678u16.to_be();
+    let local_ip = velda_core::lut::ip::v4_to_u128(0x7F00_0001);
+    let local_port_be = 80u16.to_be();
 
     let l4_req = L4Request::new(
-        ConnectionId(1),
+        1,
         TransportProtocol::Tcp,
-        client_addr,
-        local_addr,
+        client_ip,
+        client_port_be,
+        local_ip,
+        local_port_be,
     );
 
     let l7_req = L7Request::new(
@@ -183,8 +180,7 @@ fn test_zero_allocation_context_lookups() {
         Body::Empty,
     );
 
-    let conn_ctx = ConnectionContext::new(l4_req);
-    let mut req_ctx = RequestContext::new(conn_ctx, l7_req, RequestId(99));
+    let mut req_ctx = RequestContext::new(l4_req, l7_req, 99);
 
     let _lock = TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
     // Reset allocation counter before testing hot-path context read/write
@@ -192,17 +188,17 @@ fn test_zero_allocation_context_lookups() {
     CountingAllocator::enable_tracking();
 
     // Hot-path reading
-    assert_eq!(req_ctx.request_id(), RequestId(99));
-    assert_eq!(req_ctx.client_ip(), client_addr.ip());
-    assert_eq!(req_ctx.route(), None);
-    assert_eq!(req_ctx.upstream(), None);
+    assert_eq!(req_ctx.state.request_id, 99);
+    assert_eq!(req_ctx.l4.peer_ip, client_ip);
+    assert_eq!(req_ctx.state.route_id, UNMATCHED_ROUTE_ID);
+    assert_eq!(req_ctx.state.upstream_id, UNASSIGNED_UPSTREAM_ID);
 
     // Hot-path mutating
-    req_ctx.state.set_route(RouteId(1));
-    req_ctx.state.set_upstream(UpstreamId(5));
+    req_ctx.state.set_route(1);
+    req_ctx.state.set_upstream(5);
 
-    assert_eq!(req_ctx.route(), Some(RouteId(1)));
-    assert_eq!(req_ctx.upstream(), Some(UpstreamId(5)));
+    assert_eq!(req_ctx.state.route_id, 1);
+    assert_eq!(req_ctx.state.upstream_id, 5);
 
     assert_eq!(
         A.allocations(),

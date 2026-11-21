@@ -95,6 +95,7 @@ mod tests {
             grpc: None,
             http3: None,
             raw: None,
+            observability: None,
         }
     }
 

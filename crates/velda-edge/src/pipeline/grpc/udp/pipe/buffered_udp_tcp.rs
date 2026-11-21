@@ -4,7 +4,6 @@
 //! over UDP / QUIC datagrams are bridged and forwarded over upstream
 //! gRPC TCP / HTTP/2 binary framing connections.
 
-use std::net::SocketAddr;
 use std::sync::Arc;
 
 use velda_core::{L7Request, L7Response};
@@ -18,7 +17,7 @@ pub async fn serve(
     req: &L7Request,
     upstream: &Arc<GrpcTcpUpstream>,
     config: &GrpcConfig,
-) -> Result<(L7Response, Option<SocketAddr>), GrpcError> {
+) -> Result<(L7Response, Option<(u128, u16)>), GrpcError> {
     let client_req = GrpcClientRequest::from_l7(req);
 
     let mut client = upstream.acquire(config).await.map_err(|e| {

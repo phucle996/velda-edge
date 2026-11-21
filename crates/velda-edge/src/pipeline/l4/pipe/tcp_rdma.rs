@@ -17,11 +17,9 @@
 //!
 //! Self-contained pipeline adhering to the Hourglass Architecture & Flat Workflow (`AGENTS.md` Sec 2.1–2.3).
 
-use std::net::SocketAddr;
 use std::sync::Arc;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 
-use velda_core::{RouteId, UpstreamId};
 use velda_rdma::{RdmaError, RdmaSlabClass};
 use velda_sock::Connection;
 
@@ -29,48 +27,56 @@ use crate::runtime::pipeline::L4TcpConfig;
 use crate::upstream::rdma::RdmaUpstream;
 
 /// Serves a raw L4 TCP stream forwarded to an upstream RDMA kernel-bypass backend.
+#[allow(clippy::too_many_arguments)]
 pub async fn serve(
     conn: Connection,
     upstream: &Arc<RdmaUpstream>,
     _config: &L4TcpConfig,
-    route_id: RouteId,
-    upstream_id: UpstreamId,
-    peer: SocketAddr,
+    route_id: u16,
+    upstream_id: u16,
+    peer_ip: u128,
+    peer_port_be: u16,
     listener_id: &str,
 ) {
     tracing::debug!(
         listener = %listener_id,
         route = %route_id,
         upstream = %upstream_id,
-        peer = %peer,
+        peer_ip = %peer_ip,
+        peer_port = u16::from_be(peer_port_be),
         "Proxying L4 TCP stream to RDMA kernel-bypass upstream via zero-copy arena"
     );
 
     let ingress_nanos = velda_core::clock::now_unix_nanos();
     let (request_id, _) = velda_core::request_id::next_request_id(ingress_nanos);
-    let emit_log = |upstream_addr: Option<SocketAddr>,
-                    rx: u64,
-                    tx: u64,
-                    completion: velda_core::CompletionReason| {
+    let emit_telemetry = |upstream_addr: Option<(u128, u16)>,
+                          rx: u64,
+                          tx: u64,
+                          completion: velda_core::CompletionReason| {
         let (upstream_ip, upstream_port) = upstream_addr
             .map(|a| {
                 (
-                    velda_observability::encode_upstream_ip_u32(a.ip()),
-                    a.port(),
+                    if velda_core::lut::ip::is_v4_u128(a.0) {
+                        (a.0 & 0xFFFF_FFFF) as u32
+                    } else {
+                        0
+                    },
+                    u16::from_be(a.1),
                 )
             })
             .unwrap_or((0, 0));
-        velda_observability::global_log_store().emit(&velda_observability::AccessLogRecord {
-            request_id: request_id.entropy(),
+        velda_observability::global_telemetry_store().emit(&velda_observability::TelemetryRecord {
+            request_id: velda_core::request_id::entropy(request_id),
             ingress_time_nanos: ingress_nanos,
             duration_ns: velda_core::clock::now_unix_nanos().saturating_sub(ingress_nanos),
-            peer_ip: velda_observability::encode_ip_u128(peer.ip()),
+            peer_ip,
             bytes_rx: rx.min(u32::MAX as u64) as u32,
             bytes_tx: tx.min(u32::MAX as u64) as u32,
             upstream_ip,
             upstream_port,
             status_code: 0,
-            route_id: route_id.0,
+            route_id,
+            upstream_id,
             ua_major_version: 0,
             rpc_msgs_or_flags: 0,
             pipe: velda_core::PipeKind::TcpRdma,
@@ -80,7 +86,7 @@ pub async fn serve(
             ua_family: velda_core::UaFamily::None,
             ua_os: velda_core::UaOs::Unknown,
             url_len: 0,
-            url_bytes: [0; 186],
+            url_bytes: [0; 184],
         });
     };
 
@@ -92,10 +98,11 @@ pub async fn serve(
             tracing::warn!(
                 error = %e,
                 upstream = %upstream_id,
-                peer = %peer,
+                peer_ip = %peer_ip,
+                peer_port = u16::from_be(peer_port_be),
                 "Failed to acquire RDMA lease for L4 raw forwarding"
             );
-            emit_log(None, 0, 0, velda_core::CompletionReason::UpstreamError);
+            emit_telemetry(None, 0, 0, velda_core::CompletionReason::UpstreamError);
             return;
         }
     };
@@ -179,7 +186,8 @@ pub async fn serve(
                             tx_bytes = s2c;
                             tracing::debug!(
                                 upstream = %upstream_id,
-                                peer = %peer,
+                                peer_ip = %peer_ip,
+                peer_port = u16::from_be(peer_port_be),
                                 client_to_server = c2s,
                                 server_to_client = s2c,
                                 "L4 TCP to RDMA stream forwarding completed"
@@ -192,7 +200,8 @@ pub async fn serve(
                             tracing::warn!(
                                 error = %e,
                                 upstream = %upstream_id,
-                                peer = %peer,
+                                peer_ip = %peer_ip,
+                peer_port = u16::from_be(peer_port_be),
                                 "RDMA receive failed after client EOF"
                             );
                         }
@@ -202,7 +211,8 @@ pub async fn serve(
                             lease.mark_broken();
                             tracing::debug!(
                                 upstream = %upstream_id,
-                                peer = %peer,
+                                peer_ip = %peer_ip,
+                peer_port = u16::from_be(peer_port_be),
                                 client_to_server = c2s,
                                 "Idle timeout awaiting final RDMA response; stream closed"
                             );
@@ -215,7 +225,8 @@ pub async fn serve(
                     tracing::warn!(
                         error = %e,
                         upstream = %upstream_id,
-                        peer = %peer,
+                        peer_ip = %peer_ip,
+                peer_port = u16::from_be(peer_port_be),
                         "L4 TCP client read terminated with error"
                     );
                 }
@@ -227,7 +238,8 @@ pub async fn serve(
                     tx_bytes = s2c;
                     tracing::debug!(
                         upstream = %upstream_id,
-                        peer = %peer,
+                        peer_ip = %peer_ip,
+                peer_port = u16::from_be(peer_port_be),
                         server_to_client = s2c,
                         "RDMA upstream terminated forwarding"
                     );
@@ -238,7 +250,8 @@ pub async fn serve(
                     tracing::warn!(
                         error = %e,
                         upstream = %upstream_id,
-                        peer = %peer,
+                        peer_ip = %peer_ip,
+                peer_port = u16::from_be(peer_port_be),
                         "RDMA to TCP stream forwarding terminated with error"
                     );
                 }
@@ -246,7 +259,7 @@ pub async fn serve(
         }
     }
 
-    emit_log(Some(upstream_addr), rx_bytes, tx_bytes, completion);
+    emit_telemetry(Some(upstream_addr), rx_bytes, tx_bytes, completion);
 
     // Raw L4 TCP streams lack application framing delimiters.
     // Mark channel broken to prevent cross-session byte bleeding into pooled connections (CWE-444/CWE-456).

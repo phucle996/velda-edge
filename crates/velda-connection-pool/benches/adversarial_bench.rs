@@ -8,7 +8,6 @@
 
 mod common;
 
-use std::net::SocketAddr;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::thread;
@@ -61,10 +60,13 @@ fn bench_100_percent_cache_miss_storm() {
                 let ip_third = (worker_id % 250) as u8;
                 let ip_fourth = (i % 250) as u8;
                 let port = 10000 + (i / 250) as u16;
-                let addr: SocketAddr = format!("10.{ip_third}.{ip_fourth}.1:{port}")
-                    .parse()
-                    .unwrap();
-                let key = ConnectionKey::tcp(addr);
+                let addr = (
+                    velda_core::lut::ip::v4_to_u128(
+                        (10u32 << 24) | ((ip_third as u32) << 16) | ((ip_fourth as u32) << 8) | 1,
+                    ),
+                    port.to_be(),
+                );
+                let key = ConnectionKey::tcp(addr.0, addr.1);
 
                 // Acquire with timeout - will ALWAYS miss and lazy-create container
                 if pool.acquire(&key, Duration::from_secs(30)).is_none() {
@@ -138,10 +140,11 @@ fn bench_worker_churn_and_restart_storm() {
 
     // Seed pool with 64 endpoints
     for ep in 0..64 {
-        let addr: SocketAddr = format!("192.168.1.{}:8080", (ep % 250) + 1)
-            .parse()
-            .unwrap();
-        let key = ConnectionKey::tcp(addr);
+        let addr = (
+            velda_core::lut::ip::v4_to_u128(0xC0A8_0100 | (((ep % 250) + 1) as u32)),
+            8080u16.to_be(),
+        );
+        let key = ConnectionKey::tcp(addr.0, addr.1);
         for _ in 0..8 {
             pool.release(&key, BenchResource::new(addr), true, false);
         }
@@ -158,8 +161,11 @@ fn bench_worker_churn_and_restart_storm() {
             handles.push(thread::spawn(move || {
                 for i in 0..requests_per_thread {
                     let ep = ((generation * threads_per_gen + t + i) % 64) as u8;
-                    let addr: SocketAddr = format!("192.168.1.{}:8080", ep + 1).parse().unwrap();
-                    let key = ConnectionKey::tcp(addr);
+                    let addr = (
+                        velda_core::lut::ip::v4_to_u128(0xC0A8_0100 | ((ep + 1) as u32)),
+                        8080u16.to_be(),
+                    );
+                    let key = ConnectionKey::tcp(addr.0, addr.1);
 
                     if let Some(res) = pool.acquire(&key, Duration::from_secs(60)) {
                         pool.release(&key, res, true, false);
@@ -225,8 +231,11 @@ fn bench_worker_hold_connection_stalls() {
 
     // Prepopulate pool with 4 connections per endpoint
     for ep in 0..endpoints {
-        let addr: SocketAddr = format!("172.16.0.{}:8080", ep + 1).parse().unwrap();
-        let key = ConnectionKey::tcp(addr);
+        let addr = (
+            velda_core::lut::ip::v4_to_u128(0xAC10_0000 | ((ep + 1) as u32)),
+            8080u16.to_be(),
+        );
+        let key = ConnectionKey::tcp(addr.0, addr.1);
         for _ in 0..capacity_per_ep {
             pool.release(&key, BenchResource::new(addr), true, false);
         }
@@ -248,8 +257,11 @@ fn bench_worker_hold_connection_stalls() {
         handles.push(thread::spawn(move || {
             for i in 0..iterations {
                 let ep = ((worker_id + i) % endpoints) as u8;
-                let addr: SocketAddr = format!("172.16.0.{}:8080", ep + 1).parse().unwrap();
-                let key = ConnectionKey::tcp(addr);
+                let addr = (
+                    velda_core::lut::ip::v4_to_u128(0xAC10_0000 | ((ep + 1) as u32)),
+                    8080u16.to_be(),
+                );
+                let key = ConnectionKey::tcp(addr.0, addr.1);
 
                 // Acquire lease
                 if let Some(conn) = pool.acquire(&key, Duration::from_secs(30)) {
@@ -334,8 +346,11 @@ fn bench_chaos_maintenance_storm() {
 
     // Prepopulate pool with 128 endpoints
     for ep in 0..128 {
-        let addr: SocketAddr = format!("10.10.1.{}:8080", ep + 1).parse().unwrap();
-        let key = ConnectionKey::tcp(addr);
+        let addr = (
+            velda_core::lut::ip::v4_to_u128(0x0A0A_0100 | ((ep + 1) as u32)),
+            8080u16.to_be(),
+        );
+        let key = ConnectionKey::tcp(addr.0, addr.1);
         for _ in 0..8 {
             pool.release(&key, BenchResource::new(addr), true, false);
         }
@@ -351,13 +366,7 @@ fn bench_chaos_maintenance_storm() {
     let chaos_handle = thread::spawn(move || {
         while !chaos_stop.load(Ordering::Relaxed) {
             // Ruthlessly drain 50% of endpoints matching even ports
-            let drained = chaos_pool.drain_matching(|k| {
-                if let SocketAddr::V4(v4) = k.target_addr {
-                    v4.ip().octets()[3] % 2 == 0
-                } else {
-                    false
-                }
-            });
+            let drained = chaos_pool.drain_matching(|k| (k.target_ip & 1) == 0);
             drained_counter.fetch_add(drained as u64, Ordering::Relaxed);
 
             // Evict expired and prune empty containers
@@ -383,8 +392,11 @@ fn bench_chaos_maintenance_storm() {
             let mut local_ops = 0;
             while !stop.load(Ordering::Relaxed) {
                 let ep = ((worker_id + local_ops) % 128) as u8;
-                let addr: SocketAddr = format!("10.10.1.{}:8080", ep + 1).parse().unwrap();
-                let key = ConnectionKey::tcp(addr);
+                let addr = (
+                    velda_core::lut::ip::v4_to_u128(0x0A0A_0100 | ((ep + 1) as u32)),
+                    8080u16.to_be(),
+                );
+                let key = ConnectionKey::tcp(addr.0, addr.1);
 
                 if let Some(res) = pool.acquire(&key, Duration::from_secs(60)) {
                     pool.release(&key, res, true, false);

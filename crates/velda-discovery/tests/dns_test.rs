@@ -7,7 +7,7 @@ use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::time::Duration;
 
 use velda_discovery::{
-    CacheLookup, DiscoveryError, DnsResolverConfig, DnsResolverProvider, HostsFileSource,
+    CacheLookup, DiscoveryError, DnsResolverConfig, DnsResolverProvider, Endpoint, HostsFileSource,
     ResolvConfServerProvider, StaticServerProvider, UdpDnsTransport,
 };
 
@@ -120,7 +120,7 @@ async fn test_hosts_bootstrap_and_cache_population() {
     // 1st resolve: pulls from HostsFileSource, populates DnsCache!
     let endpoints = resolver.resolve("myapp.internal", 8080).await.unwrap();
     assert_eq!(endpoints.len(), 1);
-    assert_eq!(endpoints[0].address, "192.168.10.50:8080".parse().unwrap());
+    assert_eq!(endpoints[0], Endpoint::from_v4([192, 168, 10, 50], 8080, 1));
 
     // 2nd check: DnsCache is now populated (Hit)!
     match resolver.cache().get("myapp.internal") {
@@ -132,7 +132,10 @@ async fn test_hosts_bootstrap_and_cache_population() {
 
     // 2nd resolve: hits DnsCache directly without wire query!
     let endpoints2 = resolver.resolve("myapp.internal", 8080).await.unwrap();
-    assert_eq!(endpoints2[0].address, "192.168.10.50:8080".parse().unwrap());
+    assert_eq!(
+        endpoints2[0],
+        Endpoint::from_v4([192, 168, 10, 50], 8080, 1)
+    );
 }
 
 #[tokio::test]
@@ -156,7 +159,7 @@ async fn test_multi_server_failover() {
     let endpoints = resolver.resolve("api.prod.local", 443).await.unwrap();
 
     assert_eq!(endpoints.len(), 1);
-    assert_eq!(endpoints[0].address, "10.0.1.1:443".parse().unwrap());
+    assert_eq!(endpoints[0], Endpoint::from_v4([10, 0, 1, 1], 443, 1));
     assert!(s2_server.query_count() >= 1);
 }
 
@@ -254,7 +257,10 @@ async fn test_last_known_good_resilience() {
     // 1. Prime cache and LKG
     let eps = resolver.resolve("resilient.local", 8080).await.unwrap();
     assert_eq!(eps.len(), 1);
-    assert_eq!(eps[0].address.ip(), IpAddr::V4(target_ip));
+    assert_eq!(
+        eps[0].ip,
+        velda_core::lut::ip::v4_to_u128(u32::from_be_bytes(target_ip.octets()))
+    );
 
     // 2. Shut down nameserver to simulate network outage / nameserver failure
     server.set_active(false);
@@ -266,12 +272,16 @@ async fn test_last_known_good_resilience() {
     // Invariant: Resolver engages Step 4 and falls back to Last-Known-Good (LKG)!
     let fallback_eps = resolver.resolve("resilient.local", 8080).await.unwrap();
     assert_eq!(fallback_eps.len(), 1);
-    assert_eq!(fallback_eps[0].address.ip(), IpAddr::V4(target_ip));
+    assert_eq!(
+        fallback_eps[0].ip,
+        velda_core::lut::ip::v4_to_u128(u32::from_be_bytes(target_ip.octets()))
+    );
 }
 
 #[tokio::test]
 async fn test_case_insensitive_domain_resolution() {
     let target_ip = Ipv4Addr::new(192, 168, 5, 5);
+    let expected_ip = velda_core::lut::ip::v4_to_u128(u32::from_be_bytes(target_ip.octets()));
     let server = TestUdpDnsServer::spawn(Some(target_ip), None, false).await;
 
     let servers = ResolvConfServerProvider::with_servers(vec![server.addr]);
@@ -282,12 +292,12 @@ async fn test_case_insensitive_domain_resolution() {
 
     // 1. Resolve lowercase
     let eps1 = resolver.resolve("api.case.test", 80).await.unwrap();
-    assert_eq!(eps1[0].address.ip(), IpAddr::V4(target_ip));
+    assert_eq!(eps1[0].ip, expected_ip);
 
     // 2. Resolve UPPERCASE - RFC 1035 requires case-insensitivity: must hit in-memory cache
     let initial_queries = server.query_count();
     let eps2 = resolver.resolve("API.CASE.TEST", 80).await.unwrap();
-    assert_eq!(eps2[0].address.ip(), IpAddr::V4(target_ip));
+    assert_eq!(eps2[0].ip, expected_ip);
     assert_eq!(
         server.query_count(),
         initial_queries,
@@ -296,7 +306,7 @@ async fn test_case_insensitive_domain_resolution() {
 
     // 3. Resolve MixedCase
     let eps3 = resolver.resolve("Api.Case.Test", 80).await.unwrap();
-    assert_eq!(eps3[0].address.ip(), IpAddr::V4(target_ip));
+    assert_eq!(eps3[0].ip, expected_ip);
     assert_eq!(
         server.query_count(),
         initial_queries,
@@ -332,7 +342,7 @@ async fn test_singleflight_coalescing() {
     for handle in handles {
         let res = handle.await.unwrap().unwrap();
         assert_eq!(res.len(), 1);
-        assert_eq!(res[0].address, "10.0.0.99:8080".parse().unwrap());
+        assert_eq!(res[0], Endpoint::from_v4([10, 0, 0, 99], 8080, 1));
     }
 
     // Crucial check: 20 simultaneous requests coalesced into exactly 1 query batch (A and AAAA queries from single leader)
@@ -367,7 +377,7 @@ async fn test_udp_query_timeout_failover() {
 
     // Verify it timed out on s1 (~25ms) and immediately fell over to s2
     assert_eq!(eps.len(), 1);
-    assert_eq!(eps[0].address, "10.2.2.2:9090".parse().unwrap());
+    assert_eq!(eps[0], Endpoint::from_v4([10, 2, 2, 2], 9090, 1));
     assert!(elapsed < Duration::from_millis(120)); // Well under the 200ms hanging delay
 }
 
@@ -389,10 +399,7 @@ async fn test_resolve_ips_and_resolve() {
     // Call resolve with port
     let endpoints = resolver.resolve("api.service", 8080).await.unwrap();
     assert_eq!(endpoints.len(), 1);
-    assert_eq!(
-        endpoints[0].address,
-        SocketAddr::new(IpAddr::V4(target), 8080)
-    );
+    assert_eq!(endpoints[0], Endpoint::from_v4(target.octets(), 8080, 1));
 }
 
 #[test]

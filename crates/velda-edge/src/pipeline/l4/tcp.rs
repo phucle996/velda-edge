@@ -39,7 +39,7 @@ pub async fn handle_l4_tcp(
     config: L4TcpConfig,
     rt: &Runtime,
 ) {
-    let peer = conn.peer();
+    let peer = velda_sock::raw_to_socket_addr(conn.peer_ip, conn.peer_port_be);
 
     // 1. Ingress Admission: Reject if connection capacity reached or memory is saturating
     let current_conns = ACTIVE_L4_TCP_CONNS.load(Ordering::Acquire);
@@ -61,7 +61,7 @@ pub async fn handle_l4_tcp(
     let _conn_guard = L4TcpConnGuard;
     let _metric_guard = crate::pipeline::ConnMetricGuard::enter();
 
-    let Some(route) = rt.router.route_tcp(&listener_id) else {
+    let Some(route) = rt.router.route_tcp(velda_core::fnv1a_hash_32(&listener_id)) else {
         tracing::warn!(
             listener = %listener_id,
             peer = %peer,
@@ -83,25 +83,29 @@ pub async fn handle_l4_tcp(
 
     match raw_upstream.as_ref() {
         RawUpstream::Tcp(upstream) => {
+            let (peer_ip, peer_port_be) = (conn.peer_ip, conn.peer_port_be);
             super::pipe::tcp_tcp::serve(
                 conn,
                 upstream,
                 &config,
                 route.id,
                 route.upstream_id,
-                peer,
+                peer_ip,
+                peer_port_be,
                 &listener_id,
             )
             .await;
         }
         RawUpstream::Rdma(upstream) => {
+            let (peer_ip, peer_port_be) = (conn.peer_ip, conn.peer_port_be);
             super::pipe::tcp_rdma::serve(
                 conn,
                 upstream,
                 &config,
                 route.id,
                 route.upstream_id,
-                peer,
+                peer_ip,
+                peer_port_be,
                 &listener_id,
             )
             .await;

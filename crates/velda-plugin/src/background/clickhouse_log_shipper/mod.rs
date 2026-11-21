@@ -1,6 +1,6 @@
 //! ClickHouse Log Shipper Plugin (`clickhouse_log_shipper`).
 //!
-//! Streams access log batches from core-local [`velda_observability::LogStore`] directly into ClickHouse
+//! Streams access log batches from core-local [`velda_observability::TelemetryStore`] directly into ClickHouse
 //! via HTTP ingestion using either `RowBinary` (HPC native) or `JSONEachRow` (standard NDJSON) formats.
 
 pub mod client;

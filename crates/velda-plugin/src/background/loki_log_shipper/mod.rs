@@ -1,7 +1,7 @@
 //! Grafana Loki Log Shipper Background Plugin (`loki_log_shipper`).
 //!
-//! Subscribes to reference-counted 64-byte [`velda_observability::AccessLogRecord`] batches from
-//! [`velda_observability::LogStore`] across all protocols and ships them to Grafana Loki
+//! Subscribes to reference-counted 64-byte [`velda_observability::TelemetryRecord`] batches from
+//! [`velda_observability::TelemetryStore`] across all protocols and ships them to Grafana Loki
 //! over persistent HTTP/1.1 Keep-Alive (`/loki/api/v1/push`) or HTTP/2 gRPC (`/logproto.Pusher/Push`).
 //!
 //! # Architecture Subsystems

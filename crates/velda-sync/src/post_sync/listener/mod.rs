@@ -125,6 +125,16 @@ pub fn unpack_listeners_from_binary(
         });
     }
 
+    if header.compiler_version != CURRENT_COMPILER_VERSION {
+        return Err(SyncError::Compile {
+            domain: "listeners".into(),
+            reason: format!(
+                "Compiler version mismatch: artifact has {}, runtime expects {}",
+                header.compiler_version, CURRENT_COMPILER_VERSION
+            ),
+        });
+    }
+
     let payload_bytes = &bytes[DOMAIN_HEADER_SIZE..];
     if payload_bytes.len() as u64 != header.payload_size {
         return Err(SyncError::Compile {

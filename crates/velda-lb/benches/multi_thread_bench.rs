@@ -8,7 +8,6 @@
 mod common;
 
 use std::collections::HashMap;
-use std::net::SocketAddr;
 use std::sync::Arc;
 use std::time::Instant;
 
@@ -22,11 +21,8 @@ fn make_endpoints(count: usize) -> Vec<Endpoint> {
     (0..count)
         .map(|i| {
             let port = 8080 + (i as u16);
-            let addr: SocketAddr = format!("10.0.{}.{}:{}", i / 256, i % 256, port)
-                .parse()
-                .unwrap();
             let weight = ((i % 10) + 1) as u32;
-            Endpoint::new(format!("ep-{}", i), addr, weight)
+            Endpoint::from_v4([10, 0, (i / 256) as u8, (i % 256) as u8], port, weight)
         })
         .collect()
 }
@@ -201,7 +197,7 @@ fn bench_algorithm_contention_tiers() {
         m.set_active_connections((i as u32) + 1);
         m.set_inflight_requests((i as u32) + 2);
         m.set_latency_ewma_nanos(100_000 * ((i as u64) + 1));
-        metrics_map.insert(ep.address, m);
+        metrics_map.insert((ep.ip, ep.port_be), m);
 
         let ms = EndpointMetrics::new();
         ms.set_active_connections((i as u32) + 1);
@@ -209,7 +205,7 @@ fn bench_algorithm_contention_tiers() {
         ms.set_latency_ewma_nanos(100_000 * ((i as u64) + 1));
         metrics_slice.push(ms);
     }
-    let metrics_map: &'static HashMap<SocketAddr, EndpointMetrics> =
+    let metrics_map: &'static HashMap<(u128, u16), EndpointMetrics> =
         Box::leak(Box::new(metrics_map));
     let metrics_slice: &'static [EndpointMetrics] = Box::leak(metrics_slice.into_boxed_slice());
 

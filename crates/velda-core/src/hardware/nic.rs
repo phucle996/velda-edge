@@ -1,29 +1,19 @@
-//! NIC hardware RSS probe: decides who owns ingress flow hashing — the NIC or the kernel.
+//! NIC Hardware RSS & Ingress Hash Authority Probe (`velda_core::hardware::nic`).
 //!
-//! # Problem
-//! A multi-queue NIC hashes each flow (Toeplitz 4-tuple + indirection table) into an RX queue
-//! whose IRQ is pinned to one CPU. If `SO_REUSEPORT` then runs a *second* software hash to pick
-//! a listener socket, the packet is bounced to another core (cache miss + IPI). The fix is to let
-//! the NIC's choice win via `SO_INCOMING_CPU = <core that received the packet>`.
-//!
-//! The opposite failure is worse: on a NIC that does **not** spread flows, `SO_INCOMING_CPU`
-//! funnels every flow into the single worker that owns the IRQ core. So hardware authority is
-//! granted ONLY when every condition below is proven, otherwise the kernel software hash stays in
-//! charge (the safe default).
-//!
-//! # Proof obligations for [`IngressHashAuthority::HardwareRss`]
-//! For every non-loopback interface with carrier (enslaved VFs are covered by their master):
-//! 1. The interface has a physical device, `>= 2` RX queues (`/sys/class/net/<if>/queues/rx-*`).
-//! 2. The RSS indirection table (`ETHTOOL_GRSSH`) exists and spreads over `>= 2` distinct rings.
-//! 3. RPS is off on every RX queue (RPS would re-steer packets away from the IRQ CPU).
-//! 4. The queue IRQs (own device, or the lower VF device for netvsc) are pinned to `>= 2`
-//!    distinct CPUs.
-//!
-//! At bind time ([`ingress_steering_cpu`]) one more condition is required: the union of the RX IRQ
-//! CPUs must cover **every** traffic worker core, otherwise some workers would never receive
-//! packets. Any doubt (unreadable sysfs, ioctl failure, unknown driver layout) means `Software`.
-//!
-//! Safety valve: `VELDA_INGRESS_HASH=software` forces software hashing.
+//! ```text
+//! ┌─────────────────────────────────────────────────────────────────────────────────────────┐
+//! │                    INGRESS FLOW HASH AUTHORITY PROOF OBLIGATIONS                        │
+//! ├─────────────────────────────────────────────────────────────────────────────────────────┤
+//! │  Every non-loopback carrier NIC must prove ALL 4 conditions:                            │
+//! │    [1] Physical device with >= 2 RX queues (/sys/class/net/<if>/queues/rx-*)            │
+//! │    [2] RSS indirection table (ETHTOOL_GRSSH) spreads across >= 2 distinct rings         │
+//! │    [3] RPS disabled on every RX queue (no software re-steering away from IRQ CPU)       │
+//! │    [4] Queue IRQs pinned to >= 2 distinct CPUs covering all traffic worker cores        │
+//! │                                                                                         │
+//! │  All proven (and VELDA_INGRESS_HASH != software) ──► HardwareRss (SO_INCOMING_CPU)      │
+//! │  Any doubt / failure                             ──► Software    (SO_REUSEPORT hash)    │
+//! └─────────────────────────────────────────────────────────────────────────────────────────┘
+//! ```
 
 /// Maximum CPU id (exclusive) representable in [`NicProfile::rx_cpu_mask`].
 pub const NIC_MAX_CPUS: usize = 1024;

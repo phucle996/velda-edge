@@ -4,7 +4,6 @@
 //! capable of multiplexing concurrent bidirectional request-response streams over a single
 //! QUIC connection without Head-of-Line blocking.
 
-use std::net::SocketAddr;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
@@ -77,7 +76,8 @@ impl Http3StreamSender {
 #[derive(Clone)]
 pub struct Http3Client {
     command_tx: mpsc::Sender<ClientCommand>,
-    target: SocketAddr,
+    target_ip: u128,
+    target_port_be: u16,
 }
 
 impl Http3Client {
@@ -176,10 +176,10 @@ impl Http3Client {
         self.send_stream_request(req.clone()).await
     }
 
-    /// Returns the target physical socket address of this client connection.
+    /// Returns the target physical `(ip: u128, port_be: u16)` of this client connection.
     #[inline]
-    pub fn target(&self) -> SocketAddr {
-        self.target
+    pub fn target(&self) -> (u128, u16) {
+        (self.target_ip, self.target_port_be)
     }
 
     /// Returns `true` if the background driver loop has terminated or connection closed.
@@ -256,13 +256,21 @@ fn tune_udp_socket(sock: &socket2::Socket) {
 /// Establishes a persistent, multiplexed HTTP/3 client connection to the target backend endpoint
 /// using explicit QUIC [`ClientConfig`].
 pub async fn connect(
-    target: SocketAddr,
+    target_ip: u128,
+    target_port_be: u16,
     server_name: &str,
     config: &Http3Config,
     mut client_cfg: ClientConfig,
 ) -> Result<Http3Client, Http3Error> {
+    let is_v4 = velda_core::lut::ip::is_v4_u128(target_ip);
+    let target: std::net::SocketAddr = if is_v4 {
+        std::net::SocketAddr::V4(velda_core::lut::ip::v4itoaddr(target_ip, target_port_be))
+    } else {
+        std::net::SocketAddr::V6(velda_core::lut::ip::v6itoaddr(target_ip, target_port_be))
+    };
+
     // 1. Bind local UDP egress socket with tuned kernel buffers and graceful acceleration
-    let domain = if target.is_ipv4() {
+    let domain = if is_v4 {
         socket2::Domain::IPV4
     } else {
         socket2::Domain::IPV6
@@ -270,7 +278,7 @@ pub async fn connect(
     let sock = socket2::Socket::new(domain, socket2::Type::DGRAM, None).map_err(Http3Error::Io)?;
     tune_udp_socket(&sock);
     sock.set_nonblocking(true).map_err(Http3Error::Io)?;
-    let bind_addr: SocketAddr = if target.is_ipv4() {
+    let bind_addr: std::net::SocketAddr = if is_v4 {
         "0.0.0.0:0".parse().unwrap()
     } else {
         "[::]:0".parse().unwrap()
@@ -396,7 +404,11 @@ pub async fn connect(
         config.max_body_size,
     ));
 
-    Ok(Http3Client { command_tx, target })
+    Ok(Http3Client {
+        command_tx,
+        target_ip,
+        target_port_be,
+    })
 }
 
 /// Forwards an HTTP/3 [`L7Request`] to the target backend endpoint over a dedicated HTTP/3 connection.
@@ -404,11 +416,19 @@ pub async fn connect(
 /// Convenience entrypoint for single-shot or non-pooled egress workflows.
 pub async fn forward_request(
     req: &L7Request,
-    target: SocketAddr,
+    target_ip: u128,
+    target_port_be: u16,
 ) -> Result<L7Response, Http3Error> {
-    let server_name = extract_sni(req, &target);
+    let server_name = extract_sni(req, target_ip);
     let config = Http3Config::auto();
-    let client = connect(target, &server_name, &config, default_client_config()?).await?;
+    let client = connect(
+        target_ip,
+        target_port_be,
+        &server_name,
+        &config,
+        default_client_config()?,
+    )
+    .await?;
     client.send_request_ref(req).await
 }
 

@@ -5,7 +5,6 @@
 //! - Upstream target SNI / Host extraction with proper port stripping.
 
 use std::borrow::Cow;
-use std::net::SocketAddr;
 
 use http::HeaderMap;
 use http::header::HeaderName;
@@ -134,7 +133,7 @@ pub fn strip_port(host: &str) -> &str {
 pub fn extract_sni<'a>(
     headers: &'a HeaderMap,
     uri: &'a http::Uri,
-    target: &SocketAddr,
+    target_ip: u128,
 ) -> Cow<'a, str> {
     if let Some(host) = uri.host().filter(|h| !h.trim().is_empty()) {
         return Cow::Borrowed(host.trim());
@@ -149,20 +148,21 @@ pub fn extract_sni<'a>(
         return Cow::Borrowed(strip_port(host_hdr));
     }
 
-    Cow::Owned(target.ip().to_string())
+    let (buf, len) = velda_core::lut::ip::format_ip_bytes(target_ip);
+    Cow::Owned(String::from_utf8_lossy(&buf[..len]).into_owned())
 }
 
 /// Resolves the upstream TLS SNI / ServerName for an outbound connection.
 pub fn resolve_sni<'a>(
     headers: &'a HeaderMap,
     uri: &'a http::Uri,
-    target: &SocketAddr,
+    target_ip: u128,
     explicit_sni: Option<&'a str>,
 ) -> Cow<'a, str> {
     if let Some(sni) = explicit_sni.filter(|s| !s.trim().is_empty()) {
         return Cow::Borrowed(sni.trim());
     }
-    extract_sni(headers, uri, target)
+    extract_sni(headers, uri, target_ip)
 }
 
 #[cfg(test)]

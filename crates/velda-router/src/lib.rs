@@ -20,6 +20,7 @@
 //!                         Match Winning Route / 404
 //! ```
 
+pub mod arena;
 pub mod catalog;
 pub mod error;
 pub mod host;
@@ -40,4 +41,3 @@ pub use l7::{
 };
 pub use method::MethodMask;
 pub use router::{Router, RouterBuilder};
-pub use velda_core::RouteId;

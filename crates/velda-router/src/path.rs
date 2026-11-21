@@ -239,9 +239,6 @@ pub struct IntegerBlockNode {
 const _: () = assert!(std::mem::size_of::<IntegerBlockNode>() == 16);
 const _: () = assert!(std::mem::align_of::<IntegerBlockNode>() == 16);
 
-/// Canonical alias for backwards compatibility.
-pub type SlashBlockNode = IntegerBlockNode;
-
 /// Result record of a matched pattern during URI traversal.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub struct MatchedPattern {
@@ -353,10 +350,6 @@ pub struct PathPrefixMatcher {
     builder: Option<PrefixBuilderNode>,
     nodes: Vec<IntegerBlockNode>,
 }
-
-/// Canonical aliases for [`PathPrefixMatcher`].
-pub type IntegerBlockMatcher = PathPrefixMatcher;
-pub type SlashBlockPrefixTable = PathPrefixMatcher;
 
 impl PathPrefixMatcher {
     /// Creates a new empty integer-block matcher.
@@ -665,12 +658,6 @@ mod tests {
         for (a, b, expected) in cases {
             assert_eq!(common_prefix_len(a, b), expected, "Mismatch for ({a}, {b})");
         }
-    }
-
-    #[test]
-    fn test_integer_block_node_size() {
-        assert_eq!(std::mem::size_of::<IntegerBlockNode>(), 16);
-        assert_eq!(std::mem::align_of::<IntegerBlockNode>(), 16);
     }
 
     #[test]

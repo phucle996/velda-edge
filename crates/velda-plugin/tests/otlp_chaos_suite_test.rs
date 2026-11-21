@@ -18,7 +18,7 @@ use velda_core::request_id::format_hex32_bytes;
 use velda_core::{
     CompletionReason, GrpcStatus, HttpMethod, PipeKind, UaFamily, UaOs, WireProtocol,
 };
-use velda_observability::{AccessLogRecord, LogBatch};
+use velda_observability::{TelemetryBatch, TelemetryRecord};
 use velda_plugin::background::otlp_log_shipper::json::{
     OtlpJsonEnvelope, format_otlp_records_json,
 };
@@ -26,7 +26,7 @@ use velda_plugin::background::otlp_log_shipper::proto::{
     ExportLogsServiceRequest, OtlpProtoWireEnvelope, any_value,
 };
 
-/// Helper: creates an AccessLogRecord with configurable fields.
+/// Helper: creates an TelemetryRecord with configurable fields.
 fn make_record(
     req_id: u64,
     ts_sec: u32,
@@ -43,8 +43,8 @@ fn make_record(
     ua_fam: UaFamily,
     ua_major: u16,
     ua_os: UaOs,
-) -> AccessLogRecord {
-    AccessLogRecord {
+) -> TelemetryRecord {
+    TelemetryRecord {
         request_id: req_id,
         ingress_time_nanos: (ts_sec as u64).saturating_mul(1_000_000_000),
         duration_ns: dur_ns,
@@ -55,6 +55,7 @@ fn make_record(
         upstream_port: 0,
         status_code: status,
         route_id: route,
+        upstream_id: velda_core::UNASSIGNED_UPSTREAM_ID,
         ua_major_version: ua_major,
         rpc_msgs_or_flags: 0,
         pipe: match proto {
@@ -72,7 +73,7 @@ fn make_record(
         ua_family: ua_fam,
         ua_os,
         url_len: 0,
-        url_bytes: [0; 186],
+        url_bytes: [0; 184],
     }
 }
 
@@ -150,7 +151,7 @@ fn test_otlp_chaos_ids_and_ts() {
             );
 
             // A. Test Protobuf Direct Wire Encoding & Round-Trip
-            let batch = LogBatch::from_arc(Arc::from(vec![rec]));
+            let batch = TelemetryBatch::from_arc(Arc::from(vec![rec]));
             let mut records_buf = Vec::new();
             let mut out = Vec::new();
             let count = wire_env.format_records_wire(
@@ -260,7 +261,7 @@ fn test_otlp_chaos_ip_addresses_and_ports() {
         );
 
         // A. Protobuf Round-Trip
-        let batch = LogBatch::from_arc(Arc::from(vec![rec]));
+        let batch = TelemetryBatch::from_arc(Arc::from(vec![rec]));
         let mut records_buf = Vec::new();
         let mut out = Vec::new();
         wire_env.format_records_wire(std::slice::from_ref(&batch), &mut records_buf, &mut out);
@@ -348,7 +349,7 @@ fn test_otlp_chaos_severity() {
             );
 
             // A. Protobuf Validation
-            let batch = LogBatch::from_arc(Arc::from(vec![rec]));
+            let batch = TelemetryBatch::from_arc(Arc::from(vec![rec]));
             let mut records_buf = Vec::new();
             let mut out = Vec::new();
             wire_env.format_records_wire(std::slice::from_ref(&batch), &mut records_buf, &mut out);
@@ -455,7 +456,7 @@ fn test_otlp_chaos_varint_bounds() {
                 );
 
                 // Protobuf Round-Trip
-                let batch = LogBatch::from_arc(Arc::from(vec![rec]));
+                let batch = TelemetryBatch::from_arc(Arc::from(vec![rec]));
                 let mut records_buf = Vec::new();
                 let mut out = Vec::new();
                 wire_env.format_records_wire(
@@ -585,7 +586,7 @@ fn test_otlp_chaos_protocol_matrix() {
                         ua_os,
                     );
 
-                    let batch = LogBatch::from_arc(Arc::from(vec![rec]));
+                    let batch = TelemetryBatch::from_arc(Arc::from(vec![rec]));
                     let mut records_buf = Vec::new();
                     let mut out = Vec::new();
                     wire_env.format_records_wire(
@@ -659,7 +660,7 @@ fn test_otlp_chaos_batch_sizes_and_stress() {
     assert_eq!(count, 0);
     assert!(out.is_empty());
 
-    let empty_batch = LogBatch::from_arc(Arc::from(vec![]));
+    let empty_batch = TelemetryBatch::from_arc(Arc::from(vec![]));
     let count2 = wire_env.format_records_wire(
         std::slice::from_ref(&empty_batch),
         &mut records_buf,
@@ -738,9 +739,9 @@ fn test_otlp_chaos_batch_sizes_and_stress() {
     }
 
     // Split into 4 chunks (simulating 4 frontline cores flushing simultaneously)
-    let chunks: Vec<LogBatch> = large_batch
+    let chunks: Vec<TelemetryBatch> = large_batch
         .chunks(2500)
-        .map(|c| LogBatch::from_arc(Arc::from(c.to_vec())))
+        .map(|c| TelemetryBatch::from_arc(Arc::from(c.to_vec())))
         .collect();
 
     // Protobuf Stress Format & Decode
@@ -830,7 +831,7 @@ fn test_otlp_chaos_rdtsc_cycle_stability() {
         ));
     }
 
-    let batch = LogBatch::from_arc(Arc::from(chaos_batch));
+    let batch = TelemetryBatch::from_arc(Arc::from(chaos_batch));
     let slices = [batch];
 
     let mut records_buf = Vec::new();

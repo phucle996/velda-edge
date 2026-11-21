@@ -1,7 +1,15 @@
 //! Pre-warmed User-Space Buffer and Object Pooling Subsystem (`velda_core::buffer`).
 //!
-//! Provides two-tier adaptive memory management: pre-warmed permanent floor plus burst standby queue
-//! with coarse clock eviction, bounded by host RAM to eliminate OOM risks.
+//! ```text
+//! ┌─────────────────────────────────────────────────────────────────────────────────────────┐
+//! │                           VELDA BUFFER & WORKSPACE HIERARCHY                            │
+//! ├──────────────┬──────────────────────────────────────────────────────────────────────────┤
+//! │ adaptive     │ Anti-OOM baseline & burst ceilings from host RAM + core count            │
+//! │ header       │ Dual-representation HeaderWorkspace (16B register staging + HeaderMap)   │
+//! │ pool         │ HeaderPool, CoreBufferPool & ShardedBufferPool (baseline + LIFO burst)   │
+//! │ slab         │ Core-jailed PayloadSlabPool (4K / 16K / 32K / 64K contiguous arenas)     │
+//! └──────────────┴──────────────────────────────────────────────────────────────────────────┘
+//! ```
 
 pub mod adaptive;
 pub mod header;

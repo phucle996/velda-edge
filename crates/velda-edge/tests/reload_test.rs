@@ -38,6 +38,7 @@ async fn test_uds_hot_reload() {
         grpc: None,
         http3: None,
         raw: None,
+        observability: None,
     }];
 
     let initial_bin = compile_listeners_to_binary(&initial_listeners, 1, [0x11u8; 32]).unwrap();
@@ -87,6 +88,7 @@ async fn test_uds_hot_reload() {
             grpc: None,
             http3: None,
             raw: None,
+            observability: None,
         },
         ListenerConfig {
             id: "reloaded-tcp".into(),
@@ -105,6 +107,7 @@ async fn test_uds_hot_reload() {
             grpc: None,
             http3: None,
             raw: None,
+            observability: None,
         },
     ];
     let updated_bin = compile_listeners_to_binary(&updated_listeners, 2, [0x22u8; 32]).unwrap();

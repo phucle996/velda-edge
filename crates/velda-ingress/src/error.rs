@@ -1,9 +1,8 @@
 //! Ingress layer errors and standard conversions.
 
-use std::net::SocketAddr;
 use thiserror::Error;
 use velda_core::{Error as CoreError, ErrorKind};
-use velda_sock::SockError;
+use velda_sock::{SockError, format_raw_addr};
 use velda_xdp::XdpError;
 
 /// Errors originating in the ingress coordination subsystem.
@@ -22,9 +21,10 @@ pub enum IngressError {
     Io(#[from] std::io::Error),
 
     /// Failed to bind to a local socket address.
-    #[error("failed to bind to address {addr}: {source}")]
+    #[error("failed to bind to address {}: {source}", format_raw_addr(*ip, *port_be))]
     Bind {
-        addr: SocketAddr,
+        ip: u128,
+        port_be: u16,
         #[source]
         source: std::io::Error,
     },
@@ -34,9 +34,10 @@ pub enum IngressError {
     Accept(std::io::Error),
 
     /// Failed to connect to a target address.
-    #[error("failed to connect to target {addr}: {source}")]
+    #[error("failed to connect to target {}: {source}", format_raw_addr(*ip, *port_be))]
     Connect {
-        addr: SocketAddr,
+        ip: u128,
+        port_be: u16,
         #[source]
         source: std::io::Error,
     },
@@ -61,17 +62,31 @@ impl From<IngressError> for CoreError {
             IngressError::Io(e) => {
                 CoreError::with_source(ErrorKind::Connection, "ingress I/O error", e)
             }
-            IngressError::Bind { addr, source } => CoreError::with_source(
+            IngressError::Bind {
+                ip,
+                port_be,
+                source,
+            } => CoreError::with_source(
                 ErrorKind::Connection,
-                format!("failed to bind listener on {addr}"),
+                format!(
+                    "failed to bind listener on {}",
+                    format_raw_addr(ip, port_be)
+                ),
                 source,
             ),
             IngressError::Accept(e) => {
                 CoreError::with_source(ErrorKind::Connection, "failed to accept connection", e)
             }
-            IngressError::Connect { addr, source } => CoreError::with_source(
+            IngressError::Connect {
+                ip,
+                port_be,
+                source,
+            } => CoreError::with_source(
                 ErrorKind::UpstreamUnavailable,
-                format!("failed to connect to target {addr}"),
+                format!(
+                    "failed to connect to target {}",
+                    format_raw_addr(ip, port_be)
+                ),
                 source,
             ),
             IngressError::Forward(e) => CoreError::with_source(
@@ -101,9 +116,11 @@ mod tests {
         assert_eq!(core_err.kind(), ErrorKind::Connection);
         assert_eq!(core_err.message(), "ingress connection closed");
 
-        let addr: SocketAddr = "127.0.0.1:9090".parse().unwrap();
+        let ip = velda_core::lut::ip::v4_to_u128(u32::from_be_bytes([127, 0, 0, 1]));
+        let port_be = 9090u16.to_be();
         let bind_err = IngressError::Bind {
-            addr,
+            ip,
+            port_be,
             source: IoError::new(IoErrorKind::AddrInUse, "address in use"),
         };
         let core_bind: CoreError = bind_err.into();
@@ -111,7 +128,8 @@ mod tests {
         assert!(core_bind.message().contains("127.0.0.1:9090"));
 
         let conn_err = IngressError::Connect {
-            addr,
+            ip,
+            port_be,
             source: IoError::new(IoErrorKind::ConnectionRefused, "refused"),
         };
         let core_conn: CoreError = conn_err.into();

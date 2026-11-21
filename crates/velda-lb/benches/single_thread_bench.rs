@@ -7,7 +7,6 @@
 mod common;
 
 use std::collections::HashMap;
-use std::net::SocketAddr;
 use std::time::Instant;
 
 use common::{CountingAllocator, format_duration};
@@ -23,11 +22,8 @@ fn make_endpoints(count: usize) -> Vec<Endpoint> {
     (0..count)
         .map(|i| {
             let port = 8080 + (i as u16);
-            let addr: SocketAddr = format!("10.0.{}.{}:{}", i / 256, i % 256, port)
-                .parse()
-                .unwrap();
             let weight = ((i % 10) + 1) as u32;
-            Endpoint::new(format!("ep-{}", i), addr, weight)
+            Endpoint::from_v4([10, 0, (i / 256) as u8, (i % 256) as u8], port, weight)
         })
         .collect()
 }
@@ -134,7 +130,7 @@ fn bench_algorithm_latencies() {
         m.set_active_connections((i as u32) + 1);
         m.set_inflight_requests((i as u32) + 2);
         m.set_latency_ewma_nanos(100_000 * ((i as u64) + 1));
-        metrics_map.insert(ep.address, m);
+        metrics_map.insert((ep.ip, ep.port_be), m);
 
         let ms = EndpointMetrics::new();
         ms.set_active_connections((i as u32) + 1);

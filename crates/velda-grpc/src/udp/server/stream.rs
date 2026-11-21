@@ -1,7 +1,6 @@
 //! Downstream gRPC stream representation over UDP.
 
 use quinn_proto::{ConnectionHandle, StreamId};
-use std::net::SocketAddr;
 use velda_core::L7Request;
 
 /// Downstream gRPC server request head metadata over UDP.
@@ -88,8 +87,10 @@ pub struct GrpcUdpServerStream {
     pub stream_id: StreamId,
     /// Associated L7 request.
     pub request: L7Request,
-    /// Remote client address.
-    pub peer: SocketAddr,
+    /// Remote client IP (`u128` IPv4-mapped or IPv6).
+    pub peer_ip: u128,
+    /// Remote client port in network byte order (big-endian).
+    pub peer_port_be: u16,
 }
 
 impl GrpcUdpServerStream {
@@ -104,13 +105,15 @@ impl GrpcUdpServerStream {
         handle: ConnectionHandle,
         stream_id: StreamId,
         request: L7Request,
-        peer: SocketAddr,
+        peer_ip: u128,
+        peer_port_be: u16,
     ) -> Self {
         Self {
             handle,
             stream_id,
             request,
-            peer,
+            peer_ip,
+            peer_port_be,
         }
     }
 
@@ -132,7 +135,7 @@ impl GrpcUdpServerStream {
 
     /// Strips untrusted client forwarding headers and RFC 9114/9113 hop-by-hop headers,
     /// and injects authoritative proxy forwarding headers (RFC 7239 + `X-Forwarded-*`).
-    pub fn enrich_forwarded_headers(&mut self, local_addr: SocketAddr) {
+    pub fn enrich_forwarded_headers(&mut self, local_ip: u128, local_port_be: u16) {
         let auth_hdr = self.request.headers.get(":authority").cloned();
         let host_hdr = self.request.headers.get(http::header::HOST).cloned();
         let authority_str = auth_hdr
@@ -143,8 +146,9 @@ impl GrpcUdpServerStream {
 
         super::header::enrich_headers(
             &mut self.request.headers,
-            self.peer,
-            local_addr,
+            self.peer_ip,
+            local_ip,
+            local_port_be,
             authority_str,
         );
     }

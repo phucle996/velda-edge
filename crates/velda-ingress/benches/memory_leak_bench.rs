@@ -8,7 +8,6 @@
 
 mod common;
 
-use std::net::SocketAddr;
 use std::sync::Arc;
 use std::thread;
 use std::time::Instant;
@@ -96,18 +95,18 @@ fn bench_datagram_handoff_reclamation() {
     println!("> Encapsulating, handing off, and decomposing 1,000,000 datagrams...\n");
 
     let iters = 1_000_000;
-    let peer: SocketAddr = "10.0.0.1:55432".parse().unwrap();
-    let local: SocketAddr = "127.0.0.1:443".parse().unwrap();
-    let socket = Arc::new(
-        UdpSocket::bind("127.0.0.1:0".parse().unwrap(), UdpSocketConfig::default()).unwrap(),
-    );
+    let peer_ip = velda_core::lut::ip::v4_to_u128(u32::from_be_bytes([10, 0, 0, 1]));
+    let peer_port_be = 55432u16.to_be();
+    let local_ip = velda_core::lut::ip::v4_to_u128(u32::from_be_bytes([127, 0, 0, 1]));
+    let local_port_be = 443u16.to_be();
+    let socket = Arc::new(UdpSocket::bind(local_ip, 0, UdpSocketConfig::default()).unwrap());
 
     ALLOCATOR.reset();
     let start = Instant::now();
 
     for i in 0..iters {
         let payload = vec![0x33u8; 1200];
-        let dgram = Datagram::new(peer, local, payload);
+        let dgram = Datagram::new(peer_ip, peer_port_be, local_ip, local_port_be, payload);
         // Mirrors the UDP ingress dispatch arguments: (listener_id, socket, datagram)
         let listener_id = format!("listener_{:03}", i % 100);
         let args = (listener_id, Arc::clone(&socket), dgram);
@@ -165,9 +164,8 @@ fn bench_multithread_storm_reclamation() {
     let ops_per_worker = 100_000;
     let total_ops = num_workers * ops_per_worker;
 
-    let socket = Arc::new(
-        UdpSocket::bind("127.0.0.1:0".parse().unwrap(), UdpSocketConfig::default()).unwrap(),
-    );
+    let loopback_ip = velda_core::lut::ip::v4_to_u128(u32::from_be_bytes([127, 0, 0, 1]));
+    let socket = Arc::new(UdpSocket::bind(loopback_ip, 0, UdpSocketConfig::default()).unwrap());
 
     ALLOCATOR.reset();
     let start = Instant::now();
@@ -180,15 +178,17 @@ fn bench_multithread_storm_reclamation() {
         let bar = Arc::clone(&barrier);
 
         handles.push(thread::spawn(move || {
-            let peer: SocketAddr = "10.0.0.2:12345".parse().unwrap();
-            let local: SocketAddr = "127.0.0.1:443".parse().unwrap();
+            let peer_ip = velda_core::lut::ip::v4_to_u128(u32::from_be_bytes([10, 0, 0, 2]));
+            let peer_port_be = 12345u16.to_be();
+            let local_ip = velda_core::lut::ip::v4_to_u128(u32::from_be_bytes([127, 0, 0, 1]));
+            let local_port_be = 443u16.to_be();
 
             bar.wait();
 
             for _ in 0..ops_per_worker {
                 let id = next_connection_id();
                 let payload = vec![0x55u8; 256];
-                let dgram = Datagram::new(peer, local, payload);
+                let dgram = Datagram::new(peer_ip, peer_port_be, local_ip, local_port_be, payload);
                 let listener_id = format!("worker_listener_{:02}", w_idx);
                 let args = (listener_id, Arc::clone(&sock), dgram);
                 let _ = std::hint::black_box((id, args));
@@ -242,8 +242,9 @@ fn bench_adversarial_zero_retention() {
     let iters = 1_000_000;
     let mut rng = FastRng::new(0xCAFEBABE);
 
-    let dummy_addr: SocketAddr = "127.0.0.1:0".parse().unwrap();
-    let peer: SocketAddr = "10.0.0.9:54321".parse().unwrap();
+    let dummy_ip = velda_core::lut::ip::v4_to_u128(u32::from_be_bytes([127, 0, 0, 1]));
+    let peer_ip = velda_core::lut::ip::v4_to_u128(u32::from_be_bytes([10, 0, 0, 9]));
+    let peer_port_be = 54321u16.to_be();
 
     let mut hostile_payloads = Vec::with_capacity(1_000);
     for _ in 0..1_000 {
@@ -260,11 +261,11 @@ fn bench_adversarial_zero_retention() {
         // 1. Adversarial IngressBinding attempt
         let is_tcp = i % 2 == 0;
         let proto = if is_tcp { "tcp" } else { "sctp_invalid" };
-        let _ = IngressBinding::from_transport("fuzz", dummy_addr, proto, false);
+        let _ = IngressBinding::from_transport("fuzz", dummy_ip, 0, proto, false);
 
         // 2. Dynamic datagram allocation & immediate release
         let payload = &hostile_payloads[i % hostile_payloads.len()];
-        let dgram = Datagram::new(peer, dummy_addr, payload.clone());
+        let dgram = Datagram::new(peer_ip, peer_port_be, dummy_ip, 0, payload.clone());
         let _ = std::hint::black_box(dgram);
     }
 

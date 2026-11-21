@@ -1,13 +1,19 @@
-//! Domain-Blind Dual-Representation Header Workspace and Adaptive Object Pool.
+//! Domain-Blind Dual-Representation Header Workspace (`velda_core::buffer::header`).
 //!
-//! - **Values `<= 16` bytes (Hardware Register `raw: u128`)**: Integers (`U64`), IP addresses
-//!   (`Ipv4`, `Ipv6`), 128-bit identifiers (`Hex128`), and short ASCII tokens (`InlineAscii(len)`)
-//!   are stored in a 16-entry L1-resident `NumericHeaderEntry` table indexed by a 64-bit integer
-//!   key (`key: u64 = header_key(name)`).
-//! - **Values `> 16` bytes (Zero-Copy Pointer)**: Long strings (e.g. JWTs, Cookies, User-Agent)
-//!   remain as zero-copy `Bytes` pointers inside the underlying [`HeaderMap`].
-//! - **Single-Pass Batch Rendering (`render()`)**: Right before wire transmission, all pending
-//!   16-byte register entries are materialized into the [`HeaderMap`] in a single pass.
+//! ```text
+//! ┌─────────────────────────────────────────────────────────────────────────────────────────┐
+//! │                 DUAL-REPRESENTATION HEADER WORKSPACE (L1D + ZERO-COPY)                  │
+//! ├─────────────────────────────────────────────────────────────────────────────────────────┤
+//! │  Short / Numeric Values (<= 16B)             Long Values (> 16B)                        │
+//! │  ┌──────────────────────────────┐            ┌───────────────────────────────────────┐  │
+//! │  │ numeric_entries: [Entry; 16] │            │ inner: HeaderMap (zero-copy Bytes)    │  │
+//! │  │ (512B = 8x 64B L1D lines)    │            │ (JWT, Cookies, User-Agent, etc.)      │  │
+//! │  │ key: u64 FNV-1a | raw: u128  │            │ MAX_WIRE_HEADERS = 1024               │  │
+//! │  └──────────────┬───────────────┘            └───────────────────▲───────────────────┘  │
+//! │                 │                                                │                      │
+//! │                 └────────► render() (single-pass flush) ─────────┘                      │
+//! └─────────────────────────────────────────────────────────────────────────────────────────┘
+//! ```
 
 use std::cell::RefCell;
 use std::ops::Deref;
@@ -276,7 +282,7 @@ impl HeaderWorkspace {
         bypass_keys[0] = Some(X_REQUEST_ID);
         Self {
             headers,
-            request_id_raw: id.0,
+            request_id_raw: id,
             ingress_time_nanos,
             numeric_entries: [const { None }; MAX_NUMERIC_HEADERS],
             numeric_len: 0,
@@ -328,7 +334,7 @@ impl HeaderWorkspace {
         } else {
             let (id, req_id) = crate::request_id::next_request_id(now_nanos);
             headers.insert(X_REQUEST_ID, req_id);
-            (id.0, now_nanos)
+            (id, now_nanos)
         };
         let mut bypass_keys = [const { None }; MAX_BYPASS_HEADERS];
         bypass_keys[0] = Some(X_REQUEST_ID);
@@ -879,7 +885,7 @@ impl HeaderWorkspace {
         self.bypass_keys = [const { None }; MAX_BYPASS_HEADERS];
         let ingress_nanos = crate::clock::now_unix_nanos();
         let (id, req_id) = crate::request_id::next_request_id(ingress_nanos);
-        self.request_id_raw = id.0;
+        self.request_id_raw = id;
         self.ingress_time_nanos = ingress_nanos;
         self.bypass_keys[0] = Some(X_REQUEST_ID);
         self.bypass_len = 1;
@@ -896,7 +902,7 @@ impl HeaderWorkspace {
         self.numeric_len = 0;
         let ingress_nanos = crate::clock::now_unix_nanos();
         let (id, req_id) = crate::request_id::next_request_id(ingress_nanos);
-        self.request_id_raw = id.0;
+        self.request_id_raw = id;
         self.ingress_time_nanos = ingress_nanos;
         self.bypass_keys = [const { None }; MAX_BYPASS_HEADERS];
         self.bypass_keys[0] = Some(X_REQUEST_ID);

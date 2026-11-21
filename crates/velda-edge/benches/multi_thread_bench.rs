@@ -80,7 +80,9 @@ fn bench_multi_thread_scaling() {
 
                 for _ in 0..ops_per_thread {
                     let rt = s.load();
-                    let pipe = rt.pipelines.tcp_pipeline(&target_listener);
+                    let pipe = rt
+                        .pipelines
+                        .tcp_pipeline(velda_core::fnv1a_hash_32(&target_listener));
                     let _ = std::hint::black_box(pipe);
                 }
 
@@ -164,7 +166,9 @@ fn bench_hot_reload_under_traffic_storm() {
 
             for _ in 0..ops_per_reader {
                 let rt = s.load();
-                let pipe = rt.pipelines.tcp_pipeline(&target_listener);
+                let pipe = rt
+                    .pipelines
+                    .tcp_pipeline(velda_core::fnv1a_hash_32(&target_listener));
                 let _ = std::hint::black_box(pipe);
             }
 

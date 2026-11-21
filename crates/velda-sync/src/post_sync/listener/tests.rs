@@ -19,6 +19,7 @@ fn cfg(id: &str, addr: &str, transport_proto: &str, app_proto: &str) -> Listener
         grpc: None,
         http3: None,
         raw: None,
+        observability: None,
     }
 }
 
@@ -361,4 +362,144 @@ fn test_alt_svc_config_parsing_and_validation() {
     let mut bad_listeners2 = parse_listeners(bad_json2.as_bytes()).unwrap();
     let err2 = validate_listeners(&mut bad_listeners2).unwrap_err();
     assert!(err2.to_string().contains("invalid alt_svc max_age 0"));
+}
+
+#[test]
+fn test_observability_sampling_parse_validate_and_binary_roundtrip() {
+    let json = r#"{
+        "schema_version": 1,
+        "listeners": [
+            {
+                "id": "web-sampled",
+                "address": "127.0.0.1:61448",
+                "transport": { "protocol": "tcp" },
+                "application": { "protocol": "http", "streaming": [] },
+                "tls": { "enabled": false },
+                "observability": {
+                    "sampling": {
+                        "http": {
+                            "1xx": 0.0,
+                            "2xx": 0.01,
+                            "3xx": 0.05,
+                            "4xx": 1.0,
+                            "5xx": 1.0,
+                            "shed": 0.01
+                        }
+                    }
+                }
+            },
+            {
+                "id": "grpc-sampled",
+                "address": "127.0.0.1:61449",
+                "transport": { "protocol": "tcp" },
+                "application": { "protocol": "grpc", "streaming": [] },
+                "tls": { "enabled": false },
+                "observability": {
+                    "sampling": {
+                        "grpc": {
+                            "default": 1.0,
+                            "ok": 0.01,
+                            "not_found": 0.1,
+                            "shed": 0.01
+                        }
+                    }
+                }
+            }
+        ]
+    }"#;
+
+    let mut listeners = parse_listeners(json.as_bytes()).unwrap();
+    validate_listeners(&mut listeners).unwrap();
+
+    let bin = compile_listeners_to_binary(&listeners, 9, [0x22u8; 32]).unwrap();
+    let (hdr, restored) = unpack_listeners_from_binary(&bin).unwrap();
+    assert_eq!(hdr.compiler_version, CURRENT_COMPILER_VERSION);
+    assert_eq!(restored, listeners);
+}
+
+#[test]
+fn test_observability_sampling_validation_errors() {
+    // 1. Out of range rate
+    let out_of_range = r#"{
+        "schema_version": 1,
+        "listeners": [{
+            "id": "bad-rate",
+            "address": "127.0.0.1:61450",
+            "transport": { "protocol": "tcp" },
+            "application": { "protocol": "http1", "streaming": [] },
+            "tls": { "enabled": false },
+            "observability": { "sampling": { "http": { "2xx": 1.5 } } }
+        }]
+    }"#;
+    let mut ls = parse_listeners(out_of_range.as_bytes()).unwrap();
+    assert!(
+        validate_listeners(&mut ls)
+            .unwrap_err()
+            .to_string()
+            .contains("http.2xx")
+    );
+
+    // 2. Mismatched protocol block (grpc block on http listener)
+    let mismatch = r#"{
+        "schema_version": 1,
+        "listeners": [{
+            "id": "mismatch",
+            "address": "127.0.0.1:61451",
+            "transport": { "protocol": "tcp" },
+            "application": { "protocol": "http", "streaming": [] },
+            "tls": { "enabled": false },
+            "observability": { "sampling": { "grpc": { "ok": 0.1 } } }
+        }]
+    }"#;
+    let mut ls = parse_listeners(mismatch.as_bytes()).unwrap();
+    assert!(
+        validate_listeners(&mut ls)
+            .unwrap_err()
+            .to_string()
+            .contains("observability.sampling.grpc")
+    );
+
+    // 3. Raw listener rejects sampling
+    let raw_sampling = r#"{
+        "schema_version": 1,
+        "listeners": [{
+            "id": "raw-bad",
+            "address": "127.0.0.1:61452",
+            "transport": { "protocol": "tcp" },
+            "application": { "protocol": "raw", "streaming": [] },
+            "tls": { "enabled": false },
+            "observability": { "sampling": { "http": { "2xx": 0.1 } } }
+        }]
+    }"#;
+    let mut ls = parse_listeners(raw_sampling.as_bytes()).unwrap();
+    assert!(
+        validate_listeners(&mut ls)
+            .unwrap_err()
+            .to_string()
+            .contains("does not support observability sampling")
+    );
+
+    // 4. Unknown field rejected at parse time (deny_unknown_fields)
+    let unknown_key = r#"{
+        "schema_version": 1,
+        "listeners": [{
+            "id": "unknown-key",
+            "address": "127.0.0.1:61453",
+            "transport": { "protocol": "tcp" },
+            "application": { "protocol": "http", "streaming": [] },
+            "tls": { "enabled": false },
+            "observability": { "sampling": { "http": { "6xx": 0.1 } } }
+        }]
+    }"#;
+    assert!(parse_listeners(unknown_key.as_bytes()).is_err());
+}
+
+#[test]
+fn test_unpack_rejects_old_compiler_version() {
+    let listeners = vec![cfg("v1", "127.0.0.1:61454", "tcp", "http1")];
+    let mut bin = compile_listeners_to_binary(&listeners, 1, [0u8; 32]).unwrap();
+    // Corrupt compiler_version field in DomainHeader (offset: magic(4) + format_version(4) = 8..12) to 1
+    bin[8..12].copy_from_slice(&1u32.to_le_bytes());
+    let err = unpack_listeners_from_binary(&bin).unwrap_err();
+    assert!(err.to_string().contains("Compiler version mismatch"));
 }

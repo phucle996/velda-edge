@@ -229,23 +229,21 @@ impl TcpListenerConfig {
         if topo.kernel.supports_busy_poll() && topo.available_cores >= 8 {
             cfg.busy_poll_us = Some(50);
         }
-        let ladder = topo.acceleration_ladder();
-        if ladder.core_steering >= velda_core::hardware::CoreSteeringTier::IncomingCpu {
+        if topo.kernel.supports_incoming_cpu() {
             cfg.incoming_cpu = true;
         }
-        if ladder.multiplex_pacing >= velda_core::hardware::MultiplexPacingTier::NotsentLowat {
+        if topo.kernel.supports_tcp_notsent_lowat() {
             let ram_gb = topo.memory_bytes / (1024 * 1024 * 1024);
             cfg.notsent_lowat = Some(((ram_gb * 16 * 1024).clamp(16 * 1024, 128 * 1024)) as u32);
         }
-        if ladder.dead_peer_teardown >= velda_core::hardware::DeadPeerTeardownTier::UserTimeout {
+        if topo.kernel.supports_tcp_user_timeout() {
             cfg.user_timeout = Some(Duration::from_secs(30));
         }
-        if ladder.dead_peer_teardown >= velda_core::hardware::DeadPeerTeardownTier::MicrosecondPaced
-        {
+        if topo.kernel.supports_tcp_microsecond_rto() {
             cfg.rto_min_us = Some(5_000);
             cfg.delack_max_us = Some(2_000);
         }
-        if ladder.busy_poll >= velda_core::hardware::BusyPollTier::PreferBusyPoll {
+        if topo.kernel.supports_so_prefer_busy_poll() {
             cfg.prefer_busy_poll = true;
         }
         if topo.kernel.supports_bbr() {
@@ -316,16 +314,10 @@ mod tests {
     }
 
     #[test]
-    fn test_tcp_evolutionary_ladder_for_topology() {
-        use velda_core::hardware::{
-            AccelerationTier, HardwareTopology, KernelProfile, KernelVersion,
-        };
+    fn test_tcp_kernel_capabilities_for_topology() {
+        use velda_core::hardware::{HardwareTopology, KernelProfile, KernelVersion};
 
-        let kernel_6_9 = KernelProfile::new(
-            KernelVersion::new(6, 9, 0),
-            AccelerationTier::LinuxFastPath,
-            "test_6_9",
-        );
+        let kernel_6_9 = KernelProfile::new(KernelVersion::new(6, 9, 0));
         let topo = HardwareTopology::with_workers_and_memory(16, 16 * 1024 * 1024 * 1024)
             .with_kernel(kernel_6_9);
 

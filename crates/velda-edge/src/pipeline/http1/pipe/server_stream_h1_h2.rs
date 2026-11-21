@@ -139,7 +139,8 @@ where
             return Err(Http1Error::ConnectionClosed);
         }
     };
-    conn.last_upstream_addr = Some(lease.endpoint);
+    conn.last_upstream_ip = lease.endpoint.0;
+    conn.last_upstream_port_be = lease.endpoint.1;
 
     // 6. Forward request over HTTP/2 stream
     let scheme = if upstream.is_tls() { "https" } else { "http" };

@@ -80,6 +80,7 @@ pub fn canonical_phase_for_id(id: &str) -> Option<&'static str> {
         "std_log_shipper" => Some("background"),
         "otlp_log_shipper" => Some("background"),
         "clickhouse_log_shipper" => Some("background"),
+        "kafka_log_shipper" => Some("background"),
         "otlp_trace_exporter" => Some("background"),
         _ => None,
     }
@@ -589,6 +590,21 @@ pub fn validate_plugin_config(plugin: &mut PluginConfig) -> Result<(), PluginErr
             }
             let normalized =
                 crate::background::clickhouse_log_shipper::validation::validate_clickhouse_log_shipper_config(
+                    &plugin.id,
+                    &plugin.config,
+                )?;
+            plugin.config =
+                serde_json::to_value(normalized).map_err(|e| PluginError::Config(e.to_string()))?;
+        }
+        "kafka_log_shipper" => {
+            if plugin.phase != "background" {
+                return Err(PluginError::Config(format!(
+                    "Plugin '{}' must specify phase 'background'",
+                    plugin.id
+                )));
+            }
+            let normalized =
+                crate::background::kafka_log_shipper::validation::validate_kafka_log_shipper_config(
                     &plugin.id,
                     &plugin.config,
                 )?;

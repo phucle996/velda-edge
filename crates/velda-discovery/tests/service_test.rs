@@ -1,7 +1,7 @@
 //! Integration tests for Discovery service lifecycle, background sync, and EndpointSet snapshots.
 //! Uses real `UdpDnsTransport` over actual loopback UDP sockets.
 
-use std::net::{IpAddr, Ipv4Addr, SocketAddr};
+use std::net::{Ipv4Addr, SocketAddr};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, RwLock};
 use std::time::Duration;
@@ -95,31 +95,28 @@ async fn spawn_test_udp_server(ip: Ipv4Addr) -> TestDnsHandle {
 
 #[test]
 fn test_explicit_discovery_lifecycle() {
-    let ep1: SocketAddr = "10.0.0.1:8080".parse().unwrap();
-    let ep2: SocketAddr = "10.0.0.2:8080".parse().unwrap();
+    let ep1 = Endpoint::from_v4([10, 0, 0, 1], 8080, 10);
+    let ep2 = Endpoint::from_v4([10, 0, 0, 2], 8080, 20);
 
-    let endpoints = vec![
-        Endpoint::new("ep-1", ep1, 10),
-        Endpoint::new("ep-2", ep2, 20),
-    ];
+    let endpoints = vec![ep1, ep2];
 
     let disc = Discovery::new_explicit(endpoints);
     let snapshot = disc.current_endpoints();
 
     assert_eq!(snapshot.len(), 2);
     assert_eq!(snapshot.generation(), 1);
-    assert!(snapshot.contains_addr(&ep1));
-    assert!(snapshot.contains_addr(&ep2));
+    assert!(snapshot.contains_addr(ep1.ip, ep1.port_be));
+    assert!(snapshot.contains_addr(ep2.ip, ep2.port_be));
 
-    let found = snapshot.find_by_addr(&ep1).unwrap();
-    assert_eq!(found.id.0, "ep-1");
+    let found = snapshot.find_by_addr(ep1.ip, ep1.port_be).unwrap();
+    assert_eq!((found.ip, found.port_be), (ep1.ip, ep1.port_be));
     assert_eq!(found.weight, 10);
 }
 
 #[test]
 fn test_discovery_from_mode_explicit() {
-    let ep: SocketAddr = "192.168.1.1:80".parse().unwrap();
-    let endpoints = vec![Endpoint::new("srv", ep, 1)];
+    let ep = Endpoint::from_v4([192, 168, 1, 1], 80, 1);
+    let endpoints = vec![ep];
 
     let disc = Discovery::from_mode::<ResolvConfServerProvider, UdpDnsTransport>(
         DiscoveryMode::Explicit(endpoints),
@@ -129,7 +126,7 @@ fn test_discovery_from_mode_explicit() {
 
     let snapshot = disc.current_endpoints();
     assert_eq!(snapshot.len(), 1);
-    assert!(snapshot.contains_addr(&ep));
+    assert!(snapshot.contains_addr(ep.ip, ep.port_be));
 }
 
 #[test]
@@ -171,12 +168,13 @@ async fn test_discovery_from_mode_dns() {
     )
     .unwrap();
 
-    // Wait for first background resolution
-    tokio::time::sleep(Duration::from_millis(60)).await;
+    // Drive centralized discovery scheduler tick
+    velda_discovery::global_discovery_scheduler().tick().await;
 
     let snapshot = disc.current_endpoints();
     assert_eq!(snapshot.len(), 1);
-    assert!(snapshot.contains_addr(&SocketAddr::new(IpAddr::V4(target_ip), 9000)));
+    let expected = Endpoint::from_v4(target_ip.octets(), 9000, 1);
+    assert!(snapshot.contains_addr(expected.ip, expected.port_be));
 
     disc.shutdown();
 }
@@ -211,7 +209,8 @@ async fn test_discovery_from_mode_async_eager_resolution() {
         1,
         "Snapshot must be eagerly primed without sleeping!"
     );
-    assert!(snapshot.contains_addr(&SocketAddr::new(IpAddr::V4(target_ip), 8443)));
+    let expected = Endpoint::from_v4(target_ip.octets(), 8443, 1);
+    assert!(snapshot.contains_addr(expected.ip, expected.port_be));
     assert_eq!(snapshot.generation(), 1);
 
     disc.shutdown();
@@ -238,45 +237,66 @@ async fn test_topology_evolution_and_lkg_outage() {
         servers, hosts, transport, config,
     ));
 
-    let disc = Discovery::new_dns(
+    let scheduler = velda_discovery::DiscoveryScheduler::new();
+    let disc = Discovery::new_dns_scheduled(
         "evolving.service".into(),
         8080,
-        Duration::from_millis(25),
+        Duration::from_secs(1),
         resolver,
+        Vec::new(),
+        &scheduler,
+        None,
     );
 
     // 1. Initial resolution (Generation >= 1)
-    tokio::time::sleep(Duration::from_millis(50)).await;
+    let mut now = velda_core::clock::coarse_sec() + 10;
+    scheduler.tick_at(now).await;
     let snap1 = disc.current_endpoints();
     let initial_gen = snap1.generation();
     assert!(
         initial_gen >= 1,
         "Must complete at least initial resolution"
     );
-    assert!(snap1.contains_addr(&SocketAddr::new(IpAddr::V4(initial_ip), 8080)));
+    let initial_ep = Endpoint::from_v4(initial_ip.octets(), 8080, 1);
+    assert!(snap1.contains_addr(initial_ep.ip, initial_ep.port_be));
+
+    // 1b. Unchanged tick must NOT bump generation
+    now += 10;
+    scheduler.tick_at(now).await;
+    assert_eq!(
+        disc.current_endpoints().generation(),
+        initial_gen,
+        "Unchanged endpoints must skip generation bump"
+    );
 
     // 2. Rolling update: backend changes IP from 10.0.3.1 to 10.0.3.99
     let updated_ip = Ipv4Addr::new(10, 0, 3, 99);
     server.set_ip(updated_ip);
+    tokio::time::sleep(Duration::from_millis(20)).await;
 
-    // Wait for background ticker to refresh with new IP
-    tokio::time::sleep(Duration::from_millis(60)).await;
+    now += 10;
+    scheduler.tick_at(now).await;
     let snap2 = disc.current_endpoints();
     let updated_gen = snap2.generation();
     assert!(
         updated_gen > initial_gen,
         "Generation counter must increment on topology evolution"
     );
+    let updated_ep = Endpoint::from_v4(updated_ip.octets(), 8080, 1);
     assert!(
-        snap2.contains_addr(&SocketAddr::new(IpAddr::V4(updated_ip), 8080)),
+        snap2.contains_addr(updated_ep.ip, updated_ep.port_be),
         "Endpoints must update to new backend IP"
     );
 
     // 3. Upstream Outage: DNS server crashes / goes down
     server.set_active(false);
+    tokio::time::sleep(Duration::from_millis(20)).await;
 
     // Wait through multiple refresh cycles during outage
-    tokio::time::sleep(Duration::from_millis(75)).await;
+    now += 10;
+    scheduler.tick_at(now).await;
+    now += 10;
+    scheduler.tick_at(now).await;
     let snap3 = disc.current_endpoints();
 
     // Invariant: Background discovery MUST retain the Last-Known-Good endpoints!
@@ -286,7 +306,7 @@ async fn test_topology_evolution_and_lkg_outage() {
         "Endpoint set must NOT become empty during upstream DNS outages"
     );
     assert!(
-        snap3.contains_addr(&SocketAddr::new(IpAddr::V4(updated_ip), 8080)),
+        snap3.contains_addr(updated_ep.ip, updated_ep.port_be),
         "Endpoints must preserve Last-Known-Good address during outage"
     );
 
@@ -295,22 +315,22 @@ async fn test_topology_evolution_and_lkg_outage() {
 
 #[test]
 fn test_discovery_atomic_update_endpoints() {
-    let ep1: SocketAddr = "10.0.0.1:8080".parse().unwrap();
-    let endpoints = vec![Endpoint::new("ep-1", ep1, 1)];
+    let ep1 = Endpoint::from_v4([10, 0, 0, 1], 8080, 1);
+    let endpoints = vec![ep1];
 
     let disc = Discovery::new_explicit(endpoints);
     assert_eq!(disc.current_endpoints().len(), 1);
     assert_eq!(disc.current_endpoints().generation(), 1);
 
     // Atomically swap in new generation
-    let ep2: SocketAddr = "10.0.0.2:8080".parse().unwrap();
-    let new_endpoints = vec![Endpoint::new("ep-1", ep1, 1), Endpoint::new("ep-2", ep2, 5)];
+    let ep2 = Endpoint::from_v4([10, 0, 0, 2], 8080, 5);
+    let new_endpoints = vec![ep1, ep2];
     disc.update_endpoints(new_endpoints, 2);
 
     let updated = disc.current_endpoints();
     assert_eq!(updated.len(), 2);
     assert_eq!(updated.generation(), 2);
-    assert!(updated.contains_addr(&ep2));
+    assert!(updated.contains_addr(ep2.ip, ep2.port_be));
 }
 
 #[test]
@@ -320,28 +340,19 @@ fn test_endpoint_set_empty_and_iterators() {
     assert_eq!(empty.len(), 0);
     assert_eq!(empty.generation(), 0);
 
-    let ep1: SocketAddr = "10.1.1.1:80".parse().unwrap();
-    let ep2: SocketAddr = "10.1.1.2:80".parse().unwrap();
-    let set = EndpointSet::new(
-        vec![Endpoint::new("a", ep1, 1), Endpoint::new("b", ep2, 2)],
-        42,
-    );
+    let ep1 = Endpoint::from_v4([10, 1, 1, 1], 80, 1);
+    let ep2 = Endpoint::from_v4([10, 1, 1, 2], 80, 2);
+    let set = EndpointSet::new(vec![ep1, ep2], 42);
 
     assert_eq!(set.generation(), 42);
     assert_eq!(set.len(), 2);
     assert!(!set.is_empty());
 
-    let ips: Vec<IpAddr> = set.ips().collect();
-    assert_eq!(
-        ips,
-        vec![
-            "10.1.1.1".parse::<IpAddr>().unwrap(),
-            "10.1.1.2".parse::<IpAddr>().unwrap()
-        ]
-    );
+    let ips: Vec<u128> = set.ips().collect();
+    assert_eq!(ips, vec![ep1.ip, ep2.ip]);
 
-    let addrs: Vec<SocketAddr> = set.addresses().collect();
-    assert_eq!(addrs, vec![ep1, ep2]);
+    let addrs: Vec<(u128, u16)> = set.addresses().collect();
+    assert_eq!(addrs, vec![(ep1.ip, ep1.port_be), (ep2.ip, ep2.port_be)]);
 
     assert_eq!(set.all_endpoints().len(), 2);
 }

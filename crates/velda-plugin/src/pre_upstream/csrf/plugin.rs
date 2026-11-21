@@ -218,11 +218,7 @@ impl PreUpstreamPlugin for CsrfPlugin {
         &self.id
     }
 
-    fn on_upstream_request(
-        &self,
-        req: &mut L7Request,
-        _target_upstream: &mut velda_core::UpstreamId,
-    ) -> Action {
+    fn on_upstream_request(&self, req: &mut L7Request, _target_upstream: &mut u16) -> Action {
         // ─────────────────────────────────────────────────────────────────────
         // Gate 1: Safe Methods Fast Path (O(1) Single-Instruction Bitmask)
         // ─────────────────────────────────────────────────────────────────────
@@ -388,7 +384,7 @@ mod tests {
             enforce_origin: true,
         };
         let plugin = CsrfPlugin::new("csrf_test", config).unwrap();
-        let mut target = velda_core::UpstreamId::new(1);
+        let mut target = 1;
 
         let safe_methods = [Method::GET, Method::HEAD, Method::OPTIONS];
         for m in safe_methods {
@@ -411,7 +407,7 @@ mod tests {
             enforce_origin: true,
         };
         let plugin = CsrfPlugin::new("csrf_test", config).unwrap();
-        let mut target = velda_core::UpstreamId::new(1);
+        let mut target = 1;
 
         let mut headers = HeaderMap::new();
         headers.insert(HOST, HeaderValue::from_static("api.example.com"));
@@ -440,7 +436,7 @@ mod tests {
             enforce_origin: false,
         };
         let plugin = CsrfPlugin::new("csrf_test", config).unwrap();
-        let mut target = velda_core::UpstreamId::new(1);
+        let mut target = 1;
 
         let mut headers = HeaderMap::new();
         headers.insert(COOKIE, HeaderValue::from_static("aurora_csrf=token_legit"));
@@ -468,7 +464,7 @@ mod tests {
             enforce_origin: false,
         };
         let plugin = CsrfPlugin::new("csrf_test", config).unwrap();
-        let mut target = velda_core::UpstreamId::new(1);
+        let mut target = 1;
 
         let key = hmac::Key::new(hmac::HMAC_SHA256, secret.as_bytes());
         let nonce = [0x42u8; 16];
@@ -537,7 +533,7 @@ mod tests {
             enforce_origin: false,
         };
         let plugin = CsrfPlugin::new("csrf_test", config).unwrap();
-        let mut target = velda_core::UpstreamId::new(1);
+        let mut target = 1;
 
         // Case 1: Browser marks cross-site from untrusted origin -> Instant 403
         let mut headers = HeaderMap::new();
@@ -579,7 +575,7 @@ mod tests {
             enforce_origin: true,
         };
         let plugin = CsrfPlugin::new("csrf_test", config).unwrap();
-        let mut target = velda_core::UpstreamId::new(1);
+        let mut target = 1;
 
         for short_ref in ["x", "http:", "https", "1234567"] {
             let mut headers = HeaderMap::new();
@@ -607,7 +603,7 @@ mod tests {
             enforce_origin: true,
         };
         let plugin = CsrfPlugin::new("csrf_test", config).unwrap();
-        let mut target = velda_core::UpstreamId::new(1);
+        let mut target = 1;
 
         for m in [Method::GET, Method::HEAD, Method::OPTIONS] {
             let mut req = build_test_request(m, "/api/data", HeaderMap::new());
@@ -636,7 +632,7 @@ mod tests {
             enforce_origin: false,
         };
         let plugin = CsrfPlugin::new("csrf_test", config).unwrap();
-        let mut target = velda_core::UpstreamId::new(1);
+        let mut target = 1;
 
         let mut headers = HeaderMap::new();
         headers.insert(COOKIE, HeaderValue::from_static("__Host-csrf="));
@@ -660,7 +656,7 @@ mod tests {
             enforce_origin: true,
         };
         let plugin = CsrfPlugin::new("csrf_test", config).unwrap();
-        let mut target = velda_core::UpstreamId::new(1);
+        let mut target = 1;
 
         let mut headers = HeaderMap::new();
         headers.insert(HOST, HeaderValue::from_static("api.example.com"));

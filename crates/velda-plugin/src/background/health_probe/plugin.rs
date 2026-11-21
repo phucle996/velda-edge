@@ -274,8 +274,9 @@ impl BackgroundPlugin for HealthProbePlugin {
     ) -> std::pin::Pin<Box<dyn std::future::Future<Output = Result<(), PluginError>> + Send>> {
         Box::pin(async move {
             let bg_id = format!("health_probe:{}", self.id);
-            let std_listener = velda_core::socket::global_socket_manager()
-                .acquire_shadow_tcp(self.config.listen_addr, &bg_id)
+            let (ip, port_be) = velda_sock::socket_addr_to_raw(self.config.listen_addr);
+            let std_listener = velda_sock::socket::global_socket_manager()
+                .acquire_shadow_tcp(ip, port_be, &bg_id)
                 .map_err(|e| {
                     PluginError::Config(format!(
                         "Failed to acquire health probe shadow socket for {}: {e}",
@@ -333,7 +334,7 @@ impl BackgroundPlugin for HealthProbePlugin {
             }
 
             tokio::time::sleep(Duration::from_millis(50)).await;
-            velda_core::socket::global_socket_manager().release_shadow_tcp(&bg_id);
+            velda_sock::socket::global_socket_manager().release_shadow_tcp(&bg_id);
             Ok(())
         })
     }

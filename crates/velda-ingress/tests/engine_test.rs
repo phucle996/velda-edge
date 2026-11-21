@@ -5,28 +5,32 @@ use std::time::Duration;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::TcpStream;
 use tokio::sync::watch;
+use velda_core::lut::ip::v4_to_u128;
 use velda_ingress::{
     IngressBinding, TcpBinding, TcpIngress, TrafficEngine, UdpSocket, UdpSocketConfig,
 };
+use velda_sock::{raw_to_socket_addr, socket_addr_to_raw};
+
+const LOOPBACK_IP: u128 = v4_to_u128(u32::from_be_bytes([127, 0, 0, 1]));
 
 fn tcp_binding(id: &str, addr: SocketAddr) -> IngressBinding {
-    IngressBinding::from_transport(id, addr, "tcp", false).unwrap()
+    let (ip, port_be) = socket_addr_to_raw(addr);
+    IngressBinding::from_transport(id, ip, port_be, "tcp", false).unwrap()
 }
 
 fn udp_binding(id: &str, addr: SocketAddr, tls: bool) -> IngressBinding {
-    IngressBinding::from_transport(id, addr, "udp", tls).unwrap()
+    let (ip, port_be) = socket_addr_to_raw(addr);
+    IngressBinding::from_transport(id, ip, port_be, "udp", tls).unwrap()
 }
 
 #[tokio::test]
 async fn test_tcp_ingress_carries_listener_id() {
-    let dummy_ephemeral: SocketAddr = "127.0.0.1:0".parse().unwrap();
-
-    let http = TcpIngress::bind(TcpBinding::new("http", dummy_ephemeral, false)).unwrap();
-    let http_addr = http.local_addr();
-    let https = TcpIngress::bind(TcpBinding::new("https", dummy_ephemeral, true)).unwrap();
-    let https_addr = https.local_addr();
-    let raw = TcpIngress::bind(TcpBinding::new("tcp-ingress", dummy_ephemeral, false)).unwrap();
-    let raw_addr = raw.local_addr();
+    let http = TcpIngress::bind(TcpBinding::new("http", LOOPBACK_IP, 0, false)).unwrap();
+    let (http_ip, http_port_be) = http.local_addr();
+    let https = TcpIngress::bind(TcpBinding::new("https", LOOPBACK_IP, 0, true)).unwrap();
+    let (https_ip, https_port_be) = https.local_addr();
+    let raw = TcpIngress::bind(TcpBinding::new("tcp-ingress", LOOPBACK_IP, 0, false)).unwrap();
+    let (raw_ip, raw_port_be) = raw.local_addr();
 
     let mut engine = TrafficEngine::new();
     engine.add_tcp_ingress(http);
@@ -75,12 +79,24 @@ async fn test_tcp_ingress_carries_listener_id() {
             .await
     });
 
-    for (addr, payload, expect) in [
-        (http_addr, &b"GET / HTTP/1.1\r\n\r\n"[..], b"web-ok"),
-        (https_addr, &b"TLS ClientHello payload"[..], b"web-ok"),
-        (raw_addr, &b"raw tcp bytes"[..], b"raw-ok"),
+    for (ip, port_be, payload, expect) in [
+        (
+            http_ip,
+            http_port_be,
+            &b"GET / HTTP/1.1\r\n\r\n"[..],
+            b"web-ok",
+        ),
+        (
+            https_ip,
+            https_port_be,
+            &b"TLS ClientHello payload"[..],
+            b"web-ok",
+        ),
+        (raw_ip, raw_port_be, &b"raw tcp bytes"[..], b"raw-ok"),
     ] {
-        let mut stream = TcpStream::connect(addr).await.unwrap();
+        let mut stream = TcpStream::connect(raw_to_socket_addr(ip, port_be))
+            .await
+            .unwrap();
         stream.write_all(payload).await.unwrap();
         let mut buf = [0u8; 6];
         stream.read_exact(&mut buf).await.unwrap();
@@ -138,7 +154,9 @@ async fn test_multi_port_heterogeneous_bindings() {
                     |id, socket, dgram| async move {
                         let resp =
                             format!("ack-udp-{id}-{}", String::from_utf8_lossy(dgram.data()));
-                        let _ = socket.send_to(resp.as_bytes(), dgram.peer()).await;
+                        let _ = socket
+                            .send_to(resp.as_bytes(), dgram.peer_ip, dgram.peer_port_be)
+                            .await;
                     }
                 },
             )
@@ -302,7 +320,7 @@ async fn test_tcp_udp_dispatch_by_listener_id() {
                 |id| {
                     let reply: &'static [u8] = if id == "h3" { b"h3-ack" } else { b"udp-ack" };
                     move |_id, sock, dgram| async move {
-                        let _ = sock.send_to(reply, dgram.peer()).await;
+                        let _ = sock.send_to(reply, dgram.peer_ip, dgram.peer_port_be).await;
                     }
                 },
             )
@@ -331,11 +349,14 @@ async fn test_tcp_udp_dispatch_by_listener_id() {
         (free_udp, &b"ping"[..], &b"udp-ack"[..]),
         (free_h3, &b"quic-data"[..], &b"h3-ack"[..]),
     ] {
-        let client =
-            UdpSocket::bind("127.0.0.1:0".parse().unwrap(), UdpSocketConfig::default()).unwrap();
-        client.send_to(payload, addr).await.unwrap();
+        let (target_ip, target_port_be) = socket_addr_to_raw(addr);
+        let client = UdpSocket::bind(LOOPBACK_IP, 0, UdpSocketConfig::default()).unwrap();
+        client
+            .send_to(payload, target_ip, target_port_be)
+            .await
+            .unwrap();
         let mut buf = [0u8; 16];
-        let (n, _) = client.recv_from(&mut buf).await.unwrap();
+        let (n, _, _) = client.recv_from(&mut buf).await.unwrap();
         assert_eq!(&buf[..n], expect);
     }
 

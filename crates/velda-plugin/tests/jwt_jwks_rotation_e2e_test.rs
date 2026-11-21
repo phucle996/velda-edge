@@ -22,7 +22,7 @@ use http::{HeaderMap, Method, Uri, Version};
 use ring::hmac;
 use rustc_hash::FxHashMap;
 use serde_json::json;
-use velda_core::{Action, Body, L7Request, RejectReason, UpstreamId};
+use velda_core::{Action, Body, L7Request, RejectReason};
 use velda_plugin::background::BackgroundPlugin;
 use velda_plugin::background::jwks_rotator::JwksRotatorPlugin;
 use velda_plugin::config::PluginConfig;
@@ -237,7 +237,7 @@ fn make_auth_request(token: &str) -> L7Request {
 
 fn evaluate_token(plugin: &JwtAuthPlugin, token: &str) -> Action {
     let mut req = make_auth_request(token);
-    let mut target_upstream = UpstreamId::new(1);
+    let mut target_upstream = 1;
     plugin.on_upstream_request(&mut req, &mut target_upstream)
 }
 

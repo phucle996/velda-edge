@@ -61,28 +61,27 @@ const CANONICAL_JWK_LEN: usize =
     JWK_PREFIX.len() + B64_32_LEN + JWK_INFIX.len() + B64_32_LEN + JWK_SUFFIX.len();
 const _: () = assert!(CANONICAL_JWK_LEN == 126);
 
-/// Encodes 32 raw bytes into 43 base64url ASCII bytes using the best CPU instruction set.
-///
-/// Inlined direct execution eliminating indirect function pointer overhead.
+/// Encodes 32 raw bytes into 43 base64url ASCII bytes using compile-time target features.
 #[inline(always)]
 pub fn b64url_encode32(src: &[u8; 32], out: &mut [u8; B64_32_LEN]) {
-    #[cfg(target_arch = "x86_64")]
+    #[cfg(all(target_arch = "x86_64", target_feature = "ssse3"))]
     {
-        if std::is_x86_feature_detected!("ssse3") {
-            unsafe { encode32_ssse3_impl(src, out) };
-            return;
-        }
+        unsafe { encode32_ssse3_impl(src, out) };
     }
-    b64url_encode32_scalar(src, out);
+    #[cfg(not(all(target_arch = "x86_64", target_feature = "ssse3")))]
+    {
+        b64url_encode32_scalar(src, out);
+    }
 }
 
 /// Portable fallback: delegates to the `base64` crate, writing into the caller's stack buffer.
+#[cfg(any(not(all(target_arch = "x86_64", target_feature = "ssse3")), test))]
 fn b64url_encode32_scalar(src: &[u8; 32], out: &mut [u8; B64_32_LEN]) {
     // `encode_slice` into an exactly-sized buffer cannot fail for 32 input bytes.
     let _ = URL_SAFE_NO_PAD.encode_slice(src, out);
 }
 
-#[cfg(target_arch = "x86_64")]
+#[cfg(all(target_arch = "x86_64", target_feature = "ssse3"))]
 #[target_feature(enable = "ssse3")]
 unsafe fn encode32_ssse3_impl(src: &[u8; 32], out: &mut [u8; B64_32_LEN]) {
     use core::arch::x86_64::*;
