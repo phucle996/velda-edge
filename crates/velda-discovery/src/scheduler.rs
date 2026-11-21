@@ -254,3 +254,78 @@ static GLOBAL_DISCOVERY_SCHEDULER: OnceLock<Arc<DiscoveryScheduler>> = OnceLock:
 pub fn global_discovery_scheduler() -> &'static Arc<DiscoveryScheduler> {
     GLOBAL_DISCOVERY_SCHEDULER.get_or_init(|| Arc::new(DiscoveryScheduler::new()))
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
+
+    struct MockTarget {
+        endpoints: Arc<std::sync::Mutex<Vec<Endpoint>>>,
+    }
+
+    impl DiscoveryTarget for MockTarget {
+        fn resolve<'a>(
+            &'a self,
+        ) -> Pin<Box<dyn Future<Output = crate::error::Result<Vec<Endpoint>>> + Send + 'a>>
+        {
+            let eps = self.endpoints.lock().unwrap().clone();
+            Box::pin(async move { Ok(eps) })
+        }
+
+        fn ttl_remaining(&self) -> Option<Duration> {
+            None
+        }
+
+        fn label(&self) -> &str {
+            "mock-service"
+        }
+    }
+
+    #[tokio::test]
+    async fn test_scheduler_skip_if_unchanged() {
+        let ep1 = Endpoint::from_v4([10, 0, 0, 1], 8080, 1);
+        let ep2 = Endpoint::from_v4([10, 0, 0, 2], 8080, 1);
+        let ep3 = Endpoint::from_v4([10, 0, 0, 3], 8080, 1);
+
+        let shared = Arc::new(std::sync::Mutex::new(vec![ep1, ep2]));
+        let discovery = Discovery::new_explicit(vec![ep1, ep2]);
+
+        let cb_calls = Arc::new(AtomicUsize::new(0));
+        let last_gen = Arc::new(AtomicU64::new(0));
+        let cb_calls_c = Arc::clone(&cb_calls);
+        let last_gen_c = Arc::clone(&last_gen);
+
+        let scheduler = DiscoveryScheduler::new();
+        scheduler.register(
+            &discovery,
+            Box::new(MockTarget {
+                endpoints: Arc::clone(&shared),
+            }),
+            Duration::from_secs(5),
+            &[ep1, ep2],
+            1,
+            Some(Arc::new(move |_eps, generation| {
+                cb_calls_c.fetch_add(1, Ordering::Relaxed);
+                last_gen_c.store(generation, Ordering::Relaxed);
+            })),
+        );
+
+        let base = velda_core::clock::coarse_sec();
+
+        // Same endpoints in reversed order -> sorted slice equals published -> skip-if-unchanged
+        *shared.lock().unwrap() = vec![ep2, ep1];
+        scheduler.tick_at(base + 100).await;
+        assert_eq!(cb_calls.load(Ordering::Relaxed), 0);
+
+        // Same endpoints again on subsequent tick -> still skipped
+        scheduler.tick_at(base + 1_000).await;
+        assert_eq!(cb_calls.load(Ordering::Relaxed), 0);
+
+        // Endpoints actually change -> callback invoked and generation increments
+        *shared.lock().unwrap() = vec![ep1, ep3];
+        scheduler.tick_at(base + 10_000).await;
+        assert_eq!(cb_calls.load(Ordering::Relaxed), 1);
+        assert_eq!(last_gen.load(Ordering::Relaxed), 2);
+    }
+}

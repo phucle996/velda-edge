@@ -15,32 +15,26 @@
 //!                                 None (404)
 //! ```
 
-use rustc_hash::FxHashMap;
-use velda_core::{ListenerId, RouteId};
-
+use crate::arena::{ARENA_NONE, ArenaRouteEntry, RouteArena, RouteEntry};
 use crate::error::RouterError;
-use crate::host::{CompiledHost, ReverseHostLabels, host_specificity};
+use crate::host::{CompiledHost, HostBlocks, HostTable, host_specificity};
 
 /// Concrete compiled gRPC Layer 7 route (8 bytes, `Copy`, zero heap strings).
 #[repr(C)]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct GrpcRoute {
-    pub id: RouteId,
-    pub listener_id: ListenerId,
+    pub id: u16,
+    pub listener_id: u32,
 }
 
 impl GrpcRoute {
     /// Creates a new gRPC route rule matching on full service name for router compilation.
     #[inline]
     #[allow(clippy::new_ret_no_self)]
-    pub fn new(
-        id: RouteId,
-        listener_id: impl Into<ListenerId>,
-        service: impl Into<String>,
-    ) -> GrpcRouteRule {
+    pub fn new(id: u16, listener_id: u32, service: impl Into<String>) -> GrpcRouteRule {
         GrpcRouteRule {
             id,
-            listener_id: listener_id.into(),
+            listener_id,
             service: service.into(),
             method: None,
             authority: None,
@@ -55,8 +49,8 @@ impl GrpcRoute {
 /// [`ListenerGrpcRouter`], leaving only 8-byte [`GrpcRoute`]s in the route table.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct GrpcRouteRule {
-    pub id: RouteId,
-    pub listener_id: ListenerId,
+    pub id: u16,
+    pub listener_id: u32,
     pub service: String,
     pub method: Option<String>,
     pub authority: Option<String>,
@@ -80,7 +74,7 @@ impl GrpcRouteRule {
 
     /// Checks whether this route rule matches the given parsed request authority view.
     #[inline]
-    pub fn matches_authority(&self, authority: &ReverseHostLabels) -> bool {
+    pub fn matches_authority(&self, authority: &HostBlocks) -> bool {
         self.compiled_authority.matches(authority)
     }
 
@@ -105,46 +99,10 @@ impl GrpcRouteRule {
         if self.compiled_authority == CompiledHost::Any {
             return true;
         }
-        if req.parsed_authority.count > 0 || req.parsed_authority.is_ip_or_unbracketed {
+        if !req.parsed_authority.is_empty() {
             self.compiled_authority.matches(&req.parsed_authority)
         } else if let Some(a) = req.authority {
-            self.compiled_authority
-                .matches(&ReverseHostLabels::parse(a))
-        } else {
-            false
-        }
-    }
-}
-
-/// Compact candidate descriptor for gRPC route matching.
-#[repr(C, align(16))]
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct GrpcHotCandidate {
-    pub compiled_authority: CompiledHost,
-    pub route_idx: u32,
-    pub method: Option<String>,
-}
-
-impl GrpcHotCandidate {
-    /// Evaluates candidate matching against an incoming request view in 1-2 CPU cycles.
-    #[inline(always)]
-    pub fn matches_req(&self, req: &GrpcRouteRequest<'_>) -> bool {
-        if let Some(ref exp_method) = self.method {
-            let Some(act_method) = req.method else {
-                return false;
-            };
-            if exp_method != act_method {
-                return false;
-            }
-        }
-        if self.compiled_authority == CompiledHost::Any {
-            return true;
-        }
-        if req.parsed_authority.count > 0 || req.parsed_authority.is_ip_or_unbracketed {
-            self.compiled_authority.matches(&req.parsed_authority)
-        } else if let Some(a) = req.authority {
-            self.compiled_authority
-                .matches(&ReverseHostLabels::parse(a))
+            self.compiled_authority.matches(&HostBlocks::parse(a))
         } else {
             false
         }
@@ -157,7 +115,7 @@ pub struct GrpcRouteRequest<'a> {
     pub service: &'a str,
     pub method: Option<&'a str>,
     pub authority: Option<&'a str>,
-    pub parsed_authority: ReverseHostLabels,
+    pub parsed_authority: HostBlocks,
 }
 
 impl<'a> GrpcRouteRequest<'a> {
@@ -168,7 +126,7 @@ impl<'a> GrpcRouteRequest<'a> {
             service,
             method,
             authority: None,
-            parsed_authority: ReverseHostLabels::default(),
+            parsed_authority: HostBlocks::default(),
         }
     }
 
@@ -188,7 +146,7 @@ impl<'a> GrpcRouteRequest<'a> {
             return None;
         }
 
-        let parsed_authority = authority.map(ReverseHostLabels::parse).unwrap_or_default();
+        let parsed_authority = authority.map(HostBlocks::parse).unwrap_or_default();
 
         // SWAR scan for first delimiter among '/', '?', '#'
         let (delim_idx, delim_char) = swar_find_first_delimiter(rest);
@@ -259,108 +217,192 @@ impl<'a> GrpcRouteRequest<'a> {
     #[inline]
     pub fn with_authority(mut self, authority: &'a str) -> Self {
         self.authority = Some(authority);
-        self.parsed_authority = ReverseHostLabels::parse(authority);
+        self.parsed_authority = HostBlocks::parse(authority);
         self
     }
 }
 
-/// Route table for a single gRPC listener with Hot/Cold Data-Oriented Separation.
-///
-/// Aligned to 64 bytes to sit on an exact L1D cache line boundary, preventing split-line
-/// header loads and false sharing between worker threads.
+#[inline(always)]
+const fn grpc_method_tag(method: &[u8]) -> u16 {
+    let mut h: u32 = 0x811c_9dc5;
+    let mut i = 0;
+    while i < method.len() {
+        h ^= method[i] as u32;
+        h = h.wrapping_mul(0x0100_0193);
+        i += 1;
+    }
+    let tag = ((h >> 16) ^ h) as u16;
+    if tag == 0xFFFF { 0xFFFE } else { tag }
+}
+
+/// Route table for a single gRPC listener backed by a 4KB page-aligned [`RouteArena`].
 #[repr(C, align(64))]
 #[derive(Debug, Clone, Default)]
 pub struct ListenerGrpcRouter {
-    routes: Vec<GrpcRoute>,
-    service_routes: FxHashMap<String, Vec<GrpcHotCandidate>>,
-    catch_all: Vec<GrpcHotCandidate>,
+    arena: RouteArena,
 }
 
 impl ListenerGrpcRouter {
-    /// Builds a new compiled gRPC listener routing table.
+    /// Builds a new compiled gRPC listener routing table inside a 4KB [`RouteArena`].
     pub fn new(rules: Vec<GrpcRouteRule>) -> Result<Self, RouterError> {
-        let mut service_map: FxHashMap<String, Vec<GrpcHotCandidate>> = FxHashMap::default();
-        let mut catch_all = Vec::new();
-        let mut routes = Vec::with_capacity(rules.len());
+        let listener_id = rules.first().map_or(0, |r| r.listener_id);
+        let mut patterns: Vec<String> = Vec::with_capacity(rules.len());
+        let mut is_catch_all = Vec::with_capacity(rules.len());
 
-        for (idx, r) in rules.iter().enumerate() {
-            routes.push(GrpcRoute {
-                id: r.id,
-                listener_id: r.listener_id,
-            });
-
-            let candidate = GrpcHotCandidate {
-                compiled_authority: r.compiled_authority.clone(),
-                route_idx: idx as u32,
-                method: r.method.clone(),
-            };
-
-            if r.service == "*" || r.service.is_empty() {
-                catch_all.push(candidate);
+        for r in &rules {
+            let catch_all = r.service == "*" || r.service.is_empty();
+            is_catch_all.push(catch_all);
+            if catch_all {
+                patterns.push(String::new());
+            } else if let Some(ref m) = r.method {
+                patterns.push(format!("{}/{m}", r.service));
             } else {
-                service_map
-                    .entry(r.service.clone())
-                    .or_default()
-                    .push(candidate);
+                patterns.push(r.service.clone());
             }
         }
 
-        for list in service_map.values_mut() {
-            list.sort_by_key(|c| {
-                let r = &rules[c.route_idx as usize];
-                std::cmp::Reverse(host_specificity(r.authority.as_deref()))
+        let mut entries = Vec::with_capacity(rules.len());
+        for ((r, pat), &catch_all) in rules.iter().zip(patterns.iter()).zip(is_catch_all.iter()) {
+            let method_mask = if catch_all {
+                r.method
+                    .as_deref()
+                    .map_or(0xFFFF, |m| grpc_method_tag(m.as_bytes()))
+            } else {
+                0xFFFF
+            };
+            entries.push(ArenaRouteEntry {
+                pattern: pat.as_str(),
+                route_id: r.id,
+                method_mask,
+                host: r.compiled_authority.as_pattern(),
+                specificity: host_specificity(r.authority.as_deref()),
+                is_prefix: false,
+                is_catch_all: catch_all,
             });
         }
-        catch_all.sort_by_key(|c| {
-            let r = &rules[c.route_idx as usize];
-            std::cmp::Reverse(host_specificity(r.authority.as_deref()))
-        });
 
         Ok(Self {
-            routes,
-            service_routes: service_map,
-            catch_all,
+            arena: RouteArena::build(listener_id, entries),
         })
     }
 
-    /// Resolves a gRPC route for an incoming request view.
     #[inline(always)]
-    pub fn route(&self, req: &GrpcRouteRequest<'_>) -> Option<&GrpcRoute> {
-        if let Some(first_route) = self.routes.first() {
-            crate::path::prefetch_l1_keep(first_route as *const _ as *const u8);
+    fn match_entries(
+        cands: &[RouteEntry],
+        host_table: &HostTable,
+        req: &GrpcRouteRequest<'_>,
+        listener_id: u32,
+        check_method_tag: bool,
+        parsed_fallback: &mut Option<HostBlocks>,
+    ) -> Option<GrpcRoute> {
+        for c in cands {
+            if check_method_tag && c.method_mask != 0xFFFF {
+                let Some(m) = req.method else {
+                    continue;
+                };
+                if grpc_method_tag(m.as_bytes()) != c.method_mask {
+                    continue;
+                }
+            }
+            if c.host_id == ARENA_NONE {
+                return Some(GrpcRoute {
+                    id: c.route_id,
+                    listener_id,
+                });
+            }
+            let actual_auth = if !req.parsed_authority.is_empty() {
+                &req.parsed_authority
+            } else if let Some(a) = req.authority {
+                parsed_fallback.get_or_insert_with(|| HostBlocks::parse(a))
+            } else {
+                continue;
+            };
+            if host_table.matches(c.host_id, actual_auth) {
+                return Some(GrpcRoute {
+                    id: c.route_id,
+                    listener_id,
+                });
+            }
         }
+        None
+    }
 
-        if let Some(candidates) = self.service_routes.get(req.service)
-            && let Some(c) = candidates.iter().find(|c| c.matches_req(req))
+    /// Resolves a gRPC route for an incoming request view, returning an 8-byte [`GrpcRoute`] on register.
+    #[inline(always)]
+    pub fn route(&self, req: &GrpcRouteRequest<'_>) -> Option<GrpcRoute> {
+        let host_table = self.arena.host_table();
+        let listener_id = self.arena.header().listener_id;
+        let mut parsed_fallback: Option<HostBlocks> = None;
+
+        let (method_cands, svc_cands) = self.arena.match_grpc(req.service, req.method);
+
+        if let Some((start, count)) = method_cands
+            && let Some(route) = Self::match_entries(
+                self.arena.node_entries(start, count),
+                host_table,
+                req,
+                listener_id,
+                false,
+                &mut parsed_fallback,
+            )
         {
-            return self.routes.get(c.route_idx as usize);
+            return Some(route);
         }
 
-        if let Some(c) = self.catch_all.iter().find(|c| c.matches_req(req)) {
-            return self.routes.get(c.route_idx as usize);
+        if let Some((start, count)) = svc_cands
+            && let Some(route) = Self::match_entries(
+                self.arena.node_entries(start, count),
+                host_table,
+                req,
+                listener_id,
+                false,
+                &mut parsed_fallback,
+            )
+        {
+            return Some(route);
+        }
+
+        let catch_all = self.arena.catch_all_entries();
+        if !catch_all.is_empty() {
+            return Self::match_entries(
+                catch_all,
+                host_table,
+                req,
+                listener_id,
+                true,
+                &mut parsed_fallback,
+            );
         }
 
         None
     }
 }
 
-/// Unified, thread-safe gRPC routing table coordinating all gRPC listeners.
+/// Unified, thread-safe gRPC routing table coordinating all gRPC listeners (0 `FxHashMap`).
 #[derive(Debug, Default, Clone)]
 pub struct GrpcRouter {
-    listeners: FxHashMap<ListenerId, ListenerGrpcRouter>,
+    listeners: Vec<(u32, ListenerGrpcRouter)>,
 }
 
 impl GrpcRouter {
     /// Builds a new [`GrpcRouter`] from a list of [`GrpcRouteRule`] specifications.
     pub fn new(routes: impl IntoIterator<Item = GrpcRouteRule>) -> Result<Self, RouterError> {
-        let mut grouped: FxHashMap<ListenerId, Vec<GrpcRouteRule>> = FxHashMap::default();
-        for r in routes {
-            grouped.entry(r.listener_id).or_default().push(r);
-        }
+        let mut all_rules: Vec<GrpcRouteRule> = routes.into_iter().collect();
+        all_rules.sort_by_key(|r| r.listener_id);
 
-        let mut listeners = FxHashMap::with_capacity_and_hasher(grouped.len(), Default::default());
-        for (listener_id, list) in grouped {
-            listeners.insert(listener_id, ListenerGrpcRouter::new(list)?);
+        let mut listeners = Vec::new();
+        let mut iter = all_rules.into_iter().peekable();
+        while let Some(first) = iter.next() {
+            let lid = first.listener_id;
+            let mut group = vec![first];
+            while let Some(next) = iter.peek() {
+                if next.listener_id == lid {
+                    group.push(iter.next().unwrap());
+                } else {
+                    break;
+                }
+            }
+            listeners.push((lid, ListenerGrpcRouter::new(group)?));
         }
 
         Ok(Self { listeners })
@@ -368,19 +410,25 @@ impl GrpcRouter {
 
     /// Resolves a gRPC route for an incoming request on a listener.
     #[inline]
-    pub fn route(
-        &self,
-        listener_id: impl Into<ListenerId>,
-        req: &GrpcRouteRequest<'_>,
-    ) -> Option<&GrpcRoute> {
-        let listener_router = self.listeners.get(&listener_id.into())?;
+    pub fn route(&self, listener_id: u32, req: &GrpcRouteRequest<'_>) -> Option<GrpcRoute> {
+        let listener_router = self.listener(listener_id)?;
         listener_router.route(req)
     }
 
     /// Returns the compiled route table for a specific listener.
     #[inline]
-    pub fn listener(&self, listener_id: impl Into<ListenerId>) -> Option<&ListenerGrpcRouter> {
-        self.listeners.get(&listener_id.into())
+    pub fn listener(&self, listener_id: u32) -> Option<&ListenerGrpcRouter> {
+        if self.listeners.len() <= 16 {
+            self.listeners
+                .iter()
+                .find(|(id, _)| *id == listener_id)
+                .map(|(_, r)| r)
+        } else {
+            self.listeners
+                .binary_search_by_key(&listener_id, |(id, _)| *id)
+                .ok()
+                .map(|idx| &self.listeners[idx].1)
+        }
     }
 
     /// Returns the number of registered listeners.
@@ -505,13 +553,16 @@ fn swar_find_query_or_fragment(bytes: &[u8]) -> Option<usize> {
 mod tests {
     use super::*;
 
+    use velda_core::fnv1a_hash_32;
+
     #[test]
     fn test_grpc_routing_exact_and_catchall() {
+        let lid = fnv1a_hash_32("grpc-in");
         let routes = vec![
-            GrpcRoute::new(RouteId::new(1), "grpc-in", "helloworld.Greeter")
+            GrpcRoute::new(1, lid, "helloworld.Greeter")
                 .with_method("SayHello")
                 .with_authority("grpc.velda.io"),
-            GrpcRoute::new(RouteId::new(2), "grpc-in", "*"),
+            GrpcRoute::new(2, lid, "*"),
         ];
 
         let router = GrpcRouter::new(routes).unwrap();
@@ -525,8 +576,8 @@ mod tests {
         assert_eq!(req1.service, "helloworld.Greeter");
         assert_eq!(req1.method, Some("SayHello"));
 
-        let r1 = router.route("grpc-in", &req1).unwrap();
-        assert_eq!(r1.id, RouteId::new(1));
+        let r1 = router.route(lid, &req1).unwrap();
+        assert_eq!(r1.id, 1);
 
         // Method mismatch falls back to catch-all
         let req2 = GrpcRouteRequest::from_path(
@@ -534,8 +585,8 @@ mod tests {
             Some("grpc.velda.io:50051"),
         )
         .unwrap();
-        let r2 = router.route("grpc-in", &req2).unwrap();
-        assert_eq!(r2.id, RouteId::new(2));
+        let r2 = router.route(lid, &req2).unwrap();
+        assert_eq!(r2.id, 2);
     }
 
     #[test]

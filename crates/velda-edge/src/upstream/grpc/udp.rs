@@ -1,6 +1,5 @@
 //! Layer 7 gRPC over UDP Upstream managing persistent QUIC client multiplexing and RPC request forwarding.
 
-use std::net::SocketAddr;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
 
@@ -53,7 +52,7 @@ pub struct GrpcUdpUpstream {
     /// `streaming` at compile time; eliminates runtime enum branching.
     pub strategy: GrpcUdpPipeStrategy,
     /// Lock-sharded persistent gRPC QUIC client connection pool.
-    pool: Arc<MultiplexedPool<SocketAddr, GrpcUdpClientResource>>,
+    pool: Arc<MultiplexedPool<(u128, u16), GrpcUdpClientResource>>,
     /// Maximum concurrent streams per multiplexed connection.
     pub max_concurrent_streams: u32,
     /// [PRE-COMPILED]: Pre-compiled QUIC client TLS configuration compiled directly
@@ -129,7 +128,8 @@ impl GrpcUdpUpstream {
                     }
 
                     let fresh = velda_grpc::udp::connect_udp(
-                        endpoint,
+                        endpoint.0,
+                        endpoint.1,
                         server_name,
                         config,
                         (*quic_tls).clone(),
@@ -169,7 +169,8 @@ impl GrpcUdpUpstream {
                 let quic_tls = Arc::clone(&quic_tls);
                 async move {
                     let fresh = velda_grpc::udp::connect_udp(
-                        endpoint,
+                        endpoint.0,
+                        endpoint.1,
                         server_name,
                         config,
                         (*quic_tls).clone(),
@@ -204,7 +205,7 @@ impl GrpcUdpUpstream {
         }
 
         for ep in all_eps {
-            let addr = ep.address;
+            let addr = (ep.ip, ep.port_be);
             if !self.inner.health().is_healthy(&addr) {
                 continue;
             }
@@ -216,7 +217,15 @@ impl GrpcUdpUpstream {
                 let sni = Arc::clone(&self.target_sni);
                 let quic_tls = Arc::clone(&self.quic_config);
 
-                match velda_grpc::udp::connect_udp(addr, &sni, config, (*quic_tls).clone()).await {
+                match velda_grpc::udp::connect_udp(
+                    addr.0,
+                    addr.1,
+                    &sni,
+                    config,
+                    (*quic_tls).clone(),
+                )
+                .await
+                {
                     Ok(fresh) => {
                         let res = GrpcUdpClientResource::new(fresh);
                         self.pool.register_warmed_to_lane(
@@ -225,10 +234,10 @@ impl GrpcUdpUpstream {
                             res,
                             self.max_concurrent_streams,
                         );
-                        tracing::debug!(endpoint = %addr, lane, "Shadow Worker pre-warmed gRPC UDP connection");
+                        tracing::debug!(endpoint = ?addr, lane, "Shadow Worker pre-warmed gRPC UDP connection");
                     }
                     Err(e) => {
-                        tracing::debug!(endpoint = %addr, lane, error = %e, "Shadow Worker pre-warm connect failed for gRPC UDP");
+                        tracing::debug!(endpoint = ?addr, lane, error = %e, "Shadow Worker pre-warm connect failed for gRPC UDP");
                     }
                 }
             }
@@ -261,7 +270,7 @@ impl GrpcUdpUpstream {
         let idle_timeout = self.inner.timeouts().idle;
 
         for ep in all_eps {
-            let addr = ep.address;
+            let addr = (ep.ip, ep.port_be);
             let leased = self.pool.acquire_stream(&addr, idle_timeout);
 
             let success = if let Some(lease) = leased {
@@ -278,7 +287,13 @@ impl GrpcUdpUpstream {
 
                 match tokio::time::timeout(
                     timeout,
-                    velda_grpc::udp::connect_udp(addr, &sni, &config, (*quic_tls).clone()),
+                    velda_grpc::udp::connect_udp(
+                        addr.0,
+                        addr.1,
+                        &sni,
+                        &config,
+                        (*quic_tls).clone(),
+                    ),
                 )
                 .await
                 {

@@ -6,7 +6,7 @@ use serde::{Deserialize, Serialize};
 
 pub const MAGIC_BYTES: [u8; 4] = *b"VLDA";
 pub const CURRENT_FORMAT_VERSION: u32 = 1;
-pub const CURRENT_COMPILER_VERSION: u32 = 1;
+pub const CURRENT_COMPILER_VERSION: u32 = 2;
 pub const TAG_LISTENERS: [u8; 8] = *b"LISTENER";
 
 /// Self-describing binary header prepended to listeners.bin.
@@ -30,7 +30,7 @@ pub const DOMAIN_HEADER_SIZE: usize = std::mem::size_of::<DomainHeader>();
 // Phase 1: Entity & Schema Definitions
 // ============================================================================
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct ListenersFile {
     pub schema_version: u32,
     pub listeners: Vec<ListenerConfig>,
@@ -219,7 +219,87 @@ pub struct RawListenerConfig {
     pub idle_timeout_ms: Option<u64>,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+/// Listener-level observability configuration (`observability` block in `listeners.json`).
+#[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize, Default)]
+#[serde(deny_unknown_fields)]
+pub struct ListenerObservabilityConfig {
+    #[serde(default)]
+    pub sampling: Option<ListenerSamplingConfig>,
+}
+
+/// Protocol-isolated unified Log + Trace sampling policy (`observability.sampling`).
+#[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize, Default)]
+#[serde(deny_unknown_fields)]
+pub struct ListenerSamplingConfig {
+    #[serde(default)]
+    pub http: Option<HttpSamplingConfig>,
+    #[serde(default)]
+    pub grpc: Option<GrpcSamplingConfig>,
+}
+
+/// HTTP sampling rates (`0.0..=1.0`) grouped by status class (`1xx`..`5xx`) plus overload `shed`.
+#[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize, Default)]
+#[serde(deny_unknown_fields)]
+pub struct HttpSamplingConfig {
+    #[serde(rename = "1xx", default)]
+    pub r1xx: Option<f64>,
+    #[serde(rename = "2xx", default)]
+    pub r2xx: Option<f64>,
+    #[serde(rename = "3xx", default)]
+    pub r3xx: Option<f64>,
+    #[serde(rename = "4xx", default)]
+    pub r4xx: Option<f64>,
+    #[serde(rename = "5xx", default)]
+    pub r5xx: Option<f64>,
+    #[serde(default)]
+    pub shed: Option<f64>,
+}
+
+/// gRPC sampling rates (`0.0..=1.0`) per canonical status code (`0..=16`) plus `default` and `shed`.
+#[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize, Default)]
+#[serde(deny_unknown_fields)]
+pub struct GrpcSamplingConfig {
+    #[serde(default)]
+    pub default: Option<f64>,
+    #[serde(default)]
+    pub ok: Option<f64>,
+    #[serde(default)]
+    pub cancelled: Option<f64>,
+    #[serde(default)]
+    pub unknown: Option<f64>,
+    #[serde(default)]
+    pub invalid_argument: Option<f64>,
+    #[serde(default)]
+    pub deadline_exceeded: Option<f64>,
+    #[serde(default)]
+    pub not_found: Option<f64>,
+    #[serde(default)]
+    pub already_exists: Option<f64>,
+    #[serde(default)]
+    pub permission_denied: Option<f64>,
+    #[serde(default)]
+    pub resource_exhausted: Option<f64>,
+    #[serde(default)]
+    pub failed_precondition: Option<f64>,
+    #[serde(default)]
+    pub aborted: Option<f64>,
+    #[serde(default)]
+    pub out_of_range: Option<f64>,
+    #[serde(default)]
+    pub unimplemented: Option<f64>,
+    #[serde(default)]
+    pub internal: Option<f64>,
+    #[serde(default)]
+    pub unavailable: Option<f64>,
+    #[serde(default)]
+    pub data_loss: Option<f64>,
+    #[serde(default)]
+    pub unauthenticated: Option<f64>,
+    #[serde(default)]
+    pub shed: Option<f64>,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct ListenerConfig {
     pub id: String,
     pub address: String, // e.g. "0.0.0.0:80" or "0.0.0.0:443"
@@ -236,13 +316,15 @@ pub struct ListenerConfig {
     pub http3: Option<Http3ListenerConfig>,
     #[serde(default)]
     pub raw: Option<RawListenerConfig>,
+    #[serde(default)]
+    pub observability: Option<ListenerObservabilityConfig>,
 }
 
 impl ListenerConfig {
-    /// Returns the deterministic 32-bit `ListenerId` compiled from `self.id`.
+    /// Returns the deterministic 32-bit FNV-1a listener ID compiled from `self.id`.
     #[inline]
-    pub const fn listener_id(&self) -> velda_core::ListenerId {
-        velda_core::ListenerId::from_name(self.id.as_str())
+    pub const fn listener_id(&self) -> u32 {
+        velda_core::fnv1a_hash_32(self.id.as_str())
     }
 }
 

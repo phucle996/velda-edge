@@ -241,11 +241,7 @@ impl PreUpstreamPlugin for HmacAuthPlugin {
         &self.id
     }
 
-    fn on_upstream_request(
-        &self,
-        req: &mut L7Request,
-        _target_upstream: &mut velda_core::UpstreamId,
-    ) -> Action {
+    fn on_upstream_request(&self, req: &mut L7Request, _target_upstream: &mut u16) -> Action {
         // Use authoritative pre-sampled ingress timestamp (0ns, zero redundant clock reads)
         let now = req.ingress_time_sec();
 
@@ -509,7 +505,7 @@ mod tests {
             "nonce-unique-001",
             &signed_headers,
         );
-        let mut target = velda_core::UpstreamId::new(1);
+        let mut target = 1;
 
         // First attempt: MUST SUCCEED
         assert!(matches!(
@@ -538,7 +534,7 @@ mod tests {
         forged_req
             .headers
             .insert("x-signature", HeaderValue::from_static("forged_bad_sig"));
-        let mut target = velda_core::UpstreamId::new(1);
+        let mut target = 1;
 
         // Attacker sends forged signature -> Rejected
         assert!(matches!(
@@ -574,7 +570,7 @@ mod tests {
             &signed_headers,
         );
         req.body = Body::Bytes(bytes::Bytes::from_static(b"{\"amount\":999999}"));
-        let mut target = velda_core::UpstreamId::new(1);
+        let mut target = 1;
         let action = plugin.on_upstream_request(&mut req, &mut target);
         assert!(matches!(action, Action::Reject(RejectReason::Unauthorized)));
     }
@@ -598,7 +594,7 @@ mod tests {
             HeaderValue::from_str(&original_hash).unwrap(),
         );
         req.body = Body::Bytes(bytes::Bytes::from_static(b"{\"amount\":9999999}"));
-        let mut target = velda_core::UpstreamId::new(1);
+        let mut target = 1;
         let action = plugin.on_upstream_request(&mut req, &mut target);
         assert!(matches!(action, Action::Reject(RejectReason::Unauthorized)));
     }
@@ -621,7 +617,7 @@ mod tests {
             "x-content-sha256",
             HeaderValue::from_str(&upper_hash).unwrap(),
         );
-        let mut target = velda_core::UpstreamId::new(1);
+        let mut target = 1;
         assert!(matches!(
             plugin.on_upstream_request(&mut req, &mut target),
             Action::Continue
@@ -643,7 +639,7 @@ mod tests {
             &signed_headers,
         );
         req.headers.remove("host"); // RFC 9113: :authority in URI instead of Host header
-        let mut target = velda_core::UpstreamId::new(1);
+        let mut target = 1;
         assert!(matches!(
             plugin.on_upstream_request(&mut req, &mut target),
             Action::Continue

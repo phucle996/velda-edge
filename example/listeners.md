@@ -35,6 +35,7 @@ The `listeners.json` file configures the edge ingress layer (top cone of the Hou
 | `http3` | `object` | No | Protocol tuning options for HTTP/3 over QUIC connections. |
 | `grpc` | `object` | No | Protocol tuning options for gRPC RPC connections. |
 | `raw` | `object` | No | Protocol tuning options for raw L4 passthrough connections. |
+| `observability` | `object` | No | Listener-level unified Log + Trace sampling policy (`sampling.http` or `sampling.grpc`). |
 
 ---
 
@@ -106,3 +107,9 @@ The `listeners.json` file configures the edge ingress layer (top cone of the Hou
 #### `raw` (L4 Passthrough Parameters)
 * `copy_buffer_size` (`integer`): Size of the zero-copy splice / copy buffer (default `16384` bytes).
 * `idle_timeout_ms` (`integer`): Inactivity timeout before dropping idle L4 connections.
+
+#### `observability` (Unified Log + Trace Sampling)
+* Only `sampling.http` (on HTTP listeners) or `sampling.grpc` (on gRPC listeners) may be configured; rejected on `raw`.
+* Rates are floats in `0.0..=1.0` (`1.0` = keep all, `0.0` = drop all). Omitted listener config keeps 100%; Metrics always stay 100%.
+* `http`: keys `"1xx"`, `"2xx"`, `"3xx"`, `"4xx"`, `"5xx"` (omitted = `1.0`), plus `"shed"` (overload circuit breaker; omitted inherits `"4xx"`).
+* `grpc`: canonical `snake_case` status names (`"ok"`, `"cancelled"`, `"unknown"`, `"invalid_argument"`, `"deadline_exceeded"`, `"not_found"`, `"already_exists"`, `"permission_denied"`, `"resource_exhausted"`, `"failed_precondition"`, `"aborted"`, `"out_of_range"`, `"unimplemented"`, `"internal"`, `"unavailable"`, `"data_loss"`, `"unauthenticated"`), `"default"` (omitted = `1.0`), and `"shed"` (omitted inherits `"resource_exhausted"`).

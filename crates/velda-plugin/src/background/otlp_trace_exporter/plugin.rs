@@ -9,19 +9,19 @@
 //! │   │ Ingress -> Route Matching -> Upstream Proxying -> Downstream Completion       │   │
 //! │   │                                                                                │   │
 //! │   │ [Hot-Path Telemetry Hook]                                                      │   │
-//! │   │ 64-byte SpanRecord ──► Core-Local SPSC Span Ring (Non-temporal push)           │   │
+//! │   │ 256-byte TelemetryRecord ──► Core-Local SPSC Log Ring (Non-temporal push)      │   │
 //! │   └───────────────────────────────────────┬────────────────────────────────────────┘   │
 //! │                                           │ Atomic In-Memory Hand-off                  │
 //! │                                           ▼                                            │
 //! │   SHADOW LOGISTICS WORKER (velda-shadow-{i}, SCHED_IDLE, Assigned Core i)              │
 //! │   ┌────────────────────────────────────────────────────────────────────────────────┐   │
-//! │   │ TraceStore::flush_all_lanes() ──► Batched Arc<[SpanRecord]> Slices             │   │
+//! │   │ TelemetryStore::flush_all_lanes() ──► Rotating Pooled TelemetryBatch Leases                │   │
 //! │   │                                                                                │   │
-//! │   │ OtlpTraceExporterPlugin::run()                                                 │   │
+//! │   │ OtlpTraceExporterPlugin::run() (reads only Cache Line 0 trace fields)          │   │
 //! │   │  ├── is_grpc?                                                                  │   │
 //! │   │  │    ├── YES ──► proto::OtlpTraceProtoEnvelope + proto::OtlpTracesGrpcClient  │   │
 //! │   │  │    └── NO  ──► json::OtlpTraceJsonEnvelope   + json::OtlpTraceHttpClient    │   │
-//! │   │  └── Batch Drop: Atomic ref-count decrement (deallocates when count reaches 0) │   │
+//! │   │  └── drop(batches): decrements slot leases before TCP await                    │   │
 //! │   └────────────────────────────────────────────────────────────────────────────────┘   │
 //! └────────────────────────────────────────────────────────────────────────────────────────┘
 //! ```
@@ -35,7 +35,7 @@ use std::time::Duration;
 use crate::config::PluginConfig;
 use http::HeaderMap;
 use tokio::sync::watch;
-use velda_observability::{TraceStore, global_trace_store};
+use velda_observability::{TelemetryStore, global_telemetry_store};
 
 pub use super::config::OtlpTraceExporterConfig;
 use super::json::{OtlpTraceHttpClient, OtlpTraceJsonEnvelope};
@@ -47,18 +47,18 @@ use crate::error::PluginError;
 pub struct OtlpTraceExporterPlugin {
     pub id: String,
     pub config: OtlpTraceExporterConfig,
-    trace_store: Arc<TraceStore>,
+    telemetry_store: Arc<TelemetryStore>,
     custom_headers: HeaderMap,
     pub shipped_spans: AtomicU64,
     pub failed_spans: AtomicU64,
 }
 
 impl OtlpTraceExporterPlugin {
-    /// Constructs a new exporter bound to an explicit [`TraceStore`].
+    /// Constructs a new exporter subscribed to an explicit unified [`TelemetryStore`].
     pub fn with_store(
         id: impl Into<String>,
         config: OtlpTraceExporterConfig,
-        trace_store: Arc<TraceStore>,
+        telemetry_store: Arc<TelemetryStore>,
     ) -> Result<Self, PluginError> {
         let mut custom_headers = HeaderMap::new();
         for (k, v) in &config.headers {
@@ -72,7 +72,7 @@ impl OtlpTraceExporterPlugin {
         Ok(Self {
             id: id.into(),
             config,
-            trace_store,
+            telemetry_store,
             custom_headers,
             shipped_spans: AtomicU64::new(0),
             failed_spans: AtomicU64::new(0),
@@ -85,7 +85,7 @@ impl OtlpTraceExporterPlugin {
             super::validation::validate_otlp_trace_exporter_config(&config.id, &config.config)
                 .map_err(|e| PluginError::Config(e.to_string()))?;
 
-        Self::with_store(&config.id, validated, global_trace_store().clone())
+        Self::with_store(&config.id, validated, global_telemetry_store().clone())
     }
 }
 
@@ -108,7 +108,7 @@ impl BackgroundPlugin for OtlpTraceExporterPlugin {
                 || self.config.endpoint.starts_with("grpc://")
                 || self.config.endpoint.starts_with("grpcs://");
 
-            let subscriber = self.trace_store.subscribe(256);
+            let subscriber = self.telemetry_store.subscribe(256);
             let mut interval =
                 tokio::time::interval(Duration::from_millis(self.config.flush_interval_ms.max(10)));
             interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
@@ -366,7 +366,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_otlp_trace_exporter_shutdown() {
-        let store = Arc::new(TraceStore::new());
+        let store = Arc::new(TelemetryStore::new());
         let config = OtlpTraceExporterConfig {
             protocol: "http".to_string(),
             endpoint: "http://127.0.0.1:4318/v1/traces".to_string(),

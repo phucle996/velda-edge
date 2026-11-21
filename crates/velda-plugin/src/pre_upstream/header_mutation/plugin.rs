@@ -344,11 +344,7 @@ impl PreUpstreamPlugin for HeaderMutationPlugin {
         &self.id
     }
 
-    fn on_upstream_request(
-        &self,
-        req: &mut L7Request,
-        _target_upstream: &mut velda_core::UpstreamId,
-    ) -> Action {
+    fn on_upstream_request(&self, req: &mut L7Request, _target_upstream: &mut u16) -> Action {
         // Step 1: Strip RFC Hop-by-hop headers if configured
         if self.config.strip_hop_by_hop {
             strip_hop_by_hop_headers(&mut req.headers);
@@ -649,7 +645,7 @@ mod tests {
             Body::Empty,
         );
 
-        let mut target = velda_core::UpstreamId::new(1);
+        let mut target = 1;
         plugin.on_upstream_request(&mut req, &mut target);
 
         assert!(!req.headers.contains_key("x-legacy-token"));
@@ -712,7 +708,7 @@ mod tests {
             Body::Empty,
         );
 
-        let mut target = velda_core::UpstreamId::new(1);
+        let mut target = 1;
         plugin.on_upstream_request(&mut req, &mut target);
 
         // Verify arithmetic workspace state before rendering
@@ -769,7 +765,7 @@ mod tests {
             Body::Empty,
         );
 
-        let mut target = velda_core::UpstreamId::new(1);
+        let mut target = 1;
         let action = plugin.on_upstream_request(&mut req, &mut target);
         assert!(matches!(action, Action::Continue));
         assert!(!req.headers.contains_key("x-sensitive"));

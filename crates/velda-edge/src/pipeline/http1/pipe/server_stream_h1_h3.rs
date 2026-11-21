@@ -136,7 +136,9 @@ where
             return Err(Http1Error::ConnectionClosed);
         }
     };
-    conn.last_upstream_addr = Some(client.target());
+    let (__u_ip, __u_port) = client.target();
+    conn.last_upstream_ip = __u_ip;
+    conn.last_upstream_port_be = __u_port;
 
     // 6. Forward request over HTTP/3 stream and get progressive streaming response
     let mut stream_res = client.send_stream_request(l7_req.clone()).await;
@@ -146,7 +148,9 @@ where
             "HTTP/3 connection closed; self-healing with fresh QUIC connection"
         );
         if let Ok((fresh_client, _fresh_lease)) = upstream.acquire_fresh(&h3_config).await {
-            conn.last_upstream_addr = Some(fresh_client.target());
+            let (__u_ip, __u_port) = fresh_client.target();
+            conn.last_upstream_ip = __u_ip;
+            conn.last_upstream_port_be = __u_port;
             stream_res = fresh_client.send_stream_request(l7_req.clone()).await;
         }
     }

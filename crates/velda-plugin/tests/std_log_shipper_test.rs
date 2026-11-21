@@ -6,7 +6,7 @@ use std::time::Duration;
 
 use tokio::sync::watch;
 use velda_core::{CompletionReason, GrpcStatus, HttpMethod, PipeKind};
-use velda_observability::{AccessLogRecord, LogBatch, LogStore};
+use velda_observability::{TelemetryBatch, TelemetryRecord, TelemetryStore};
 use velda_plugin::PluginConfig;
 use velda_plugin::background::BackgroundPlugin;
 use velda_plugin::background::std_log_shipper::config::TargetStream;
@@ -15,7 +15,7 @@ use velda_plugin::background::std_log_shipper::{StdLogShipperConfig, StdLogShipp
 
 #[test]
 fn test_std_log_format_all() {
-    let mut http1_rec = AccessLogRecord::zeroed();
+    let mut http1_rec = TelemetryRecord::zeroed();
     http1_rec.request_id = 0x1111_2222;
     http1_rec.ingress_time_nanos = 1_710_000_000_000_000_000;
     http1_rec.duration_ns = 150;
@@ -37,7 +37,7 @@ fn test_std_log_format_all() {
     http1_rec.ua_os = os;
     http1_rec.ua_major_version = ver;
 
-    let mut h2_rec = AccessLogRecord::zeroed();
+    let mut h2_rec = TelemetryRecord::zeroed();
     h2_rec.request_id = 0x3333_4444;
     h2_rec.ingress_time_nanos = 1_710_000_001_000_000_000;
     h2_rec.duration_ns = 220;
@@ -58,7 +58,7 @@ fn test_std_log_format_all() {
     h2_rec.ua_os = os;
     h2_rec.ua_major_version = ver;
 
-    let mut grpc_rec = AccessLogRecord::zeroed();
+    let mut grpc_rec = TelemetryRecord::zeroed();
     grpc_rec.request_id = 0x5555_6666;
     grpc_rec.ingress_time_nanos = 1_710_000_002_000_000_000;
     grpc_rec.duration_ns = 350;
@@ -80,7 +80,7 @@ fn test_std_log_format_all() {
     grpc_rec.ua_os = os;
     grpc_rec.ua_major_version = ver;
 
-    let mut raw_rec = AccessLogRecord::zeroed();
+    let mut raw_rec = TelemetryRecord::zeroed();
     raw_rec.request_id = 0x7777_8888;
     raw_rec.ingress_time_nanos = 1_710_000_003_000_000_000;
     raw_rec.duration_ns = 80;
@@ -97,7 +97,7 @@ fn test_std_log_format_all() {
     raw_rec.method = HttpMethod::Unknown;
     raw_rec.grpc_status = GrpcStatus::NonGrpc;
 
-    let batches = vec![LogBatch::from_arc(Arc::from(vec![
+    let batches = vec![TelemetryBatch::from_arc(Arc::from(vec![
         http1_rec, h2_rec, grpc_rec, raw_rec,
     ]))];
 
@@ -150,7 +150,7 @@ async fn test_std_log_shipper_from_plugin_config() {
 
 #[tokio::test]
 async fn test_std_log_subscription() {
-    let log_store = Arc::new(LogStore::with_cores_and_capacity(1, 1024));
+    let telemetry_store = Arc::new(TelemetryStore::with_cores_and_capacity(1, 1024));
 
     let config = StdLogShipperConfig {
         target: "stdout".to_string(),
@@ -160,7 +160,7 @@ async fn test_std_log_subscription() {
     };
 
     let plugin = Arc::new(
-        StdLogShipperPlugin::with_store("test_shipper", config, Arc::clone(&log_store))
+        StdLogShipperPlugin::with_store("test_shipper", config, Arc::clone(&telemetry_store))
             .expect("Plugin must construct"),
     );
 
@@ -171,13 +171,17 @@ async fn test_std_log_subscription() {
     });
 
     // Wait until background runner has registered its subscriber
-    while log_store.active_subscriber_count.load(Ordering::Acquire) == 0 {
+    while telemetry_store
+        .active_subscriber_count
+        .load(Ordering::Acquire)
+        == 0
+    {
         tokio::time::sleep(Duration::from_millis(5)).await;
     }
 
     // Emit 10 records across lanes
     for i in 0..10 {
-        let mut rec = AccessLogRecord::zeroed();
+        let mut rec = TelemetryRecord::zeroed();
         rec.request_id = i as u64;
         rec.ingress_time_nanos = 1_710_000_000_000_000_000 + i as u64;
         rec.duration_ns = 100 + i as u64;
@@ -194,9 +198,9 @@ async fn test_std_log_subscription() {
         rec.ua_family = fam;
         rec.ua_os = os;
         rec.ua_major_version = ver;
-        log_store.emit_on_core(0, &rec);
+        telemetry_store.emit_on_core(0, &rec);
     }
-    log_store.flush_all_lanes(128);
+    telemetry_store.flush_all_lanes(128);
 
     // Wait for the background loop to flush and process
     tokio::time::sleep(Duration::from_millis(150)).await;

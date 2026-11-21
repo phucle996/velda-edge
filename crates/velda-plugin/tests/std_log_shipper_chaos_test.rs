@@ -16,12 +16,12 @@ use std::sync::Arc;
 use velda_core::{
     CompletionReason, GrpcStatus, HttpMethod, PipeKind, UaFamily, UaOs, WireProtocol,
 };
-use velda_observability::{AccessLogRecord, LogBatch, encode_ip_u128};
+use velda_observability::{TelemetryBatch, TelemetryRecord, encode_ip_u128};
 use velda_plugin::background::std_log_shipper::config::TargetStream;
 use velda_plugin::background::std_log_shipper::format::format_std_log_payload;
 use velda_plugin::background::std_log_shipper::sink::StdLogSink;
 
-/// Helper to build an [`AccessLogRecord`] with fine-grained control over all 64-byte scalar fields.
+/// Helper to build an [`TelemetryRecord`] with fine-grained control over all 64-byte scalar fields.
 #[allow(clippy::too_many_arguments)]
 fn build_chaos_record(
     request_id: u64,
@@ -43,8 +43,8 @@ fn build_chaos_record(
     ua_family: UaFamily,
     ua_os: UaOs,
     ua_major_version: u16,
-) -> AccessLogRecord {
-    AccessLogRecord {
+) -> TelemetryRecord {
+    TelemetryRecord {
         request_id,
         ingress_time_nanos: (timestamp_sec as u64) * 1_000_000_000,
         duration_ns,
@@ -55,6 +55,7 @@ fn build_chaos_record(
         upstream_port,
         status_code,
         route_id,
+        upstream_id: velda_core::UNASSIGNED_UPSTREAM_ID,
         ua_major_version,
         rpc_msgs_or_flags,
         pipe,
@@ -64,7 +65,7 @@ fn build_chaos_record(
         ua_family,
         ua_os,
         url_len: 0,
-        url_bytes: [0; 186],
+        url_bytes: [0; 184],
     }
 }
 
@@ -111,7 +112,7 @@ fn test_chaos_req_id_bounds() {
         ));
     }
 
-    let batches = vec![LogBatch::from_arc(Arc::from(records.as_slice()))];
+    let batches = vec![TelemetryBatch::from_arc(Arc::from(records.as_slice()))];
     let mut json_out = Vec::new();
     let count = format_std_log_payload(&batches, "json", &mut json_out);
     assert_eq!(count, test_ids.len());
@@ -196,7 +197,7 @@ fn test_chaos_ts_and_counters() {
         ));
     }
 
-    let batches = vec![LogBatch::from_arc(Arc::from(records.as_slice()))];
+    let batches = vec![TelemetryBatch::from_arc(Arc::from(records.as_slice()))];
     let mut json_out = Vec::new();
     format_std_log_payload(&batches, "json", &mut json_out);
 
@@ -305,7 +306,7 @@ fn test_chaos_ip_addresses_rfc4291_rfc5952() {
         ));
     }
 
-    let batches = vec![LogBatch::from_arc(Arc::from(records.as_slice()))];
+    let batches = vec![TelemetryBatch::from_arc(Arc::from(records.as_slice()))];
 
     // 1. JSON Round-Trip Verification
     let mut json_out = Vec::new();
@@ -441,7 +442,7 @@ fn test_chaos_protocol_matrix() {
         }
     }
 
-    let batches = vec![LogBatch::from_arc(Arc::from(records.as_slice()))];
+    let batches = vec![TelemetryBatch::from_arc(Arc::from(records.as_slice()))];
 
     // 1. JSON Verification: ALL lines must parse strictly with serde_json
     let mut json_buf = Vec::new();
@@ -528,11 +529,11 @@ fn test_chaos_syntax_roundtrip() {
         UaOs::MacOs,
         125,
     );
-    let (p_len, p_bytes) = AccessLogRecord::from_url_bytes(b"/api/v1/upload");
+    let (p_len, p_bytes) = TelemetryRecord::from_url_bytes(b"/api/v1/upload");
     rec.url_len = p_len;
     rec.url_bytes = p_bytes;
 
-    let batches = vec![LogBatch::from_arc(Arc::from(vec![rec]))];
+    let batches = vec![TelemetryBatch::from_arc(Arc::from(vec![rec]))];
     let mut out = Vec::new();
     format_std_log_payload(&batches, "json", &mut out);
 
@@ -636,7 +637,7 @@ async fn test_chaos_file_sink_10k() {
             ));
         }
 
-        let batches = vec![LogBatch::from_arc(Arc::from(records.as_slice()))];
+        let batches = vec![TelemetryBatch::from_arc(Arc::from(records.as_slice()))];
         let n = format_std_log_payload(&batches, "json", &mut out_buf);
         assert_eq!(n, RECORDS_PER_BATCH);
 

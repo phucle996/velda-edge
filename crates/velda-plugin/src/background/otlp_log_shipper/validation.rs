@@ -1,7 +1,7 @@
 //! OpenTelemetry Log Shipper Schema & Validation (`phase: "background"`).
 //!
 //! Validates configuration for [`OtlpLogShipperPlugin`], which drains reference-counted
-//! 64-byte [`velda_observability::AccessLogRecord`] batches across all protocols and ships them
+//! 64-byte [`velda_observability::TelemetryRecord`] batches across all protocols and ships them
 //! to OpenTelemetry Collectors over persistent HTTP/1.1 or HTTP/2 gRPC connections.
 
 use serde::{Deserialize, Serialize};

@@ -2,7 +2,7 @@
 //!
 //! Unlike **Acceleration Pipes** (`*_tcp_rdma`) that bypass the OS kernel via hardware RDMA Verbs,
 //! this is a **Standard Pipe** routing outbound traffic through the Linux kernel TCP network stack
-//! using pre-compiled socket acceleration flags (`TcpAccelerationPath` / `GrpcAccelerationPath`:
+//! using pre-compiled socket acceleration flags (`TCP_NODELAY`,
 //! `TCP_NODELAY`, `TCP_FASTOPEN_CONNECT`, `TCP_NOTSENT_LOWAT`, `SO_BUSY_POLL`, `TCP_QUICKACK`, `BBR`).
 //!
 //! ### Activation Conditions

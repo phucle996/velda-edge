@@ -136,9 +136,11 @@ async fn test_15s_high_load_passive_active_coordination() {
     // 2. Configure Http1Upstream with dual Active + Passive health checking
     velda_connection_pool::set_current_thread_lane(0);
 
+    let (ip_a, port_a_be) = velda_sock::socket_addr_to_raw(addr_a);
+    let (ip_b, port_b_be) = velda_sock::socket_addr_to_raw(addr_b);
     let endpoints = vec![
-        Endpoint::new("server-a", addr_a, 1),
-        Endpoint::new("server-b", addr_b, 1),
+        Endpoint::from_raw(ip_a, port_a_be, 1),
+        Endpoint::from_raw(ip_b, port_b_be, 1),
     ];
     let discovery = Discovery::new_explicit(endpoints);
     let timeouts = UpstreamTimeouts::tcp(Duration::from_millis(500), Duration::from_secs(30));
@@ -180,7 +182,6 @@ async fn test_15s_high_load_passive_active_coordination() {
         StreamingMode::DISABLED,
         PoolConfig::default(),
         4,
-        velda_http1::Http1AccelerationPath::default(),
         None,
     ));
 
@@ -258,7 +259,7 @@ async fn test_15s_high_load_passive_active_coordination() {
                                 t_succ.fetch_add(1, Ordering::Relaxed);
                                 upstream.record_success(&target);
 
-                                if target == addr_a {
+                                if target == velda_sock::socket_addr_to_raw(addr_a) {
                                     match cur_p {
                                         1 => {
                                             p1_a.fetch_add(1, Ordering::Relaxed);
@@ -344,7 +345,7 @@ async fn test_15s_high_load_passive_active_coordination() {
         "Server B must take over 100% load during outage"
     );
     assert!(
-        !h1_upstream.is_healthy(&addr_a),
+        !h1_upstream.is_healthy(&velda_sock::socket_addr_to_raw(addr_a)),
         "Server A must be tripped unhealthy by passive circuit breaking and active probe"
     );
 
@@ -382,7 +383,7 @@ async fn test_15s_high_load_passive_active_coordination() {
         "Active health check MUST have healed Server A and resumed serving requests to it!"
     );
     assert!(
-        h1_upstream.is_healthy(&addr_a),
+        h1_upstream.is_healthy(&velda_sock::socket_addr_to_raw(addr_a)),
         "Server A must be marked healthy after active healing"
     );
 

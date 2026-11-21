@@ -1,7 +1,7 @@
 //! Standard Stream Log Shipper Background Plugin (`std_log_shipper`).
 //!
-//! Consumes reference-counted 64-byte [`velda_observability::AccessLogRecord`] batches from
-//! [`velda_observability::LogStore`] across all application protocols (HTTP/1, H2, H3, gRPC, Raw L4)
+//! Consumes reference-counted 64-byte [`velda_observability::TelemetryRecord`] batches from
+//! [`velda_observability::TelemetryStore`] across all application protocols (HTTP/1, H2, H3, gRPC, Raw L4)
 //! and emits them as formatted text or JSON streams to `stdout`, `stderr`, or a filesystem file.
 
 pub mod config;

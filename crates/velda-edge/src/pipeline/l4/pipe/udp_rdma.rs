@@ -52,7 +52,9 @@ pub async fn serve(
     route: &UdpRoute,
     config: &L4UdpConfig,
 ) {
-    let client_addr = key.client_addr;
+    let client_ip = key.client_ip;
+    let client_port_be = key.client_port_be;
+    let client_addr = velda_sock::raw_to_socket_addr(client_ip, client_port_be);
     let token = key.token;
     let is_unidirectional = route.is_unidirectional();
     let udp_idle_timeout = route.udp_idle_timeout;
@@ -130,7 +132,7 @@ pub async fn serve(
     // Step 3: Extract shared client peer address handle to support dynamic NAT rebinding.
     let session_peer = session_table
         .get_peer(&key)
-        .unwrap_or_else(|| Arc::new(parking_lot::RwLock::new(client_addr)));
+        .unwrap_or_else(|| Arc::new(parking_lot::RwLock::new((client_ip, client_port_be))));
     let session_key = key;
 
     let up_clone = Arc::clone(upstream);
@@ -141,42 +143,51 @@ pub async fn serve(
     tokio::spawn(async move {
         let ingress_nanos = velda_core::clock::now_unix_nanos();
         let (request_id, _) = velda_core::request_id::next_request_id(ingress_nanos);
-        let emit_log = |peer: std::net::SocketAddr,
-                        upstream_addr: Option<std::net::SocketAddr>,
-                        rx: u64,
-                        tx: u64,
-                        completion: velda_core::CompletionReason| {
-            let (upstream_ip, upstream_port) = upstream_addr
-                .map(|a| {
-                    (
-                        velda_observability::encode_upstream_ip_u32(a.ip()),
-                        a.port(),
-                    )
-                })
-                .unwrap_or((0, 0));
-            velda_observability::global_log_store().emit(&velda_observability::AccessLogRecord {
-                request_id: request_id.entropy(),
-                ingress_time_nanos: ingress_nanos,
-                duration_ns: velda_core::clock::now_unix_nanos().saturating_sub(ingress_nanos),
-                peer_ip: velda_observability::encode_ip_u128(peer.ip()),
-                bytes_rx: rx.min(u32::MAX as u64) as u32,
-                bytes_tx: tx.min(u32::MAX as u64) as u32,
-                upstream_ip,
-                upstream_port,
-                status_code: 0,
-                route_id: route_id.0,
-                ua_major_version: 0,
-                rpc_msgs_or_flags: 0,
-                pipe: velda_core::PipeKind::UdpRdma,
-                completion,
-                method: velda_core::HttpMethod::Unknown,
-                grpc_status: velda_core::GrpcStatus::NonGrpc,
-                ua_family: velda_core::UaFamily::None,
-                ua_os: velda_core::UaOs::Unknown,
-                url_len: 0,
-                url_bytes: [0; 186],
-            });
-        };
+        let emit_telemetry =
+            |peer_ip: u128,
+             upstream_addr: Option<(u128, u16)>,
+             rx: u64,
+             tx: u64,
+             completion: velda_core::CompletionReason| {
+                let (upstream_ip, upstream_port) = upstream_addr
+                    .map(|a| {
+                        (
+                            if velda_core::lut::ip::is_v4_u128(a.0) {
+                                (a.0 & 0xFFFF_FFFF) as u32
+                            } else {
+                                0
+                            },
+                            u16::from_be(a.1),
+                        )
+                    })
+                    .unwrap_or((0, 0));
+                velda_observability::global_telemetry_store().emit(
+                    &velda_observability::TelemetryRecord {
+                        request_id: velda_core::request_id::entropy(request_id),
+                        ingress_time_nanos: ingress_nanos,
+                        duration_ns: velda_core::clock::now_unix_nanos()
+                            .saturating_sub(ingress_nanos),
+                        peer_ip,
+                        bytes_rx: rx.min(u32::MAX as u64) as u32,
+                        bytes_tx: tx.min(u32::MAX as u64) as u32,
+                        upstream_ip,
+                        upstream_port,
+                        status_code: 0,
+                        route_id,
+                        upstream_id,
+                        ua_major_version: 0,
+                        rpc_msgs_or_flags: 0,
+                        pipe: velda_core::PipeKind::UdpRdma,
+                        completion,
+                        method: velda_core::HttpMethod::Unknown,
+                        grpc_status: velda_core::GrpcStatus::NonGrpc,
+                        ua_family: velda_core::UaFamily::None,
+                        ua_os: velda_core::UaOs::Unknown,
+                        url_len: 0,
+                        url_bytes: [0; 184],
+                    },
+                );
+            };
         // Step 4a: Lease a pre-warmed RDMA channel from the local core lane shard.
         // Conforms to AGENTS.md Sec 2.9: Frontline worker does not block on warmup.
         let lease = match up_clone.acquire().await {
@@ -189,8 +200,8 @@ pub async fn serve(
                     "Failed to acquire RDMA lease for bidirectional L4 UDP session"
                 );
                 get_udp_session_table().remove(&session_key);
-                emit_log(
-                    client_addr,
+                emit_telemetry(
+                    client_ip,
                     None,
                     0,
                     0,
@@ -220,8 +231,8 @@ pub async fn serve(
             );
             lease.mark_broken();
             get_udp_session_table().remove(&session_key);
-            emit_log(
-                client_addr,
+            emit_telemetry(
+                client_ip,
                 Some(upstream_addr),
                 0,
                 0,
@@ -307,11 +318,15 @@ pub async fn serve(
                 rdma_res = rdma_receiver.recv(RDMA_RECV_POLL_TIMEOUT) => {
                     match rdma_res {
                         Ok(resp_payload) => {
-                            let current_peer = *session_peer.read();
-                            if let Err(e) = downstream_socket.send_to(&resp_payload, current_peer).await {
+                            let (peer_ip, peer_port_be) = *session_peer.read();
+                            if let Err(e) = downstream_socket
+                                .send_to(&resp_payload, peer_ip, peer_port_be)
+                                .await
+                            {
                                 tracing::trace!(
                                     error = %e,
-                                    client = %current_peer,
+                                    client_ip = %peer_ip,
+                                    client_port = u16::from_be(peer_port_be),
                                     "Failed forwarding RDMA reply back to UDP client"
                                 );
                                 break;
@@ -356,9 +371,10 @@ pub async fn serve(
                     };
 
                     if elapsed >= limit {
-                        let current_peer = *session_peer.read();
+                        let (p_ip, p_port_be) = *session_peer.read();
                         tracing::debug!(
-                            client = %current_peer,
+                            client_ip = %p_ip,
+                            client_port = u16::from_be(p_port_be),
                             upstream = %upstream_id,
                             assured,
                             "L4 UDP-to-RDMA session timeout elapsed ({limit:?}); closing session"
@@ -371,11 +387,11 @@ pub async fn serve(
 
         // Step 5: Evict session key from table on task exit.
         // Mark channel broken to prevent cross-session datagram bleeding into pooled connections.
-        let final_peer = *session_peer.read();
+        let (final_peer_ip, _) = *session_peer.read();
         lease.mark_broken();
         get_udp_session_table().remove(&session_key);
-        emit_log(
-            final_peer,
+        emit_telemetry(
+            final_peer_ip,
             Some(upstream_addr),
             bytes_rx,
             bytes_tx,

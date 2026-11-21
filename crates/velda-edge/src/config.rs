@@ -64,14 +64,39 @@ impl EdgeConfig {
 // ============================================================================
 
 /// Reads and unpacks `listeners.bin` from storage if present.
+/// Falls back to recompiling `config/listeners.json` if the binary artifact fails version checks.
 pub fn load_listeners(runtime_dir: &Path) -> Result<Vec<ListenerConfig>, EdgeError> {
     let path = runtime_dir.join("listeners.bin");
     if !path.exists() {
         return Ok(Vec::new());
     }
     let bytes = std::fs::read(&path)?;
-    let (_header, listeners) = listener::unpack_listeners_from_binary(&bytes)?;
-    Ok(listeners)
+    match listener::unpack_listeners_from_binary(&bytes) {
+        Ok((_header, listeners)) => Ok(listeners),
+        Err(unpack_err) => {
+            if let Some(json_path) = runtime_dir
+                .parent()
+                .map(|p| p.join("config").join("listeners.json"))
+                .filter(|p| p.exists())
+                && let Ok(json_bytes) = std::fs::read(&json_path)
+                && let Ok(mut listeners) = listener::parse_listeners(&json_bytes)
+            {
+                tracing::warn!(
+                    error = %unpack_err,
+                    json = %json_path.display(),
+                    "listeners.bin incompatible with current compiler version; recovered from LKG listeners.json"
+                );
+                for l in &mut listeners {
+                    l.id = l.id.trim().to_string();
+                    l.address = l.address.trim().to_string();
+                    l.transport.protocol = l.transport.protocol.trim().to_ascii_lowercase();
+                    l.application.protocol = l.application.protocol.trim().to_ascii_lowercase();
+                }
+                return Ok(listeners);
+            }
+            Err(unpack_err.into())
+        }
+    }
 }
 
 /// Reads and unpacks `routes.bin` from storage if present.

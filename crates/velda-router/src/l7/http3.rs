@@ -22,34 +22,27 @@
 //!                           Http3Route   None (404)
 //! ```
 
-use rustc_hash::FxHashMap;
-use velda_core::{ListenerId, RouteId};
-
+use crate::arena::{ARENA_NONE, ArenaRouteEntry, RouteArena};
 use crate::error::RouterError;
-use crate::host::{CompiledHost, ReverseHostLabels, host_specificity};
+use crate::host::{CompiledHost, HostBlocks, host_specificity};
 use crate::method::MethodMask;
-use crate::path::PathPrefixMatcher;
 
-/// Concrete compiled HTTP/3 Layer 7 route (8 bytes, `Copy`, zero heap strings).
+/// Concrete compiled HTTP/1.1 Layer 7 route (8 bytes, `Copy`, zero heap strings).
 #[repr(C)]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Http3Route {
-    pub id: RouteId,
-    pub listener_id: ListenerId,
+    pub id: u16,
+    pub listener_id: u32,
 }
 
 impl Http3Route {
-    /// Creates a new prefix-based HTTP/3 route rule for router compilation.
+    /// Creates a new prefix-based HTTP/1.1 route rule for router compilation.
     #[inline]
     #[allow(clippy::new_ret_no_self)]
-    pub fn new(
-        id: RouteId,
-        listener_id: impl Into<ListenerId>,
-        path_prefix: impl Into<String>,
-    ) -> Http3RouteRule {
+    pub fn new(id: u16, listener_id: u32, path_prefix: impl Into<String>) -> Http3RouteRule {
         Http3RouteRule {
             id,
-            listener_id: listener_id.into(),
+            listener_id,
             host: None,
             path_prefix: Some(path_prefix.into()),
             exact_path: None,
@@ -59,17 +52,13 @@ impl Http3Route {
         }
     }
 
-    /// Creates a new exact-path HTTP/3 route rule for router compilation.
+    /// Creates a new exact-path HTTP/1.1 route rule for router compilation.
     #[inline]
     #[allow(clippy::new_ret_no_self)]
-    pub fn new_exact(
-        id: RouteId,
-        listener_id: impl Into<ListenerId>,
-        exact_path: impl Into<String>,
-    ) -> Http3RouteRule {
+    pub fn new_exact(id: u16, listener_id: u32, exact_path: impl Into<String>) -> Http3RouteRule {
         Http3RouteRule {
             id,
-            listener_id: listener_id.into(),
+            listener_id,
             host: None,
             path_prefix: None,
             exact_path: Some(exact_path.into()),
@@ -80,14 +69,14 @@ impl Http3Route {
     }
 }
 
-/// Builder specification for an HTTP/3 route rule consumed during router compilation.
+/// Builder specification for an HTTP/1.1 route rule consumed during router compilation.
 ///
 /// All pattern strings (`host`, `path_prefix`, `exact_path`, `method`) are consumed and
 /// dropped once compiled into [`ListenerHttp3Router`], leaving only 8-byte [`Http3Route`]s in RAM.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Http3RouteRule {
-    pub id: RouteId,
-    pub listener_id: ListenerId,
+    pub id: u16,
+    pub listener_id: u32,
     pub host: Option<String>,
     pub path_prefix: Option<String>,
     pub exact_path: Option<String>,
@@ -115,7 +104,7 @@ impl Http3RouteRule {
 
     /// Checks whether this route rule matches the given parsed request host.
     #[inline]
-    pub fn matches_host(&self, host: &ReverseHostLabels) -> bool {
+    pub fn matches_host(&self, host: &HostBlocks) -> bool {
         self.compiled_host.matches(host)
     }
 
@@ -134,54 +123,24 @@ impl Http3RouteRule {
         if self.compiled_host == CompiledHost::Any {
             return true;
         }
-        if req.parsed_host.count > 0 || req.parsed_host.is_ip_or_unbracketed {
+        if !req.parsed_host.is_empty() {
             self.compiled_host.matches(&req.parsed_host)
         } else if let Some(h) = req.host {
-            self.compiled_host.matches(&ReverseHostLabels::parse(h))
+            self.compiled_host.matches(&HostBlocks::parse(h))
         } else {
             false
         }
     }
 }
 
-/// Compact candidate descriptor indexing into `routes: Vec<Http3Route>`.
-#[repr(C, align(16))]
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct Http3HotCandidate {
-    pub compiled_host: CompiledHost,
-    pub route_idx: u32,
-    pub method_mask: MethodMask,
-    pub is_prefix: bool,
-}
-
-impl Http3HotCandidate {
-    /// Evaluates candidate matching against an incoming request view in 1-2 CPU cycles.
-    #[inline(always)]
-    pub fn matches_req(&self, req: &Http3RouteRequest<'_>) -> bool {
-        if !self.method_mask.matches(req.method_mask) {
-            return false;
-        }
-        if self.compiled_host == CompiledHost::Any {
-            return true;
-        }
-        if req.parsed_host.count > 0 || req.parsed_host.is_ip_or_unbracketed {
-            self.compiled_host.matches(&req.parsed_host)
-        } else if let Some(h) = req.host {
-            self.compiled_host.matches(&ReverseHostLabels::parse(h))
-        } else {
-            false
-        }
-    }
-}
-
-/// Zero-allocation view of an incoming HTTP/3 request for route matching.
+/// Zero-allocation view of an incoming HTTP/1.1 request for route matching.
 #[derive(Debug, Clone, Copy)]
 pub struct Http3RouteRequest<'a> {
     pub path: &'a str,
     pub host: Option<&'a str>,
     pub method: Option<&'a str>,
     pub method_mask: MethodMask,
-    pub parsed_host: ReverseHostLabels,
+    pub parsed_host: HostBlocks,
 }
 
 impl<'a> Http3RouteRequest<'a> {
@@ -193,7 +152,7 @@ impl<'a> Http3RouteRequest<'a> {
             host: None,
             method: None,
             method_mask: MethodMask::ANY,
-            parsed_host: ReverseHostLabels::default(),
+            parsed_host: HostBlocks::default(),
         }
     }
 
@@ -201,7 +160,7 @@ impl<'a> Http3RouteRequest<'a> {
     #[inline]
     pub fn with_host(mut self, host: &'a str) -> Self {
         self.host = Some(host);
-        self.parsed_host = ReverseHostLabels::parse(host);
+        self.parsed_host = HostBlocks::parse(host);
         self
     }
 
@@ -214,36 +173,22 @@ impl<'a> Http3RouteRequest<'a> {
     }
 }
 
-/// Route table for a single HTTP/3 listener with Hot/Cold Data-Oriented Separation.
-///
-/// Aligned to 64 bytes to sit on an exact L1D cache line boundary, preventing split-line
-/// header loads and false sharing between worker threads.
+/// Route table for a single HTTP/3 listener backed by a 4KB page-aligned [`RouteArena`].
 #[repr(C, align(64))]
 #[derive(Debug, Clone, Default)]
 pub struct ListenerHttp3Router {
-    routes: Vec<Http3Route>,
-    matcher: PathPrefixMatcher,
-    pattern_routes: Vec<Vec<Http3HotCandidate>>,
+    arena: RouteArena,
 }
 
 impl ListenerHttp3Router {
-    /// Builds a new compiled HTTP/3 router for a single listener.
-    ///
-    /// Consolidates exact and prefix matching into a single contiguous integer-block
-    /// arena ([`PathPrefixMatcher`]), eliminating heap pointer dereferencing and scalar
-    /// branch divergence.
+    /// Builds a new compiled HTTP/3 router for a single listener inside a 4KB [`RouteArena`].
     pub fn new(rules: Vec<Http3RouteRule>) -> Result<Self, RouterError> {
-        let mut routes = Vec::with_capacity(rules.len());
-        let mut pattern_map: FxHashMap<String, Vec<Http3HotCandidate>> = FxHashMap::default();
+        let listener_id = rules.first().map_or(0, |r| r.listener_id);
+        let mut entries = Vec::with_capacity(rules.len());
+        let mut patterns: Vec<String> = Vec::with_capacity(rules.len());
 
-        for (idx, r) in rules.iter().enumerate() {
-            routes.push(Http3Route {
-                id: r.id,
-                listener_id: r.listener_id,
-            });
-
-            let is_prefix = r.exact_path.is_none();
-            let pattern = if let Some(ref exact) = r.exact_path {
+        for r in &rules {
+            let pat = if let Some(ref exact) = r.exact_path {
                 exact.clone()
             } else if let Some(ref prefix) = r.path_prefix {
                 if prefix.is_empty() {
@@ -254,75 +199,65 @@ impl ListenerHttp3Router {
             } else {
                 "/".to_string()
             };
-
-            let candidate = Http3HotCandidate {
-                compiled_host: r.compiled_host.clone(),
-                route_idx: idx as u32,
-                method_mask: r.method_mask,
-                is_prefix,
-            };
-
-            pattern_map.entry(pattern).or_default().push(candidate);
+            patterns.push(pat);
         }
 
-        for list in pattern_map.values_mut() {
-            list.sort_by(|a, b| {
-                // 1. Exact candidates take precedence over prefix candidates
-                let a_exact = !a.is_prefix;
-                let b_exact = !b.is_prefix;
-                if a_exact != b_exact {
-                    return b_exact.cmp(&a_exact);
-                }
-                // 2. Specific host takes precedence over wildcard host
-                let r_a = &rules[a.route_idx as usize];
-                let r_b = &rules[b.route_idx as usize];
-                let spec_a = host_specificity(r_a.host.as_deref());
-                let spec_b = host_specificity(r_b.host.as_deref());
-                spec_b.cmp(&spec_a)
+        for (r, pat) in rules.iter().zip(patterns.iter()) {
+            entries.push(ArenaRouteEntry {
+                pattern: pat.as_str(),
+                route_id: r.id,
+                method_mask: r.method_mask.0,
+                host: r.compiled_host.as_pattern(),
+                specificity: host_specificity(r.host.as_deref()),
+                is_prefix: r.exact_path.is_none(),
+                is_catch_all: false,
             });
         }
 
-        let mut matcher = PathPrefixMatcher::new();
-        let mut pattern_routes = Vec::with_capacity(pattern_map.len());
-
-        for (pattern, c_list) in pattern_map {
-            let idx = pattern_routes.len();
-            let has_prefix = c_list.iter().any(|c| c.is_prefix);
-            pattern_routes.push(c_list);
-            matcher.insert_pattern(&pattern, idx, has_prefix);
-        }
-        matcher.compile();
-
-        Ok(Self {
-            routes,
-            matcher,
-            pattern_routes,
-        })
+        let arena = RouteArena::build(listener_id, entries);
+        Ok(Self { arena })
     }
 
-    /// Resolves an HTTP/3 route for an incoming request view.
-    ///
-    /// Evaluates using unified contiguous integer-block matching across ALU Port 0/1.
+    /// Resolves an HTTP/3 route for an incoming request view, returning an 8-byte [`Http3Route`] on register.
     #[inline(always)]
-    pub fn route(&self, req: &Http3RouteRequest<'_>) -> Option<&Http3Route> {
-        // 1. Hardware temporal prefetch
-        if let Some(first_node) = self.matcher.nodes().first() {
-            crate::path::prefetch_l1_keep(first_node as *const _ as *const u8);
+    pub fn route(&self, req: &Http3RouteRequest<'_>) -> Option<Http3Route> {
+        // 2. Contiguous 4KB arena matching
+        let mut matches = [(0u16, 0u8, false); 32];
+        let count = self.arena.match_path(req.path, &mut matches);
+        if count == 0 {
+            return None;
         }
 
-        // 2. Contiguous integer matching
-        let mut matches = [crate::path::MatchedPattern::default(); 32];
-        let count = self.matcher.match_path(req.path, &mut matches);
+        let host_table = self.arena.host_table();
+        let listener_id = self.arena.header().listener_id;
+        let mut parsed_fallback: Option<HostBlocks> = None;
 
-        for m in matches[..count].iter().rev() {
-            if let Some(candidates) = self.pattern_routes.get(m.pattern_idx as usize) {
-                for c in candidates {
-                    if !m.is_exact && !c.is_prefix {
-                        continue;
-                    }
-                    if c.matches_req(req) {
-                        return self.routes.get(c.route_idx as usize);
-                    }
+        for &(cand_start, cand_count, is_exact) in matches[..count].iter().rev() {
+            for c in self.arena.node_entries(cand_start, cand_count) {
+                if !is_exact && (c._pad & 0x01) == 0 {
+                    continue;
+                }
+                if !MethodMask(c.method_mask).matches(req.method_mask) {
+                    continue;
+                }
+                if c.host_id == ARENA_NONE {
+                    return Some(Http3Route {
+                        id: c.route_id,
+                        listener_id,
+                    });
+                }
+                let actual_host = if !req.parsed_host.is_empty() {
+                    &req.parsed_host
+                } else if let Some(h) = req.host {
+                    parsed_fallback.get_or_insert_with(|| HostBlocks::parse(h))
+                } else {
+                    continue;
+                };
+                if host_table.matches(c.host_id, actual_host) {
+                    return Some(Http3Route {
+                        id: c.route_id,
+                        listener_id,
+                    });
                 }
             }
         }
@@ -331,43 +266,57 @@ impl ListenerHttp3Router {
     }
 }
 
-/// Unified, thread-safe HTTP/3 routing table coordinating all HTTP/3 listeners.
+/// Unified, thread-safe HTTP/1.1 routing table coordinating all HTTP/1.1 listeners (0 `FxHashMap`).
 #[derive(Debug, Default, Clone)]
 pub struct Http3Router {
-    listeners: FxHashMap<ListenerId, ListenerHttp3Router>,
+    listeners: Vec<(u32, ListenerHttp3Router)>,
 }
 
 impl Http3Router {
     /// Builds a new [`Http3Router`] from a list of [`Http3RouteRule`] specifications.
     pub fn new(routes: impl IntoIterator<Item = Http3RouteRule>) -> Result<Self, RouterError> {
-        let mut grouped: FxHashMap<ListenerId, Vec<Http3RouteRule>> = FxHashMap::default();
-        for r in routes {
-            grouped.entry(r.listener_id).or_default().push(r);
-        }
+        let mut all_rules: Vec<Http3RouteRule> = routes.into_iter().collect();
+        all_rules.sort_by_key(|r| r.listener_id);
 
-        let mut listeners = FxHashMap::with_capacity_and_hasher(grouped.len(), Default::default());
-        for (listener_id, list) in grouped {
-            listeners.insert(listener_id, ListenerHttp3Router::new(list)?);
+        let mut listeners = Vec::new();
+        let mut iter = all_rules.into_iter().peekable();
+        while let Some(first) = iter.next() {
+            let lid = first.listener_id;
+            let mut group = vec![first];
+            while let Some(next) = iter.peek() {
+                if next.listener_id == lid {
+                    group.push(iter.next().unwrap());
+                } else {
+                    break;
+                }
+            }
+            listeners.push((lid, ListenerHttp3Router::new(group)?));
         }
 
         Ok(Self { listeners })
     }
 
-    /// Resolves an HTTP/3 route for an incoming request on a listener.
+    /// Resolves an HTTP/1.1 route for an incoming request on a listener.
     #[inline]
-    pub fn route(
-        &self,
-        listener_id: impl Into<ListenerId>,
-        req: &Http3RouteRequest<'_>,
-    ) -> Option<&Http3Route> {
-        let listener_router = self.listeners.get(&listener_id.into())?;
+    pub fn route(&self, listener_id: u32, req: &Http3RouteRequest<'_>) -> Option<Http3Route> {
+        let listener_router = self.listener(listener_id)?;
         listener_router.route(req)
     }
 
     /// Returns the compiled route table for a specific listener.
     #[inline]
-    pub fn listener(&self, listener_id: impl Into<ListenerId>) -> Option<&ListenerHttp3Router> {
-        self.listeners.get(&listener_id.into())
+    pub fn listener(&self, listener_id: u32) -> Option<&ListenerHttp3Router> {
+        if self.listeners.len() <= 16 {
+            self.listeners
+                .iter()
+                .find(|(id, _)| *id == listener_id)
+                .map(|(_, r)| r)
+        } else {
+            self.listeners
+                .binary_search_by_key(&listener_id, |(id, _)| *id)
+                .ok()
+                .map(|idx| &self.listeners[idx].1)
+        }
     }
 
     /// Returns the number of registered listeners.
@@ -381,44 +330,47 @@ impl Http3Router {
 mod tests {
     use super::*;
 
+    use velda_core::fnv1a_hash_32;
+
     #[test]
     fn test_http3_exact_and_prefix_routing() {
+        let lid = fnv1a_hash_32("quic-listener");
         let routes = vec![
-            Http3Route::new_exact(RouteId::new(1), "quic-listener", "/healthz"),
-            Http3Route::new(RouteId::new(2), "quic-listener", "/api/v3"),
+            Http3Route::new_exact(1, lid, "/healthz"),
+            Http3Route::new(2, lid, "/api/v3"),
         ];
 
         let router = Http3Router::new(routes).unwrap();
 
         let req1 = Http3RouteRequest::new("/healthz");
-        let r1 = router.route("quic-listener", &req1).unwrap();
-        assert_eq!(r1.id, RouteId::new(1));
+        let r1 = router.route(lid, &req1).unwrap();
+        assert_eq!(r1.id, 1);
 
         let req2 = Http3RouteRequest::new("/api/v3/orders/42");
-        let r2 = router.route("quic-listener", &req2).unwrap();
-        assert_eq!(r2.id, RouteId::new(2));
+        let r2 = router.route(lid, &req2).unwrap();
+        assert_eq!(r2.id, 2);
 
         let req3 = Http3RouteRequest::new("/unknown");
-        assert!(router.route("quic-listener", &req3).is_none());
+        assert!(router.route(lid, &req3).is_none());
     }
 
     #[test]
     fn test_http3_prefix_shadowing_fallback() {
+        let lid = fnv1a_hash_32("listener-1");
         let routes = vec![
-            Http3Route::new(RouteId::new(1), "listener-1", "/api/v3/internal")
-                .with_host("internal.velda.io"),
-            Http3Route::new(RouteId::new(2), "listener-1", "/api/v3"),
+            Http3Route::new(1, lid, "/api/v3/internal").with_host("internal.velda.io"),
+            Http3Route::new(2, lid, "/api/v3"),
         ];
 
         let router = Http3Router::new(routes).unwrap();
 
         let req1 =
             Http3RouteRequest::new("/api/v3/internal/secrets").with_host("internal.velda.io");
-        let r1 = router.route("listener-1", &req1).unwrap();
-        assert_eq!(r1.id, RouteId::new(1));
+        let r1 = router.route(lid, &req1).unwrap();
+        assert_eq!(r1.id, 1);
 
         let req2 = Http3RouteRequest::new("/api/v3/internal/data").with_host("public.velda.io");
-        let r2 = router.route("listener-1", &req2).unwrap();
-        assert_eq!(r2.id, RouteId::new(2));
+        let r2 = router.route(lid, &req2).unwrap();
+        assert_eq!(r2.id, 2);
     }
 }

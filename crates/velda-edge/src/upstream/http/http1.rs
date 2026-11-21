@@ -1,6 +1,5 @@
 //! Layer 7 HTTP/1.1 Upstream managing endpoint selection, connection establishment, and pipe forwarding.
 
-use std::net::SocketAddr;
 use std::ops::{Deref, DerefMut};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -68,8 +67,8 @@ pub struct Http1Lease {
     stream: Option<UpstreamHttp1Stream>,
     pub read_buf: bytes::BytesMut,
     pub write_buf: bytes::BytesMut,
-    pub endpoint: SocketAddr,
-    pool: Arc<PoolManager<SocketAddr, Http1ClientResource>>,
+    pub endpoint: (u128, u16),
+    pool: Arc<PoolManager<(u128, u16), Http1ClientResource>>,
     reusable: bool,
     pub is_reused: bool,
     created_at: Instant,
@@ -226,7 +225,7 @@ pub struct Http1Upstream {
     /// timeouts, and the selected `LbAlgorithm` enum variant.
     inner: EdgeUpstream,
     /// Lock-sharded persistent HTTP/1.1 sequential client connection pool for keep-alive reuse.
-    pool: Arc<PoolManager<SocketAddr, Http1ClientResource>>,
+    pool: Arc<PoolManager<(u128, u16), Http1ClientResource>>,
     /// [PRE-COMPILED]: Upstream TLS identity: client engine plus the static target SNI.
     /// `None` for plaintext upstreams. A TLS upstream without SNI is rejected at compile time.
     tls: Option<(Arc<TlsClientEngine>, Arc<str>)>,
@@ -236,7 +235,6 @@ pub struct Http1Upstream {
     /// `streaming` at compile time; enables $O(1)$ zero-cost dispatch on the hot path.
     pub strategy: Http1PipeStrategy,
     /// [PRE-COMPILED]: Protocol-specific socket acceleration path.
-    pub acceleration: velda_http1::Http1AccelerationPath,
     /// [PRE-COMPILED]: Pre-computed HTTP/1.1 protocol engine configuration.
     pub config: velda_http1::config::Http1Config,
     /// Configured buffer capacity for reading upstream responses.
@@ -252,7 +250,6 @@ impl std::fmt::Debug for Http1Upstream {
             .field("tls_sni", &self.tls.as_ref().map(|(_, sni)| sni))
             .field("streaming", &self.streaming)
             .field("strategy", &self.strategy)
-            .field("acceleration", &self.acceleration)
             .field("proxy_buffer_size", &self.proxy_buffer_size)
             .finish()
     }
@@ -266,7 +263,6 @@ impl Http1Upstream {
         streaming: StreamingMode,
         pool_config: PoolConfig,
         shard_count: usize,
-        acceleration: velda_http1::Http1AccelerationPath,
         buffer_config: Option<&velda_sync::post_sync::upstream::UpstreamBufferConfig>,
     ) -> Self {
         let strategy = if let Some(buf) = buffer_config
@@ -304,7 +300,6 @@ impl Http1Upstream {
             tls,
             streaming,
             strategy,
-            acceleration,
             config,
             proxy_buffer_size,
             last_probe_sec: AtomicU64::new(0),
@@ -319,19 +314,19 @@ impl Http1Upstream {
 
     /// Returns whether the specified backend endpoint is healthy.
     #[inline]
-    pub fn is_healthy(&self, addr: &SocketAddr) -> bool {
+    pub fn is_healthy(&self, addr: &(u128, u16)) -> bool {
         self.inner.health().is_healthy(addr)
     }
 
     /// Records a client-traffic passive success for an endpoint.
     #[inline]
-    pub fn record_success(&self, addr: &SocketAddr) {
+    pub fn record_success(&self, addr: &(u128, u16)) {
         self.inner.health().record_success(addr);
     }
 
     /// Records a client-traffic passive failure for an endpoint.
     #[inline]
-    pub fn record_failure(&self, addr: &SocketAddr) {
+    pub fn record_failure(&self, addr: &(u128, u16)) {
         self.inner.health().record_failure(addr);
     }
 
@@ -353,7 +348,6 @@ impl Http1Upstream {
             .tls
             .as_ref()
             .map(|(engine, sni)| (engine.as_ref(), sni.as_ref()));
-        let acceleration = self.acceleration;
         let connect_timeout = self.inner.timeouts().connect;
         let idle_timeout = self.inner.timeouts().idle;
         let pool = &self.pool;
@@ -389,9 +383,9 @@ impl Http1Upstream {
                 }
 
                 let stream = velda_http1::client::connect(
-                    endpoint,
+                    endpoint.0,
+                    endpoint.1,
                     tls,
-                    Some(&acceleration),
                     Some(connect_timeout),
                 )
                 .await
@@ -430,16 +424,15 @@ impl Http1Upstream {
             .tls
             .as_ref()
             .map(|(engine, sni)| (engine.as_ref(), sni.as_ref()));
-        let acceleration = self.acceleration;
         let connect_timeout = self.inner.timeouts().connect;
 
         let (stream, endpoint) = self
             .inner
             .execute(|endpoint| async move {
                 let stream = velda_http1::client::connect(
-                    endpoint,
+                    endpoint.0,
+                    endpoint.1,
                     tls,
-                    Some(&acceleration),
                     Some(connect_timeout),
                 )
                 .await
@@ -465,7 +458,7 @@ impl Http1Upstream {
 
     /// Returns the number of idle keep-alive connections for `endpoint` in `lane`.
     #[inline]
-    pub fn idle_conns_for_lane(&self, endpoint: &SocketAddr, lane: usize) -> usize {
+    pub fn idle_conns_for_lane(&self, endpoint: &(u128, u16), lane: usize) -> usize {
         self.pool.idle_conns_for_lane(endpoint, lane)
     }
 
@@ -481,7 +474,7 @@ impl Http1Upstream {
         }
 
         for ep in all_eps {
-            let addr = ep.address;
+            let addr = (ep.ip, ep.port_be);
             if !self.inner.health().is_healthy(&addr) {
                 continue;
             }
@@ -497,9 +490,9 @@ impl Http1Upstream {
                     let connect_timeout = self.inner.timeouts().connect;
 
                     match velda_http1::client::connect(
-                        addr,
+                        addr.0,
+                        addr.1,
                         tls_ref,
-                        Some(&self.acceleration),
                         Some(connect_timeout),
                     )
                     .await
@@ -513,10 +506,10 @@ impl Http1Upstream {
                                 last_used_at: Instant::now(),
                             };
                             self.pool.release_to_lane(&addr, lane, res);
-                            tracing::debug!(endpoint = %addr, lane, "Shadow Worker pre-warmed HTTP/1.1 connection");
+                            tracing::debug!(endpoint = ?addr, lane, "Shadow Worker pre-warmed HTTP/1.1 connection");
                         }
                         Err(e) => {
-                            tracing::debug!(endpoint = %addr, lane, error = %e, "Shadow Worker pre-warm connect failed for HTTP/1.1");
+                            tracing::debug!(endpoint = ?addr, lane, error = %e, "Shadow Worker pre-warm connect failed for HTTP/1.1");
                             break;
                         }
                     }
@@ -554,10 +547,10 @@ impl Http1Upstream {
         let timeout = active_cfg.timeout;
 
         for ep in all_eps {
-            let addr = ep.address;
+            let addr = (ep.ip, ep.port_be);
             let success = if active_cfg.check_type.eq_ignore_ascii_case("tcp") {
-                match tokio::time::timeout(timeout, tokio::net::TcpStream::connect(addr)).await {
-                    Ok(Ok(stream)) => {
+                match velda_sock::connect::connect_tcp_u128(addr.0, addr.1, timeout).await {
+                    Ok(stream) => {
                         let _ = stream
                             .into_std()
                             .and_then(|s| s.shutdown(std::net::Shutdown::Both));
@@ -575,13 +568,8 @@ impl Http1Upstream {
                     Some(res) => (res.stream, true),
                     None => {
                         let tls_ref = self.tls.as_ref().map(|(e, s)| (e.as_ref(), s.as_ref()));
-                        match velda_http1::client::connect(
-                            addr,
-                            tls_ref,
-                            Some(&self.acceleration),
-                            Some(timeout),
-                        )
-                        .await
+                        match velda_http1::client::connect(addr.0, addr.1, tls_ref, Some(timeout))
+                            .await
                         {
                             Ok(s) => (s, false),
                             Err(_) => {

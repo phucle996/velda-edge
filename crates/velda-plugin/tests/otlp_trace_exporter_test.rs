@@ -7,7 +7,7 @@ use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::TcpListener;
 use tokio::sync::watch;
 
-use velda_observability::traces::{SpanRecord, TraceStore};
+use velda_observability::{TelemetryRecord, TelemetryStore};
 use velda_plugin::background::BackgroundPlugin;
 use velda_plugin::background::otlp_trace_exporter::{
     OtlpTraceExporterConfig, OtlpTraceExporterPlugin,
@@ -65,7 +65,7 @@ async fn spawn_mock_trace_collector(
 async fn trace_exporter_e2e() {
     let (url, conns, reqs, shutdown_tx) = spawn_mock_trace_collector("/v1/traces").await;
 
-    let store = Arc::new(TraceStore::with_cores_and_capacity(2, 64));
+    let store = Arc::new(TelemetryStore::with_cores_and_capacity(2, 64));
 
     let config = OtlpTraceExporterConfig {
         protocol: "http".to_string(),
@@ -99,17 +99,16 @@ async fn trace_exporter_e2e() {
     let catalog = velda_router::RouteCatalog::build(["/", "/api/orders"]);
     velda_router::set_global_route_catalog(catalog);
 
-    // Emit 5 spans across core 0 and core 1
+    // Emit 5 unified records across core 0 and core 1
     for i in 0..5 {
-        let mut span = SpanRecord::empty();
-        span.start_time_unix_nano = 1_000_000_000 + i * 1_000_000;
-        span.end_time_unix_nano = 1_000_000_000 + (i + 1) * 1_000_000;
-        span.status_code = 200;
-        span.route_id = 1;
-        span.trace_id = [1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16];
-        span.span_id = [0, 0, 0, 0, 0, 0, 0, i as u8];
+        let mut rec = TelemetryRecord::zeroed();
+        rec.ingress_time_nanos = 1_000_000_000 + i * 1_000_000;
+        rec.duration_ns = 1_000_000;
+        rec.request_id = i + 1;
+        rec.status_code = 200;
+        rec.route_id = 1;
 
-        store.emit_on_core((i % 2) as usize, &span);
+        store.emit_on_core((i % 2) as usize, &rec);
     }
     store.flush_all_lanes(100);
 

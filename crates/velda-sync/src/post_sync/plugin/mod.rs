@@ -30,6 +30,7 @@ pub use velda_plugin::background::acme_cert_rotator::validation::*;
 pub use velda_plugin::background::clickhouse_log_shipper::validation::*;
 pub use velda_plugin::background::health_probe::validation::*;
 pub use velda_plugin::background::jwks_rotator::validation::*;
+pub use velda_plugin::background::kafka_log_shipper::validation::*;
 pub use velda_plugin::background::loki_log_shipper::validation::*;
 pub use velda_plugin::background::otlp_log_shipper::validation::*;
 pub use velda_plugin::background::otlp_metrics_exporter::validation::*;

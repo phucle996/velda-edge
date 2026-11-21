@@ -15,7 +15,7 @@
 //!        ┌────────────────────────────────────────┴───────────────────────────────────────┐
 //!        ▼                                                                                ▼
 //! ┌────────────────────────────────────────┐                            ┌────────────────────────────────────────┐
-//! │ AccessLogRecord (64B SPSC Ring)        │                            │ Persistent Scratch Buffers (0 alloc)   │
+//! │ TelemetryRecord (64B SPSC Ring)        │                            │ Persistent Scratch Buffers (0 alloc)   │
 //! │ ├─ downstream_protocol                    │ ──► Protocol Slicing ──►   │ ├─ http_values.clear()                 │
 //! │ ├─ 128-bit (ts_sec, request_id)        │                            │ ├─ grpc_values.clear()                 │
 //! │ ├─ peer_ip: u128 (RFC 4291 / 5952)     │                            │ └─ raw_values.clear()                  │
@@ -33,7 +33,7 @@ use std::cell::RefCell;
 use std::collections::HashMap;
 
 use velda_core::WireProtocol;
-use velda_observability::{AccessLogRecord, LogBatch};
+use velda_observability::{TelemetryBatch, TelemetryRecord};
 
 use velda_core::lut::decimal::fast_write_u64;
 use velda_core::lut::ip::{fast_write_ip, fast_write_ipv4};
@@ -140,11 +140,11 @@ impl LokiJsonFormatter {
         }
     }
 
-    /// Serializes batches of reference-counted [`AccessLogRecord`] into a multi-stream
+    /// Serializes batches of reference-counted [`TelemetryRecord`] into a multi-stream
     /// Grafana Loki JSON push payload, reusing persistent internal scratch buffers.
     ///
     /// Guarantees 0 heap allocations during formatting.
-    pub fn format_batches(&mut self, batches: &[LogBatch], out: &mut Vec<u8>) -> usize {
+    pub fn format_batches(&mut self, batches: &[TelemetryBatch], out: &mut Vec<u8>) -> usize {
         out.clear();
         self.http_values.clear();
         self.grpc_values.clear();
@@ -160,7 +160,7 @@ impl LokiJsonFormatter {
                     unsafe {
                         use core::arch::x86_64::*;
                         let next_rec =
-                            recs.get_unchecked(idx + 4) as *const AccessLogRecord as *const i8;
+                            recs.get_unchecked(idx + 4) as *const TelemetryRecord as *const i8;
                         _mm_prefetch(next_rec, _MM_HINT_T1);
                         _mm_prefetch(next_rec.add(64), _MM_HINT_T1);
                         _mm_prefetch(next_rec.add(128), _MM_HINT_T1);
@@ -371,7 +371,7 @@ thread_local! {
 /// Uses thread-local persistent scratch buffers to guarantee 0 heap allocations
 /// even when called outside of [`LokiJsonFormatter`].
 pub fn format_loki_push_payload(
-    batches: &[LogBatch],
+    batches: &[TelemetryBatch],
     template: &LokiStreamTemplate,
     out: &mut Vec<u8>,
 ) -> usize {
@@ -394,7 +394,7 @@ pub fn format_loki_push_payload(
                     unsafe {
                         use core::arch::x86_64::*;
                         let next_rec =
-                            recs.get_unchecked(idx + 4) as *const AccessLogRecord as *const i8;
+                            recs.get_unchecked(idx + 4) as *const TelemetryRecord as *const i8;
                         _mm_prefetch(next_rec, _MM_HINT_T1);
                         _mm_prefetch(next_rec.add(64), _MM_HINT_T1);
                         _mm_prefetch(next_rec.add(128), _MM_HINT_T1);
@@ -568,7 +568,7 @@ mod tests {
         labels.insert("env".to_string(), "prod".to_string());
         let mut formatter = LokiJsonFormatter::new("test-service", &labels);
 
-        let mut http_rec = AccessLogRecord::zeroed();
+        let mut http_rec = TelemetryRecord::zeroed();
         http_rec.request_id = 0xaaaa_bbbb_cccc_dddd;
         http_rec.ingress_time_nanos = 1_710_000_001_123_456_789;
         http_rec.duration_ns = 320;
@@ -589,7 +589,7 @@ mod tests {
         http_rec.ua_os = os;
         http_rec.ua_major_version = ver;
 
-        let mut grpc_rec = AccessLogRecord::zeroed();
+        let mut grpc_rec = TelemetryRecord::zeroed();
         grpc_rec.request_id = 0x1111_2222_3333_4444;
         grpc_rec.ingress_time_nanos = 1_710_000_002_987_654_321;
         grpc_rec.duration_ns = 890;
@@ -611,7 +611,7 @@ mod tests {
         grpc_rec.ua_os = os;
         grpc_rec.ua_major_version = ver;
 
-        let batches = vec![LogBatch::from_arc(std::sync::Arc::from(vec![
+        let batches = vec![TelemetryBatch::from_arc(std::sync::Arc::from(vec![
             http_rec, grpc_rec,
         ]))];
         let mut out = Vec::new();
@@ -644,7 +644,7 @@ mod tests {
     fn test_loki_json_empty_batch() {
         let template = LokiStreamTemplate::new("test", &HashMap::new());
         let mut out = Vec::new();
-        let batches: Vec<LogBatch> = Vec::new();
+        let batches: Vec<TelemetryBatch> = Vec::new();
         let count = format_loki_push_payload(&batches, &template, &mut out);
         assert_eq!(count, 0);
         assert!(out.is_empty());

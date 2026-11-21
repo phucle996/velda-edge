@@ -268,11 +268,7 @@ impl PreUpstreamPlugin for GrpcFaultInjectionPlugin {
     /// 3. Zero-Division Delay: Pre-computed `self.delay_dur` used directly.
     /// 4. Compact Abort: Pre-compiled 3-slot Trailers-Only response cloned with minimal footprint.
     #[inline]
-    fn on_upstream_request(
-        &self,
-        _req: &mut L7Request,
-        _target_upstream: &mut velda_core::UpstreamId,
-    ) -> Action {
+    fn on_upstream_request(&self, _req: &mut L7Request, _target_upstream: &mut u16) -> Action {
         // Step 1: Single-cycle fast-path bypass when fault injection is inactive
         if self.combined_mask == 0 {
             return Action::Continue;
@@ -358,7 +354,7 @@ mod tests {
             Body::Empty,
         );
 
-        let mut target = velda_core::UpstreamId::new(1);
+        let mut target = 1;
         let action = plugin.on_upstream_request(&mut req, &mut target);
         match action {
             Action::Delay { duration, and_then } => {
@@ -382,7 +378,7 @@ mod tests {
             Body::Empty,
         );
 
-        let mut target = velda_core::UpstreamId::new(1);
+        let mut target = 1;
         let action = plugin.on_upstream_request(&mut req, &mut target);
         match action {
             Action::Respond(resp) => {
@@ -416,7 +412,7 @@ mod tests {
             Body::Empty,
         );
 
-        let mut target = velda_core::UpstreamId::new(1);
+        let mut target = 1;
         let action = plugin.on_upstream_request(&mut req, &mut target);
         match action {
             Action::Delay { duration, and_then } => {
@@ -446,7 +442,7 @@ mod tests {
             Body::Empty,
         );
 
-        let mut target = velda_core::UpstreamId::new(1);
+        let mut target = 1;
         let action = plugin.on_upstream_request(&mut req, &mut target);
         assert!(matches!(action, Action::Continue));
     }

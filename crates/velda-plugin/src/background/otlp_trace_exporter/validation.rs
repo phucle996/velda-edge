@@ -1,7 +1,7 @@
 //! OpenTelemetry Trace Exporter Schema & Validation (`phase: "background"`).
 //!
 //! Validates configuration for [`OtlpTraceExporterPlugin`], which drains reference-counted
-//! 64-byte [`velda_observability::SpanRecord`] batches from [`velda_observability::TraceStore`]
+//! [`velda_observability::TelemetryRecord`] batches from [`velda_observability::TelemetryStore`]
 //! and exports them to OpenTelemetry Collectors over persistent HTTP/1.1 or HTTP/2 gRPC connections.
 
 use serde::{Deserialize, Serialize};

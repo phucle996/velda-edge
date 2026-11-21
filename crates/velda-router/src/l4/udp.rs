@@ -4,21 +4,19 @@
 //! UDP routing operates strictly on L4 datagram flows, managing optional idle session timeouts
 //! for bidirectional stateful proxying or unidirectional fire-and-forget.
 
-use rustc_hash::FxHashMap;
 use std::time::Duration;
-use velda_core::{ListenerId, RouteId, UpstreamId};
 
 use crate::error::RouterError;
 
 /// Concrete compiled Layer 4 UDP routing rule (`Copy`, zero heap strings).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct UdpRoute {
-    /// Unique identifier of this route.
-    pub id: RouteId,
-    /// Ingress listener identifier this route attaches to.
-    pub listener_id: ListenerId,
-    /// Logical upstream destination for forwarding traffic.
-    pub upstream_id: UpstreamId,
+    /// Unique identifier of this route (`u16`).
+    pub id: u16,
+    /// Ingress listener identifier (`u32` FNV-1a) this route attaches to.
+    pub listener_id: u32,
+    /// Logical upstream destination for forwarding traffic (`u16`).
+    pub upstream_id: u16,
     /// Optional idle timeout for stateful bidirectional L4 UDP sessions.
     /// If `None`, UDP is unidirectional (1 chiều fire-and-forget).
     /// If `Some`, UDP is bidirectional (2 chiều stateful proxying).
@@ -85,10 +83,10 @@ impl UdpSessionAffinity {
 impl UdpRoute {
     /// Creates a new L4 UDP route rule.
     #[inline]
-    pub fn new(id: RouteId, listener_id: impl Into<ListenerId>, upstream_id: UpstreamId) -> Self {
+    pub const fn new(id: u16, listener_id: u32, upstream_id: u16) -> Self {
         Self {
             id,
-            listener_id: listener_id.into(),
+            listener_id,
             upstream_id,
             udp_idle_timeout: None,
             session_affinity: UdpSessionAffinity::ClientAddr,
@@ -116,86 +114,89 @@ impl UdpRoute {
     }
 }
 
-/// High-performance, in-memory L4 UDP route lookup table.
-///
-/// Provides zero-allocation $O(1)$ route resolution from [`ListenerId`] to [`UdpRoute`] via [`FxHashMap`].
+/// High-performance, in-memory L4 UDP route lookup table backed by a flat contiguous `Vec<UdpRoute>`.
 #[derive(Debug, Default, Clone, PartialEq, Eq)]
 pub struct UdpRouter {
-    listeners: FxHashMap<ListenerId, UdpRoute>,
+    routes: Vec<UdpRoute>,
 }
 
 impl UdpRouter {
     /// Builds a new [`UdpRouter`] from a list of compiled [`UdpRoute`] rules.
     pub fn new(routes: impl IntoIterator<Item = UdpRoute>) -> Result<Self, RouterError> {
-        let mut listeners: FxHashMap<ListenerId, UdpRoute> = FxHashMap::default();
-
-        for r in routes {
-            if listeners.contains_key(&r.listener_id) {
+        let mut vec: Vec<UdpRoute> = routes.into_iter().collect();
+        vec.sort_by_key(|r| r.listener_id);
+        for w in vec.windows(2) {
+            if w[0].listener_id == w[1].listener_id {
                 return Err(RouterError::DuplicateRoute {
-                    listener: r.listener_id.to_string(),
+                    listener: w[0].listener_id.to_string(),
                     protocol: "Udp".to_string(),
                 });
             }
-            listeners.insert(r.listener_id, r);
         }
-
-        Ok(Self { listeners })
+        Ok(Self { routes: vec })
     }
 
     /// Resolves a UDP route for an incoming datagram on a listener.
     #[inline]
-    pub fn route(&self, listener_id: impl Into<ListenerId>) -> Option<&UdpRoute> {
-        self.listeners.get(&listener_id.into())
+    pub fn route(&self, listener_id: u32) -> Option<&UdpRoute> {
+        if self.routes.len() <= 16 {
+            self.routes.iter().find(|r| r.listener_id == listener_id)
+        } else {
+            self.routes
+                .binary_search_by_key(&listener_id, |r| r.listener_id)
+                .ok()
+                .map(|idx| &self.routes[idx])
+        }
     }
 
     /// Returns the total number of configured UDP routes.
     #[inline]
     pub fn len(&self) -> usize {
-        self.listeners.len()
+        self.routes.len()
     }
 
     /// Returns whether the router has no configured routes.
     #[inline]
     pub fn is_empty(&self) -> bool {
-        self.listeners.is_empty()
+        self.routes.is_empty()
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use velda_core::fnv1a_hash_32;
 
     #[test]
     fn test_udp_router_lookup() {
+        let l1 = fnv1a_hash_32("dns-in");
+        let l2 = fnv1a_hash_32("syslog-in");
         let routes = vec![
-            UdpRoute::new(RouteId::new(1), "dns-in", UpstreamId::new(10))
-                .with_udp_idle_timeout(Some(Duration::from_secs(30))),
-            UdpRoute::new(RouteId::new(2), "syslog-in", UpstreamId::new(20)),
+            UdpRoute::new(1, l1, 10).with_udp_idle_timeout(Some(Duration::from_secs(30))),
+            UdpRoute::new(2, l2, 20),
         ];
 
         let router = UdpRouter::new(routes).unwrap();
         assert_eq!(router.len(), 2);
         assert!(!router.is_empty());
 
-        let r1 = router.route("dns-in").unwrap();
-        assert_eq!(r1.id, RouteId::new(1));
-        assert_eq!(r1.upstream_id, UpstreamId::new(10));
+        let r1 = router.route(l1).unwrap();
+        assert_eq!(r1.id, 1);
+        assert_eq!(r1.upstream_id, 10);
         assert!(!r1.is_unidirectional());
 
-        let r2 = router.route("syslog-in").unwrap();
-        assert_eq!(r2.id, RouteId::new(2));
-        assert_eq!(r2.upstream_id, UpstreamId::new(20));
+        let r2 = router.route(l2).unwrap();
+        assert_eq!(r2.id, 2);
+        assert_eq!(r2.upstream_id, 20);
         assert!(r2.is_unidirectional());
 
-        assert!(router.route("unknown").is_none());
+        assert!(router.route(fnv1a_hash_32("unknown")).is_none());
     }
 
     #[test]
     fn test_udp_router_duplicate_fails() {
-        let routes = vec![
-            UdpRoute::new(RouteId::new(1), "dns", UpstreamId::new(10)),
-            UdpRoute::new(RouteId::new(2), "dns", UpstreamId::new(20)),
-        ];
+        let l1 = fnv1a_hash_32("dns");
+        let routes = vec![UdpRoute::new(1, l1, 10), UdpRoute::new(2, l1, 20)];
 
         let err = UdpRouter::new(routes).unwrap_err();
         assert!(matches!(err, RouterError::DuplicateRoute { .. }));

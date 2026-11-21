@@ -109,12 +109,12 @@ fn bench_pipeline_dispatch_lookup() {
 
         if is_tcp {
             for _ in 0..iters {
-                let res = table.tcp_pipeline(id);
+                let res = table.tcp_pipeline(velda_core::fnv1a_hash_32(id));
                 let _ = std::hint::black_box(res);
             }
         } else {
             for _ in 0..iters {
-                let res = table.udp_pipeline(id);
+                let res = table.udp_pipeline(velda_core::fnv1a_hash_32(id));
                 let _ = std::hint::black_box(res);
             }
         }

@@ -373,6 +373,7 @@ mod tests {
             grpc: None,
             http3: None,
             raw: None,
+            observability: None,
         }];
         let bin = compile_listeners_to_binary(&listeners, 10, [0u8; 32]).unwrap();
         std::fs::write(runtime_dir.join("listeners.bin"), bin).unwrap();

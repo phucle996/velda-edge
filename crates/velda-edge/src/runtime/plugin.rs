@@ -7,7 +7,7 @@
 use std::sync::Arc;
 
 use rustc_hash::FxHashMap;
-use velda_core::{ProtocolFamily, RouteId, StreamingMode};
+use velda_core::{ProtocolFamily, StreamingMode};
 use velda_plugin::{
     LoadedPlugin, RoutePluginPlan, build_route_plugin_plan, instantiate_plugin,
     wire_plugin_dependencies,
@@ -21,8 +21,8 @@ use crate::error::EdgeError;
 /// Active in-memory plugin table holding pre-compiled [`RoutePluginPlan`] execution plans.
 #[derive(Clone, Default)]
 pub struct PluginTable {
-    /// O(1) integer lookup table: RouteId -> RoutePluginPlan.
-    pub routes: FxHashMap<RouteId, Arc<RoutePluginPlan>>,
+    /// O(1) integer lookup table: u16 -> RoutePluginPlan.
+    pub routes: FxHashMap<u16, Arc<RoutePluginPlan>>,
     /// Active background plugins running on Shadow Worker.
     pub background_plugins: Vec<Arc<dyn velda_plugin::BackgroundPlugin>>,
     /// Pre-computed background plugins partitioned across shadow workers:
@@ -57,7 +57,7 @@ impl PluginTable {
     ///
     /// If the route has no plugins or route_id is unknown, returns the canonical empty plan.
     #[inline(always)]
-    pub fn get_plan(&self, route_id: RouteId) -> &Arc<RoutePluginPlan> {
+    pub fn get_plan(&self, route_id: u16) -> &Arc<RoutePluginPlan> {
         self.routes.get(&route_id).unwrap_or(&self.empty_plan)
     }
 
@@ -77,7 +77,7 @@ impl PluginTable {
 
     /// Returns `true` if the route has at least one active plugin hook.
     #[inline(always)]
-    pub fn has_plugins(&self, route_id: RouteId) -> bool {
+    pub fn has_plugins(&self, route_id: u16) -> bool {
         self.routes.get(&route_id).is_some_and(|p| !p.is_empty())
     }
 }
@@ -107,15 +107,16 @@ pub fn build_plugin_table(
     })?;
 
     // 2. Host Ingress Port Authority: register Traffic Ingress listeners with SocketManager
-    let socket_manager = velda_core::socket::global_socket_manager();
+    let socket_manager = velda_sock::socket::global_socket_manager();
     for l in listeners {
         if let Ok(addr) = l.address.parse::<std::net::SocketAddr>() {
+            let (ip, port_be) = velda_sock::socket_addr_to_raw(addr);
             let proto = match l.transport.protocol.to_ascii_lowercase().as_str() {
-                "udp" => velda_core::socket::SocketProtocol::Udp,
-                _ => velda_core::socket::SocketProtocol::Tcp,
+                "udp" => velda_sock::socket::SocketProtocol::Udp,
+                _ => velda_sock::socket::SocketProtocol::Tcp,
             };
             socket_manager
-                .register_traffic_socket(addr, proto, &l.id)
+                .register_traffic_socket(ip, port_be, proto, &l.id)
                 .map_err(|e| EdgeError::InvalidConfig {
                     detail: format!("Ingress listener port conflict: {e}"),
                 })?;
@@ -157,7 +158,7 @@ pub fn build_plugin_table(
         })?;
 
         if !plan.is_empty() {
-            let route_id = velda_core::RouteId(idx as u16);
+            let route_id = idx as u16;
             route_plans.insert(route_id, Arc::new(plan));
         }
     }
@@ -226,7 +227,7 @@ mod tests {
     #[test]
     fn test_empty_plugin_table() {
         let table = PluginTable::empty();
-        let non_existent = RouteId::new(999);
+        let non_existent = 999;
         assert!(!table.has_plugins(non_existent));
         assert!(table.get_plan(non_existent).is_empty());
         assert!(table.background_plugins.is_empty());

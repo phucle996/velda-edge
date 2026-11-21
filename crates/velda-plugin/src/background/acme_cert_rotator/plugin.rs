@@ -132,7 +132,7 @@ impl AcmeCertRotatorPlugin {
         let challenge_store = ChallengeStore::new();
 
         let router_registry = match (router, listener_id) {
-            (Some(r), Some(lid)) => Some(RouterRegistry::new(r, lid)),
+            (Some(r), Some(lid)) => Some(RouterRegistry::new(r, velda_core::fnv1a_hash_32(&lid))),
             _ => None,
         };
 
@@ -162,7 +162,10 @@ impl AcmeCertRotatorPlugin {
         router: Arc<RwLock<Router>>,
         listener_id: impl Into<String>,
     ) -> Self {
-        self.router_registry = Some(RouterRegistry::new(router, listener_id.into()));
+        self.router_registry = Some(RouterRegistry::new(
+            router,
+            velda_core::fnv1a_hash_32(&listener_id.into()),
+        ));
         self
     }
 

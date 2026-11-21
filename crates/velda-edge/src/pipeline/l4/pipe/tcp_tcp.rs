@@ -4,7 +4,7 @@
 //!
 //! Unlike **Acceleration Pipes** (`*_tcp_rdma`) that bypass the OS kernel via hardware RDMA Verbs,
 //! this is a **Standard Pipe** routing outbound byte traffic through the Linux kernel TCP network stack
-//! using pre-compiled socket acceleration flags (`TcpAccelerationPath`: `TCP_NODELAY`, `TCP_FASTOPEN_CONNECT`,
+//! using pre-compiled socket acceleration flags (`TCP_NODELAY`, `TCP_FASTOPEN_CONNECT`,
 //! `TCP_NOTSENT_LOWAT`, `SO_BUSY_POLL`, `TCP_QUICKACK`, and BBR congestion control).
 //!
 //! ### Activation Conditions
@@ -15,30 +15,31 @@
 //!
 //! Self-contained pipeline adhering to the Hourglass Architecture & Flat Workflow (`AGENTS.md` Sec 2.1–2.3).
 
-use std::net::SocketAddr;
 use std::sync::Arc;
 
-use velda_core::{RouteId, UpstreamId};
 use velda_sock::Connection;
 
 use crate::runtime::pipeline::L4TcpConfig;
 use crate::upstream::raw::TcpUpstream;
 
 /// Serves a raw L4 TCP stream forwarded to an upstream TCP backend.
+#[allow(clippy::too_many_arguments)]
 pub async fn serve(
     conn: Connection,
     upstream: &Arc<TcpUpstream>,
     config: &L4TcpConfig,
-    route_id: RouteId,
-    upstream_id: UpstreamId,
-    peer: SocketAddr,
+    route_id: u16,
+    upstream_id: u16,
+    peer_ip: u128,
+    peer_port_be: u16,
     listener_id: &str,
 ) {
     tracing::debug!(
         listener = %listener_id,
         route = %route_id,
         upstream = %upstream_id,
-        peer = %peer,
+        peer_ip = %peer_ip,
+        peer_port = u16::from_be(peer_port_be),
         "Proxying L4 TCP stream to upstream backend via forward_connection (Zero TLS)"
     );
 
@@ -108,17 +109,18 @@ pub async fn serve(
             Some(e.to_string()),
         ),
     };
-    velda_observability::global_log_store().emit(&velda_observability::AccessLogRecord {
-        request_id: request_id.entropy(),
+    velda_observability::global_telemetry_store().emit(&velda_observability::TelemetryRecord {
+        request_id: velda_core::request_id::entropy(request_id),
         ingress_time_nanos: ingress_nanos,
         duration_ns: velda_core::clock::now_unix_nanos().saturating_sub(ingress_nanos),
-        peer_ip: velda_observability::encode_ip_u128(peer.ip()),
+        peer_ip,
         bytes_rx: rx.min(u32::MAX as u64) as u32,
         bytes_tx: tx.min(u32::MAX as u64) as u32,
         upstream_ip,
         upstream_port,
         status_code: 0,
-        route_id: route_id.0,
+        route_id,
+        upstream_id,
         ua_major_version: 0,
         rpc_msgs_or_flags: 0,
         pipe: velda_core::PipeKind::TcpTcp,
@@ -128,7 +130,7 @@ pub async fn serve(
         ua_family: velda_core::UaFamily::None,
         ua_os: velda_core::UaOs::Unknown,
         url_len: 0,
-        url_bytes: [0; 186],
+        url_bytes: [0; 184],
     });
 
     match forward_err {
@@ -136,7 +138,8 @@ pub async fn serve(
             // Step 4: Record transferred byte telemetry upon graceful stream closure.
             tracing::debug!(
                 upstream = %upstream_id,
-                peer = %peer,
+                peer_ip = %peer_ip,
+                peer_port = u16::from_be(peer_port_be),
                 client_to_server = rx,
                 server_to_client = tx,
                 "L4 TCP stream forwarding completed"
@@ -147,7 +150,8 @@ pub async fn serve(
             tracing::warn!(
                 error = %e,
                 upstream = %upstream_id,
-                peer = %peer,
+                peer_ip = %peer_ip,
+                peer_port = u16::from_be(peer_port_be),
                 "L4 TCP stream forwarding terminated with error"
             );
         }

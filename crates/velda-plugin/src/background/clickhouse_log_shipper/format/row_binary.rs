@@ -26,10 +26,10 @@
 //!
 //!  Memory Pipeline & Direct Pointer Stamping:
 //!
-//!    LogBatch (L2 Prefetch _MM_HINT_T1)
+//!    TelemetryBatch (L2 Prefetch _MM_HINT_T1)
 //!         │
 //!         ▼
-//!    [ AccessLogRecord ] ──► Upfront Reservation: out.reserve(total_recs * 384)
+//!    [ TelemetryRecord ] ──► Upfront Reservation: out.reserve(total_recs * 384)
 //!         │
 //!         ├─── Integers (ts, id, dur, ports) ──► core::ptr::write_unaligned (LE)
 //!         ├─── IP Addrs (peer_ip, upstream)  ──► fast_write_ip_ptr (velda-core::lut::ip)
@@ -52,9 +52,9 @@
 //! - Zero heap allocation per record: Uses core-local pre-reserved buffers and direct pointer stamping.
 
 use velda_core::lut::ip::{fast_write_ip_ptr, fast_write_ipv4_ptr};
-use velda_observability::{AccessLogRecord, LogBatch};
+use velda_observability::{TelemetryBatch, TelemetryRecord};
 
-/// Upper bound of one RowBinary row (186 B URL + IPv6 + enum names + 2 B packed over-store).
+/// Upper bound of one RowBinary row (184 B URL + IPv6 + enum names + 2 B packed over-store).
 const MAX_ROW_BYTES: usize = 512;
 
 /// Writes unsigned LEB128 variable-length integer (ClickHouse string length prefix).
@@ -103,14 +103,14 @@ pub(crate) unsafe fn write_fixed_str_ptr(ptr: *mut u8, s: &[u8]) -> usize {
     }
 }
 
-/// Encodes batches of [`AccessLogRecord`] into ClickHouse RowBinary format.
+/// Encodes batches of [`TelemetryRecord`] into ClickHouse RowBinary format.
 ///
 /// Appends binary records directly into `out` buffer using direct pointer stamping
 /// and Core vocabulary framing, eliminating per-field capacity checks and reallocation branching.
 /// Employs `_MM_HINT_T1` prefetching to keep the record batch in L2 without polluting L1d cache.
 /// Returns the number of records serialized into `out`.
 #[inline(never)]
-pub fn format_row_binary(batches: &[LogBatch], out: &mut Vec<u8>) -> usize {
+pub fn format_row_binary(batches: &[TelemetryBatch], out: &mut Vec<u8>) -> usize {
     let total_recs: usize = batches.iter().map(|b| b.len()).sum();
     out.reserve(total_recs * 256);
     let mut serialized_count = 0;
@@ -123,7 +123,7 @@ pub fn format_row_binary(batches: &[LogBatch], out: &mut Vec<u8>) -> usize {
                 unsafe {
                     use core::arch::x86_64::*;
                     let next_rec =
-                        recs.get_unchecked(idx + 4) as *const AccessLogRecord as *const i8;
+                        recs.get_unchecked(idx + 4) as *const TelemetryRecord as *const i8;
                     _mm_prefetch(next_rec, _MM_HINT_T1);
                     _mm_prefetch(next_rec.add(64), _MM_HINT_T1);
                     _mm_prefetch(next_rec.add(128), _MM_HINT_T1);
@@ -133,7 +133,7 @@ pub fn format_row_binary(batches: &[LogBatch], out: &mut Vec<u8>) -> usize {
 
             serialized_count += 1;
 
-            // Per-row capacity guard: worst case row is ~380 B (186 B URL + IPv6 + enum names)
+            // Per-row capacity guard: worst case row is ~380 B (184 B URL + IPv6 + enum names)
             // plus the 2-byte over-store of the packed u64 at field 7..9.
             out.reserve(MAX_ROW_BYTES);
 
@@ -218,10 +218,10 @@ mod tests {
     use super::*;
     use std::sync::Arc;
     use velda_core::{CompletionReason, GrpcStatus, HttpMethod, PipeKind, UaFamily, UaOs};
-    use velda_observability::AccessLogRecord;
+    use velda_observability::TelemetryRecord;
 
-    fn make_test_record() -> AccessLogRecord {
-        let mut rec = AccessLogRecord::zeroed();
+    fn make_test_record() -> TelemetryRecord {
+        let mut rec = TelemetryRecord::zeroed();
         rec.ingress_time_nanos = 1_732_011_000_123_456_789;
         rec.request_id = 987654321;
         rec.duration_ns = 250_000;
@@ -247,7 +247,7 @@ mod tests {
     #[test]
     fn test_row_binary_serialization() {
         let rec = make_test_record();
-        let batch = LogBatch::from_arc(Arc::new([rec]));
+        let batch = TelemetryBatch::from_arc(Arc::new([rec]));
         let mut out = Vec::new();
 
         let count = format_row_binary(&[batch], &mut out);
@@ -368,7 +368,7 @@ mod tests {
         err_rec.request_id = 2;
         err_rec.status_code = 500;
 
-        let batch = LogBatch::from_arc(Arc::new([ok_rec, err_rec]));
+        let batch = TelemetryBatch::from_arc(Arc::new([ok_rec, err_rec]));
         let mut out = Vec::new();
 
         let count = format_row_binary(std::slice::from_ref(&batch), &mut out);

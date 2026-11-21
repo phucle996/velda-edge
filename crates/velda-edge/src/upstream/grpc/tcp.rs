@@ -1,6 +1,5 @@
 //! Layer 7 gRPC over TCP Upstream managing connection lifecycle, multiplexing, and endpoint health tracking.
 
-use std::net::SocketAddr;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
 
@@ -8,7 +7,7 @@ use velda_connection_pool::{MultiplexedPool, PoolableResource};
 use velda_core::StreamingMode;
 use velda_grpc::GrpcConfig;
 use velda_grpc::tcp::GrpcPipeStrategy;
-use velda_grpc::tcp::client::{GrpcAccelerationPath, GrpcUpstreamConnector};
+use velda_grpc::tcp::client::GrpcUpstreamConnector;
 use velda_tls::TlsClientEngine;
 
 use super::super::lb::EdgeUpstream;
@@ -50,11 +49,10 @@ pub struct GrpcTcpUpstream {
     /// `streaming` at compile time; eliminates runtime enum branching.
     pub strategy: GrpcPipeStrategy,
     /// Lock-sharded persistent gRPC HTTP/2 multiplexed client connection pool.
-    pool: Arc<MultiplexedPool<SocketAddr, GrpcTcpClientResource>>,
+    pool: Arc<MultiplexedPool<(u128, u16), GrpcTcpClientResource>>,
     /// Maximum concurrent streams per multiplexed connection.
     pub max_concurrent_streams: u32,
     /// [PRE-COMPILED]: Protocol-specific socket acceleration path.
-    pub acceleration: GrpcAccelerationPath,
     /// Last active health probe timestamp in seconds from coarse integer clock.
     last_probe_sec: AtomicU64,
 }
@@ -66,7 +64,6 @@ impl std::fmt::Debug for GrpcTcpUpstream {
             .field("streaming", &self.streaming)
             .field("strategy", &self.strategy)
             .field("max_concurrent_streams", &self.max_concurrent_streams)
-            .field("acceleration", &self.acceleration)
             .finish()
     }
 }
@@ -79,7 +76,6 @@ impl GrpcTcpUpstream {
         streaming: StreamingMode,
         shard_count: usize,
         max_concurrent_streams: u32,
-        acceleration: GrpcAccelerationPath,
     ) -> Self {
         let strategy = GrpcPipeStrategy::from_streaming(streaming);
         Self {
@@ -89,7 +85,6 @@ impl GrpcTcpUpstream {
             strategy,
             pool: Arc::new(MultiplexedPool::with_shards(shard_count)),
             max_concurrent_streams,
-            acceleration,
             last_probe_sec: AtomicU64::new(0),
         }
     }
@@ -103,7 +98,6 @@ impl GrpcTcpUpstream {
     /// Acquires an active, ready multiplexed gRPC over TCP client connection from the pool or connects a fresh one.
     pub async fn acquire(&self, config: &GrpcConfig) -> Result<GrpcUpstreamConnector, EdgeError> {
         let max_streams = self.max_concurrent_streams;
-        let acceleration = self.acceleration;
         let connect_timeout = self.inner.timeouts().connect;
         let idle_timeout = self.inner.timeouts().idle;
         let tls = self
@@ -115,7 +109,7 @@ impl GrpcTcpUpstream {
             .inner
             .execute(|endpoint| async move {
                 if let Some(lease) = self.pool.acquire_stream(&endpoint, idle_timeout) {
-                    let mut connector = lease.client.clone().with_target(endpoint);
+                    let mut connector = lease.client.clone().with_target(endpoint.0, endpoint.1);
                     match connector.ready().await {
                         Ok(()) => return Ok::<_, String>((connector, endpoint)),
                         Err(_) => {
@@ -125,15 +119,15 @@ impl GrpcTcpUpstream {
                 }
 
                 let mut fresh = GrpcUpstreamConnector::connect(
-                    endpoint,
+                    endpoint.0,
+                    endpoint.1,
                     tls,
                     config,
-                    Some(&acceleration),
                     Some(connect_timeout),
                 )
                 .await
                 .map_err(|e| e.to_string())?
-                .with_target(endpoint);
+                .with_target(endpoint.0, endpoint.1);
 
                 fresh
                     .ready()
@@ -165,7 +159,6 @@ impl GrpcTcpUpstream {
         config: &GrpcConfig,
     ) -> Result<GrpcUpstreamConnector, EdgeError> {
         let max_streams = self.max_concurrent_streams;
-        let acceleration = self.acceleration;
         let connect_timeout = self.inner.timeouts().connect;
         let tls = self
             .tls
@@ -176,15 +169,15 @@ impl GrpcTcpUpstream {
             .inner
             .execute(|endpoint| async move {
                 let mut fresh = GrpcUpstreamConnector::connect(
-                    endpoint,
+                    endpoint.0,
+                    endpoint.1,
                     tls,
                     config,
-                    Some(&acceleration),
                     Some(connect_timeout),
                 )
                 .await
                 .map_err(|e| e.to_string())?
-                .with_target(endpoint);
+                .with_target(endpoint.0, endpoint.1);
 
                 fresh
                     .ready()
@@ -219,7 +212,7 @@ impl GrpcTcpUpstream {
         }
 
         for ep in all_eps {
-            let addr = ep.address;
+            let addr = (ep.ip, ep.port_be);
             if !self.inner.health().is_healthy(&addr) {
                 continue;
             }
@@ -232,14 +225,13 @@ impl GrpcTcpUpstream {
                     .tls
                     .as_ref()
                     .map(|(engine, sni)| (engine.as_ref(), sni.as_ref()));
-                let acceleration = self.acceleration;
                 let connect_timeout = self.inner.timeouts().connect;
 
                 match GrpcUpstreamConnector::connect(
-                    addr,
+                    addr.0,
+                    addr.1,
                     tls,
                     config,
-                    Some(&acceleration),
                     Some(connect_timeout),
                 )
                 .await
@@ -254,11 +246,11 @@ impl GrpcTcpUpstream {
                                 res,
                                 self.max_concurrent_streams,
                             );
-                            tracing::debug!(endpoint = %addr, lane, "Shadow Worker pre-warmed gRPC TCP connection");
+                            tracing::debug!(endpoint = ?addr, lane, "Shadow Worker pre-warmed gRPC TCP connection");
                         }
                     }
                     Err(e) => {
-                        tracing::debug!(endpoint = %addr, lane, error = %e, "Shadow Worker pre-warm connect failed for gRPC TCP");
+                        tracing::debug!(endpoint = ?addr, lane, error = %e, "Shadow Worker pre-warm connect failed for gRPC TCP");
                     }
                 }
             }
@@ -290,10 +282,10 @@ impl GrpcTcpUpstream {
         let timeout = active_cfg.timeout;
 
         for ep in all_eps {
-            let addr = ep.address;
+            let addr = (ep.ip, ep.port_be);
             let success = if active_cfg.check_type.eq_ignore_ascii_case("tcp") {
-                match tokio::time::timeout(timeout, tokio::net::TcpStream::connect(addr)).await {
-                    Ok(Ok(stream)) => {
+                match velda_sock::connect::connect_tcp_u128(addr.0, addr.1, timeout).await {
+                    Ok(stream) => {
                         let _ = stream
                             .into_std()
                             .and_then(|s| s.shutdown(std::net::Shutdown::Both));
@@ -319,17 +311,10 @@ impl GrpcTcpUpstream {
                     .tls
                     .as_ref()
                     .map(|(engine, sni)| (engine.as_ref(), sni.as_ref()));
-                let acceleration = self.acceleration;
                 let config = GrpcConfig::default();
 
-                match GrpcUpstreamConnector::connect(
-                    addr,
-                    tls,
-                    &config,
-                    Some(&acceleration),
-                    Some(timeout),
-                )
-                .await
+                match GrpcUpstreamConnector::connect(addr.0, addr.1, tls, &config, Some(timeout))
+                    .await
                 {
                     Ok(mut fresh) => {
                         let ready_res = tokio::time::timeout(timeout, fresh.ready()).await;

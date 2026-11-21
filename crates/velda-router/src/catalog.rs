@@ -17,7 +17,6 @@ use std::ptr::NonNull;
 use std::sync::Arc;
 
 use arc_swap::ArcSwapOption;
-use velda_core::RouteId;
 
 static GLOBAL_ROUTE_CATALOG: ArcSwapOption<RouteCatalog> = ArcSwapOption::const_empty();
 
@@ -37,7 +36,7 @@ pub fn with_route_bytes<R>(id: u16, f: impl FnOnce(&[u8]) -> R) -> R {
     }
     let guard = GLOBAL_ROUTE_CATALOG.load();
     if let Some(cat) = guard.as_ref()
-        && let Some(bytes) = cat.get_bytes(RouteId(id))
+        && let Some(bytes) = cat.get_bytes(id)
     {
         return f(bytes);
     }
@@ -118,10 +117,10 @@ impl RouteCatalog {
         }
     }
 
-    /// Resolves the raw byte slice of a route name in O(1) by [`RouteId`].
+    /// Resolves the raw byte slice of a route name in O(1) by `route_id` (`u16`).
     #[inline(always)]
-    pub fn get_bytes(&self, id: RouteId) -> Option<&[u8]> {
-        let idx = id.0 as usize;
+    pub fn get_bytes(&self, id: u16) -> Option<&[u8]> {
+        let idx = id as usize;
         if idx >= self.entry_count {
             return None;
         }
@@ -147,9 +146,9 @@ mod tests {
         assert_eq!(catalog.capacity, PAGE_SIZE);
         assert_eq!((catalog.ptr.as_ptr() as usize) % PAGE_SIZE, 0);
 
-        assert_eq!(catalog.get_bytes(RouteId(0)), Some(b"healthz".as_slice()));
-        assert_eq!(catalog.get_bytes(RouteId(3)), Some(b"checkout".as_slice()));
-        assert_eq!(catalog.get_bytes(RouteId(4)), None);
+        assert_eq!(catalog.get_bytes(0), Some(b"healthz".as_slice()));
+        assert_eq!(catalog.get_bytes(3), Some(b"checkout".as_slice()));
+        assert_eq!(catalog.get_bytes(4), None);
     }
 
     #[test]
@@ -165,7 +164,7 @@ mod tests {
         assert_eq!((catalog.ptr.as_ptr() as usize) % PAGE_SIZE, 0);
 
         for (i, name) in routes.iter().enumerate() {
-            assert_eq!(catalog.get_bytes(RouteId(i as u16)), Some(name.as_bytes()));
+            assert_eq!(catalog.get_bytes(i as u16), Some(name.as_bytes()));
         }
     }
 

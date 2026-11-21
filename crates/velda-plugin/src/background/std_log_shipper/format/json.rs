@@ -6,7 +6,7 @@
 //! the global route catalog without hot-path overhead.
 
 use velda_core::WireProtocol;
-use velda_observability::{AccessLogRecord, LogBatch};
+use velda_observability::{TelemetryBatch, TelemetryRecord};
 
 use super::fast_write_iso8601_utc;
 use velda_core::lut::decimal::fast_write_u64;
@@ -70,10 +70,10 @@ fn write_json_escaped(out: &mut Vec<u8>, s: &[u8]) {
     out.extend_from_slice(&s[start..]);
 }
 
-/// Formats batches of [`AccessLogRecord`] into APISIX-aligned NDJSON format directly into `out`.
+/// Formats batches of [`TelemetryRecord`] into APISIX-aligned NDJSON format directly into `out`.
 ///
 /// Pre-reserves capacity upfront to guarantee 0 heap reallocations during formatting.
-pub fn format_ndjson_records(batches: &[LogBatch], total_recs: usize, out: &mut Vec<u8>) {
+pub fn format_ndjson_records(batches: &[TelemetryBatch], total_recs: usize, out: &mut Vec<u8>) {
     out.reserve(total_recs * 320);
 
     for batch in batches {
@@ -84,7 +84,7 @@ pub fn format_ndjson_records(batches: &[LogBatch], total_recs: usize, out: &mut 
                 unsafe {
                     use core::arch::x86_64::*;
                     let next_rec =
-                        recs.get_unchecked(idx + 4) as *const AccessLogRecord as *const i8;
+                        recs.get_unchecked(idx + 4) as *const TelemetryRecord as *const i8;
                     _mm_prefetch(next_rec, _MM_HINT_T1);
                     _mm_prefetch(next_rec.add(64), _MM_HINT_T1);
                     _mm_prefetch(next_rec.add(128), _MM_HINT_T1);

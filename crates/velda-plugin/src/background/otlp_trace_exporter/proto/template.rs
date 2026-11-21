@@ -1,15 +1,14 @@
 //! Direct Protobuf Wire Serializer (`otlp_trace_exporter::proto::template`).
 //!
 //! ```text
-//!  SpanRecord (64B) ──► encode_single_span_wire() ──► ExportTraceServiceRequest Wire Stream
-//!                            ├── trace_id (16B) / span_id (8B)
+//!  TelemetryRecord (CL0) ──► encode_single_span_wire() ──► ExportTraceServiceRequest Wire Stream
+//!                            ├── trace_id / span_id (derived from ingress_time_nanos | request_id)
 //!                            ├── name ("<method> <route_bytes>") ◄── RouteCatalog &[u8]
 //!                            ├── timestamps (fixed64)
 //!                            └── attributes ◄───────────────────── UpstreamCatalog &[u8]
 //! ```
 
-use std::sync::Arc;
-use velda_observability::SpanRecord;
+use velda_observability::{TelemetryBatch, TelemetryRecord};
 
 /// Fast inline varint encoding for u64.
 #[inline(always)]
@@ -131,10 +130,11 @@ impl OtlpTraceProtoEnvelope {
         }
     }
 
-    /// Serializes batches of [`SpanRecord`] into an OTLP `ExportTraceServiceRequest` protobuf byte buffer.
+    /// Serializes batches of unified [`TelemetryRecord`] into an OTLP `ExportTraceServiceRequest`
+    /// protobuf byte buffer, touching only Cache Line 0 trace fields.
     pub fn format_spans_wire(
         &mut self,
-        batches: &[Arc<[SpanRecord]>],
+        batches: &[TelemetryBatch],
         out_buf: &mut Vec<u8>,
     ) -> usize {
         let mut total_spans = 0;
@@ -193,16 +193,16 @@ impl OtlpTraceProtoEnvelope {
     }
 
     #[inline]
-    fn encode_single_span_wire(record: &SpanRecord, buf: &mut Vec<u8>) {
-        // Tag 1: trace_id (16B)
+    fn encode_single_span_wire(record: &TelemetryRecord, buf: &mut Vec<u8>) {
+        // Tag 1: trace_id (16B, derived locally from Edge-minted timestamp and entropy)
         buf.push(0x0A);
         buf.push(16);
-        buf.extend_from_slice(&record.trace_id);
+        buf.extend_from_slice(&record.trace_id_bytes());
 
         // Tag 2: span_id (8B)
         buf.push(0x12);
         buf.push(8);
-        buf.extend_from_slice(&record.span_id);
+        buf.extend_from_slice(&record.span_id_bytes());
 
         // Tag 5: name = "<method> <route>"
         let method_bytes = record.method.as_bytes();
@@ -221,11 +221,12 @@ impl OtlpTraceProtoEnvelope {
 
         // Tag 7: start_time_unix_nano (fixed64)
         buf.push(0x39);
-        buf.extend_from_slice(&record.start_time_unix_nano.to_le_bytes());
+        buf.extend_from_slice(&record.ingress_time_nanos.to_le_bytes());
 
         // Tag 8: end_time_unix_nano (fixed64)
+        let end_time_unix_nano = record.ingress_time_nanos.saturating_add(record.duration_ns);
         buf.push(0x41);
-        buf.extend_from_slice(&record.end_time_unix_nano.to_le_bytes());
+        buf.extend_from_slice(&end_time_unix_nano.to_le_bytes());
 
         // Tag 9: attributes
         write_int_attribute(buf, b"http.status_code", record.status_code as i64);
@@ -245,8 +246,8 @@ impl OtlpTraceProtoEnvelope {
             });
         }
 
-        if record.client_ip != 0 {
-            let (ip_buf, ip_len) = velda_core::lut::ip::format_ip_bytes(record.client_ip);
+        if record.peer_ip != 0 {
+            let (ip_buf, ip_len) = velda_core::lut::ip::format_ip_bytes(record.peer_ip);
             write_str_attribute(buf, b"net.peer.ip", &ip_buf[..ip_len]);
         }
 
@@ -263,6 +264,7 @@ impl OtlpTraceProtoEnvelope {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::sync::Arc;
 
     #[test]
     fn wire_encode_decode() {
@@ -272,19 +274,20 @@ mod tests {
         velda_upstream::set_global_upstream_catalog(up_cat);
 
         let mut envelope = OtlpTraceProtoEnvelope::new("order-gateway");
-        let mut span = SpanRecord::empty();
-        span.start_time_unix_nano = 1_700_000_000_000_000_000;
-        span.end_time_unix_nano = 1_700_000_000_015_000_000;
-        span.status_code = 200;
-        span.route_id = 0; // first route: "/api/health"
-        span.upstream_id = 0; // first upstream: "orders-cluster"
-        span.method = velda_core::HttpMethod::Get;
-        span.client_ip =
-            velda_core::lut::ip::encode_ipv4_u128(u32::from_be_bytes([10, 20, 30, 40]));
-        span.trace_id = [1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16];
-        span.span_id = [10, 20, 30, 40, 50, 60, 70, 80];
+        let mut rec = TelemetryRecord::zeroed();
+        rec.ingress_time_nanos = 0x1798_09b1_5174_0000;
+        rec.duration_ns = 15_000_000;
+        rec.request_id = 0x0a14_1e28_323c_4650;
+        rec.status_code = 200;
+        rec.route_id = 0; // first route: "/api/health"
+        rec.upstream_id = 0; // first upstream: "orders-cluster"
+        rec.method = velda_core::HttpMethod::Get;
+        rec.peer_ip = velda_core::lut::ip::encode_ipv4_u128(u32::from_be_bytes([10, 20, 30, 40]));
 
-        let batch: Arc<[SpanRecord]> = Arc::from([span]);
+        let expected_trace_id = rec.trace_id_bytes();
+        let expected_span_id = rec.span_id_bytes();
+
+        let batch = TelemetryBatch::from_arc(Arc::from([rec]));
         let mut out_buf = Vec::new();
         let total = envelope.format_spans_wire(&[batch], &mut out_buf);
 
@@ -304,15 +307,12 @@ mod tests {
         assert_eq!(scope.name, "velda.edge.router");
 
         let os = &scope_spans.spans[0];
-        assert_eq!(
-            os.trace_id,
-            &[1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16]
-        );
-        assert_eq!(os.span_id, &[10, 20, 30, 40, 50, 60, 70, 80]);
+        assert_eq!(os.trace_id, &expected_trace_id);
+        assert_eq!(os.span_id, &expected_span_id);
         assert_eq!(os.name, "GET /api/health");
         assert_eq!(os.kind, 2);
-        assert_eq!(os.start_time_unix_nano, 1_700_000_000_000_000_000);
-        assert_eq!(os.end_time_unix_nano, 1_700_000_000_015_000_000);
+        assert_eq!(os.start_time_unix_nano, 0x1798_09b1_5174_0000);
+        assert_eq!(os.end_time_unix_nano, 0x1798_09b1_5174_0000 + 15_000_000);
         assert_eq!(os.status.as_ref().unwrap().code, 1);
 
         let keys: Vec<&str> = os.attributes.iter().map(|kv| kv.key.as_str()).collect();

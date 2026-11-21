@@ -114,9 +114,8 @@ pub fn bootstrap(config: EdgeConfig) -> Result<EdgeSupervisor, EdgeError> {
         ram_bytes = hardware.memory.total_bytes,
         workers = runtime_profile.transport.io_workers,
         kernel_version = %hardware.kernel.version,
-        acceleration = hardware.kernel.acceleration.as_str(),
-        acceleration_reason = hardware.kernel.reason,
-        vector_simd = hardware.cpu.register_capabilities.summary(),
+        rmem_max = ?hardware.kernel.rmem_max,
+        wmem_max = ?hardware.kernel.wmem_max,
         "Velda Edge supervisor bootstrapped successfully"
     );
 

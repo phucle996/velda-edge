@@ -8,29 +8,28 @@
 use std::sync::Arc;
 use std::sync::RwLock;
 
-use velda_core::{ListenerId, RouteId, UpstreamId};
 use velda_router::{Http1Route, Router};
 
 use super::challenge::{CHALLENGE_PATH_PREFIX, ChallengeGuard, ChallengeStore};
 
 /// Ephemeral route identifier reserved strictly for transient ACME HTTP-01 challenge matching.
-pub const ACME_CHALLENGE_ROUTE_ID: RouteId = RouteId::new(u16::MAX);
+pub const ACME_CHALLENGE_ROUTE_ID: u16 = u16::MAX;
 
 /// Dummy upstream identifier used because ACME challenges short-circuit directly in memory.
-pub const ACME_DUMMY_UPSTREAM_ID: UpstreamId = UpstreamId::new(0);
+pub const ACME_DUMMY_UPSTREAM_ID: u16 = 0;
 
 /// Thread-safe registry providing dynamic exact-route registration into the active [`Router`].
 pub struct RouterRegistry {
     router: Arc<RwLock<Router>>,
-    listener_id: ListenerId,
+    listener_id: u32,
 }
 
 impl RouterRegistry {
     /// Creates a new router registry targeting a specific ingress listener.
-    pub fn new(router: Arc<RwLock<Router>>, listener_id: impl Into<ListenerId>) -> Self {
+    pub fn new(router: Arc<RwLock<Router>>, listener_id: u32) -> Self {
         Self {
             router,
-            listener_id: listener_id.into(),
+            listener_id,
         }
     }
 
@@ -71,7 +70,7 @@ impl RouterRegistry {
 /// the pre-baked challenge response from [`ChallengeStore`] when dropped.
 pub struct EphemeralRouteGuard {
     router: Arc<RwLock<Router>>,
-    listener_id: ListenerId,
+    listener_id: u32,
     exact_path: String,
     _challenge_guard: ChallengeGuard,
 }
@@ -91,16 +90,13 @@ impl Drop for EphemeralRouteGuard {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use velda_core::fnv1a_hash_32;
     use velda_router::{Http1Route, Http1RouteRequest, Http1Router};
 
     #[test]
     fn test_ephemeral_route_guard_lifecycle() {
-        let http1 = Http1Router::new(vec![Http1Route::new(
-            RouteId::new(1),
-            "listener-http",
-            "/api",
-        )])
-        .unwrap();
+        let lid = fnv1a_hash_32("listener-http");
+        let http1 = Http1Router::new(vec![Http1Route::new(1, lid, "/api")]).unwrap();
 
         let router = Arc::new(RwLock::new(Router::new(
             Default::default(),
@@ -112,7 +108,7 @@ mod tests {
         )));
 
         let store = ChallengeStore::new();
-        let registry = RouterRegistry::new(Arc::clone(&router), "listener-http");
+        let registry = RouterRegistry::new(Arc::clone(&router), lid);
 
         let token = "challenge_token_xyz";
         let path = format!("{CHALLENGE_PATH_PREFIX}{token}");
@@ -121,7 +117,7 @@ mod tests {
         let req = Http1RouteRequest::new(&path);
         {
             let r = router.read().unwrap();
-            assert!(r.route_http1("listener-http", &req).is_none());
+            assert!(r.route_http1(lid, &req).is_none());
         }
 
         // 2. Active registration: route matches and store has response
@@ -129,7 +125,7 @@ mod tests {
             let _guard = registry.register_challenge(token, "token.thumbprint", &store);
 
             let r = router.read().unwrap();
-            let matched = r.route_http1("listener-http", &req).unwrap();
+            let matched = r.route_http1(lid, &req).unwrap();
             assert_eq!(matched.id, ACME_CHALLENGE_ROUTE_ID);
 
             let resp = store.lookup(&path).unwrap();
@@ -139,7 +135,7 @@ mod tests {
         // 3. After guard drop: route is unconditionally removed and store is empty
         {
             let r = router.read().unwrap();
-            assert!(r.route_http1("listener-http", &req).is_none());
+            assert!(r.route_http1(lid, &req).is_none());
             assert!(store.is_empty());
         }
     }

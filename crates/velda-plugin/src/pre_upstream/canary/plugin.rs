@@ -251,7 +251,7 @@ pub struct CanaryConfig {
 pub struct CanaryPlugin {
     pub id: String,
     pub canary_upstream: Arc<str>,
-    pub canary_upstream_id: velda_core::UpstreamId,
+    pub canary_upstream_id: u16,
     pub weight: u32,
     pub rules: Vec<HeaderRule>,
     pub hash_strategy: HashStrategy,
@@ -262,7 +262,7 @@ pub struct CanaryPlugin {
 impl CanaryPlugin {
     /// Constructs a new canary plugin with full configuration.
     pub fn new(id: impl Into<String>, config: CanaryConfig) -> Result<Self, PluginError> {
-        let canary_upstream_id = velda_core::UpstreamId::new(2);
+        let canary_upstream_id = 2;
         let canary_upstream: Arc<str> = Arc::from(config.canary_upstream.as_str());
 
         let canary_marker = if config.canary_header.trim().eq_ignore_ascii_case("none") {
@@ -428,18 +428,14 @@ impl PreUpstreamPlugin for CanaryPlugin {
         &self.id
     }
 
-    fn on_upstream_request(
-        &self,
-        req: &mut L7Request,
-        target_upstream: &mut velda_core::UpstreamId,
-    ) -> Action {
+    fn on_upstream_request(&self, req: &mut L7Request, target_upstream: &mut u16) -> Action {
         if self.should_route_to_canary(req) {
             // 1. Inject informational marker header for backend telemetry/sandbox (if configured)
             if let Some((ref name, ref val)) = self.canary_marker {
                 req.headers.insert(name.clone(), val.clone());
             }
 
-            // 2. Direct in-memory u32 UpstreamId register store without heap allocation
+            // 2. Direct in-memory u32 u16 register store without heap allocation
             *target_upstream = self.canary_upstream_id;
         } else {
             // Baseline Path: Strip client-supplied canary marker to prevent telemetry/flag spoofing
@@ -515,9 +511,9 @@ mod tests {
             },
             Body::Empty,
         );
-        let mut target1 = velda_core::UpstreamId::new(1);
+        let mut target1 = 1;
         plugin.on_upstream_request(&mut req1, &mut target1);
-        assert_eq!(target1, velda_core::UpstreamId::new(2));
+        assert_eq!(target1, 2);
         assert_eq!(req1.headers.get("x-velda-canary").unwrap(), "true");
 
         // 2. Suffix match
@@ -532,9 +528,9 @@ mod tests {
             },
             Body::Empty,
         );
-        let mut target2 = velda_core::UpstreamId::new(1);
+        let mut target2 = 1;
         plugin.on_upstream_request(&mut req2, &mut target2);
-        assert_eq!(target2, velda_core::UpstreamId::new(2));
+        assert_eq!(target2, 2);
 
         // 3. Prefix match
         let mut req3 = L7Request::new(
@@ -548,9 +544,9 @@ mod tests {
             },
             Body::Empty,
         );
-        let mut target3 = velda_core::UpstreamId::new(1);
+        let mut target3 = 1;
         plugin.on_upstream_request(&mut req3, &mut target3);
-        assert_eq!(target3, velda_core::UpstreamId::new(2));
+        assert_eq!(target3, 2);
 
         // 4. Contains match
         let mut req4 = L7Request::new(
@@ -567,9 +563,9 @@ mod tests {
             },
             Body::Empty,
         );
-        let mut target4 = velda_core::UpstreamId::new(1);
+        let mut target4 = 1;
         plugin.on_upstream_request(&mut req4, &mut target4);
-        assert_eq!(target4, velda_core::UpstreamId::new(2));
+        assert_eq!(target4, 2);
 
         // 5. Exists match
         let mut req5 = L7Request::new(
@@ -583,9 +579,9 @@ mod tests {
             },
             Body::Empty,
         );
-        let mut target5 = velda_core::UpstreamId::new(1);
+        let mut target5 = 1;
         plugin.on_upstream_request(&mut req5, &mut target5);
-        assert_eq!(target5, velda_core::UpstreamId::new(2));
+        assert_eq!(target5, 2);
 
         // 6. Non-matching request with spoofed canary marker -> marker MUST be stripped!
         let mut req_spoof = L7Request::new(
@@ -599,9 +595,9 @@ mod tests {
             },
             Body::Empty,
         );
-        let mut target_base = velda_core::UpstreamId::new(1);
+        let mut target_base = 1;
         plugin.on_upstream_request(&mut req_spoof, &mut target_base);
-        assert_eq!(target_base, velda_core::UpstreamId::new(1));
+        assert_eq!(target_base, 1);
         assert!(
             !req_spoof.headers.contains_key("x-velda-canary"),
             "Spoofed canary marker must be stripped on baseline path!"

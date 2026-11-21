@@ -1,307 +1,485 @@
-//! Host and authority matching utilities for Layer 7 routers.
-//!
-//! Provides ultra-low-latency host cleaning, reverse block-by-block domain matching,
-//! and 1-cycle suffix wildcard verification using Length-Guarded Dual-Chunk SWAR,
-//! 64-bit register bitmasking, and zero heap allocations.
+//! Zero-hash, 256-bit AVX2 / 64-bit SWAR host and authority matching (`velda_router::host`).
 //!
 //! # Microarchitectural Rationale
-//! - **Reverse Block-by-Block Host Matching (`ReverseHostLabels`)**: Hostnames are tokenized
-//!   right-to-left (TLD -> SLD -> Subdomain). Each label is encoded into a 64-bit integer
-//!   register (`u64`) with case-insensitive bitmasking (`& 0xDFDF_DFDF_DFDF_DFDF`).
-//! - **1-Cycle Wildcard Suffix Matching (`CompiledHost::Wildcard`)**: RFC 6125 wildcards (`*.example.com`)
-//!   match rightmost suffix blocks `[u64("com"), u64("example")]` simultaneously using Dual-64 SWAR
-//!   or 128-bit vector registers. Suffix equality immediately validates the route without scanning
-//!   arbitrary leftmost subdomains.
-//! - **Register-Adaptive Hardware Multi-Versioning**: Hardware capabilities probe CPU topology
-//!   once at boot via [`global_hardware_topology()`], resolving function pointers down to 32-bit
-//!   hardware (`Bits64`, `Bits32`) with zero branching on the request serving hot path.
-//! - **SWAR Colon Scanning (`swar_find_colon`)**: Scans 8 bytes per iteration for port colons
-//!   using 64-bit bitwise magic arithmetic, stripping ports in 1-2 CPU cycles without branch loops.
+//! - **100% Zero-Hash Raw `u64` Label Blocks**: Domain labels are packed right-to-left
+//!   (TLD -> SLD -> Subdomain) directly into 64-bit integers (`u64`), with ASCII letters
+//!   uppercased. Labels longer than 8 bytes split into consecutive `u64` chunks marked with
+//!   a continuation bit (`1 << 63`) so there is zero hashing and zero collision risk.
+//! - **4KB Page-Aligned [`HostTable`]**: All unique [`HostPattern`] entries for a router are
+//!   packed into an independent 4KB page-aligned contiguous slab (`align = 4096, size = k * 4096`),
+//!   separating 64-byte host patterns from the 16-byte path radix nodes and 8-byte [`RouteEntry`](crate::arena::RouteEntry)
+//!   descriptors in [`RouteArena`](crate::arena::RouteArena).
+//! - **Anti-Subdomain Spoofing + RFC 6125 Wildcard Semantics**:
+//!   - Unused slots are padded with [`EMPTY_LABEL`] (`0_u64`).
+//!   - Wildcard `*` is represented by [`WILDCARD_LABEL`] (`u64::MAX`).
+//!   - All 8 slots are verified: if `req` has a label where `pat` is `EMPTY_LABEL`, it is a
+//!     mismatch (blocks extra-subdomain spoofing). If `pat` has `WILDCARD_LABEL` where `req` is
+//!     `EMPTY_LABEL`, it is a mismatch (enforces RFC 6125).
+//! - **256-bit AVX2 Acceleration (`vpcmpeqq`)**: Compares 4 `u64` label blocks per instruction
+//!   on x86_64 AVX2 CPUs (zero AVX-512), with a portable 64-bit SWAR fallback for ARM/non-AVX2.
 
-// ============================================================================
-// 1. Reverse Block-by-Block Host Matching (Right-to-Left Label Matching)
-// ============================================================================
+use std::alloc::{Layout, alloc_zeroed, dealloc};
+use std::ptr::NonNull;
 
-/// Encoded representation of a single DNS domain label (up to 8 bytes in 1 register).
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
-pub struct HostLabelBlock {
-    /// Case-insensitively uppercase-masked 64-bit integer value of the label.
-    pub word: u64,
-    /// Byte length of the label.
-    pub len: u8,
-}
+/// Physical OS memory page size (4 KiB).
+pub const HOST_PAGE_SIZE: usize = 4096;
 
-impl HostLabelBlock {
-    /// Encodes a raw label slice into a case-insensitive 64-bit [`HostLabelBlock`].
-    #[inline(always)]
-    pub fn encode(b: &[u8]) -> Self {
-        let len = b.len();
-        if len == 0 {
-            return Self { word: 0, len: 0 };
-        }
-        let word = match len {
-            1 => (b[0] & 0xDF) as u64,
-            2 => {
-                let w = u16::from_le_bytes([b[0], b[1]]) as u64;
-                w & 0xDFDF
-            }
-            3 => {
-                let w = (b[0] as u64) | ((b[1] as u64) << 8) | ((b[2] as u64) << 16);
-                w & 0x00DF_DFDF
-            }
-            4 => {
-                let w = u32::from_le_bytes(b[..4].try_into().unwrap()) as u64;
-                w & 0xDFDF_DFDF
-            }
-            5 => {
-                let lo = u32::from_le_bytes(b[..4].try_into().unwrap()) as u64;
-                let hi = b[4] as u64;
-                (lo & 0xDFDF_DFDF) | ((hi & 0xDF) << 32)
-            }
-            6 => {
-                let lo = u32::from_le_bytes(b[..4].try_into().unwrap()) as u64;
-                let hi = u16::from_le_bytes(b[4..6].try_into().unwrap()) as u64;
-                (lo & 0xDFDF_DFDF) | ((hi & 0xDFDF) << 32)
-            }
-            7 => {
-                let lo = u32::from_le_bytes(b[..4].try_into().unwrap()) as u64;
-                let hi = (b[4] as u64) | ((b[5] as u64) << 8) | ((b[6] as u64) << 16);
-                (lo & 0xDFDF_DFDF) | ((hi & 0x00DF_DFDF) << 32)
-            }
-            8 => {
-                let w = u64::from_le_bytes(b[..8].try_into().unwrap());
-                w & 0xDFDF_DFDF_DFDF_DFDF_u64
-            }
-            _ => {
-                // For long labels (> 8 bytes): load first 8 bytes and fold remaining bytes
-                let w = u64::from_le_bytes(b[..8].try_into().unwrap()) & 0xDFDF_DFDF_DFDF_DFDF_u64;
-                let mut acc = w;
-                for &byte in &b[8..] {
-                    acc = acc.rotate_left(5) ^ ((byte & 0xDF) as u64);
-                }
-                acc
-            }
-        };
-        Self {
-            word,
-            len: len as u8,
-        }
+/// Empty / unused label slot sentinel.
+pub const EMPTY_LABEL: u64 = 0;
+
+/// Wildcard `*` label sentinel (cannot appear in any ASCII request hostname).
+pub const WILDCARD_LABEL: u64 = u64::MAX;
+
+/// Overflow sentinel when a request host exceeds 8 `u64` blocks (prevents truncation spoofing).
+pub const OVERFLOW_LABEL: u64 = u64::MAX - 1;
+
+/// Continuation bit (bit 63, always 0 in ASCII) marking subsequent 8-byte chunks of a >8-byte label.
+const CONT_BIT: u64 = 1_u64 << 63;
+
+/// Packs up to 8 ASCII bytes into a little-endian `u64` with ASCII letters uppercased.
+#[inline(always)]
+fn pack_u64_upper(b: &[u8]) -> u64 {
+    let mut buf = [0u8; 8];
+    let n = b.len().min(8);
+    let mut i = 0;
+    while i < n {
+        buf[i] = b[i].to_ascii_uppercase();
+        i += 1;
     }
+    u64::from_le_bytes(buf)
 }
 
-/// Tokenized reverse host labels stored on the stack (TLD at index 0, SLD at index 1, etc.).
+/// Encodes a single DNS label right-to-left into `blocks[idx..]` as raw 64-bit chunks.
+/// Returns `false` if the 8-slot buffer overflows.
+#[inline(always)]
+fn push_label_chunks(blocks: &mut [u64; 8], idx: &mut usize, seg: &[u8]) -> bool {
+    if seg.is_empty() {
+        return true;
+    }
+    let mut offset = 0;
+    while offset < seg.len() {
+        if *idx >= 8 {
+            return false;
+        }
+        let end = (offset + 8).min(seg.len());
+        let mut word = pack_u64_upper(&seg[offset..end]);
+        if offset > 0 {
+            word |= CONT_BIT;
+        }
+        blocks[*idx] = word;
+        *idx += 1;
+        offset = end;
+    }
+    true
+}
+
+/// 64-byte, 32-byte aligned right-to-left raw `u64` representation of an incoming request host.
+#[repr(C, align(32))]
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
-pub struct ReverseHostLabels {
-    pub blocks: [HostLabelBlock; 8],
-    pub count: u8,
-    pub is_ip_or_unbracketed: bool,
+pub struct HostBlocks {
+    pub blocks: [u64; 8],
 }
 
-impl ReverseHostLabels {
-    /// Tokenizes an incoming host string from right to left into pre-encoded 64-bit blocks.
+const _: () = assert!(std::mem::size_of::<HostBlocks>() == 64);
+const _: () = assert!(std::mem::align_of::<HostBlocks>() == 32);
+
+impl HostBlocks {
+    /// Returns `true` if no host was parsed (`blocks[0] == EMPTY_LABEL`).
+    #[inline(always)]
+    pub const fn is_empty(&self) -> bool {
+        self.blocks[0] == EMPTY_LABEL
+    }
+
+    /// Parses an incoming request host string (stripping port/brackets) right-to-left into raw `u64` blocks.
     #[inline]
     pub fn parse(host: &str) -> Self {
         let clean = clean_host(host);
         let bytes = clean.as_bytes();
         let len = bytes.len();
-
         if len == 0 {
             return Self::default();
         }
 
-        // Unbracketed IPv6 (contains colons) or single word (e.g. localhost)
+        let mut blocks = [EMPTY_LABEL; 8];
+        let mut idx = 0usize;
+
+        // Unbracketed IPv6 (contains colons) or single label (e.g. "localhost")
         if clean.contains(':') || !clean.contains('.') {
-            let mut labels = Self {
-                blocks: [HostLabelBlock::default(); 8],
-                count: 1,
-                is_ip_or_unbracketed: true,
-            };
-            labels.blocks[0] = HostLabelBlock::encode(bytes);
-            return labels;
+            if !push_label_chunks(&mut blocks, &mut idx, bytes) {
+                blocks[7] = OVERFLOW_LABEL;
+            }
+            return Self { blocks };
         }
 
-        let mut labels = Self {
-            blocks: [HostLabelBlock::default(); 8],
-            count: 0,
-            is_ip_or_unbracketed: false,
-        };
-
-        // Scan backwards: rightmost label (TLD) -> SLD -> Subdomain
+        // Scan backwards: TLD -> SLD -> Subdomain
         let mut end = len;
         let mut i = len;
-
-        while i > 0 && (labels.count as usize) < labels.blocks.len() {
+        while i > 0 {
             i -= 1;
             if bytes[i] == b'.' {
                 let seg = &bytes[i + 1..end];
-                if !seg.is_empty() {
-                    labels.blocks[labels.count as usize] = HostLabelBlock::encode(seg);
-                    labels.count += 1;
+                if !push_label_chunks(&mut blocks, &mut idx, seg) {
+                    blocks[7] = OVERFLOW_LABEL;
+                    return Self { blocks };
                 }
                 end = i;
             }
         }
 
-        if end > 0 && (labels.count as usize) < labels.blocks.len() {
-            let seg = &bytes[..end];
-            if !seg.is_empty() {
-                labels.blocks[labels.count as usize] = HostLabelBlock::encode(seg);
-                labels.count += 1;
-            }
+        if end > 0 && !push_label_chunks(&mut blocks, &mut idx, &bytes[..end]) {
+            blocks[7] = OVERFLOW_LABEL;
         }
 
-        labels
+        Self { blocks }
     }
 }
 
-/// Signature for comparing two 64-bit label words simultaneously.
-pub type CompareLabelsDualFn = fn(e0: u64, e1: u64, a0: u64, a1: u64) -> bool;
-
-/// Pre-resolved static function pointer for Dual-64 label comparison.
-pub static COMPARE_LABELS_DUAL_FN: std::sync::LazyLock<CompareLabelsDualFn> =
-    std::sync::LazyLock::new(|| compare_labels_dual_64);
-
-/// Compares two label words simultaneously using Dual-64 SWAR on 64-bit/vector hardware.
-#[inline(always)]
-pub fn compare_labels_dual_64(e0: u64, e1: u64, a0: u64, a1: u64) -> bool {
-    ((e0 ^ a0) | (e1 ^ a1)) == 0
-}
-
-/// Compares two label words simultaneously with zero indirect call overhead.
+/// 64-byte, 32-byte aligned compiled host pattern stored in [`HostTable`].
 ///
-/// Inlines directly at caller sites, compiling down to 3 instructions (`xor`, `xor`, `or`)
-/// on 64-bit targets with zero stack allocations and zero function call penalty.
-#[inline(always)]
-pub fn compare_labels_dual(e0: u64, e1: u64, a0: u64, a1: u64) -> bool {
-    compare_labels_dual_64(e0, e1, a0, a1)
+/// Unused slots are [`EMPTY_LABEL`] (`0`), wildcard `*` is [`WILDCARD_LABEL`] (`u64::MAX`).
+#[repr(C, align(32))]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct HostPattern {
+    pub blocks: [u64; 8],
 }
 
-/// Pre-compiled, zero-allocation host routing rule.
-#[derive(Debug, Clone, PartialEq, Eq)]
+const _: () = assert!(std::mem::size_of::<HostPattern>() == 64);
+const _: () = assert!(std::mem::align_of::<HostPattern>() == 32);
+
+impl HostPattern {
+    /// Compiles an optional host rule into `Some(HostPattern)`, or `None` for catch-all (`*` / `None`).
+    #[inline]
+    pub fn compile(host: Option<&str>) -> Option<Self> {
+        let host = host?;
+        if host.is_empty() || host == "*" {
+            return None;
+        }
+
+        let clean = clean_host(host);
+        if clean.is_empty() || clean == "*" {
+            return None;
+        }
+
+        if let Some(suffix) = clean.strip_prefix("*.") {
+            let parsed = HostBlocks::parse(suffix);
+            let mut blocks = parsed.blocks;
+            if let Some(slot) = blocks.iter().position(|&b| b == EMPTY_LABEL) {
+                blocks[slot] = WILDCARD_LABEL;
+            } else {
+                blocks[7] = OVERFLOW_LABEL;
+            }
+            Some(Self { blocks })
+        } else {
+            let parsed = HostBlocks::parse(clean);
+            Some(Self {
+                blocks: parsed.blocks,
+            })
+        }
+    }
+
+    /// Matches this pattern against pre-parsed request [`HostBlocks`] using 256-bit AVX2 (x86_64)
+    /// or 64-bit SWAR fallback.
+    #[inline(always)]
+    pub fn matches(&self, req: &HostBlocks) -> bool {
+        if req.is_empty() {
+            return false;
+        }
+
+        if match_blocks_fast(&req.blocks, &self.blocks) {
+            return true;
+        }
+
+        // Slow path: only if pattern ends in WILDCARD_LABEL and request has a >8-byte single label
+        // (continuation chunks marked with CONT_BIT) at that wildcard position.
+        match_wildcard_long_label(&req.blocks, &self.blocks)
+    }
+}
+
+/// Fast-path 8-slot block comparison: `true` iff for every lane `i in 0..8`,
+/// `(req[i] == pat[i]) || (pat[i] == WILDCARD_LABEL && req[i] != EMPTY_LABEL)`.
+#[inline(always)]
+fn match_blocks_fast(req: &[u64; 8], pat: &[u64; 8]) -> bool {
+    #[cfg(all(target_arch = "x86_64", target_feature = "avx2"))]
+    {
+        // SAFETY: target_feature = "avx2" is statically enabled at compile time.
+        unsafe { match_blocks_avx2(req, pat) }
+    }
+    #[cfg(not(all(target_arch = "x86_64", target_feature = "avx2")))]
+    {
+        #[cfg(target_arch = "x86_64")]
+        {
+            (*MATCH_BLOCKS_FN)(req, pat)
+        }
+        #[cfg(not(target_arch = "x86_64"))]
+        {
+            match_blocks_swar(req, pat)
+        }
+    }
+}
+
+#[cfg(all(target_arch = "x86_64", not(target_feature = "avx2")))]
+type MatchBlocksFn = fn(&[u64; 8], &[u64; 8]) -> bool;
+
+#[cfg(all(target_arch = "x86_64", not(target_feature = "avx2")))]
+static MATCH_BLOCKS_FN: std::sync::LazyLock<MatchBlocksFn> = std::sync::LazyLock::new(|| {
+    if std::arch::is_x86_feature_detected!("avx2") {
+        match_blocks_avx2_wrapper
+    } else {
+        match_blocks_swar
+    }
+});
+
+#[cfg(all(target_arch = "x86_64", not(target_feature = "avx2")))]
+fn match_blocks_avx2_wrapper(req: &[u64; 8], pat: &[u64; 8]) -> bool {
+    // SAFETY: Verified AVX2 support once at initialization via LazyLock.
+    unsafe { match_blocks_avx2(req, pat) }
+}
+
+/// 256-bit AVX2 vector host matcher (`_mm256_cmpeq_epi64` / `vpcmpeqq`):
+/// evaluates 4 `u64` label blocks per vector instruction (zero AVX-512).
+#[cfg(target_arch = "x86_64")]
+#[target_feature(enable = "avx2")]
+unsafe fn match_blocks_avx2(req: &[u64; 8], pat: &[u64; 8]) -> bool {
+    use std::arch::x86_64::*;
+
+    // SAFETY: Both `HostBlocks` and `HostPattern` are `#[repr(C, align(32))]`.
+    let r0 = unsafe { _mm256_load_si256(req.as_ptr() as *const __m256i) };
+    let p0 = unsafe { _mm256_load_si256(pat.as_ptr() as *const __m256i) };
+    let r1 = unsafe { _mm256_load_si256(req.as_ptr().add(4) as *const __m256i) };
+    let p1 = unsafe { _mm256_load_si256(pat.as_ptr().add(4) as *const __m256i) };
+
+    let zero = _mm256_setzero_si256();
+    let wc = _mm256_set1_epi64x(WILDCARD_LABEL as i64);
+
+    // Half 0 (lanes 0..4)
+    let eq0 = _mm256_cmpeq_epi64(r0, p0);
+    let is_wc0 = _mm256_cmpeq_epi64(p0, wc);
+    let r0_zero = _mm256_cmpeq_epi64(r0, zero);
+    let wc_ok0 = _mm256_andnot_si256(r0_zero, is_wc0);
+    let ok0 = _mm256_or_si256(eq0, wc_ok0);
+
+    // Half 1 (lanes 4..8)
+    let eq1 = _mm256_cmpeq_epi64(r1, p1);
+    let is_wc1 = _mm256_cmpeq_epi64(p1, wc);
+    let r1_zero = _mm256_cmpeq_epi64(r1, zero);
+    let wc_ok1 = _mm256_andnot_si256(r1_zero, is_wc1);
+    let ok1 = _mm256_or_si256(eq1, wc_ok1);
+
+    let both_ok = _mm256_and_si256(ok0, ok1);
+    _mm256_movemask_epi8(both_ok) == -1
+}
+
+/// Portable 64-bit SWAR host matcher for ARM / non-AVX2 targets.
+#[cfg(any(not(all(target_arch = "x86_64", target_feature = "avx2")), test))]
+#[inline(always)]
+fn match_blocks_swar(req: &[u64; 8], pat: &[u64; 8]) -> bool {
+    let mut ok = true;
+    let mut i = 0;
+    while i < 8 {
+        let r = req[i];
+        let p = pat[i];
+        ok &= (r == p) | ((p == WILDCARD_LABEL) & (r != EMPTY_LABEL));
+        i += 1;
+    }
+    ok
+}
+
+/// Handles the rare case where a wildcard `*.domain` matches a request whose leftmost label
+/// exceeds 8 bytes (represented as a start chunk followed by `CONT_BIT`-marked chunks).
+#[inline(never)]
+fn match_wildcard_long_label(req: &[u64; 8], pat: &[u64; 8]) -> bool {
+    let Some(wc_idx) = pat.iter().position(|&p| p == WILDCARD_LABEL) else {
+        return false;
+    };
+
+    // Suffix before wildcard must match 1:1
+    for i in 0..wc_idx {
+        if req[i] != pat[i] {
+            return false;
+        }
+    }
+
+    // Request must have a non-empty label at `wc_idx` (and not overflow)
+    if req[wc_idx] == EMPTY_LABEL || req[wc_idx] == OVERFLOW_LABEL {
+        return false;
+    }
+
+    // Any remaining non-empty slots in `req` after `wc_idx` MUST be continuation chunks of that
+    // same single label (CONT_BIT set); a new label (CONT_BIT == 0) is subdomain spoofing -> false.
+    for &r in &req[wc_idx + 1..] {
+        if r == EMPTY_LABEL {
+            return true;
+        }
+        if r == OVERFLOW_LABEL || (r & CONT_BIT) == 0 {
+            return false;
+        }
+    }
+    true
+}
+
+/// 64-byte cache-aligned header at offset 0 of [`HostTable`].
+#[repr(C, align(64))]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct HostTableHeader {
+    count: u32,
+    patterns_offset: u32,
+    _pad: [u8; 56],
+}
+
+const _: () = assert!(std::mem::size_of::<HostTableHeader>() == 64);
+
+/// Independent 4KB Page-Aligned Host Pattern Table (`align = 4096, size = k * 4096`).
+///
+/// Stores deduplicated 64-byte [`HostPattern`] entries contiguously so [`RouteEntry`](crate::arena::RouteEntry)
+/// only needs a 2-byte `host_id: u16` (`0xFFFF` = ANY).
+#[derive(Debug)]
+pub struct HostTable {
+    ptr: NonNull<u8>,
+    capacity: usize,
+}
+
+unsafe impl Send for HostTable {}
+unsafe impl Sync for HostTable {}
+
+impl Drop for HostTable {
+    fn drop(&mut self) {
+        let layout = Layout::from_size_align(self.capacity, HOST_PAGE_SIZE)
+            .expect("HostTable layout must be valid");
+        unsafe {
+            dealloc(self.ptr.as_ptr(), layout);
+        }
+    }
+}
+
+impl Clone for HostTable {
+    fn clone(&self) -> Self {
+        let layout = Layout::from_size_align(self.capacity, HOST_PAGE_SIZE)
+            .expect("HostTable layout must be valid");
+        let raw = unsafe { alloc_zeroed(layout) };
+        let ptr = NonNull::new(raw).expect("HostTable clone allocation failed");
+        unsafe {
+            std::ptr::copy_nonoverlapping(self.ptr.as_ptr(), ptr.as_ptr(), self.capacity);
+        }
+        Self {
+            ptr,
+            capacity: self.capacity,
+        }
+    }
+}
+
+impl Default for HostTable {
+    fn default() -> Self {
+        Self::from_patterns(&[])
+    }
+}
+
+impl HostTable {
+    /// Allocates a 4KB page-aligned [`HostTable`] containing `patterns`.
+    pub fn from_patterns(patterns: &[HostPattern]) -> Self {
+        let patterns_offset = std::mem::size_of::<HostTableHeader>(); // 64B (32B aligned)
+        let total_required = patterns_offset + std::mem::size_of_val(patterns);
+        let pages = total_required.div_ceil(HOST_PAGE_SIZE).max(1);
+        let capacity = pages * HOST_PAGE_SIZE;
+
+        let layout = Layout::from_size_align(capacity, HOST_PAGE_SIZE)
+            .expect("HostTable page layout must succeed");
+        let raw = unsafe { alloc_zeroed(layout) };
+        let ptr = NonNull::new(raw).expect("HostTable allocation failed");
+
+        let header = HostTableHeader {
+            count: patterns.len() as u32,
+            patterns_offset: patterns_offset as u32,
+            _pad: [0; 56],
+        };
+
+        unsafe {
+            let base = ptr.as_ptr();
+            std::ptr::write(base as *mut HostTableHeader, header);
+            if !patterns.is_empty() {
+                std::ptr::copy_nonoverlapping(
+                    patterns.as_ptr(),
+                    base.add(patterns_offset) as *mut HostPattern,
+                    patterns.len(),
+                );
+            }
+        }
+
+        Self { ptr, capacity }
+    }
+
+    /// Returns the contiguous slice of 64-byte [`HostPattern`] entries.
+    #[inline(always)]
+    pub fn patterns(&self) -> &[HostPattern] {
+        let h = unsafe { &*(self.ptr.as_ptr() as *const HostTableHeader) };
+        if h.count == 0 {
+            return &[];
+        }
+        unsafe {
+            std::slice::from_raw_parts(
+                self.ptr.as_ptr().add(h.patterns_offset as usize) as *const HostPattern,
+                h.count as usize,
+            )
+        }
+    }
+
+    /// Returns the allocated page-aligned size in bytes (`k * 4096`).
+    #[inline(always)]
+    pub fn allocated_bytes(&self) -> usize {
+        self.capacity
+    }
+
+    /// Matches `host_id` against pre-parsed request [`HostBlocks`].
+    #[inline(always)]
+    pub fn matches(&self, host_id: u16, req: &HostBlocks) -> bool {
+        let patterns = self.patterns();
+        let idx = host_id as usize;
+        if idx >= patterns.len() {
+            return false;
+        }
+        patterns[idx].matches(req)
+    }
+}
+
+/// Pre-compiled host rule wrapper (used on rule builders before packing into [`HostTable`]).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum CompiledHost {
     /// Matches any host (`"*"` or `None`).
     Any,
-    /// Exact domain match evaluated right-to-left.
-    Exact(ReverseHostLabels),
-    /// RFC 6125 wildcard matching suffix labels from right to left.
-    Wildcard {
-        suffix: ReverseHostLabels,
-        suffix_count: u8,
-    },
+    /// Fixed or wildcard [`HostPattern`].
+    Pattern(HostPattern),
 }
 
 impl CompiledHost {
     /// Compiles an optional host pattern into a [`CompiledHost`].
+    #[inline]
     pub fn compile(host: Option<&str>) -> Self {
-        let Some(host) = host else {
-            return Self::Any;
-        };
-        if host == "*" || host.is_empty() {
-            return Self::Any;
-        }
-
-        let clean = clean_host(host);
-        if let Some(suffix) = clean.strip_prefix("*.") {
-            let parsed_suffix = ReverseHostLabels::parse(suffix);
-            Self::Wildcard {
-                suffix_count: parsed_suffix.count,
-                suffix: parsed_suffix,
-            }
-        } else {
-            Self::Exact(ReverseHostLabels::parse(clean))
+        match HostPattern::compile(host) {
+            Some(pat) => Self::Pattern(pat),
+            None => Self::Any,
         }
     }
 
-    /// Matches this compiled host against pre-tokenized request host labels in 1-2 CPU cycles.
+    /// Returns `Some(HostPattern)` or `None` for [`CompiledHost::Any`].
     #[inline(always)]
-    pub fn matches(&self, actual: &ReverseHostLabels) -> bool {
+    pub const fn as_pattern(&self) -> Option<HostPattern> {
+        match self {
+            Self::Any => None,
+            Self::Pattern(p) => Some(*p),
+        }
+    }
+
+    /// Matches this compiled host against pre-tokenized request [`HostBlocks`].
+    #[inline(always)]
+    pub fn matches(&self, req: &HostBlocks) -> bool {
         match self {
             Self::Any => true,
-            Self::Wildcard {
-                suffix,
-                suffix_count,
-            } => {
-                // RFC 6125: Actual host must have at least one label to the left of suffix
-                if actual.count <= *suffix_count || actual.is_ip_or_unbracketed {
-                    return false;
-                }
-
-                // Standard 2-label suffix (e.g. "*.example.com" -> ["com", "example"])
-                if *suffix_count == 2 {
-                    let words_match = compare_labels_dual(
-                        suffix.blocks[0].word,
-                        suffix.blocks[1].word,
-                        actual.blocks[0].word,
-                        actual.blocks[1].word,
-                    );
-                    let lens_match = (suffix.blocks[0].len == actual.blocks[0].len)
-                        && (suffix.blocks[1].len == actual.blocks[1].len);
-                    return words_match && lens_match;
-                }
-
-                // General case for N suffix labels
-                let sc = *suffix_count as usize;
-                for i in 0..sc {
-                    if suffix.blocks[i].word != actual.blocks[i].word
-                        || suffix.blocks[i].len != actual.blocks[i].len
-                    {
-                        return false;
-                    }
-                }
-                true
-            }
-            Self::Exact(expected) => {
-                if expected.count != actual.count {
-                    return false;
-                }
-
-                // Standard 2-label domain (e.g. "example.com" -> ["com", "example"])
-                if expected.count == 2 {
-                    let words_match = compare_labels_dual(
-                        expected.blocks[0].word,
-                        expected.blocks[1].word,
-                        actual.blocks[0].word,
-                        actual.blocks[1].word,
-                    );
-                    let lens_match = (expected.blocks[0].len == actual.blocks[0].len)
-                        && (expected.blocks[1].len == actual.blocks[1].len);
-                    return words_match && lens_match;
-                }
-
-                // Standard 3-label domain (e.g. "api.example.com" -> ["com", "example", "api"])
-                if expected.count == 3 {
-                    let suffix_words_match = compare_labels_dual(
-                        expected.blocks[0].word,
-                        expected.blocks[1].word,
-                        actual.blocks[0].word,
-                        actual.blocks[1].word,
-                    );
-                    let suffix_lens_match = (expected.blocks[0].len == actual.blocks[0].len)
-                        && (expected.blocks[1].len == actual.blocks[1].len);
-                    if !suffix_words_match || !suffix_lens_match {
-                        return false;
-                    }
-                    return expected.blocks[2].word == actual.blocks[2].word
-                        && expected.blocks[2].len == actual.blocks[2].len;
-                }
-
-                // General case for N labels
-                let count = expected.count as usize;
-                for i in 0..count {
-                    if expected.blocks[i].word != actual.blocks[i].word
-                        || expected.blocks[i].len != actual.blocks[i].len
-                    {
-                        return false;
-                    }
-                }
-                true
-            }
+            Self::Pattern(p) => p.matches(req),
         }
     }
 }
 
 // ============================================================================
-// 2. Port Stripping & Host Cleaning Utilities
+// Port Stripping & Host Cleaning Utilities
 // ============================================================================
 
 /// Scans for the ASCII colon (`':'`, 0x3A) using 64-bit and 32-bit SWAR chunking
@@ -311,7 +489,6 @@ pub fn swar_find_colon(bytes: &[u8]) -> Option<usize> {
     let len = bytes.len();
     let mut i = 0;
 
-    // 64-bit SWAR chunk scan (8 bytes per iteration)
     while i + 8 <= len {
         let w = u64::from_le_bytes(bytes[i..i + 8].try_into().unwrap());
         let x = w ^ 0x3A3A_3A3A_3A3A_3A3A_u64;
@@ -322,7 +499,6 @@ pub fn swar_find_colon(bytes: &[u8]) -> Option<usize> {
         i += 8;
     }
 
-    // 32-bit SWAR chunk scan (4 bytes)
     if i + 4 <= len {
         let w = u32::from_le_bytes(bytes[i..i + 4].try_into().unwrap());
         let x = w ^ 0x3A3A_3A3A_u32;
@@ -333,7 +509,6 @@ pub fn swar_find_colon(bytes: &[u8]) -> Option<usize> {
         i += 4;
     }
 
-    // Scalar tail for remainder (0..3 bytes)
     while i < len {
         if bytes[i] == b':' {
             return Some(i);
@@ -345,15 +520,6 @@ pub fn swar_find_colon(bytes: &[u8]) -> Option<usize> {
 }
 
 /// Extracts the hostname without port or IPv6 enclosing brackets.
-///
-/// Uses SWAR chunked scans to locate port colons in 1-2 CPU cycles.
-///
-/// Handles:
-/// - `"example.com:8080"` -> `"example.com"`
-/// - `"example.com"` -> `"example.com"`
-/// - `"[::1]:8080"` -> `"::1"`
-/// - `"[::1]"` -> `"::1"`
-/// - `"[2001:db8::1]:443"` -> `"2001:db8::1"`
 #[inline]
 pub fn clean_host(host: &str) -> &str {
     if host.starts_with('[') {
@@ -365,7 +531,6 @@ pub fn clean_host(host: &str) -> &str {
     } else {
         let bytes = host.as_bytes();
         if let Some(first_colon) = swar_find_colon(bytes) {
-            // Unbracketed IPv6 has more than 1 colon (e.g. "::1" or "2001:db8::1")
             if swar_find_colon(&bytes[first_colon + 1..]).is_some() {
                 host
             } else {
@@ -377,8 +542,7 @@ pub fn clean_host(host: &str) -> &str {
     }
 }
 
-/// Compares two ASCII domain byte slices case-insensitively using Dual 64-bit SWAR registers
-/// (16 bytes per cycle across ALU Port 0 & ALU Port 1).
+/// Compares two ASCII domain byte slices case-insensitively using Dual 64-bit SWAR registers.
 #[inline]
 pub fn eq_ignore_ascii_case_dual64_swar(a: &[u8], b: &[u8]) -> bool {
     if a.len() != b.len() {
@@ -392,7 +556,6 @@ pub fn eq_ignore_ascii_case_dual64_swar(a: &[u8], b: &[u8]) -> bool {
     let mut i = 0;
     let dual_len = len & !15;
 
-    // Dual 64-bit SWAR: process 16 bytes per cycle across ALU Port 0 & ALU Port 1
     while i < dual_len {
         let wa0 = u64::from_ne_bytes(a[i..i + 8].try_into().unwrap());
         let wb0 = u64::from_ne_bytes(b[i..i + 8].try_into().unwrap());
@@ -403,11 +566,9 @@ pub fn eq_ignore_ascii_case_dual64_swar(a: &[u8], b: &[u8]) -> bool {
         let d1 = wa1 ^ wb1;
 
         if (d0 | d1) != 0 {
-            // Fast rejection: if any non-case bits differ, early exit
             if ((d0 | d1) & 0xDFDF_DFDF_DFDF_DFDF_u64) != 0 {
                 return false;
             }
-            // Differing bytes must be ASCII letters ('a'-'z' / 'A'-'Z')
             if !validate_ascii_letter_diff_64(wa0, d0) || !validate_ascii_letter_diff_64(wa1, d1) {
                 return false;
             }
@@ -415,7 +576,6 @@ pub fn eq_ignore_ascii_case_dual64_swar(a: &[u8], b: &[u8]) -> bool {
         i += 16;
     }
 
-    // 64-bit SWAR single chunk: 8 bytes
     if i + 8 <= len {
         let wa = u64::from_ne_bytes(a[i..i + 8].try_into().unwrap());
         let wb = u64::from_ne_bytes(b[i..i + 8].try_into().unwrap());
@@ -431,7 +591,6 @@ pub fn eq_ignore_ascii_case_dual64_swar(a: &[u8], b: &[u8]) -> bool {
         i += 8;
     }
 
-    // 32-bit SWAR chunk: 4 bytes
     if i + 4 <= len {
         let wa = u32::from_ne_bytes(a[i..i + 4].try_into().unwrap());
         let wb = u32::from_ne_bytes(b[i..i + 4].try_into().unwrap());
@@ -454,7 +613,6 @@ pub fn eq_ignore_ascii_case_dual64_swar(a: &[u8], b: &[u8]) -> bool {
         i += 4;
     }
 
-    // Scalar tail: 0..3 remaining bytes
     while i < len {
         if !a[i].eq_ignore_ascii_case(&b[i]) {
             return false;
@@ -510,49 +668,100 @@ mod tests {
     }
 
     #[test]
-    fn test_reverse_host_labels_parsing() {
-        let rev = ReverseHostLabels::parse("api.velda.io");
-        assert_eq!(rev.count, 3);
-        assert_eq!(rev.blocks[0], HostLabelBlock::encode(b"io"));
-        assert_eq!(rev.blocks[1], HostLabelBlock::encode(b"velda"));
-        assert_eq!(rev.blocks[2], HostLabelBlock::encode(b"api"));
+    fn test_host_blocks_parsing_zero_hash() {
+        let rev = HostBlocks::parse("api.velda.io");
+        assert_eq!(rev.blocks[0], pack_u64_upper(b"io"));
+        assert_eq!(rev.blocks[1], pack_u64_upper(b"velda"));
+        assert_eq!(rev.blocks[2], pack_u64_upper(b"api"));
+        assert_eq!(rev.blocks[3], EMPTY_LABEL);
 
-        let rev_port = ReverseHostLabels::parse("sub.api.example.com:8080");
-        assert_eq!(rev_port.count, 4);
-        assert_eq!(rev_port.blocks[0], HostLabelBlock::encode(b"com"));
-        assert_eq!(rev_port.blocks[1], HostLabelBlock::encode(b"example"));
-        assert_eq!(rev_port.blocks[2], HostLabelBlock::encode(b"api"));
-        assert_eq!(rev_port.blocks[3], HostLabelBlock::encode(b"sub"));
+        // Labels > 8 bytes are split into continuation chunks without hashing
+        let long_a = HostBlocks::parse("abcdefghi");
+        let two_labels = HostBlocks::parse("i.abcdefgh");
+        assert_ne!(long_a, two_labels);
     }
 
     #[test]
-    fn test_compiled_host_matching() {
+    fn test_anti_subdomain_spoofing_and_rfc6125() {
         let any = CompiledHost::compile(None);
         let any_star = CompiledHost::compile(Some("*"));
         let exact = CompiledHost::compile(Some("api.example.com"));
         let wildcard = CompiledHost::compile(Some("*.example.com"));
 
-        let req_api = ReverseHostLabels::parse("api.example.com:8080");
-        let req_sub = ReverseHostLabels::parse("sub.api.example.com");
-        let req_root = ReverseHostLabels::parse("example.com");
-        let req_other = ReverseHostLabels::parse("api.other.com");
+        let req_api = HostBlocks::parse("api.example.com:8080");
+        let req_upper = HostBlocks::parse("API.EXAMPLE.COM");
+        let req_sub = HostBlocks::parse("sub.api.example.com");
+        let req_root = HostBlocks::parse("example.com");
+        let req_other = HostBlocks::parse("api.other.com");
+        let req_long_sub = HostBlocks::parse("very-long-subdomain.example.com");
+        let req_two_long = HostBlocks::parse("a.very-long-subdomain.example.com");
 
         assert!(any.matches(&req_api));
         assert!(any_star.matches(&req_api));
 
         assert!(exact.matches(&req_api));
+        assert!(exact.matches(&req_upper));
         assert!(!exact.matches(&req_sub));
         assert!(!exact.matches(&req_root));
         assert!(!exact.matches(&req_other));
 
         assert!(wildcard.matches(&req_api));
-        assert!(wildcard.matches(&req_sub));
-        assert!(!wildcard.matches(&req_root)); // RFC 6125: wildcard must have >= 1 label to the left
+        assert!(wildcard.matches(&req_long_sub));
+        assert!(!wildcard.matches(&req_sub)); // Anti-subdomain spoofing: 1 label per '*'
+        assert!(!wildcard.matches(&req_two_long));
+        assert!(!wildcard.matches(&req_root)); // RFC 6125: missing subdomain -> mismatch
         assert!(!wildcard.matches(&req_other));
+
+        // Verify SWAR fallback produces identical results
+        if let CompiledHost::Pattern(pat) = wildcard {
+            assert!(match_blocks_swar(&req_api.blocks, &pat.blocks));
+            assert!(!match_blocks_swar(&req_sub.blocks, &pat.blocks));
+            assert!(!match_blocks_swar(&req_root.blocks, &pat.blocks));
+        }
 
         assert_eq!(host_specificity(Some("api.velda.io")), 2);
         assert_eq!(host_specificity(Some("*.velda.io")), 1);
         assert_eq!(host_specificity(Some("*")), 0);
         assert_eq!(host_specificity(None), 0);
+    }
+
+    #[test]
+    fn test_strict_subdomain_level_and_long_label_boundaries() {
+        let wc_abc = HostPattern::compile(Some("*.abc.velda.com")).unwrap();
+        assert!(!wc_abc.matches(&HostBlocks::parse("abc.velda.com"))); // missing level (RFC 6125)
+        assert!(!wc_abc.matches(&HostBlocks::parse("evil.node.abc.velda.com"))); // extra level (spoofing)
+        assert!(wc_abc.matches(&HostBlocks::parse("node.abc.velda.com")));
+        assert!(wc_abc.matches(&HostBlocks::parse(
+            "very-long-subdomain-label.abc.velda.com"
+        )));
+        assert!(!wc_abc.matches(&HostBlocks::parse(
+            "a.very-long-subdomain-label.abc.velda.com"
+        )));
+
+        let exact_api = HostPattern::compile(Some("api.velda.com")).unwrap();
+        assert!(exact_api.matches(&HostBlocks::parse("api.velda.com")));
+        assert!(!exact_api.matches(&HostBlocks::parse("sub.api.velda.com")));
+        assert!(!exact_api.matches(&HostBlocks::parse("velda.com")));
+
+        let exact_long = HostPattern::compile(Some("authentication.velda.com")).unwrap();
+        assert!(exact_long.matches(&HostBlocks::parse("authentication.velda.com")));
+        assert!(!exact_long.matches(&HostBlocks::parse("cation.authenti.velda.com")));
+        assert!(!exact_long.matches(&HostBlocks::parse("sub.authentication.velda.com")));
+    }
+
+    #[test]
+    fn test_host_table_4kb_page_aligned() {
+        let p0 = HostPattern::compile(Some("api.velda.io")).unwrap();
+        let p1 = HostPattern::compile(Some("*.velda.io")).unwrap();
+        let table = HostTable::from_patterns(&[p0, p1]);
+
+        assert_eq!((table.ptr.as_ptr() as usize) % HOST_PAGE_SIZE, 0);
+        assert_eq!(table.allocated_bytes() % HOST_PAGE_SIZE, 0);
+        assert_eq!(table.patterns().len(), 2);
+
+        let req = HostBlocks::parse("api.velda.io");
+        assert!(table.matches(0, &req));
+        assert!(table.matches(1, &req));
+        assert!(!table.matches(2, &req));
     }
 }

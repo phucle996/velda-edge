@@ -15,7 +15,7 @@ use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::TcpListener;
 use tokio::sync::watch;
 use velda_core::{CompletionReason, GrpcStatus, HttpMethod, PipeKind, UaFamily, UaOs};
-use velda_observability::{AccessLogRecord, LogStore};
+use velda_observability::{TelemetryRecord, TelemetryStore};
 use velda_plugin::background::BackgroundPlugin;
 use velda_plugin::background::clickhouse_log_shipper::{
     ClickHouseLogShipperConfig, ClickHouseLogShipperPlugin,
@@ -23,8 +23,8 @@ use velda_plugin::background::clickhouse_log_shipper::{
 use velda_plugin::factory::{LoadedPlugin, instantiate_plugin};
 use velda_plugin::{PluginConfig, canonical_phase_for_id, validate_plugin_config};
 
-fn make_sample_record(id: u64, ts: u32) -> AccessLogRecord {
-    let mut rec = AccessLogRecord::zeroed();
+fn make_sample_record(id: u64, ts: u32) -> TelemetryRecord {
+    let mut rec = TelemetryRecord::zeroed();
     rec.ingress_time_nanos = (ts as u64) * 1_000_000_000;
     rec.request_id = id;
     rec.duration_ns = 150_000;
@@ -76,7 +76,7 @@ async fn test_clickhouse_row_binary_e2e() {
             .unwrap();
     });
 
-    let log_store = Arc::new(LogStore::with_cores_and_capacity(1, 1024));
+    let telemetry_store = Arc::new(TelemetryStore::with_cores_and_capacity(1, 1024));
 
     let config = ClickHouseLogShipperConfig {
         endpoint: format!("http://127.0.0.1:{port}"),
@@ -93,7 +93,7 @@ async fn test_clickhouse_row_binary_e2e() {
     };
 
     let plugin = Arc::new(
-        ClickHouseLogShipperPlugin::with_store("ch_shipper", config, Arc::clone(&log_store))
+        ClickHouseLogShipperPlugin::with_store("ch_shipper", config, Arc::clone(&telemetry_store))
             .unwrap(),
     );
 
@@ -102,16 +102,20 @@ async fn test_clickhouse_row_binary_e2e() {
     let runner = tokio::spawn(async move { p_clone.run(shutdown_rx).await });
 
     // Wait until subscriber is active
-    while log_store.active_subscriber_count.load(Ordering::Acquire) == 0 {
+    while telemetry_store
+        .active_subscriber_count
+        .load(Ordering::Acquire)
+        == 0
+    {
         tokio::time::sleep(Duration::from_millis(5)).await;
     }
 
     // Emit 5 test records
     for i in 0..5 {
         let rec = make_sample_record(100 + i, 1732000000 + i as u32);
-        log_store.emit_on_core(0, &rec);
+        telemetry_store.emit_on_core(0, &rec);
     }
-    log_store.flush_all_lanes(128);
+    telemetry_store.flush_all_lanes(128);
 
     // Wait for shipper to flush batch
     for _ in 0..50 {
@@ -158,7 +162,7 @@ async fn test_clickhouse_json_e2e() {
             .unwrap();
     });
 
-    let log_store = Arc::new(LogStore::with_cores_and_capacity(1, 1024));
+    let telemetry_store = Arc::new(TelemetryStore::with_cores_and_capacity(1, 1024));
 
     let config = ClickHouseLogShipperConfig {
         endpoint: format!("http://127.0.0.1:{port}"),
@@ -175,21 +179,29 @@ async fn test_clickhouse_json_e2e() {
     };
 
     let plugin = Arc::new(
-        ClickHouseLogShipperPlugin::with_store("ch_shipper_json", config, Arc::clone(&log_store))
-            .unwrap(),
+        ClickHouseLogShipperPlugin::with_store(
+            "ch_shipper_json",
+            config,
+            Arc::clone(&telemetry_store),
+        )
+        .unwrap(),
     );
 
     let (shutdown_tx, shutdown_rx) = watch::channel(false);
     let p_clone = Arc::clone(&plugin);
     let runner = tokio::spawn(async move { p_clone.run(shutdown_rx).await });
 
-    while log_store.active_subscriber_count.load(Ordering::Acquire) == 0 {
+    while telemetry_store
+        .active_subscriber_count
+        .load(Ordering::Acquire)
+        == 0
+    {
         tokio::time::sleep(Duration::from_millis(5)).await;
     }
 
     let rec = make_sample_record(999, 1732000000);
-    log_store.emit_on_core(0, &rec);
-    log_store.flush_all_lanes(128);
+    telemetry_store.emit_on_core(0, &rec);
+    telemetry_store.flush_all_lanes(128);
 
     for _ in 0..50 {
         if plugin.shipped_records() >= 1 {
@@ -317,7 +329,7 @@ async fn test_clickhouse_tls_mtls_e2e() {
         tls_stream.flush().await.unwrap();
     });
 
-    let log_store = Arc::new(LogStore::with_cores_and_capacity(1, 1024));
+    let telemetry_store = Arc::new(TelemetryStore::with_cores_and_capacity(1, 1024));
 
     let config = ClickHouseLogShipperConfig {
         endpoint: format!("https://127.0.0.1:{port}"),
@@ -339,20 +351,28 @@ async fn test_clickhouse_tls_mtls_e2e() {
     };
 
     let plugin = Arc::new(
-        ClickHouseLogShipperPlugin::with_store("ch_mtls_shipper", config, Arc::clone(&log_store))
-            .unwrap(),
+        ClickHouseLogShipperPlugin::with_store(
+            "ch_mtls_shipper",
+            config,
+            Arc::clone(&telemetry_store),
+        )
+        .unwrap(),
     );
 
     let (shutdown_tx, shutdown_rx) = watch::channel(false);
     let p_clone = Arc::clone(&plugin);
     let runner = tokio::spawn(async move { p_clone.run(shutdown_rx).await });
 
-    while log_store.active_subscriber_count.load(Ordering::Acquire) == 0 {
+    while telemetry_store
+        .active_subscriber_count
+        .load(Ordering::Acquire)
+        == 0
+    {
         tokio::time::sleep(Duration::from_millis(5)).await;
     }
 
-    log_store.emit_on_core(0, &make_sample_record(777, 1732000000));
-    log_store.flush_all_lanes(128);
+    telemetry_store.emit_on_core(0, &make_sample_record(777, 1732000000));
+    telemetry_store.flush_all_lanes(128);
 
     for _ in 0..50 {
         if plugin.shipped_records() >= 1 {
@@ -388,7 +408,7 @@ async fn test_clickhouse_backoff_and_disconnect() {
         }
     });
 
-    let log_store = Arc::new(LogStore::with_cores_and_capacity(1, 1024));
+    let telemetry_store = Arc::new(TelemetryStore::with_cores_and_capacity(1, 1024));
 
     let config = ClickHouseLogShipperConfig {
         endpoint: format!("http://127.0.0.1:{port}"),
@@ -408,7 +428,7 @@ async fn test_clickhouse_backoff_and_disconnect() {
         ClickHouseLogShipperPlugin::with_store(
             "ch_backoff_shipper",
             config,
-            Arc::clone(&log_store),
+            Arc::clone(&telemetry_store),
         )
         .unwrap(),
     );
@@ -417,19 +437,23 @@ async fn test_clickhouse_backoff_and_disconnect() {
     let p_clone = Arc::clone(&plugin);
     let runner = tokio::spawn(async move { p_clone.run(shutdown_rx).await });
 
-    while log_store.active_subscriber_count.load(Ordering::Acquire) == 0 {
+    while telemetry_store
+        .active_subscriber_count
+        .load(Ordering::Acquire)
+        == 0
+    {
         tokio::time::sleep(Duration::from_millis(5)).await;
     }
 
-    log_store.emit_on_core(0, &make_sample_record(1, 1732000000));
-    log_store.flush_all_lanes(128);
+    telemetry_store.emit_on_core(0, &make_sample_record(1, 1732000000));
+    telemetry_store.flush_all_lanes(128);
 
     for _ in 0..50 {
         if plugin.failed_pushes() >= 2 {
             break;
         }
-        log_store.emit_on_core(0, &make_sample_record(1, 1732000000));
-        log_store.flush_all_lanes(128);
+        telemetry_store.emit_on_core(0, &make_sample_record(1, 1732000000));
+        telemetry_store.flush_all_lanes(128);
         tokio::time::sleep(Duration::from_millis(30)).await;
     }
 
@@ -518,7 +542,7 @@ async fn test_clickhouse_full_logs_e2e() {
             .unwrap();
     });
 
-    let log_store = Arc::new(LogStore::with_cores_and_capacity(1, 1024));
+    let telemetry_store = Arc::new(TelemetryStore::with_cores_and_capacity(1, 1024));
 
     let config = ClickHouseLogShipperConfig {
         endpoint: format!("http://127.0.0.1:{port}"),
@@ -535,29 +559,37 @@ async fn test_clickhouse_full_logs_e2e() {
     };
 
     let plugin = Arc::new(
-        ClickHouseLogShipperPlugin::with_store("ch_full_logger", config, Arc::clone(&log_store))
-            .unwrap(),
+        ClickHouseLogShipperPlugin::with_store(
+            "ch_full_logger",
+            config,
+            Arc::clone(&telemetry_store),
+        )
+        .unwrap(),
     );
 
     let (shutdown_tx, shutdown_rx) = watch::channel(false);
     let p_clone = Arc::clone(&plugin);
     let runner = tokio::spawn(async move { p_clone.run(shutdown_rx).await });
 
-    while log_store.active_subscriber_count.load(Ordering::Acquire) == 0 {
+    while telemetry_store
+        .active_subscriber_count
+        .load(Ordering::Acquire)
+        == 0
+    {
         tokio::time::sleep(Duration::from_millis(5)).await;
     }
 
     // Emit 5 OK records (status 200) and 2 ERROR records (status 500)
     for i in 0..5 {
         let rec = make_sample_record(100 + i, 1732000000 + i as u32);
-        log_store.emit_on_core(0, &rec);
+        telemetry_store.emit_on_core(0, &rec);
     }
     for i in 0..2 {
         let mut err_rec = make_sample_record(200 + i, 1732000010 + i as u32);
         err_rec.status_code = 500;
-        log_store.emit_on_core(0, &err_rec);
+        telemetry_store.emit_on_core(0, &err_rec);
     }
-    log_store.flush_all_lanes(128);
+    telemetry_store.flush_all_lanes(128);
 
     // Give background shipper time to process
     tokio::time::sleep(Duration::from_millis(250)).await;

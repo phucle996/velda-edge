@@ -124,7 +124,8 @@ where
             return Err(Http1Error::ConnectionClosed);
         }
     };
-    conn.last_upstream_addr = Some(lease.endpoint);
+    conn.last_upstream_ip = lease.endpoint.0;
+    conn.last_upstream_port_be = lease.endpoint.1;
 
     // 6. Forward buffered request over HTTP/2 stream with self-healing retry
     let is_tls = upstream.is_tls();
@@ -147,7 +148,8 @@ where
             "HTTP/2 stream refused or connection closed; self-healing with fresh connection"
         );
         if let Ok((mut fresh_client, fresh_lease)) = upstream.acquire_fresh(&h2_config).await {
-            conn.last_upstream_addr = Some(fresh_lease.endpoint);
+            conn.last_upstream_ip = fresh_lease.endpoint.0;
+            conn.last_upstream_port_be = fresh_lease.endpoint.1;
             pipe_res = send_h2_buffered(
                 &mut fresh_client,
                 &req_head,

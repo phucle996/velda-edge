@@ -67,7 +67,7 @@ pub async fn serve(
     upstream: &Arc<Http3Upstream>,
 ) -> (
     L7Response,
-    Option<std::net::SocketAddr>,
+    Option<(u128, u16)>,
     velda_core::CompletionReason,
 ) {
     let (client, lease) = match upstream.acquire(&upstream.config).await {

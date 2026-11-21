@@ -15,7 +15,6 @@ use std::time::{Duration, Instant};
 
 use arc_swap::ArcSwap;
 use common::{CountingAllocator, format_duration};
-use velda_core::{RouteId, UpstreamId};
 use velda_router::{
     GrpcRoute, GrpcRouteRequest, GrpcRouter, Http1Route, Http1RouteRequest, Http1Router, Router,
     TcpRoute, TcpRouter, UdpRoute, UdpRouter,
@@ -29,72 +28,68 @@ fn build_baseline_router(prefix_count: usize) -> Router {
 
     // Exact paths
     http_routes.push(Http1Route::new_exact(
-        RouteId::new(1),
-        "https-in",
+        1,
+        velda_core::fnv1a_hash_32("https-in"),
         "/healthz",
     ));
     http_routes.push(Http1Route::new_exact(
-        RouteId::new(2),
-        "https-in",
+        2,
+        velda_core::fnv1a_hash_32("https-in"),
         "/metrics",
     ));
 
     // Deep nested prefixes
     http_routes.push(Http1Route::new(
-        RouteId::new(3),
-        "https-in",
+        3,
+        velda_core::fnv1a_hash_32("https-in"),
         "/api/v1/clusters/us-east/tenants/corp-alpha/analytics/realtime/events/v2",
     ));
     http_routes.push(Http1Route::new(
-        RouteId::new(4),
-        "https-in",
+        4,
+        velda_core::fnv1a_hash_32("https-in"),
         "/api/v1/clusters/us-east/tenants/corp-alpha/analytics",
     ));
     http_routes.push(Http1Route::new(
-        RouteId::new(5),
-        "https-in",
+        5,
+        velda_core::fnv1a_hash_32("https-in"),
         "/api/v1/clusters",
     ));
 
     // Host-restricted route
     http_routes.push(
-        Http1Route::new(RouteId::new(6), "https-in", "/secure/vault")
+        Http1Route::new(6, velda_core::fnv1a_hash_32("https-in"), "/secure/vault")
             .with_host("*.api.velda.internal"),
     );
 
     // Dynamic prefixes
     for i in 10..prefix_count + 10 {
         http_routes.push(Http1Route::new(
-            RouteId::new(i as u16),
-            "https-in",
+            i as u16,
+            velda_core::fnv1a_hash_32("https-in"),
             format!("/services/tenant_{i:04}/resource"),
         ));
     }
     let http_router = Http1Router::new(http_routes).unwrap();
 
     let grpc_routes = vec![
-        GrpcRoute::new(RouteId::new(100), "grpc-in", "velda.auth.v1.AuthService")
-            .with_method("Authenticate"),
         GrpcRoute::new(
-            RouteId::new(101),
-            "grpc-in",
+            100,
+            velda_core::fnv1a_hash_32("grpc-in"),
+            "velda.auth.v1.AuthService",
+        )
+        .with_method("Authenticate"),
+        GrpcRoute::new(
+            101,
+            velda_core::fnv1a_hash_32("grpc-in"),
             "velda.billing.v2.PaymentService",
         ),
     ];
     let grpc_router = GrpcRouter::new(grpc_routes).unwrap();
 
-    let tcp_routes = vec![TcpRoute::new(
-        RouteId::new(200),
-        "tcp-in",
-        UpstreamId::new(200),
-    )];
+    let tcp_routes = vec![TcpRoute::new(200, velda_core::fnv1a_hash_32("tcp-in"), 200)];
     let tcp_router = TcpRouter::new(tcp_routes).unwrap();
 
-    let udp_routes = vec![UdpRoute::new(
-        RouteId::new(201),
-        "udp-in",
-        UpstreamId::new(201),
-    )];
+    let udp_routes = vec![UdpRoute::new(201, velda_core::fnv1a_hash_32("udp-in"), 201)];
     let udp_router = UdpRouter::new(udp_routes).unwrap();
 
     Router::new(
@@ -133,7 +128,7 @@ fn bench_404_path_flooding_storm() {
     for i in 0..iters {
         let path = malicious_paths[i % malicious_paths.len()];
         let req = Http1RouteRequest::new(path);
-        let route = router.route_http1("https-in", &req);
+        let route = router.route_http1(velda_core::fnv1a_hash_32("https-in"), &req);
         assert!(route.is_none()); // Strict None invariant
         let _ = std::hint::black_box(route);
     }
@@ -187,7 +182,7 @@ fn bench_pathological_prefix_backtracking() {
     for i in 0..iters {
         let path = near_misses[i % near_misses.len()];
         let req = Http1RouteRequest::new(path);
-        let route = router.route_http1("https-in", &req);
+        let route = router.route_http1(velda_core::fnv1a_hash_32("https-in"), &req);
         let _ = std::hint::black_box(route);
     }
     let elapsed = start.elapsed();
@@ -241,7 +236,7 @@ fn bench_wildcard_host_spoofing_storm() {
     for i in 0..iters {
         let host = spoofed_hosts[i % spoofed_hosts.len()];
         let req = Http1RouteRequest::new("/secure/vault").with_host(host);
-        let route = router.route_http1("https-in", &req);
+        let route = router.route_http1(velda_core::fnv1a_hash_32("https-in"), &req);
         let _ = std::hint::black_box(route);
     }
     let elapsed = start.elapsed();
@@ -380,11 +375,12 @@ fn bench_concurrent_traffic_under_hot_reload() {
                     0..=2 => {
                         let path = paths[i % 4];
                         let req = Http1RouteRequest::new(path);
-                        let route = current_table.route_http1("https-in", &req);
+                        let route =
+                            current_table.route_http1(velda_core::fnv1a_hash_32("https-in"), &req);
                         let _ = std::hint::black_box(route);
                     }
                     _ => {
-                        let route = current_table.route_udp("udp-in");
+                        let route = current_table.route_udp(velda_core::fnv1a_hash_32("udp-in"));
                         let _ = std::hint::black_box(route);
                     }
                 }

@@ -117,7 +117,8 @@ where
             return Err(Http1Error::ConnectionClosed);
         }
     };
-    conn.last_upstream_addr = Some(upstream_lease.endpoint);
+    conn.last_upstream_ip = upstream_lease.endpoint.0;
+    conn.last_upstream_port_be = upstream_lease.endpoint.1;
 
     let cfg = *conn.config();
     let req_timeout = upstream.request_timeout();
@@ -251,7 +252,8 @@ where
 
     let exchange_res = tokio::time::timeout(req_timeout, upstream_exchange).await;
     if let Some(ep) = fresh_endpoint {
-        conn.last_upstream_addr = Some(ep);
+        conn.last_upstream_ip = ep.0;
+        conn.last_upstream_port_be = ep.1;
     }
     let (mut resp_head, body_len, decoded_chunk_bytes) = match exchange_res {
         Ok(Ok(res)) => res,

@@ -318,6 +318,27 @@
         "connect_timeout_ms": 2000,
         "request_timeout_ms": 5000
       }
+    },
+    {
+      "id": "kafka_log_shipper",
+      "config": {
+        "brokers": [
+          "127.0.0.1:9092"
+        ],
+        "topic": "velda-access-logs",
+        "transport_security": "plain",
+        "sasl_mechanism": "none",
+        "sasl_username": "",
+        "sasl_password": "",
+        "compression": "zstd",
+        "acks": "leader",
+        "partitioner": "round_robin",
+        "flush_interval_ms": 1000,
+        "max_batch_size": 8000,
+        "connect_timeout_ms": 2000,
+        "request_timeout_ms": 5000,
+        "metadata_refresh_ms": 300000
+      }
     }
   ]
 }

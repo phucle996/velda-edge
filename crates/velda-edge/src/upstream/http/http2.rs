@@ -1,6 +1,5 @@
 //! Layer 7 HTTP/2 Upstream managing persistent client multiplexing (RFC 9113) and pipe forwarding.
 
-use std::net::SocketAddr;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
 
@@ -17,11 +16,11 @@ use crate::upstream::lb::EdgeUpstream;
 #[derive(Clone, Debug)]
 pub struct Http2ClientResource {
     pub client: h2::client::SendRequest<Bytes>,
-    pub endpoint: SocketAddr,
+    pub endpoint: (u128, u16),
 }
 
 impl Http2ClientResource {
-    pub fn new(client: h2::client::SendRequest<Bytes>, endpoint: SocketAddr) -> Self {
+    pub fn new(client: h2::client::SendRequest<Bytes>, endpoint: (u128, u16)) -> Self {
         Self { client, endpoint }
     }
 }
@@ -50,13 +49,12 @@ pub struct Http2Upstream {
     /// `streaming` at compile time; eliminates runtime enum branching.
     pub strategy: Http2PipeStrategy,
     /// Lock-sharded persistent HTTP/2 multiplexed client connection pool.
-    pool: Arc<MultiplexedPool<SocketAddr, Http2ClientResource>>,
+    pool: Arc<MultiplexedPool<(u128, u16), Http2ClientResource>>,
     /// Maximum parallel TCP connections maintained per physical endpoint.
     pub max_connections_per_key: usize,
     /// Maximum concurrent streams per multiplexed connection.
     pub max_concurrent_streams: u32,
     /// [PRE-COMPILED]: Protocol-specific socket acceleration path.
-    pub acceleration: velda_http2::Http2AccelerationPath,
     /// [PRE-COMPILED]: Pre-computed HTTP/2 protocol configuration.
     pub config: velda_http2::Http2Config,
     /// Cold-start / saturation synchronization lock preventing thundering-herd connection storms.
@@ -73,7 +71,6 @@ impl std::fmt::Debug for Http2Upstream {
             .field("strategy", &self.strategy)
             .field("max_connections_per_key", &self.max_connections_per_key)
             .field("max_concurrent_streams", &self.max_concurrent_streams)
-            .field("acceleration", &self.acceleration)
             .finish()
     }
 }
@@ -87,7 +84,6 @@ impl Http2Upstream {
         shard_count: usize,
         max_connections_per_key: usize,
         max_concurrent_streams: u32,
-        acceleration: velda_http2::Http2AccelerationPath,
     ) -> Self {
         let strategy = Http2PipeStrategy::from_streaming(streaming);
         Self {
@@ -101,7 +97,6 @@ impl Http2Upstream {
             ),
             max_connections_per_key: max_connections_per_key.max(1),
             max_concurrent_streams,
-            acceleration,
             config: velda_http2::Http2Config::auto(),
             connect_lock: tokio::sync::Mutex::new(()),
             last_probe_sec: AtomicU64::new(0),
@@ -154,7 +149,6 @@ impl Http2Upstream {
         EdgeError,
     > {
         let max_streams = self.max_concurrent_streams;
-        let acceleration = self.acceleration;
         let connect_timeout = self.inner.timeouts().connect;
         let idle_timeout = self.inner.timeouts().idle;
         let tls = self
@@ -224,10 +218,10 @@ impl Http2Upstream {
 
                 // Establish a single fresh HTTP/2 client connection
                 let fresh = velda_http2::client::connect(
-                    endpoint,
+                    endpoint.0,
+                    endpoint.1,
                     tls,
                     config,
-                    Some(&acceleration),
                     Some(connect_timeout),
                 )
                 .await
@@ -266,7 +260,6 @@ impl Http2Upstream {
         EdgeError,
     > {
         let max_streams = self.max_concurrent_streams;
-        let acceleration = self.acceleration;
         let connect_timeout = self.inner.timeouts().connect;
         let tls = self
             .tls
@@ -277,10 +270,10 @@ impl Http2Upstream {
             .inner
             .execute(|endpoint| async move {
                 let fresh = velda_http2::client::connect(
-                    endpoint,
+                    endpoint.0,
+                    endpoint.1,
                     tls,
                     config,
-                    Some(&acceleration),
                     Some(connect_timeout),
                 )
                 .await
@@ -307,7 +300,7 @@ impl Http2Upstream {
 
     /// Returns the number of physical multiplexed connections for `endpoint` in `lane`.
     #[inline]
-    pub fn connection_count_for_lane(&self, endpoint: &SocketAddr, lane: usize) -> usize {
+    pub fn connection_count_for_lane(&self, endpoint: &(u128, u16), lane: usize) -> usize {
         self.pool.connection_count_for_lane(endpoint, lane)
     }
 
@@ -323,7 +316,7 @@ impl Http2Upstream {
         }
 
         for ep in all_eps {
-            let addr = ep.address;
+            let addr = (ep.ip, ep.port_be);
             if !self.inner.health().is_healthy(&addr) {
                 continue;
             }
@@ -347,14 +340,13 @@ impl Http2Upstream {
                     .tls
                     .as_ref()
                     .map(|(engine, sni)| (engine.as_ref(), sni.as_ref()));
-                let acceleration = self.acceleration;
                 let connect_timeout = self.inner.timeouts().connect;
 
                 match velda_http2::client::connect(
-                    addr,
+                    addr.0,
+                    addr.1,
                     tls,
                     config,
-                    Some(&acceleration),
                     Some(connect_timeout),
                 )
                 .await
@@ -369,11 +361,11 @@ impl Http2Upstream {
                                 res,
                                 self.max_concurrent_streams,
                             );
-                            tracing::debug!(endpoint = %addr, lane, "Shadow Worker pre-warmed HTTP/2 connection");
+                            tracing::debug!(endpoint = ?addr, lane, "Shadow Worker pre-warmed HTTP/2 connection");
                         }
                     }
                     Err(e) => {
-                        tracing::debug!(endpoint = %addr, lane, error = %e, "Shadow Worker pre-warm connect failed for HTTP/2");
+                        tracing::debug!(endpoint = ?addr, lane, error = %e, "Shadow Worker pre-warm connect failed for HTTP/2");
                         break;
                     }
                 }
@@ -410,10 +402,10 @@ impl Http2Upstream {
         let timeout = active_cfg.timeout;
 
         for ep in all_eps {
-            let addr = ep.address;
+            let addr = (ep.ip, ep.port_be);
             let success = if active_cfg.check_type.eq_ignore_ascii_case("tcp") {
-                match tokio::time::timeout(timeout, tokio::net::TcpStream::connect(addr)).await {
-                    Ok(Ok(stream)) => {
+                match velda_sock::connect::connect_tcp_u128(addr.0, addr.1, timeout).await {
+                    Ok(stream) => {
                         let _ = stream
                             .into_std()
                             .and_then(|s| s.shutdown(std::net::Shutdown::Both));
@@ -429,12 +421,11 @@ impl Http2Upstream {
                     Some(lease) => (lease.client.clone(), Some(lease)),
                     None => {
                         let tls = self.tls.as_ref().map(|(e, s)| (e.as_ref(), s.as_ref()));
-                        let acceleration = self.acceleration;
                         match velda_http2::client::connect(
-                            addr,
+                            addr.0,
+                            addr.1,
                             tls,
                             &self.config,
-                            Some(&acceleration),
                             Some(timeout),
                         )
                         .await

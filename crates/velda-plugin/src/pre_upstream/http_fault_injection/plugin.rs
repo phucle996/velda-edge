@@ -165,11 +165,7 @@ impl PreUpstreamPlugin for HttpFaultInjectionPlugin {
     /// 4. Evaluates delay injection criteria.
     /// 5. Evaluates abort injection criteria.
     /// 6. Composes non-blocking [`Action`] (Delay first, then Abort or Continue).
-    fn on_upstream_request(
-        &self,
-        req: &mut L7Request,
-        _target_upstream: &mut velda_core::UpstreamId,
-    ) -> Action {
+    fn on_upstream_request(&self, req: &mut L7Request, _target_upstream: &mut u16) -> Action {
         // Security Hygiene: Always extract and purge chaos testing headers so testing tokens
         // NEVER leak to upstream backends, regardless of whether request matches scope or overrides are enabled.
         let (override_delay, override_abort) = if self.condition.allow_header_override {
@@ -250,7 +246,7 @@ mod tests {
             Body::Empty,
         );
 
-        let mut target = velda_core::UpstreamId::new(1);
+        let mut target = 1;
         let action = plugin.on_upstream_request(&mut req, &mut target);
         assert!(matches!(action, Action::Continue));
     }
@@ -270,7 +266,7 @@ mod tests {
             Body::Empty,
         );
 
-        let mut target = velda_core::UpstreamId::new(1);
+        let mut target = 1;
         let action = plugin.on_upstream_request(&mut req, &mut target);
         match action {
             Action::Delay { duration, and_then } => {
@@ -296,7 +292,7 @@ mod tests {
             Body::Empty,
         );
 
-        let mut target = velda_core::UpstreamId::new(1);
+        let mut target = 1;
         let action = plugin.on_upstream_request(&mut req, &mut target);
         match action {
             Action::Respond(resp) => {
@@ -327,7 +323,7 @@ mod tests {
             Body::Empty,
         );
 
-        let mut target = velda_core::UpstreamId::new(1);
+        let mut target = 1;
         let action = plugin.on_upstream_request(&mut req, &mut target);
         match action {
             Action::Delay { duration, and_then } => {
@@ -383,7 +379,7 @@ mod tests {
             Body::Empty,
         );
 
-        let mut target = velda_core::UpstreamId::new(1);
+        let mut target = 1;
         let action = plugin.on_upstream_request(&mut req, &mut target);
         match action {
             Action::Delay { duration, and_then } => {

@@ -6,11 +6,11 @@
 //! │                                                                                        │
 //! │   Traffic Workers (Cores 0..N-1, SCHED_OTHER)                                          │
 //! │        │                                                                               │
-//! │        ▼ AccessLogRecord (64B)                                                         │
-//! │   [LogStore SPSC Ring Buffers]                                                         │
+//! │        ▼ TelemetryRecord (64B)                                                         │
+//! │   [TelemetryStore SPSC Ring Buffers]                                                         │
 //! │        │                                                                               │
 //! │        ▼ subscriber.drain_batches()                                                     │
-//! │   Batched Arc<[AccessLogRecord]> Slices                                                │
+//! │   Batched Arc<[TelemetryRecord]> Slices                                                │
 //! │        │                                                                               │
 //! │        ▼ format_std_log_payload() (Zero Heap Reallocations)                            │
 //! │   out_buf (Pre-reserved Vector, Direct Byte Stamping)                                  │
@@ -18,7 +18,7 @@
 //! │        ▼ sink.write_all(&out_buf).await (Single Open FD, Zero Open/Close Churn)        │
 //! │   StdLogSink (Persistent File / Stdout / Stderr)                                       │
 //! │        │                                                                               │
-//! │        ▼ Drop Arc<[AccessLogRecord]> ──► Lock-free memory reclamation                  │
+//! │        ▼ Drop Arc<[TelemetryRecord]> ──► Lock-free memory reclamation                  │
 //! └────────────────────────────────────────────────────────────────────────────────────────┘
 //! ```
 
@@ -30,7 +30,7 @@ use std::time::Duration;
 
 pub use crate::config::PluginConfig;
 use tokio::sync::watch;
-use velda_observability::{LogStore, global_log_store};
+use velda_observability::{TelemetryStore, global_telemetry_store};
 
 pub use super::config::{StdLogShipperConfig, TargetStream};
 pub use super::format::format_std_log_payload;
@@ -43,7 +43,7 @@ pub struct StdLogShipperPlugin {
     pub id: String,
     pub config: StdLogShipperConfig,
     pub target: TargetStream,
-    pub log_store: Arc<LogStore>,
+    pub telemetry_store: Arc<TelemetryStore>,
     pub shipped_records: Arc<AtomicU64>,
 }
 
@@ -51,14 +51,14 @@ impl StdLogShipperPlugin {
     pub fn with_store(
         id: impl Into<String>,
         config: StdLogShipperConfig,
-        log_store: Arc<LogStore>,
+        telemetry_store: Arc<TelemetryStore>,
     ) -> Result<Self, PluginError> {
         let target = TargetStream::parse(&config.target);
         Ok(Self {
             id: id.into(),
             config,
             target,
-            log_store,
+            telemetry_store,
             shipped_records: Arc::new(AtomicU64::new(0)),
         })
     }
@@ -68,7 +68,7 @@ impl StdLogShipperPlugin {
             super::validation::validate_std_log_shipper_config(&config.id, &config.config)
                 .map_err(|e| PluginError::Config(e.to_string()))?;
 
-        Self::with_store(&config.id, validated, global_log_store())
+        Self::with_store(&config.id, validated, Arc::clone(global_telemetry_store()))
     }
 }
 
@@ -88,7 +88,7 @@ impl BackgroundPlugin for StdLogShipperPlugin {
     ) -> Pin<Box<dyn Future<Output = Result<(), PluginError>> + Send>> {
         Box::pin(async move {
             let mut sink = StdLogSink::init(&self.target).await?;
-            let subscriber = self.log_store.subscribe(256);
+            let subscriber = self.telemetry_store.subscribe(256);
             let mut interval =
                 tokio::time::interval(Duration::from_millis(self.config.flush_interval_ms.max(50)));
             interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);

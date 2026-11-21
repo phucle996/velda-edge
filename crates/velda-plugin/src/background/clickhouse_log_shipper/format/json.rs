@@ -29,10 +29,10 @@
 //!
 //!  Memory Pipeline & Direct Pointer Stamping:
 //!
-//!    LogBatch (L2 Prefetch _MM_HINT_T1)
+//!    TelemetryBatch (L2 Prefetch _MM_HINT_T1)
 //!         │
 //!         ▼
-//!    [ AccessLogRecord ] ──► Reservation: upfront estimate + per-row MAX_ROW_BYTES guard
+//!    [ TelemetryRecord ] ──► Reservation: upfront estimate + per-row MAX_ROW_BYTES guard
 //!         │
 //!         ├─── Static Syntax Literals (,"key":") ──► LLVM Immediate Register Stores
 //!         ├─── Integers (ts, id, dur, ports)     ──► fast_write_u16/u64_ptr (DIGIT_PAIRS)
@@ -50,14 +50,14 @@
 //! Produces newline-delimited JSON objects matching ClickHouse's native `JSONEachRow` wire format.
 //! Pre-reserves capacity upfront to guarantee zero heap reallocations during formatting.
 
-use velda_observability::{AccessLogRecord, LogBatch};
+use velda_observability::{TelemetryBatch, TelemetryRecord};
 
 use velda_core::lut::decimal::{fast_write_u16_ptr, fast_write_u64_ptr};
 use velda_core::lut::ip::{fast_write_ip_ptr, fast_write_ipv4_ptr};
 
 /// Upper bound of one serialized row: fixed keys + numerics + IPv6 + enum names (< 512 B)
 /// plus a fully control-character URL escaped at 6 bytes per input byte (`\u00XX`).
-const MAX_ROW_BYTES: usize = 512 + 186 * 6;
+const MAX_ROW_BYTES: usize = 512 + 184 * 6;
 
 const HEX_DIGITS: &[u8; 16] = b"0123456789abcdef";
 
@@ -108,13 +108,13 @@ const JSON_UA_FAMILY: &[u8] = b"\",\"user_agent_family\":\"";
 const JSON_UA_OS: &[u8] = b"\",\"user_agent_os\":\"";
 const JSON_SUFFIX: &[u8] = b"\"}\n";
 
-/// Formats batches of [`AccessLogRecord`] into ClickHouse `JSONEachRow` format directly into `out`.
+/// Formats batches of [`TelemetryRecord`] into ClickHouse `JSONEachRow` format directly into `out`.
 ///
 /// Employs direct pointer stamping, compile-time key literals, and zero-allocation integer formatting.
 /// Employs `_MM_HINT_T1` prefetching to keep the record batch in L2 without polluting L1d cache.
 /// Returns the number of records actually serialized into `out`.
 #[inline(never)]
-pub fn format_json_each_row(batches: &[LogBatch], out: &mut Vec<u8>) -> usize {
+pub fn format_json_each_row(batches: &[TelemetryBatch], out: &mut Vec<u8>) -> usize {
     let total_recs: usize = batches.iter().map(|b| b.len()).sum();
     out.reserve(total_recs * 384);
     let mut serialized_count = 0;
@@ -127,7 +127,7 @@ pub fn format_json_each_row(batches: &[LogBatch], out: &mut Vec<u8>) -> usize {
                 unsafe {
                     use core::arch::x86_64::*;
                     let next_rec =
-                        recs.get_unchecked(idx + 4) as *const AccessLogRecord as *const i8;
+                        recs.get_unchecked(idx + 4) as *const TelemetryRecord as *const i8;
                     _mm_prefetch(next_rec, _MM_HINT_T1);
                     _mm_prefetch(next_rec.add(64), _MM_HINT_T1);
                     _mm_prefetch(next_rec.add(128), _MM_HINT_T1);
@@ -301,10 +301,10 @@ mod tests {
     use super::*;
     use std::sync::Arc;
     use velda_core::{CompletionReason, GrpcStatus, HttpMethod, PipeKind, UaFamily, UaOs};
-    use velda_observability::AccessLogRecord;
+    use velda_observability::TelemetryRecord;
 
-    fn make_test_record() -> AccessLogRecord {
-        let mut rec = AccessLogRecord::zeroed();
+    fn make_test_record() -> TelemetryRecord {
+        let mut rec = TelemetryRecord::zeroed();
         rec.ingress_time_nanos = 1_732_011_000_123_456_789;
         rec.request_id = 987654321;
         rec.duration_ns = 250_000;
@@ -330,7 +330,7 @@ mod tests {
     #[test]
     fn test_json_each_row_serialization() {
         let rec = make_test_record();
-        let batch = LogBatch::from_arc(Arc::new([rec]));
+        let batch = TelemetryBatch::from_arc(Arc::new([rec]));
         let mut out = Vec::new();
 
         let count = format_json_each_row(&[batch], &mut out);
@@ -379,7 +379,7 @@ mod tests {
         let evil = "/a\"b\\c\n\r\t".repeat(21);
         rec.set_url(&evil);
 
-        let batch = LogBatch::from_arc(Arc::new([rec]));
+        let batch = TelemetryBatch::from_arc(Arc::new([rec]));
         let mut out = Vec::new();
         let count = format_json_each_row(&[batch], &mut out);
         assert_eq!(count, 1);

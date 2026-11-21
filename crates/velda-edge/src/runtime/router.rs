@@ -18,13 +18,13 @@ pub fn build_router(
     let mut builder = RouterBuilder::new();
 
     for (idx, route) in routes.iter().enumerate() {
-        let route_id = velda_core::RouteId(idx as u16);
+        let route_id = idx as u16;
         let listener_id = route.listener_id();
         let up_idx = upstreams
             .iter()
             .position(|u| u.id == route.upstream)
             .unwrap_or(0);
-        let upstream_id = velda_core::UpstreamId(up_idx as u16);
+        let upstream_id = up_idx as u16;
 
         if route.kind.eq_ignore_ascii_case("l4") {
             let protocol_str = route.match_rule.protocol.as_deref().unwrap_or("tcp");
@@ -265,7 +265,6 @@ pub fn build_router(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use velda_core::{ListenerId, UpstreamId};
     use velda_sync::post_sync::listener::{
         ListenerApplicationConfig, ListenerConfig, ListenerTlsConfig, ListenerTransportConfig,
     };
@@ -294,6 +293,7 @@ mod tests {
                 grpc: None,
                 http3: None,
                 raw: None,
+                observability: None,
             },
             ListenerConfig {
                 id: "dns-in".into(),
@@ -312,6 +312,7 @@ mod tests {
                 grpc: None,
                 http3: None,
                 raw: None,
+                observability: None,
             },
             ListenerConfig {
                 id: "http-in".into(),
@@ -330,6 +331,7 @@ mod tests {
                 grpc: None,
                 http3: None,
                 raw: None,
+                observability: None,
             },
         ];
 
@@ -450,20 +452,26 @@ mod tests {
         let router = build_router(&routes, &upstreams, &listeners).unwrap();
 
         // Verify L4 TCP route
-        let tcp = router.route_tcp("postgres-in").unwrap();
-        assert_eq!(tcp.listener_id, ListenerId::from_name("postgres-in"));
-        assert_eq!(tcp.upstream_id, UpstreamId::new(0));
+        let tcp = router
+            .route_tcp(velda_core::fnv1a_hash_32("postgres-in"))
+            .unwrap();
+        assert_eq!(tcp.listener_id, velda_core::fnv1a_hash_32("postgres-in"));
+        assert_eq!(tcp.upstream_id, 0);
 
         // Verify L4 UDP route
-        let udp = router.route_udp("dns-in").unwrap();
-        assert_eq!(udp.listener_id, ListenerId::from_name("dns-in"));
-        assert_eq!(udp.upstream_id, UpstreamId::new(1));
+        let udp = router
+            .route_udp(velda_core::fnv1a_hash_32("dns-in"))
+            .unwrap();
+        assert_eq!(udp.listener_id, velda_core::fnv1a_hash_32("dns-in"));
+        assert_eq!(udp.upstream_id, 1);
         assert_eq!(
             udp.session_affinity,
             velda_router::UdpSessionAffinity::ClientAddr
         );
 
-        let game_udp = router.route_udp("game-in").unwrap();
+        let game_udp = router
+            .route_udp(velda_core::fnv1a_hash_32("game-in"))
+            .unwrap();
         assert_eq!(
             game_udp.session_affinity,
             velda_router::UdpSessionAffinity::PayloadToken { offset: 0, len: 8 }
@@ -471,15 +479,29 @@ mod tests {
 
         // Verify L7 HTTP/1.1 route compilation
         let http_req = velda_router::Http1RouteRequest::new("/api/v1/users");
-        let http_matched = router.route_http1("http-in", &http_req).unwrap();
-        assert_eq!(http_matched.id, velda_core::RouteId(3));
+        let http_matched = router
+            .route_http1(velda_core::fnv1a_hash_32("http-in"), &http_req)
+            .unwrap();
+        assert_eq!(http_matched.id, 3);
 
         // Verify protocol isolation: HTTP/1 route is NOT in HTTP/2 router
         let h2_req = velda_router::Http2RouteRequest::new("/api/v1/users");
-        assert!(router.route_http2("http-in", &h2_req).is_none());
+        assert!(
+            router
+                .route_http2(velda_core::fnv1a_hash_32("http-in"), &h2_req)
+                .is_none()
+        );
 
         // Verify unknown listeners return None
-        assert!(router.route_tcp("unknown").is_none());
-        assert!(router.route_udp("unknown").is_none());
+        assert!(
+            router
+                .route_tcp(velda_core::fnv1a_hash_32("unknown"))
+                .is_none()
+        );
+        assert!(
+            router
+                .route_udp(velda_core::fnv1a_hash_32("unknown"))
+                .is_none()
+        );
     }
 }

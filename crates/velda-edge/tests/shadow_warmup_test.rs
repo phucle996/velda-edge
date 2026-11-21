@@ -44,7 +44,8 @@ async fn test_http1_shadow_worker_warmup_end_to_end() {
     // 2. Set current thread lane to Worker 0
     velda_connection_pool::set_current_thread_lane(0);
 
-    let endpoint = Endpoint::new("mock-ep", backend_addr, 1);
+    let (backend_ip, backend_port_be) = velda_sock::socket_addr_to_raw(backend_addr);
+    let endpoint = Endpoint::from_raw(backend_ip, backend_port_be, 1);
     let discovery = Discovery::new_explicit(vec![endpoint]);
     let timeouts = UpstreamTimeouts::tcp(Duration::from_secs(2), Duration::from_secs(30));
 
@@ -62,16 +63,21 @@ async fn test_http1_shadow_worker_warmup_end_to_end() {
         StreamingMode::DISABLED,
         PoolConfig::default(),
         4,
-        velda_http1::Http1AccelerationPath::default(),
         None,
     );
 
     // Initial state: lane 0 has 0 idle connections
-    assert_eq!(h1_upstream.idle_conns_for_lane(&backend_addr, 0), 0);
+    assert_eq!(
+        h1_upstream.idle_conns_for_lane(&velda_sock::socket_addr_to_raw(backend_addr), 0),
+        0
+    );
 
     // 3. Shadow Worker (Logistics) pre-warms 2 connections for Lane 0
     h1_upstream.prewarm_lane(0, 2).await;
-    assert_eq!(h1_upstream.idle_conns_for_lane(&backend_addr, 0), 2);
+    assert_eq!(
+        h1_upstream.idle_conns_for_lane(&velda_sock::socket_addr_to_raw(backend_addr), 0),
+        2
+    );
 
     // 4. Traffic Worker (Frontline) acquires connection on the hot path -> instant reuse!
     let lease1 = h1_upstream
@@ -84,7 +90,10 @@ async fn test_http1_shadow_worker_warmup_end_to_end() {
     );
 
     // One connection remains in pool
-    assert_eq!(h1_upstream.idle_conns_for_lane(&backend_addr, 0), 1);
+    assert_eq!(
+        h1_upstream.idle_conns_for_lane(&velda_sock::socket_addr_to_raw(backend_addr), 0),
+        1
+    );
 
     // Second acquire: also an instant hit!
     let lease2 = h1_upstream
@@ -97,7 +106,10 @@ async fn test_http1_shadow_worker_warmup_end_to_end() {
     );
 
     // Pool for lane 0 is now depleted
-    assert_eq!(h1_upstream.idle_conns_for_lane(&backend_addr, 0), 0);
+    assert_eq!(
+        h1_upstream.idle_conns_for_lane(&velda_sock::socket_addr_to_raw(backend_addr), 0),
+        0
+    );
 
     // Third acquire: cold fallback (connects fresh on demand)
     let lease3 = h1_upstream
@@ -140,7 +152,8 @@ async fn test_http2_shadow_worker_warmup_end_to_end() {
     // 2. Set current thread lane to Worker 0
     velda_connection_pool::set_current_thread_lane(0);
 
-    let endpoint = Endpoint::new("mock-h2-ep", backend_addr, 1);
+    let (backend_ip, backend_port_be) = velda_sock::socket_addr_to_raw(backend_addr);
+    let endpoint = Endpoint::from_raw(backend_ip, backend_port_be, 1);
     let discovery = Discovery::new_explicit(vec![endpoint]);
     let timeouts = UpstreamTimeouts::tcp(Duration::from_secs(2), Duration::from_secs(30));
 
@@ -152,24 +165,22 @@ async fn test_http2_shadow_worker_warmup_end_to_end() {
         timeouts,
     );
 
-    let h2_upstream = Http2Upstream::new(
-        edge_upstream,
-        None,
-        StreamingMode::DISABLED,
-        4,
-        4,
-        100,
-        velda_http2::Http2AccelerationPath::default(),
-    );
+    let h2_upstream = Http2Upstream::new(edge_upstream, None, StreamingMode::DISABLED, 4, 4, 100);
 
     let config = velda_http2::Http2Config::auto();
 
     // Initial state: lane 0 has 0 multiplexed connections
-    assert_eq!(h2_upstream.connection_count_for_lane(&backend_addr, 0), 0);
+    assert_eq!(
+        h2_upstream.connection_count_for_lane(&velda_sock::socket_addr_to_raw(backend_addr), 0),
+        0
+    );
 
     // 3. Shadow Worker (Logistics) pre-warms multiplexed connection for Lane 0
     h2_upstream.prewarm_lane(0, &config).await;
-    assert_eq!(h2_upstream.connection_count_for_lane(&backend_addr, 0), 1);
+    assert_eq!(
+        h2_upstream.connection_count_for_lane(&velda_sock::socket_addr_to_raw(backend_addr), 0),
+        1
+    );
 
     // 4. Traffic Worker (Frontline) acquires multiplexed stream slot on the hot path
     let (ready_client, lease) = h2_upstream
@@ -183,7 +194,10 @@ async fn test_http2_shadow_worker_warmup_end_to_end() {
     );
 
     // Still exactly 1 physical connection in lane 0 (stream multiplexed on existing conn)
-    assert_eq!(h2_upstream.connection_count_for_lane(&backend_addr, 0), 1);
+    assert_eq!(
+        h2_upstream.connection_count_for_lane(&velda_sock::socket_addr_to_raw(backend_addr), 0),
+        1
+    );
 
     drop(ready_client);
     drop(lease);
@@ -196,7 +210,7 @@ async fn test_rdma_shadow_worker_warmup_end_to_end() {
     velda_connection_pool::set_current_thread_lane(0);
 
     let mock_addr: std::net::SocketAddr = "127.0.0.1:9999".parse().unwrap();
-    let endpoint = Endpoint::new("mock-rdma-ep", mock_addr, 1);
+    let endpoint = Endpoint::from_v4([127, 0, 0, 1], 9999, 1);
     let discovery = Discovery::new_explicit(vec![endpoint]);
     let timeouts = UpstreamTimeouts::tcp(Duration::from_secs(2), Duration::from_secs(30));
 
@@ -211,11 +225,17 @@ async fn test_rdma_shadow_worker_warmup_end_to_end() {
     let rdma_upstream = RdmaUpstream::new(edge_upstream, RdmaConfig::mock(), PoolConfig::default());
 
     // Initial state: lane 0 has 0 idle RDMA connections
-    assert_eq!(rdma_upstream.idle_conns_for_lane(&mock_addr, 0), 0);
+    assert_eq!(
+        rdma_upstream.idle_conns_for_lane(&velda_sock::socket_addr_to_raw(mock_addr), 0),
+        0
+    );
 
     // 2. Shadow Worker (Logistics) pre-warms 2 RDMA connections for Lane 0
     rdma_upstream.prewarm_lane(0, 2).await;
-    assert_eq!(rdma_upstream.idle_conns_for_lane(&mock_addr, 0), 2);
+    assert_eq!(
+        rdma_upstream.idle_conns_for_lane(&velda_sock::socket_addr_to_raw(mock_addr), 0),
+        2
+    );
 
     // 3. Traffic Worker (Frontline) acquires connection on the hot path -> instant reuse!
     let lease1 = rdma_upstream
@@ -226,7 +246,10 @@ async fn test_rdma_shadow_worker_warmup_end_to_end() {
         lease1.is_reused,
         "Frontline acquire must hit pre-warmed RDMA connection placed by Shadow Worker!"
     );
-    assert_eq!(rdma_upstream.idle_conns_for_lane(&mock_addr, 0), 1);
+    assert_eq!(
+        rdma_upstream.idle_conns_for_lane(&velda_sock::socket_addr_to_raw(mock_addr), 0),
+        1
+    );
 
     // Second acquire: also an instant hit!
     let lease2 = rdma_upstream
@@ -237,7 +260,10 @@ async fn test_rdma_shadow_worker_warmup_end_to_end() {
         lease2.is_reused,
         "Second acquire must hit second pre-warmed RDMA connection!"
     );
-    assert_eq!(rdma_upstream.idle_conns_for_lane(&mock_addr, 0), 0);
+    assert_eq!(
+        rdma_upstream.idle_conns_for_lane(&velda_sock::socket_addr_to_raw(mock_addr), 0),
+        0
+    );
 
     // Third acquire: cold fallback (connects fresh on demand)
     let lease3 = rdma_upstream
@@ -297,7 +323,8 @@ async fn test_http1_active_health_check_circuit_break_and_recovery() {
 
     velda_connection_pool::set_current_thread_lane(0);
 
-    let endpoint = Endpoint::new("mock-ep", backend_addr, 1);
+    let (backend_ip, backend_port_be) = velda_sock::socket_addr_to_raw(backend_addr);
+    let endpoint = Endpoint::from_raw(backend_ip, backend_port_be, 1);
     let discovery = Discovery::new_explicit(vec![endpoint]);
     let timeouts = UpstreamTimeouts::tcp(Duration::from_secs(1), Duration::from_secs(30));
 
@@ -332,16 +359,15 @@ async fn test_http1_active_health_check_circuit_break_and_recovery() {
         StreamingMode::DISABLED,
         PoolConfig::default(),
         4,
-        velda_http1::Http1AccelerationPath::default(),
         None,
     );
 
     // Initial state: healthy
-    assert!(h1_upstream.is_healthy(&backend_addr));
+    assert!(h1_upstream.is_healthy(&velda_sock::socket_addr_to_raw(backend_addr)));
 
     // First probe: mock backend is running -> succeeds!
     h1_upstream.check_active_health(0, 12345).await;
-    assert!(h1_upstream.is_healthy(&backend_addr));
+    assert!(h1_upstream.is_healthy(&velda_sock::socket_addr_to_raw(backend_addr)));
 
     // Signal mock server and all client streams to stop immediately
     let _ = shutdown_tx.send(true);
@@ -356,7 +382,7 @@ async fn test_http1_active_health_check_circuit_break_and_recovery() {
 
     // After 2 consecutive failures exceeding unhealthy_threshold = 2, endpoint is tripped unhealthy!
     assert!(
-        !h1_upstream.is_healthy(&backend_addr),
+        !h1_upstream.is_healthy(&velda_sock::socket_addr_to_raw(backend_addr)),
         "Endpoint must be tripped unhealthy after exceeding active failure threshold!"
     );
 }

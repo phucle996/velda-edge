@@ -2,7 +2,6 @@
 //!
 //! Provides `RdmaClientResource` for core-lane pooling and `RdmaLease` for RAII lease management.
 
-use std::net::SocketAddr;
 use std::ops::{Deref, DerefMut};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -59,8 +58,8 @@ impl std::fmt::Debug for RdmaClientResource {
 /// Automatically returns healthy channels to the connection pool on drop.
 pub struct RdmaLease {
     pub(crate) channel: Option<RdmaChannel>,
-    pub(crate) endpoint: SocketAddr,
-    pub(crate) pool: Arc<PoolManager<SocketAddr, RdmaClientResource>>,
+    pub(crate) endpoint: (u128, u16),
+    pub(crate) pool: Arc<PoolManager<(u128, u16), RdmaClientResource>>,
     pub(crate) reusable: AtomicBool,
     pub is_reused: bool,
     pub(crate) created_at: Instant,
@@ -108,15 +107,15 @@ impl Drop for RdmaLease {
 impl RdmaLease {
     /// Returns the physical backend endpoint address backing this lease.
     #[inline(always)]
-    pub fn endpoint(&self) -> SocketAddr {
+    pub fn endpoint(&self) -> (u128, u16) {
         self.endpoint
     }
 
     /// Constructs a new `RdmaLease`.
     pub fn new(
         channel: RdmaChannel,
-        endpoint: SocketAddr,
-        pool: Arc<PoolManager<SocketAddr, RdmaClientResource>>,
+        endpoint: (u128, u16),
+        pool: Arc<PoolManager<(u128, u16), RdmaClientResource>>,
         is_reused: bool,
         created_at: Instant,
     ) -> Self {

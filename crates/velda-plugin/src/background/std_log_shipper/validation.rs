@@ -1,7 +1,7 @@
 //! Standard Stream Log Shipper Schema & Validation (`phase: "background"`).
 //!
 //! Validates configuration for [`StdLogShipperPlugin`], which drains reference-counted
-//! 64-byte [`velda_observability::AccessLogRecord`] batches across all protocols (HTTP/1, H2, H3,
+//! 64-byte [`velda_observability::TelemetryRecord`] batches across all protocols (HTTP/1, H2, H3,
 //! gRPC, Raw L4) and formats them into standard text or JSON streams (`stdout`, `stderr`, or file).
 
 use serde::{Deserialize, Serialize};

@@ -46,23 +46,23 @@ fn bench_steady_state_request_serving_zero_alloc(router: &Router) {
     for i in 0..iters {
         match i % 5 {
             0 => {
-                let r = router.route_tcp("l4-in-0");
+                let r = router.route_tcp(velda_core::fnv1a_hash_32("l4-in-0"));
                 let _ = std::hint::black_box(r);
             }
             1 => {
-                if let Some(r) = router.route_udp("l4-in-9") {
+                if let Some(r) = router.route_udp(velda_core::fnv1a_hash_32("l4-in-9")) {
                     let ep = r.id;
                     let _ = std::hint::black_box(ep);
                 }
             }
             2 => {
                 let req = Http1RouteRequest::new(paths[i % paths.len()]).with_host(host);
-                let r = router.route_http1("https-in", &req);
+                let r = router.route_http1(velda_core::fnv1a_hash_32("https-in"), &req);
                 let _ = std::hint::black_box(r);
             }
             3 => {
                 let req = GrpcRouteRequest::new(grpc_srv, None);
-                let r = router.route_grpc("https-in", &req);
+                let r = router.route_grpc(velda_core::fnv1a_hash_32("https-in"), &req);
                 let _ = std::hint::black_box(r);
             }
             _ => {
@@ -207,10 +207,10 @@ fn bench_concurrent_traffic_storm_under_hot_reload() {
             for i in 0..ops_per_worker {
                 let current = r.load();
                 if (i + w) % 2 == 0 {
-                    let route = current.route_http1("https-in", &req);
+                    let route = current.route_http1(velda_core::fnv1a_hash_32("https-in"), &req);
                     let _ = std::hint::black_box(route);
                 } else {
-                    let route = current.route_tcp("l4-in-0");
+                    let route = current.route_tcp(velda_core::fnv1a_hash_32("l4-in-0"));
                     let _ = std::hint::black_box(route);
                 }
             }

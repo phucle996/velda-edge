@@ -1,6 +1,6 @@
 //! ClickHouse Log Shipper Background Coordinator (`clickhouse_log_shipper::plugin`).
 //!
-//! Subscribes to core-local log streams via [`LogStore`], encodes access log batches
+//! Subscribes to core-local log streams via [`TelemetryStore`], encodes access log batches
 //! into high-performance ClickHouse wire formats, and pushes them directly to ClickHouse HTTP API.
 
 use std::future::Future;
@@ -10,7 +10,7 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::Duration;
 
 use tokio::sync::watch;
-use velda_observability::{LogStore, global_log_store};
+use velda_observability::{TelemetryStore, global_telemetry_store};
 
 use crate::background::BackgroundPlugin;
 use crate::capability::{Direction, PluginCapability, SupportedProtocols};
@@ -25,30 +25,30 @@ use super::format::ClickHouseFormat;
 pub struct ClickHouseLogShipperPlugin {
     pub id: String,
     pub config: ClickHouseLogShipperConfig,
-    log_store: Arc<LogStore>,
+    telemetry_store: Arc<TelemetryStore>,
     shipped_records: Arc<AtomicU64>,
     failed_pushes: Arc<AtomicU64>,
 }
 
 impl ClickHouseLogShipperPlugin {
-    /// Constructs a new shipper bound to the global singleton [`LogStore`].
+    /// Constructs a new shipper bound to the global singleton [`TelemetryStore`].
     pub fn new(
         id: impl Into<String>,
         config: ClickHouseLogShipperConfig,
     ) -> Result<Self, PluginError> {
-        Self::with_store(id, config, global_log_store())
+        Self::with_store(id, config, Arc::clone(global_telemetry_store()))
     }
 
-    /// Constructs a new shipper bound to an explicit [`LogStore`].
+    /// Constructs a new shipper bound to an explicit [`TelemetryStore`].
     pub fn with_store(
         id: impl Into<String>,
         config: ClickHouseLogShipperConfig,
-        log_store: Arc<LogStore>,
+        telemetry_store: Arc<TelemetryStore>,
     ) -> Result<Self, PluginError> {
         Ok(Self {
             id: id.into(),
             config,
-            log_store,
+            telemetry_store,
             shipped_records: Arc::new(AtomicU64::new(0)),
             failed_pushes: Arc::new(AtomicU64::new(0)),
         })
@@ -60,7 +60,7 @@ impl ClickHouseLogShipperPlugin {
             super::validation::validate_clickhouse_log_shipper_config(&config.id, &config.config)
                 .map_err(|e| PluginError::Config(e.to_string()))?;
 
-        Self::with_store(&config.id, validated, global_log_store())
+        Self::with_store(&config.id, validated, Arc::clone(global_telemetry_store()))
     }
 
     /// Returns cumulative total of successfully shipped log records.
@@ -100,7 +100,7 @@ impl BackgroundPlugin for ClickHouseLogShipperPlugin {
         mut shutdown: watch::Receiver<bool>,
     ) -> Pin<Box<dyn Future<Output = Result<(), PluginError>> + Send>> {
         Box::pin(async move {
-            let subscriber = self.log_store.subscribe(256);
+            let subscriber = self.telemetry_store.subscribe(256);
             let mut interval = tokio::time::interval(Duration::from_millis(
                 self.config.flush_interval_ms.max(100),
             ));

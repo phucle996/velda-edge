@@ -17,7 +17,7 @@ use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::TcpListener;
 use tokio::sync::watch;
 use velda_core::{CompletionReason, GrpcStatus, HttpMethod, PipeKind};
-use velda_observability::{AccessLogRecord, LogBatch, LogStore};
+use velda_observability::{TelemetryBatch, TelemetryRecord, TelemetryStore};
 
 use velda_plugin::background::BackgroundPlugin;
 use velda_plugin::background::loki_log_shipper::json::LokiJsonFormatter;
@@ -35,8 +35,8 @@ fn parse_ip(s: &str) -> std::net::IpAddr {
     }
 }
 
-fn create_sample_http_record(id: u64, ts: u32, ip_str: &str) -> AccessLogRecord {
-    let mut rec = AccessLogRecord::zeroed();
+fn create_sample_http_record(id: u64, ts: u32, ip_str: &str) -> TelemetryRecord {
+    let mut rec = TelemetryRecord::zeroed();
     rec.request_id = id;
     rec.ingress_time_nanos = (ts as u64) * 1_000_000_000;
     rec.duration_ns = 320;
@@ -58,8 +58,8 @@ fn create_sample_http_record(id: u64, ts: u32, ip_str: &str) -> AccessLogRecord 
     rec
 }
 
-fn create_sample_grpc_record(id: u64, ts: u32, ip_str: &str) -> AccessLogRecord {
-    let mut rec = AccessLogRecord::zeroed();
+fn create_sample_grpc_record(id: u64, ts: u32, ip_str: &str) -> TelemetryRecord {
+    let mut rec = TelemetryRecord::zeroed();
     rec.request_id = id;
     rec.ingress_time_nanos = (ts as u64) * 1_000_000_000;
     rec.duration_ns = 890;
@@ -82,8 +82,8 @@ fn create_sample_grpc_record(id: u64, ts: u32, ip_str: &str) -> AccessLogRecord 
     rec
 }
 
-fn create_sample_raw_record(id: u64, ts: u32) -> AccessLogRecord {
-    let mut rec = AccessLogRecord::zeroed();
+fn create_sample_raw_record(id: u64, ts: u32) -> TelemetryRecord {
+    let mut rec = TelemetryRecord::zeroed();
     rec.request_id = id;
     rec.ingress_time_nanos = (ts as u64) * 1_000_000_000;
     rec.duration_ns = 1200;
@@ -122,7 +122,7 @@ async fn test_loki_multi_protocol_e2e() {
         }
     });
 
-    let store = Arc::new(LogStore::with_cores_and_capacity(2, 128));
+    let store = Arc::new(TelemetryStore::with_cores_and_capacity(2, 128));
 
     let mut labels = HashMap::new();
     labels.insert("env".to_string(), "test".to_string());
@@ -250,7 +250,7 @@ async fn test_loki_log_shipper_grpc_end_to_end() {
         }
     });
 
-    let store = Arc::new(LogStore::with_cores_and_capacity(2, 128));
+    let store = Arc::new(TelemetryStore::with_cores_and_capacity(2, 128));
 
     let mut labels = HashMap::new();
     labels.insert("cluster".to_string(), "edge-us".to_string());
@@ -329,7 +329,7 @@ fn test_loki_json_zero_alloc() {
     let mut formatter = LokiJsonFormatter::new("svc", &labels);
 
     let rec = create_sample_http_record(0x1122_3344_5566_7788, 1_710_000_000, "127.0.0.1:80");
-    let batch = vec![LogBatch::from_arc(Arc::from(vec![rec]))];
+    let batch = vec![TelemetryBatch::from_arc(Arc::from(vec![rec]))];
     let mut out = Vec::new();
 
     // Cycle 1
@@ -353,7 +353,7 @@ fn test_loki_proto_decode() {
     let rec2 = create_sample_grpc_record(0x2222_2222_2222_2222, 1_710_000_002, "192.168.1.2:90");
     let rec3 = create_sample_raw_record(0x3333_3333_3333_3333, 1_710_000_003);
 
-    let batches = vec![LogBatch::from_arc(Arc::from(vec![rec1, rec2, rec3]))];
+    let batches = vec![TelemetryBatch::from_arc(Arc::from(vec![rec1, rec2, rec3]))];
     let mut wire_out = Vec::new();
 
     let n = format_loki_records_proto(&batches, &proto_labels, &mut wire_out);

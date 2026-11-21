@@ -15,12 +15,10 @@ use std::time::{Duration, Instant};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::{TcpListener, TcpStream, UdpSocket};
 
-use velda_core::{ConnectionId, Endpoint};
+use velda_core::Endpoint;
 use velda_discovery::Discovery;
 use velda_edge::pipeline::l4::{SessionAcquisition, UdpSessionKey, get_udp_session_table};
-use velda_edge::upstream::{
-    LbAlgorithm, TcpAccelerationPath, TcpUpstream, UdpAccelerationPath, UdpUpstream,
-};
+use velda_edge::upstream::{LbAlgorithm, TcpUpstream, UdpUpstream};
 use velda_lb::SelectionContext;
 use velda_router::UdpSessionAffinity;
 use velda_sock::{Connection, Datagram};
@@ -75,11 +73,13 @@ async fn bench_l4_tcp_splicing_throughput() {
     let gateway_listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
     let gateway_addr = gateway_listener.local_addr().unwrap();
 
-    let discovery = Discovery::new_explicit(vec![Endpoint::new("tcp-be-1", backend_addr, 1)]);
+    let (backend_ip, backend_port_be) = velda_sock::socket_addr_to_raw(backend_addr);
+    let discovery =
+        Discovery::new_explicit(vec![Endpoint::from_raw(backend_ip, backend_port_be, 1)]);
     let timeouts = UpstreamTimeouts::tcp(Duration::from_secs(2), Duration::from_secs(30));
     let balancer = LbAlgorithm::from_name("round_robin");
     let inner_up = Upstream::new("tcp_raw_up", "tcp", discovery, balancer, timeouts);
-    let tcp_upstream = Arc::new(TcpUpstream::new(inner_up, TcpAccelerationPath::default()));
+    let tcp_upstream = Arc::new(TcpUpstream::new(inner_up));
 
     let gateway_stop = Arc::new(AtomicBool::new(false));
     let gateway_stop_clone = Arc::clone(&gateway_stop);
@@ -89,11 +89,15 @@ async fn bench_l4_tcp_splicing_throughput() {
         while !gateway_stop_clone.load(Ordering::Relaxed) {
             if let Ok((client_stream, client_addr)) = gateway_listener.accept().await {
                 let _ = client_stream.set_nodelay(true);
+                let (peer_ip, peer_port_be) = velda_sock::socket_addr_to_raw(client_addr);
+                let (local_ip, local_port_be) = velda_sock::socket_addr_to_raw(gateway_addr);
                 let conn = Connection::new(
-                    ConnectionId::new(1),
+                    1,
                     client_stream,
-                    client_addr,
-                    gateway_addr,
+                    peer_ip,
+                    peer_port_be,
+                    local_ip,
+                    local_port_be,
                 );
                 let up = Arc::clone(&tcp_up_clone);
                 tokio::spawn(async move {
@@ -216,16 +220,17 @@ async fn bench_l4_udp_game_telemetry_rtt() {
     });
 
     // 2. Velda Edge UDP Ingress
+    let loopback_ip = velda_core::lut::ip::v4_to_u128(u32::from_be_bytes([127, 0, 0, 1]));
     let gateway_sock = Arc::new(
-        velda_sock::UdpSocket::bind(
-            "127.0.0.1:0".parse().unwrap(),
-            velda_sock::UdpSocketConfig::default(),
-        )
-        .unwrap(),
+        velda_sock::UdpSocket::bind(loopback_ip, 0, velda_sock::UdpSocketConfig::default())
+            .unwrap(),
     );
-    let gateway_addr = gateway_sock.local_addr();
+    let gateway_addr =
+        velda_sock::raw_to_socket_addr(gateway_sock.local_ip, gateway_sock.local_port_be);
 
-    let discovery = Discovery::new_explicit(vec![Endpoint::new("udp-game-1", backend_addr, 1)]);
+    let (backend_ip, backend_port_be) = velda_sock::socket_addr_to_raw(backend_addr);
+    let discovery =
+        Discovery::new_explicit(vec![Endpoint::from_raw(backend_ip, backend_port_be, 1)]);
     let timeouts = UpstreamTimeouts::tcp(Duration::from_secs(1), Duration::from_secs(30));
     let inner_up = Upstream::new(
         "udp_game_up",
@@ -234,7 +239,7 @@ async fn bench_l4_udp_game_telemetry_rtt() {
         LbAlgorithm::from_name("round_robin"),
         timeouts,
     );
-    let udp_upstream = Arc::new(UdpUpstream::new(inner_up, UdpAccelerationPath::default()));
+    let udp_upstream = Arc::new(UdpUpstream::new(inner_up));
 
     let table = get_udp_session_table();
     table.clear();
@@ -271,20 +276,25 @@ async fn bench_l4_udp_game_telemetry_rtt() {
                 client_sock.send_to(&pkt, gw).await.unwrap();
 
                 // Gateway receives and drives pipeline
+                let (c_ip, c_port_be) =
+                    velda_sock::socket_addr_to_raw(client_sock.local_addr().unwrap());
+                let (gw_ip, gw_port_be) = velda_sock::socket_addr_to_raw(gw);
                 let dgram = Datagram::new(
-                    client_sock.local_addr().unwrap(),
-                    gw,
+                    c_ip,
+                    c_port_be,
+                    gw_ip,
+                    gw_port_be,
                     bytes::Bytes::copy_from_slice(&pkt),
                 );
 
-                let key = velda_edge::pipeline::l4::UdpSessionKey {
-                    listener_id: Arc::from("game_listener"),
-                    client_addr: dgram.peer(),
-                    token: None,
-                };
+                let (c_ip, c_port_be) = (dgram.peer_ip, dgram.peer_port_be);
+                let key = velda_edge::pipeline::l4::UdpSessionKey::peer(
+                    Arc::from("game_listener"),
+                    c_ip,
+                    c_port_be,
+                );
 
                 let table = get_udp_session_table();
-                let client_addr = dgram.peer();
                 let data = dgram.into_bytes();
 
                 if let Some(sender) = table.get_sender(&key) {
@@ -298,7 +308,7 @@ async fn bench_l4_udp_game_telemetry_rtt() {
                     let s_key = key.clone();
 
                     tokio::spawn(async move {
-                        if let Ok(u_sock) = up_clone.connect_socket(target_addr) {
+                        if let Ok(u_sock) = up_clone.connect_socket(target_addr.0, target_addr.1) {
                             let _ = u_sock.send(&data).await;
                             let mut r_buf = [0u8; 2048];
                             let mut rx = rx;
@@ -309,7 +319,7 @@ async fn bench_l4_udp_game_telemetry_rtt() {
                                         let _ = u_sock.send(&c_data).await;
                                     }
                                     Ok(n) = u_sock.recv(&mut r_buf) => {
-                                        let _ = gw_s.send_to(&r_buf[..n], client_addr).await;
+                                        let _ = gw_s.send_to(&r_buf[..n], c_ip, c_port_be).await;
                                     }
                                     _ = tokio::time::sleep(Duration::from_millis(500)) => {
                                         break;
@@ -414,13 +424,16 @@ async fn bench_l4_udp_anti_zombie_eviction() {
     let start = Instant::now();
 
     for i in 0..num_zombies {
-        let key = velda_edge::pipeline::l4::UdpSessionKey {
-            listener_id: Arc::from("zombie_listener"),
-            client_addr: format!("192.168.1.{}:{}", (i % 250) + 1, 10000 + i)
-                .parse()
-                .unwrap(),
-            token: None,
-        };
+        let key = velda_edge::pipeline::l4::UdpSessionKey::peer(
+            Arc::from("zombie_listener"),
+            velda_core::lut::ip::v4_to_u128(u32::from_be_bytes([
+                192,
+                168,
+                1,
+                ((i % 250) + 1) as u8,
+            ])),
+            (10000 + i as u16).to_be(),
+        );
 
         if let velda_edge::pipeline::l4::SessionAcquisition::Created { rx, .. } =
             table.get_or_create(&key, table.max_sessions())
@@ -604,13 +617,11 @@ async fn bench_l4_adversarial_security_suite() {
     let mut attacker_txs = Vec::with_capacity(num_attackers);
 
     for i in 0..num_attackers {
-        let key = velda_edge::pipeline::l4::UdpSessionKey {
-            listener_id: Arc::from("sec_listener"),
-            client_addr: format!("10.99.1.{}:{}", (i % 250) + 1, 20000 + i)
-                .parse()
-                .unwrap(),
-            token: None,
-        };
+        let key = velda_edge::pipeline::l4::UdpSessionKey::peer(
+            Arc::from("sec_listener"),
+            velda_core::lut::ip::v4_to_u128(u32::from_be_bytes([10, 99, 1, ((i % 250) + 1) as u8])),
+            (20000 + i as u16).to_be(),
+        );
 
         if let velda_edge::pipeline::l4::SessionAcquisition::Created { sender: _, rx } =
             table.get_or_create(&key, table.max_sessions())
@@ -707,14 +718,19 @@ async fn bench_l4_adversarial_security_suite() {
 
     for i in 0..100_000 {
         let peer = bogon_peers[i % bogon_peers.len()];
+        let (peer_ip, peer_port_be) = velda_sock::socket_addr_to_raw(peer);
+        let (local_ip, local_port_be) = velda_sock::socket_addr_to_raw(test_socket_addr);
         let dgram = Datagram::new(
-            peer,
-            test_socket_addr,
+            peer_ip,
+            peer_port_be,
+            local_ip,
+            local_port_be,
             bytes::Bytes::from_static(b"bogon_payload"),
         );
 
         // Inline check identical to handle_l4_udp line 1
-        let client_addr = dgram.peer();
+        let client_addr = velda_sock::raw_to_socket_addr(dgram.peer_ip, dgram.peer_port_be);
+        let local_addr = velda_sock::raw_to_socket_addr(dgram.local_ip, dgram.local_port_be);
         let client_ip = client_addr.ip();
         let client_port = client_addr.port();
 
@@ -725,7 +741,7 @@ async fn bench_l4_adversarial_security_suite() {
                 std::net::IpAddr::V4(v4) => v4.is_broadcast(),
                 std::net::IpAddr::V6(_) => false,
             }
-            || client_addr == dgram.local_addr();
+            || client_addr == local_addr;
 
         if is_bogon {
             dropped_bogons += 1;
@@ -846,18 +862,19 @@ async fn bench_l4_udp_game_affinity_and_nat_rebinding() {
     });
 
     // 2. Velda Edge UDP Ingress Gateway with Hash / Maglev Balancer
+    let loopback_ip = velda_core::lut::ip::v4_to_u128(u32::from_be_bytes([127, 0, 0, 1]));
     let gateway_sock = Arc::new(
-        velda_sock::UdpSocket::bind(
-            "127.0.0.1:0".parse().unwrap(),
-            velda_sock::UdpSocketConfig::default(),
-        )
-        .unwrap(),
+        velda_sock::UdpSocket::bind(loopback_ip, 0, velda_sock::UdpSocketConfig::default())
+            .unwrap(),
     );
-    let gateway_addr = gateway_sock.local_addr();
+    let gateway_addr =
+        velda_sock::raw_to_socket_addr(gateway_sock.local_ip, gateway_sock.local_port_be);
 
+    let (sa_ip, sa_port_be) = velda_sock::socket_addr_to_raw(server_a_addr);
+    let (sb_ip, sb_port_be) = velda_sock::socket_addr_to_raw(server_b_addr);
     let discovery = Discovery::new_explicit(vec![
-        Endpoint::new("game-server-a", server_a_addr, 1),
-        Endpoint::new("game-server-b", server_b_addr, 1),
+        Endpoint::from_raw(sa_ip, sa_port_be, 1),
+        Endpoint::from_raw(sb_ip, sb_port_be, 1),
     ]);
     let timeouts = UpstreamTimeouts::tcp(Duration::from_secs(1), Duration::from_secs(30));
     let inner_up = Upstream::new(
@@ -867,7 +884,7 @@ async fn bench_l4_udp_game_affinity_and_nat_rebinding() {
         LbAlgorithm::from_name("hash"),
         timeouts,
     );
-    let udp_upstream = Arc::new(UdpUpstream::new(inner_up, UdpAccelerationPath::default()));
+    let udp_upstream = Arc::new(UdpUpstream::new(inner_up));
 
     let table = get_udp_session_table();
     table.clear();
@@ -930,18 +947,26 @@ async fn bench_l4_udp_game_affinity_and_nat_rebinding() {
                 current_sock.send_to(&pkt, gw).await.unwrap();
 
                 // Drive gateway pipeline
-                let dgram = Datagram::new(cur_client_addr, gw, bytes::Bytes::copy_from_slice(&pkt));
-                let client_addr = dgram.peer();
+                let (c_ip, c_port_be) = velda_sock::socket_addr_to_raw(cur_client_addr);
+                let (gw_ip, gw_port_be) = velda_sock::socket_addr_to_raw(gw);
+                let dgram = Datagram::new(
+                    c_ip,
+                    c_port_be,
+                    gw_ip,
+                    gw_port_be,
+                    bytes::Bytes::copy_from_slice(&pkt),
+                );
+                let (peer_ip, peer_port_be) = (dgram.peer_ip, dgram.peer_port_be);
                 let data = dgram.into_bytes();
 
                 let token = affinity.extract_token(&data);
                 let key = match token {
-                    Some(tok) => UdpSessionKey::token(Arc::from("fps_listener"), client_addr, tok),
-                    None => UdpSessionKey::peer(Arc::from("fps_listener"), client_addr),
+                    Some(tok) => UdpSessionKey::token(Arc::from("fps_listener"), peer_ip, peer_port_be, tok),
+                    None => UdpSessionKey::peer(Arc::from("fps_listener"), peer_ip, peer_port_be),
                 };
 
                 let table = get_udp_session_table();
-                match table.try_forward(&key, client_addr, data) {
+                match table.try_forward(&key, peer_ip, peer_port_be, data) {
                     Ok(true) => {}
                     Ok(false) => {
                         // buffer full
@@ -950,24 +975,22 @@ async fn bench_l4_udp_game_affinity_and_nat_rebinding() {
                         // Create new session with LB affinity selection
                         let selection_ctx = match token {
                             Some(tok) => SelectionContext::with_hash(tok),
-                            None => SelectionContext::with_client_ip(
-                                velda_core::lut::ip::encode_ip_u128(client_addr.ip()),
-                            ),
+                            None => SelectionContext::with_client_ip(peer_ip),
                         };
 
                         if let Some(target_addr) = up.select_target_with_context(&selection_ctx)
                             && let SessionAcquisition::Created { rx, .. } =
                                 table.get_or_create(&key, table.max_sessions())
                         {
-                            let session_peer = table
-                                .get_peer(&key)
-                                .unwrap_or_else(|| Arc::new(parking_lot::RwLock::new(client_addr)));
+                            let session_peer = table.get_peer(&key).unwrap_or_else(|| {
+                                Arc::new(parking_lot::RwLock::new((peer_ip, peer_port_be)))
+                            });
                             let up_clone = Arc::clone(&up);
                             let gw_s = Arc::clone(&gw_sock);
                             let s_key = key.clone();
 
                             tokio::spawn(async move {
-                                if let Ok(u_sock) = up_clone.connect_socket(target_addr) {
+                                if let Ok(u_sock) = up_clone.connect_socket(target_addr.0, target_addr.1) {
                                     let _ = u_sock.send(&recovered).await;
                                     let mut r_buf = [0u8; 2048];
                                     let mut rx = rx;
@@ -978,8 +1001,8 @@ async fn bench_l4_udp_game_affinity_and_nat_rebinding() {
                                                 let _ = u_sock.send(&c_data).await;
                                             }
                                             Ok(n) = u_sock.recv(&mut r_buf) => {
-                                                let dest_peer = *session_peer.read();
-                                                let _ = gw_s.send_to(&r_buf[..n], dest_peer).await;
+                                                let (d_ip, d_port_be) = *session_peer.read();
+                                                let _ = gw_s.send_to(&r_buf[..n], d_ip, d_port_be).await;
                                             }
                                             _ = tokio::time::sleep(Duration::from_millis(500)) => {
                                                 break;

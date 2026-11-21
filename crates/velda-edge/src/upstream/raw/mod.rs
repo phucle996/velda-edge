@@ -10,6 +10,6 @@ pub mod udp;
 pub mod udp_connector;
 
 pub use tcp::TcpUpstream;
-pub use tcp_connector::{TcpAccelerationPath, connect_tcp_stream};
+pub use tcp_connector::connect_tcp_stream;
 pub use udp::UdpUpstream;
-pub use udp_connector::{UdpAccelerationPath, connect_udp_socket};
+pub use udp_connector::connect_udp_socket;

@@ -11,7 +11,7 @@
 
 use prost::Message;
 use velda_core::GrpcStatus;
-use velda_observability::{AccessLogRecord, LogBatch};
+use velda_observability::{TelemetryBatch, TelemetryRecord};
 
 use velda_core::lut::ip::fast_write_ip;
 use velda_core::request_id::fast_write_hex32;
@@ -196,8 +196,8 @@ impl LogRecord {
         }
     }
 
-    /// Mutates pre-allocated LogRecord template in-place from scalar [`AccessLogRecord`].
-    pub fn populate_from_record(&mut self, rec: &AccessLogRecord) {
+    /// Mutates pre-allocated LogRecord template in-place from scalar [`TelemetryRecord`].
+    pub fn populate_from_record(&mut self, rec: &TelemetryRecord) {
         let downstream_protocol = rec.downstream_protocol();
         let upstream_protocol = rec.upstream_protocol();
         let method = rec.method;
@@ -363,9 +363,9 @@ impl LogRecord {
     }
 }
 
-/// Helper to format batches of [`AccessLogRecord`] into a Prost `ExportLogsServiceRequest`.
+/// Helper to format batches of [`TelemetryRecord`] into a Prost `ExportLogsServiceRequest`.
 pub fn format_otlp_records_proto(
-    batches: &[LogBatch],
+    batches: &[TelemetryBatch],
     service_name: &str,
 ) -> (ExportLogsServiceRequest, usize) {
     let total_recs: usize = batches.iter().map(|b| b.len()).sum();
@@ -379,7 +379,7 @@ pub fn format_otlp_records_proto(
                 unsafe {
                     use core::arch::x86_64::*;
                     let next_rec =
-                        recs.get_unchecked(idx + 4) as *const AccessLogRecord as *const i8;
+                        recs.get_unchecked(idx + 4) as *const TelemetryRecord as *const i8;
                     _mm_prefetch(next_rec, _MM_HINT_T1);
                     _mm_prefetch(next_rec.add(64), _MM_HINT_T1);
                     _mm_prefetch(next_rec.add(128), _MM_HINT_T1);

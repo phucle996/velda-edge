@@ -18,7 +18,7 @@ pub async fn serve(
     upstream: &Arc<Http2Upstream>,
 ) -> (
     L7Response,
-    Option<std::net::SocketAddr>,
+    Option<(u128, u16)>,
     velda_core::CompletionReason,
 ) {
     let mut headers = req.headers.clone().into_inner();

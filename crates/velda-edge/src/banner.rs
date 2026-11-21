@@ -31,7 +31,11 @@ pub fn format_startup_banner(
     let ram_display = format!("{ram_gb:.1} GB");
     let cpu_branding = read_cpu_branding(hardware.available_cores);
     let (nic_name, nic_caps) = read_nic_summary(hardware);
-    let accel_str = hardware.kernel.acceleration.as_str();
+    let accel_str = if hardware.kernel.version.is_at_least(5, 10) {
+        "linux_fast_path"
+    } else {
+        "standard"
+    };
     let kernel_ver_str = hardware.kernel.version.to_string();
 
     let listeners_display = if listeners.is_empty() {

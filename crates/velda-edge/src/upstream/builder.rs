@@ -4,7 +4,7 @@ use std::net::SocketAddr;
 use std::sync::Arc;
 
 use rustc_hash::FxHashMap;
-use velda_core::{Endpoint, UpstreamId};
+use velda_core::Endpoint;
 use velda_discovery::{
     Discovery, DnsResolverConfig, DnsResolverProvider, HostsFileSource, ResolvConfServerProvider,
     StaticServerProvider, UdpDnsTransport,
@@ -18,7 +18,7 @@ use velda_upstream::{
 use super::grpc::{GrpcRdmaUpstream, GrpcTcpUpstream, GrpcUdpUpstream};
 use super::http::{Http1Upstream, Http2Upstream, Http3Upstream};
 use super::lb::LbAlgorithm;
-use super::raw::{TcpAccelerationPath, TcpUpstream, UdpAccelerationPath, UdpUpstream};
+use super::raw::{TcpUpstream, UdpUpstream};
 use super::rdma::RdmaUpstream;
 use super::table::{GrpcUpstream, HttpUpstream, RawUpstream, SubUpstreamTable, UpstreamTable};
 
@@ -67,10 +67,10 @@ pub fn build_upstreams(
 
     for (idx, config) in configs.iter().enumerate() {
         let mut endpoints = Vec::new();
-        for (i, ep) in config.endpoints.iter().enumerate() {
+        for ep in &config.endpoints {
             if let Ok(addr) = ep.address.parse::<SocketAddr>() {
-                let id = format!("{}-ep-{}", config.id, i);
-                endpoints.push(Endpoint::new(id, addr, ep.weight));
+                let (ip, port_be) = velda_sock::socket_addr_to_raw(addr);
+                endpoints.push(Endpoint::from_raw(ip, port_be, ep.weight));
             }
         }
 
@@ -80,9 +80,11 @@ pub fn build_upstreams(
         if let Some(ref target) = config.target {
             if let Ok(ip) = target.host.parse::<std::net::IpAddr>() {
                 if endpoints.is_empty() {
-                    let addr = SocketAddr::new(ip, target.port);
-                    let id = format!("{}-target", config.id);
-                    endpoints.push(Endpoint::new(id, addr, 1));
+                    let ep = match ip {
+                        std::net::IpAddr::V4(v4) => Endpoint::from_v4(v4.octets(), target.port, 1),
+                        std::net::IpAddr::V6(v6) => Endpoint::from_v6(v6.octets(), target.port, 1),
+                    };
+                    endpoints.push(ep);
                 }
             } else {
                 dns_hostname_target = Some((target.host.clone(), target.port));
@@ -305,7 +307,7 @@ pub fn build_upstreams(
             _ => None,
         };
 
-        let uid = UpstreamId::new(idx as u16);
+        let uid = idx as u16;
 
         if transport == "rdma" && app != "grpc" {
             let rdma_config = velda_rdma::RdmaConfig {
@@ -365,13 +367,6 @@ pub fn build_upstreams(
                         )))),
                     );
                 } else {
-                    let grpc_acceleration =
-                        velda_grpc::tcp::client::GrpcAccelerationPath::for_topology(
-                            topology,
-                            timeouts.connect,
-                            timeouts.idle,
-                            is_tls,
-                        );
                     grpc_map.insert(
                         uid,
                         Arc::new(GrpcUpstream::Tcp(Arc::new(GrpcTcpUpstream::new(
@@ -380,7 +375,6 @@ pub fn build_upstreams(
                             config.protocol.streaming,
                             shard_count,
                             max_streams,
-                            grpc_acceleration,
                         )))),
                     );
                 }
@@ -413,12 +407,6 @@ pub fn build_upstreams(
                 );
             }
             "http2" => {
-                let http2_acceleration = velda_http2::Http2AccelerationPath::for_topology(
-                    topology,
-                    timeouts.connect,
-                    timeouts.idle,
-                    is_tls,
-                );
                 http_map.insert(
                     uid,
                     Arc::new(HttpUpstream::Http2(Arc::new(Http2Upstream::new(
@@ -428,17 +416,10 @@ pub fn build_upstreams(
                         shard_count,
                         mux_conns,
                         max_streams,
-                        http2_acceleration,
                     )))),
                 );
             }
             "http" | "http1" => {
-                let http1_acceleration = velda_http1::Http1AccelerationPath::for_topology(
-                    topology,
-                    timeouts.connect,
-                    timeouts.idle,
-                    is_tls,
-                );
                 http_map.insert(
                     uid,
                     Arc::new(HttpUpstream::Http1(Arc::new(Http1Upstream::new(
@@ -447,30 +428,20 @@ pub fn build_upstreams(
                         config.protocol.streaming,
                         pool_config,
                         shard_count,
-                        http1_acceleration,
                         config.buffer.as_ref(),
                     )))),
                 );
             }
             "raw" | "udp" if transport == "udp" => {
-                let udp_acceleration = UdpAccelerationPath::for_topology(topology);
                 raw_map.insert(
                     uid,
-                    Arc::new(RawUpstream::Udp(Arc::new(UdpUpstream::new(
-                        inner,
-                        udp_acceleration,
-                    )))),
+                    Arc::new(RawUpstream::Udp(Arc::new(UdpUpstream::new(inner)))),
                 );
             }
             "raw" | "tcp" => {
-                let tcp_acceleration =
-                    TcpAccelerationPath::for_topology(topology, &timeouts, is_tls);
                 raw_map.insert(
                     uid,
-                    Arc::new(RawUpstream::Tcp(Arc::new(TcpUpstream::new(
-                        inner,
-                        tcp_acceleration,
-                    )))),
+                    Arc::new(RawUpstream::Tcp(Arc::new(TcpUpstream::new(inner)))),
                 );
             }
             other => {
@@ -637,15 +608,15 @@ mod tests {
         assert_eq!(table.rdma.len(), 1);
         assert_eq!(table.len(), 9);
 
-        assert!(table.get_raw(UpstreamId::new(2)).is_some());
-        assert!(table.get_raw(UpstreamId::new(3)).is_some());
-        assert!(table.get_raw(UpstreamId::new(7)).is_some());
-        assert!(table.get_http(UpstreamId::new(0)).is_some());
-        assert!(table.get_http(UpstreamId::new(1)).is_some());
-        assert!(table.get_http(UpstreamId::new(6)).is_some());
-        assert!(table.get_grpc(UpstreamId::new(4)).is_some());
-        assert!(table.get_grpc(UpstreamId::new(5)).is_some());
-        assert!(table.get_rdma(UpstreamId::new(7)).is_some());
+        assert!(table.get_raw(2).is_some());
+        assert!(table.get_raw(3).is_some());
+        assert!(table.get_raw(7).is_some());
+        assert!(table.get_http(0).is_some());
+        assert!(table.get_http(1).is_some());
+        assert!(table.get_http(6).is_some());
+        assert!(table.get_grpc(4).is_some());
+        assert!(table.get_grpc(5).is_some());
+        assert!(table.get_rdma(7).is_some());
     }
 
     #[test]
@@ -663,7 +634,7 @@ mod tests {
 
         let table = build_upstreams_default(&[cfg], None);
         assert_eq!(table.http.len(), 1);
-        let u = table.get_http(UpstreamId::new(0)).unwrap();
+        let u = table.get_http(0).unwrap();
         assert_eq!(u.id(), "u-dns");
     }
 

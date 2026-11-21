@@ -10,7 +10,7 @@
 //! │     raw_labels:  {service="velda-edge",protocol="raw",...}                             │
 //! │                                                                                        │
 //! │  2. Zero-Allocation Wire Serialization (LokiProtoFormatter):                           │
-//! │     AccessLogRecord (64B SPSC Ring)                                                    │
+//! │     TelemetryRecord (64B SPSC Ring)                                                    │
 //! │           │                                                                            │
 //! │           ▼                                                                            │
 //! │     Format log line text into scratch line_buf (32-hex request_id, RFC 5952 IP)         │
@@ -33,7 +33,7 @@
 use std::collections::HashMap;
 
 use velda_core::WireProtocol;
-use velda_observability::{AccessLogRecord, LogBatch};
+use velda_observability::{TelemetryBatch, TelemetryRecord};
 
 use velda_core::lut::decimal::fast_write_u64;
 use velda_core::lut::ip::{fast_write_ip, fast_write_ipv4};
@@ -142,11 +142,11 @@ impl LokiProtoFormatter {
         }
     }
 
-    /// Serializes batches of reference-counted [`AccessLogRecord`] into a binary Protobuf
+    /// Serializes batches of reference-counted [`TelemetryRecord`] into a binary Protobuf
     /// `logproto.PushRequest` wire payload.
     ///
     /// Guarantees 0 heap allocations during export flush cycle.
-    pub fn format_batches(&mut self, batches: &[LogBatch], out: &mut Vec<u8>) -> usize {
+    pub fn format_batches(&mut self, batches: &[TelemetryBatch], out: &mut Vec<u8>) -> usize {
         out.clear();
         self.http_entries_buf.clear();
         self.grpc_entries_buf.clear();
@@ -162,7 +162,7 @@ impl LokiProtoFormatter {
                     unsafe {
                         use core::arch::x86_64::*;
                         let next_rec =
-                            recs.get_unchecked(idx + 4) as *const AccessLogRecord as *const i8;
+                            recs.get_unchecked(idx + 4) as *const TelemetryRecord as *const i8;
                         _mm_prefetch(next_rec, _MM_HINT_T1);
                         _mm_prefetch(next_rec.add(64), _MM_HINT_T1);
                         _mm_prefetch(next_rec.add(128), _MM_HINT_T1);
@@ -401,7 +401,7 @@ impl LokiProtoFormatter {
 
 /// Standalone formatting helper for Grafana Loki PushRequest wire format.
 pub fn format_loki_records_proto(
-    batches: &[LogBatch],
+    batches: &[TelemetryBatch],
     labels: &LokiProtoLabels,
     out: &mut Vec<u8>,
 ) -> usize {
@@ -423,7 +423,7 @@ mod tests {
         labels.insert("env".to_string(), "staging".to_string());
         let mut formatter = LokiProtoFormatter::new("my-service", &labels);
 
-        let mut http_rec = AccessLogRecord::zeroed();
+        let mut http_rec = TelemetryRecord::zeroed();
         http_rec.request_id = 0xaaaa_bbbb_cccc_dddd;
         http_rec.ingress_time_nanos = 1_710_000_001_123_456_789;
         http_rec.duration_ns = 320;
@@ -444,7 +444,7 @@ mod tests {
         http_rec.ua_os = os;
         http_rec.ua_major_version = ver;
 
-        let mut grpc_rec = AccessLogRecord::zeroed();
+        let mut grpc_rec = TelemetryRecord::zeroed();
         grpc_rec.request_id = 0x1111_2222_3333_4444;
         grpc_rec.ingress_time_nanos = 1_710_000_002_987_654_321;
         grpc_rec.duration_ns = 890;
@@ -466,7 +466,9 @@ mod tests {
         grpc_rec.ua_os = os;
         grpc_rec.ua_major_version = ver;
 
-        let batches = vec![LogBatch::from_arc(Arc::from(vec![http_rec, grpc_rec]))];
+        let batches = vec![TelemetryBatch::from_arc(Arc::from(vec![
+            http_rec, grpc_rec,
+        ]))];
         let mut wire_out = Vec::new();
         let count = formatter.format_batches(&batches, &mut wire_out);
         assert_eq!(count, 2);

@@ -14,7 +14,7 @@ use std::sync::RwLock;
 
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::TcpListener;
-use velda_core::{ListenerId, RouteId};
+use velda_core::fnv1a_hash_32;
 use velda_plugin::background::acme_cert_rotator::hot_swap::TlsHotSwapper;
 use velda_plugin::background::acme_cert_rotator::storage::CertStorage;
 use velda_plugin::background::acme_cert_rotator::{AcmeCertRotatorConfig, AcmeCertRotatorPlugin};
@@ -230,9 +230,8 @@ async fn test_acme_cert_rotator_e2e_lifecycle() {
     };
 
     // 1. Setup in-memory Router and dynamic SniResolver
-    let listener_id = ListenerId::from("ingress-http");
-    let http1 =
-        Http1Router::new(vec![Http1Route::new(RouteId::new(1), listener_id, "/api")]).unwrap();
+    let listener_id = fnv1a_hash_32("ingress-http");
+    let http1 = Http1Router::new(vec![Http1Route::new(1, listener_id, "/api")]).unwrap();
 
     let router = Arc::new(RwLock::new(Router::new(
         Default::default(),
@@ -292,10 +291,7 @@ async fn test_acme_cert_rotator_e2e_lifecycle() {
 
         // Regular traffic route remains untouched and functional
         let api_req = Http1RouteRequest::new("/api/users");
-        assert_eq!(
-            r.route_http1(listener_id, &api_req).unwrap().id,
-            RouteId::new(1)
-        );
+        assert_eq!(r.route_http1(listener_id, &api_req).unwrap().id, 1);
     }
 
     // 8. Idempotency test: check_and_renew() on healthy cert skips without renewal

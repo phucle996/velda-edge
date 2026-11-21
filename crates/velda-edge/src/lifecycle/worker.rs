@@ -96,6 +96,7 @@ impl RunningWorkerPool {
                     velda_plugin::set_core_shadow_sender(shadow_tx);
                     velda_connection_pool::set_current_thread_lane(worker_id);
                     velda_observability::set_current_worker_lane(worker_id);
+                    velda_observability::sampling::state::seed_worker(worker_id);
                     let reg = global_worker_registry();
 
                     if cpu_pinning {
@@ -256,14 +257,11 @@ pub fn spawn_shadow_worker(
             rt.block_on(async move {
                 let traffic_handle = traffic_handle_rx.await.ok();
                 // Dedicated outbound client probe socket registered via Core SocketManager (SocketRole::Shadow)
-                let heal_port = 60000 + (worker_id as u16 & 0x3FF);
-                let heal_addr = std::net::SocketAddr::new(
-                    std::net::IpAddr::V4(std::net::Ipv4Addr::UNSPECIFIED),
-                    heal_port,
-                );
+                let heal_port_be = (60000 + (worker_id as u16 & 0x3FF)).to_be();
+                let heal_ip = velda_core::lut::ip::v4_to_u128(0);
                 let shadow_id = format!("shadow_probe_worker_{worker_id}");
-                let heal_sock = velda_core::socket::global_socket_manager()
-                    .acquire_shadow_udp(heal_addr, &shadow_id)
+                let heal_sock = velda_sock::socket::global_socket_manager()
+                    .acquire_shadow_udp(heal_ip, heal_port_be, &shadow_id)
                     .ok()
                     .and_then(|std_sock| {
                         let _ = std_sock.set_nonblocking(true);
@@ -287,7 +285,7 @@ pub fn spawn_shadow_worker(
                     );
                 }
 
-                // 2. Register Resource Overload Monitor (process-wide singleton on Worker 0)
+                // 2. Register Resource Overload Monitor & Centralized Discovery Scheduler (process-wide singletons on Worker 0)
                 if worker_id == 0 {
                     let overload = shared_runtime.load().overload.clone();
                     let mut overload_shutdown = shutdown.clone();
@@ -299,6 +297,21 @@ pub fn spawn_shadow_worker(
                                     let _ = overload.sample_and_update();
                                 }
                                 _ = overload_shutdown.changed() => break,
+                            }
+                        }
+                    });
+
+                    let mut disc_shutdown = shutdown.clone();
+                    bg_tasks.spawn(async move {
+                        let scheduler = velda_discovery::global_discovery_scheduler();
+                        let mut interval = tokio::time::interval(std::time::Duration::from_secs(1));
+                        interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+                        loop {
+                            tokio::select! {
+                                _ = interval.tick() => {
+                                    scheduler.tick().await;
+                                }
+                                _ = disc_shutdown.changed() => break,
                             }
                         }
                     });
@@ -333,11 +346,10 @@ pub fn spawn_shadow_worker(
                 // Single unified cooperative event loop
                 loop {
                     tokio::select! {
-                        // Drain core-local SPSC access log and trace span rings into reference-counted
-                        // batches for registered background exporter plugins.
+                        // Drain core-local unified SPSC observability ring into reference-counted
+                        // rotating pool batches for registered background exporters.
                         _ = log_flush_interval.tick() => {
-                            velda_observability::global_log_store().flush_lane(worker_id, 512);
-                            velda_observability::global_trace_store().flush_lane(worker_id, 512);
+                            velda_observability::global_telemetry_store().flush_lane(worker_id, 512);
                         }
 
                         // Autonomous background upstream pre-warming & core-local buffer maintenance on SCHED_IDLE
@@ -447,15 +459,14 @@ pub fn spawn_shadow_worker(
                     }
                 }
 
-                // Drain any remaining access log records and trace spans from this core's SPSC rings into
+                // Drain any remaining observability records from this core's SPSC ring into
                 // registered background exporter queues before terminating background tasks.
-                velda_observability::global_log_store().flush_lane(worker_id, 4096);
-                velda_observability::global_trace_store().flush_lane(worker_id, 4096);
+                velda_observability::global_telemetry_store().flush_lane(worker_id, 4096);
 
                 // Gracefully cancel and flush all active tasks in both sets
                 shadow_tasks.shutdown().await;
                 bg_tasks.shutdown().await;
-                velda_core::socket::global_socket_manager()
+                velda_sock::socket::global_socket_manager()
                     .release_shadow_udp(&format!("shadow_probe_worker_{worker_id}"));
             });
         })

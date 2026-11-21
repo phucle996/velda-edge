@@ -15,7 +15,7 @@
 use bytes::Bytes;
 
 /// 128-bit vector streaming store using SSE2 `_mm_stream_si128`.
-#[cfg(target_arch = "x86_64")]
+#[cfg(all(target_arch = "x86_64", not(target_feature = "avx2")))]
 unsafe fn stream_payload_sse2_dispatched(dst: *mut u8, src: *const u8, len: usize) {
     if len >= 32 {
         unsafe {
@@ -29,7 +29,7 @@ unsafe fn stream_payload_sse2_dispatched(dst: *mut u8, src: *const u8, len: usiz
 }
 
 /// 256-bit vector streaming store using AVX2 `_mm256_stream_si256`.
-#[cfg(target_arch = "x86_64")]
+#[cfg(all(target_arch = "x86_64", target_feature = "avx2"))]
 unsafe fn stream_payload_avx2_dispatched(dst: *mut u8, src: *const u8, len: usize) {
     if len >= 64 {
         unsafe {
@@ -55,14 +55,14 @@ unsafe fn stream_payload_avx2_dispatched(dst: *mut u8, src: *const u8, len: usiz
 /// `src` must be valid for reads of `len` bytes.
 #[inline(always)]
 pub unsafe fn stream_payload_to_dram(dst: *mut u8, src: *const u8, len: usize) {
-    #[cfg(target_arch = "x86_64")]
+    #[cfg(all(target_arch = "x86_64", target_feature = "avx2"))]
     {
-        if is_x86_feature_detected!("avx2") {
-            unsafe {
-                stream_payload_avx2_dispatched(dst, src, len);
-            }
-            return;
+        unsafe {
+            stream_payload_avx2_dispatched(dst, src, len);
         }
+    }
+    #[cfg(all(target_arch = "x86_64", not(target_feature = "avx2")))]
+    {
         unsafe {
             stream_payload_sse2_dispatched(dst, src, len);
         }
@@ -75,7 +75,7 @@ pub unsafe fn stream_payload_to_dram(dst: *mut u8, src: *const u8, len: usize) {
     }
 }
 
-#[cfg(target_arch = "x86_64")]
+#[cfg(all(target_arch = "x86_64", target_feature = "avx2"))]
 #[target_feature(enable = "avx2")]
 unsafe fn stream_payload_avx2(dst: *mut u8, src: *const u8, len: usize) {
     use core::arch::x86_64::*;

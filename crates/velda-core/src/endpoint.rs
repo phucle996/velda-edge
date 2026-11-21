@@ -31,7 +31,8 @@ pub struct Endpoint {
     pub _pad: u8,
 }
 
-const _: () = assert!(std::mem::size_of::<Endpoint>() <= 32);
+// `u128` has 16-byte alignment on x86_64, so 24 bytes of fields round up to 32 bytes.
+const _: () = assert!(std::mem::size_of::<Endpoint>() == 32);
 
 impl Endpoint {
     /// Creates an IPv4 backend destination endpoint.

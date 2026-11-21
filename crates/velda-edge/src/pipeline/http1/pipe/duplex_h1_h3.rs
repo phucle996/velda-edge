@@ -88,7 +88,9 @@ where
             return Err(Http1Error::ConnectionClosed);
         }
     };
-    conn.last_upstream_addr = Some(client.target());
+    let (__u_ip, __u_port) = client.target();
+    conn.last_upstream_ip = __u_ip;
+    conn.last_upstream_port_be = __u_port;
 
     // 5. Opportunistically drain any already-buffered payload bytes waiting in the downstream
     // kernel socket buffer before opening the upstream stream (zero async scheduler yields).
@@ -196,7 +198,9 @@ where
                     return Err(Http1Error::ConnectionClosed);
                 }
             };
-            conn.last_upstream_addr = Some(fresh_client.target());
+            let (__u_ip, __u_port) = fresh_client.target();
+            conn.last_upstream_ip = __u_ip;
+            conn.last_upstream_port_be = __u_port;
             _lease_guard = Some(fresh_lease);
             match fresh_client
                 .open_stream(
