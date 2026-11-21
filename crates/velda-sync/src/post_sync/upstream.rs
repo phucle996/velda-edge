@@ -1491,12 +1491,21 @@ mod tests {
         u.protocol.transport = "rdma".into();
         u.protocol.application = "raw".into();
 
-        let err = validate_upstreams(&mut [u]).unwrap_err();
-        let msg = err.to_string();
-        assert!(
-            msg.contains("lacks active RDMA hardware"),
-            "Expected failure due to missing host RDMA hardware, got: {msg}"
-        );
+        let host_has_rdma = velda_core::hardware::probe_rdma().is_available;
+        let res = validate_upstreams(&mut [u]);
+        if host_has_rdma {
+            assert!(
+                res.is_ok(),
+                "Expected success because host has active RDMA hardware"
+            );
+        } else {
+            let err = res.unwrap_err();
+            let msg = err.to_string();
+            assert!(
+                msg.contains("lacks active RDMA hardware"),
+                "Expected failure due to missing host RDMA hardware, got: {msg}"
+            );
+        }
     }
 
     #[test]
