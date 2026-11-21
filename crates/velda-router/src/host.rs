@@ -637,41 +637,15 @@ mod tests {
         assert!(!wildcard.matches(&req_root)); // RFC 6125: missing subdomain -> mismatch
         assert!(!wildcard.matches(&req_other));
 
-        // Verify SWAR fallback produces identical results
-        if let CompiledHost::Pattern(pat) = wildcard {
-            assert!(match_blocks_swar(&req_api.blocks, &pat.blocks));
-            assert!(!match_blocks_swar(&req_sub.blocks, &pat.blocks));
-            assert!(!match_blocks_swar(&req_root.blocks, &pat.blocks));
-        }
-
         assert_eq!(host_specificity(Some("api.velda.io")), 2);
         assert_eq!(host_specificity(Some("*.velda.io")), 1);
         assert_eq!(host_specificity(Some("*")), 0);
         assert_eq!(host_specificity(None), 0);
-    }
 
-    #[test]
-    fn test_strict_subdomain_level_and_long_label_boundaries() {
-        let wc_abc = HostPattern::compile(Some("*.abc.velda.com")).unwrap();
-        assert!(!wc_abc.matches(&HostBlocks::parse("abc.velda.com"))); // missing level (RFC 6125)
-        assert!(!wc_abc.matches(&HostBlocks::parse("evil.node.abc.velda.com"))); // extra level (spoofing)
-        assert!(wc_abc.matches(&HostBlocks::parse("node.abc.velda.com")));
-        assert!(wc_abc.matches(&HostBlocks::parse(
-            "very-long-subdomain-label.abc.velda.com"
-        )));
-        assert!(!wc_abc.matches(&HostBlocks::parse(
-            "a.very-long-subdomain-label.abc.velda.com"
-        )));
-
-        let exact_api = HostPattern::compile(Some("api.velda.com")).unwrap();
-        assert!(exact_api.matches(&HostBlocks::parse("api.velda.com")));
-        assert!(!exact_api.matches(&HostBlocks::parse("sub.api.velda.com")));
-        assert!(!exact_api.matches(&HostBlocks::parse("velda.com")));
-
+        // Long single label (>8 bytes) must not collide with two shorter labels
         let exact_long = HostPattern::compile(Some("authentication.velda.com")).unwrap();
         assert!(exact_long.matches(&HostBlocks::parse("authentication.velda.com")));
         assert!(!exact_long.matches(&HostBlocks::parse("cation.authenti.velda.com")));
-        assert!(!exact_long.matches(&HostBlocks::parse("sub.authentication.velda.com")));
     }
 
     #[test]

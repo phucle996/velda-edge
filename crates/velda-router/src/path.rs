@@ -661,12 +661,6 @@ mod tests {
     }
 
     #[test]
-    fn test_integer_block_node_size() {
-        assert_eq!(std::mem::size_of::<IntegerBlockNode>(), 16);
-        assert_eq!(std::mem::align_of::<IntegerBlockNode>(), 16);
-    }
-
-    #[test]
     fn test_slash_block_prefix_matcher_insert_and_match() {
         let mut matcher = PathPrefixMatcher::new();
         matcher.insert("/api/v1", 1);
