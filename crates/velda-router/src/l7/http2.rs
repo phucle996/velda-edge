@@ -236,8 +236,8 @@ impl ListenerHttp2Router {
         let listener_id = self.arena.header().listener_id;
         let mut parsed_fallback: Option<HostBlocks> = None;
 
-        for &(cand_start, cand_count, is_exact) in matches[..count].iter().rev() {
-            for c in self.arena.node_entries(cand_start, cand_count) {
+        for &(entry_start, entry_count, is_exact) in matches[..count].iter().rev() {
+            for c in self.arena.node_entries(entry_start, entry_count) {
                 if !is_exact && (c._pad & 0x01) == 0 {
                     continue;
                 }

@@ -47,13 +47,13 @@ pub struct ArenaNode {
     /// Contiguous start index of child nodes in Region 1.
     pub children_start: u16,
     /// Contiguous start index of entries in Region 2 (`ARENA_NONE` = no entries).
-    pub cand_start: u16,
+    pub entry_start: u16,
     /// Byte length of `chunk` (`1..=8`, or `0` for root).
     pub len: u8,
     /// Number of child nodes (`0..=255`).
     pub children_count: u8,
     /// Number of entries at this node (`0..=255`).
-    pub cand_count: u8,
+    pub entry_count: u8,
     /// Bit `0x01`: `1` if any entry at this node allows prefix matching.
     pub flags: u8,
 }
@@ -93,17 +93,17 @@ pub struct ArenaRouteEntry<'a> {
 #[derive(Debug, Clone, Default)]
 struct BuilderNode {
     prefix: String,
-    cand_start: u16,
-    cand_count: u8,
+    entry_start: u16,
+    entry_count: u8,
     has_prefix: bool,
     children: Vec<BuilderNode>,
 }
 
 impl BuilderNode {
-    fn insert(&mut self, path: &str, cand_start: u16, cand_count: u8, has_prefix: bool) {
+    fn insert(&mut self, path: &str, entry_start: u16, entry_count: u8, has_prefix: bool) {
         if path.is_empty() {
-            self.cand_start = cand_start;
-            self.cand_count = cand_count;
+            self.entry_start = entry_start;
+            self.entry_count = entry_count;
             self.has_prefix = self.has_prefix || has_prefix;
             return;
         }
@@ -118,7 +118,7 @@ impl BuilderNode {
             let common_len = common_prefix_len(&child.prefix, path);
 
             if common_len == child.prefix.len() {
-                child.insert(&path[common_len..], cand_start, cand_count, has_prefix);
+                child.insert(&path[common_len..], entry_start, entry_count, has_prefix);
             } else {
                 let common_prefix = child.prefix[..common_len].to_string();
                 let child_suffix = child.prefix[common_len..].to_string();
@@ -126,13 +126,13 @@ impl BuilderNode {
 
                 let split_node = BuilderNode {
                     prefix: common_prefix,
-                    cand_start: if path_suffix.is_empty() {
-                        cand_start
+                    entry_start: if path_suffix.is_empty() {
+                        entry_start
                     } else {
                         ARENA_NONE
                     },
-                    cand_count: if path_suffix.is_empty() {
-                        cand_count
+                    entry_count: if path_suffix.is_empty() {
+                        entry_count
                     } else {
                         0
                     },
@@ -151,8 +151,8 @@ impl BuilderNode {
                 if !path_suffix.is_empty() {
                     self.children[child_idx].children.push(BuilderNode {
                         prefix: path_suffix,
-                        cand_start,
-                        cand_count,
+                        entry_start,
+                        entry_count,
                         has_prefix,
                         children: Vec::new(),
                     });
@@ -161,8 +161,8 @@ impl BuilderNode {
         } else {
             self.children.push(BuilderNode {
                 prefix: path.to_string(),
-                cand_start,
-                cand_count,
+                entry_start,
+                entry_count,
                 has_prefix,
                 children: Vec::new(),
             });
@@ -179,14 +179,14 @@ impl BuilderNode {
             self.prefix.truncate(8);
 
             let old_children = std::mem::take(&mut self.children);
-            let old_cand_start = std::mem::replace(&mut self.cand_start, ARENA_NONE);
-            let old_cand_count = std::mem::replace(&mut self.cand_count, 0);
+            let old_entry_start = std::mem::replace(&mut self.entry_start, ARENA_NONE);
+            let old_entry_count = std::mem::replace(&mut self.entry_count, 0);
             let old_has_prefix = std::mem::replace(&mut self.has_prefix, false);
 
             let mut intermediate_child = BuilderNode {
                 prefix: tail_prefix,
-                cand_start: old_cand_start,
-                cand_count: old_cand_count,
+                entry_start: old_entry_start,
+                entry_count: old_entry_count,
                 has_prefix: old_has_prefix,
                 children: old_children,
             };
@@ -297,8 +297,8 @@ impl RouteArena {
 
         let mut root_builder = BuilderNode {
             prefix: String::new(),
-            cand_start: ARENA_NONE,
-            cand_count: 0,
+            entry_start: ARENA_NONE,
+            entry_count: 0,
             has_prefix: false,
             children: Vec::new(),
         };
@@ -329,7 +329,7 @@ impl RouteArena {
                 });
             }
 
-            let cand_start = route_entries.len() as u16;
+            let entry_start = route_entries.len() as u16;
             let mut has_prefix = false;
 
             for e in &pattern_entries[i..j] {
@@ -345,7 +345,7 @@ impl RouteArena {
                 });
             }
 
-            root_builder.insert(pat, cand_start, count as u8, has_prefix);
+            root_builder.insert(pat, entry_start, count as u8, has_prefix);
             i = j;
         }
 
@@ -381,10 +381,10 @@ impl RouteArena {
         nodes.push(ArenaNode {
             chunk: 0,
             children_start: 0,
-            cand_start: root_builder.cand_start,
+            entry_start: root_builder.entry_start,
             len: 0,
             children_count: 0,
-            cand_count: root_builder.cand_count,
+            entry_count: root_builder.entry_count,
             flags: u8::from(root_builder.has_prefix),
         });
         queue.push_back((root_builder, 0usize));
@@ -424,10 +424,10 @@ impl RouteArena {
                 nodes.push(ArenaNode {
                     chunk: u64::from_le_bytes(buf),
                     children_start: 0,
-                    cand_start: child_b.cand_start,
+                    entry_start: child_b.entry_start,
                     len: copy_len as u8,
                     children_count: 0,
-                    cand_count: child_b.cand_count,
+                    entry_count: child_b.entry_count,
                     flags: u8::from(child_b.has_prefix),
                 });
             }
@@ -544,15 +544,15 @@ impl RouteArena {
         &all[start..end]
     }
 
-    /// Returns the [`RouteEntry`] slice for a given `(cand_start, cand_count)` pair.
+    /// Returns the [`RouteEntry`] slice for a given `(entry_start, entry_count)` pair.
     #[inline(always)]
-    pub fn node_entries(&self, cand_start: u16, cand_count: u8) -> &[RouteEntry] {
-        if cand_start == ARENA_NONE || cand_count == 0 {
+    pub fn node_entries(&self, entry_start: u16, entry_count: u8) -> &[RouteEntry] {
+        if entry_start == ARENA_NONE || entry_count == 0 {
             return &[];
         }
         let all = self.entries();
-        let start = cand_start as usize;
-        let end = (start + cand_count as usize).min(all.len());
+        let start = entry_start as usize;
+        let end = (start + entry_count as usize).min(all.len());
         &all[start..end]
     }
 
@@ -562,7 +562,7 @@ impl RouteArena {
         self.capacity
     }
 
-    /// Traverses the 16-byte radix node arena for `path`, recording `(cand_start, cand_count, is_exact)`
+    /// Traverses the 16-byte radix node arena for `path`, recording `(entry_start, entry_count, is_exact)`
     /// from root down to the deepest matching node into `out`.
     #[inline]
     pub fn match_path(&self, path: &str, out: &mut [(u16, u8, bool); 32]) -> usize {
@@ -576,10 +576,10 @@ impl RouteArena {
         let mut current_idx = 0;
         let mut remaining = path.as_bytes();
 
-        if nodes[0].cand_start != ARENA_NONE && nodes[0].cand_count > 0 {
+        if nodes[0].entry_start != ARENA_NONE && nodes[0].entry_count > 0 {
             let is_exact = remaining.is_empty();
             if is_exact || (nodes[0].flags & 0x01) != 0 {
-                out[count] = (nodes[0].cand_start, nodes[0].cand_count, is_exact);
+                out[count] = (nodes[0].entry_start, nodes[0].entry_count, is_exact);
                 count += 1;
             }
         }
@@ -615,10 +615,10 @@ impl RouteArena {
             remaining = &remaining[child.len as usize..];
             current_idx = child_idx;
 
-            if child.cand_start != ARENA_NONE && child.cand_count > 0 && count < out.len() {
+            if child.entry_start != ARENA_NONE && child.entry_count > 0 && count < out.len() {
                 let is_exact = remaining.is_empty();
                 if is_exact || (child.flags & 0x01) != 0 {
-                    out[count] = (child.cand_start, child.cand_count, is_exact);
+                    out[count] = (child.entry_start, child.entry_count, is_exact);
                     count += 1;
                 }
             }
@@ -629,7 +629,7 @@ impl RouteArena {
 
     /// Two-stage exact traversal for gRPC `(service, Option<method>)` with zero allocations.
     ///
-    /// Returns `(method_cands, service_cands)` where each is `Option<(cand_start, cand_count)>`.
+    /// Returns `(method_cands, service_cands)` where each is `Option<(entry_start, entry_count)>`.
     #[inline]
     #[allow(clippy::type_complexity)]
     pub fn match_grpc(
@@ -645,14 +645,15 @@ impl RouteArena {
 
         let svc_cands = walk_exact_segments(nodes, &[service.as_bytes()]).and_then(|idx| {
             let n = &nodes[idx];
-            (n.cand_start != ARENA_NONE && n.cand_count > 0).then_some((n.cand_start, n.cand_count))
+            (n.entry_start != ARENA_NONE && n.entry_count > 0)
+                .then_some((n.entry_start, n.entry_count))
         });
 
         let method_cands = method.and_then(|m| {
             walk_exact_segments(nodes, &[service.as_bytes(), b"/", m.as_bytes()]).and_then(|idx| {
                 let n = &nodes[idx];
-                (n.cand_start != ARENA_NONE && n.cand_count > 0)
-                    .then_some((n.cand_start, n.cand_count))
+                (n.entry_start != ARENA_NONE && n.entry_count > 0)
+                    .then_some((n.entry_start, n.entry_count))
             })
         });
 

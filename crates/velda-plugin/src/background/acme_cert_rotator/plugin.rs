@@ -6,8 +6,9 @@
 //! 2. **Cron Scheduled Loop**: Evaluates strictly on user-defined 5-field UTC cron schedules (zero interval polling).
 //! 3. **Exponential Backoff**: In case of transient CA or network failure, automatically retries up to 3 times
 //!    with exponential backoff and jitter before falling back to the cron schedule.
-//! 4. **Ephemeral Route Injection**: Pre-bakes the HTTP-01 wire response and injects the challenge route into
-//!    [`Router`] with RAII teardown, guaranteeing zero memory or route leakage on success, failure, or timeout.
+//! 4. **Zero-Lock Challenge Publishing**: Pre-bakes the HTTP-01 wire response and publishes it into
+//!    [`ChallengeStore`] with RAII [`ChallengeGuard`] teardown, while the `/.well-known/acme-challenge/`
+//!    route remains statically pre-compiled in the immutable 4KB `RouteArena` from bootstrap.
 //! 5. **Zero-Downtime Hot-Swap**: Atomically hot-swaps renewed certificates into `velda-tls::SniResolver`.
 //!
 //! # Architecture & Execution Mechanics
@@ -27,24 +28,18 @@
 //!  |                 v                                   |                                  |
 //!  |       [ Pre-bake Response Chunk ]                   |                                  |
 //!  |                 |                                   |                                  |
-//!  |                 +---------------+                   |                                  |
-//!  |                 |               |                   |                                  |
-//!  |                 v               v                   |                                  |
-//!  |     +--------------------+   +-------------------+  |                                  |
-//!  |     |   ChallengeStore   |   |   RouterRegistry  |  |                                  |
-//!  |     | (Store Pre-baked)  |   | (Inject Ephemeral)|  |                                  |
-//!  |     +--------------------+   +-------------------+  |                                  |
-//!  |                 |                      |            |                                  |
-//!  |                 |    +-----------------+            |                                  |
-//!  |                 |    | (RAII EphemeralRouteGuard)   |                                  |
-//!  |                 v    v                              |                                  |
-//!  +=================|====|==============================|==================================+
-//!                    |    |                              |
-//!  +=================|====|==============================|==================================+
-//!  |                 |    |   FRONTLINE TRAFFIC WORKER   |                                  |
-//!  |                 |    |                              |                                  |
-//!  |                 v    v                              |                                  |
-//!  |        [ velda-router::Router ]                     |                                  |
+//!  |                 v                                   |                                  |
+//!  |     +--------------------+                          |                                  |
+//!  |     |   ChallengeStore   |                          |                                  |
+//!  |     | (RAII ChallengeGuard)                         |                                  |
+//!  |     +--------------------+                          |                                  |
+//!  |                 |                                   |                                  |
+//!  +=================|===================================|==================================+
+//!                    |                                   |
+//!  +=================|===================================|==================================+
+//!  |                 |       FRONTLINE TRAFFIC WORKER    |                                  |
+//!  |                 v                                   |                                  |
+//!  |        [ Immutable RouteArena ]                     |                                  |
 //!  |             ^                                       |                                  |
 //!  |             | HTTP-01 Ingress                       |                                  |
 //!  |             | (/.well-known/acme-challenge/<token>) |                                  |

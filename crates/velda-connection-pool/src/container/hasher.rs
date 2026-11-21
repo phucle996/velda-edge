@@ -1,7 +1,7 @@
 //! Ultra-fast, zero-dependency 64-bit non-cryptographic hasher.
 //!
 //! Provides [`FastHasher`] and [`FastBuildHasher`] for high-performance internal
-//! key hashing (such as `SocketAddr` and `ConnectionKey`).
+//! key hashing (such as `(u128, u16)` raw endpoints and `ConnectionKey`).
 //!
 //! # Hardware Efficiency
 //! Executes in 2–4 CPU cycles using FNV-1a byte streaming combined with a
