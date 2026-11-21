@@ -1,22 +1,29 @@
-//! Sharded container and connection wrappers for concurrent multiplexed protocols (HTTP/2, HTTP/3).
+//! Lane-sharded contiguous container for concurrent multiplexed protocols (HTTP/2, HTTP/3, gRPC).
 //!
-//! Unlike sequential connections where sockets are checked out by value and returned to a LIFO queue,
-//! multiplexed connections stay resident in the pool and serve multiple independent requests
-//! simultaneously up to `max_concurrent_streams`.
+//! ```text
+//! MultiplexedPool -> shards[lane & mask] -> MuxShard (align=64B, AtomicU8)
+//! ┌─────────────────────────────────────────────────────────────────────────┐
+//! │ MuxTable (SoA PageAlignedSlab, 0 HashMap):                              │
+//! │   keys:  [ K_0 | K_1 | ... ]                                            │
+//! │   conns: [ Vec<Arc<MultiplexedConnection<R>>> ]                         │
+//! │                                                                         │
+//! │ Stream Lease: lock-free AtomicU32 active_streams CAS outside shard lock │
+//! └─────────────────────────────────────────────────────────────────────────┘
+//! ```
 
-use std::collections::HashMap;
+use std::cell::UnsafeCell;
 use std::fmt;
-use std::hash::{BuildHasher, Hash};
+use std::ops::{Deref, DerefMut};
 use std::sync::Arc;
-use std::sync::Mutex;
 use std::sync::OnceLock;
-use std::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU8, AtomicU32, AtomicU64, AtomicUsize, Ordering};
 use std::time::{Duration, Instant};
 
-use crate::container::hasher::FastBuildHasher;
-use crate::container::probed_shard_count;
+use crate::config::probed_shard_count;
+use crate::hot::current_thread_lane;
 use crate::lease::StreamLease;
 use crate::resource::PoolableResource;
+use crate::slab::PageAlignedSlab;
 
 // ============================================================================
 // Lock-Free Millisecond Timestamp Infrastructure
@@ -221,45 +228,143 @@ impl<R: PoolableResource> Drop for MultiplexedConnection<R> {
 }
 
 // ============================================================================
-// MultiplexedPool & MuxShard
+// MultiplexedPool & MuxShard (4KB Page-Aligned Contiguous SoA, Zero HashMap)
 // ============================================================================
 
-/// An isolated mutex partition bucket holding multiplexed connections.
-///
-/// Cache-line aligned (64 bytes) to eliminate false sharing between CPU cores.
-#[repr(align(64))]
-#[allow(clippy::type_complexity)]
-pub struct MuxShard<K, R: PoolableResource> {
-    table: Mutex<HashMap<K, Vec<Arc<MultiplexedConnection<R>>>, FastBuildHasher>>,
+/// Contiguous Structure-of-Arrays table inside each [`MuxShard`].
+pub struct MuxTable<K, R: PoolableResource> {
+    keys: PageAlignedSlab<K>,
+    conns: PageAlignedSlab<Vec<Arc<MultiplexedConnection<R>>>>,
 }
 
-impl<K, R: PoolableResource> Default for MuxShard<K, R> {
-    fn default() -> Self {
+impl<K: Eq, R: PoolableResource> MuxTable<K, R> {
+    fn new() -> Self {
         Self {
-            table: Mutex::new(HashMap::with_hasher(FastBuildHasher)),
+            keys: PageAlignedSlab::with_pages(1),
+            conns: PageAlignedSlab::with_pages(1),
+        }
+    }
+
+    #[inline]
+    fn get(&self, key: &K) -> Option<&Vec<Arc<MultiplexedConnection<R>>>> {
+        let idx = self.keys.as_slice().iter().position(|k| k == key)?;
+        Some(&self.conns.as_slice()[idx])
+    }
+
+    #[inline]
+    fn get_mut(&mut self, key: &K) -> Option<&mut Vec<Arc<MultiplexedConnection<R>>>> {
+        let idx = self.keys.as_slice().iter().position(|k| k == key)?;
+        Some(&mut self.conns.as_mut_slice()[idx])
+    }
+
+    #[inline]
+    fn get_or_insert_default(&mut self, key: K) -> &mut Vec<Arc<MultiplexedConnection<R>>> {
+        if let Some(idx) = self.keys.as_slice().iter().position(|k| k == &key) {
+            return &mut self.conns.as_mut_slice()[idx];
+        }
+        let idx = self.keys.len();
+        self.keys.push(key);
+        self.conns.push(Vec::new());
+        &mut self.conns.as_mut_slice()[idx]
+    }
+
+    fn retain_non_empty(&mut self) {
+        let mut i = 0;
+        while i < self.keys.len() {
+            if self.conns.as_slice()[i].is_empty() {
+                self.keys.swap_remove(i);
+                self.conns.swap_remove(i);
+            } else {
+                i += 1;
+            }
         }
     }
 }
 
-/// A sharded generic pool for multiplexed connections.
-///
-/// Distributes keys across cache-friendly, independent 64-byte aligned mutex shards
-/// with power-of-two bitmask indexing for minimal lock contention.
-pub struct MultiplexedPool<K, R, S = FastBuildHasher>
+struct MuxShardGuard<'a, K, R: PoolableResource> {
+    lock: &'a AtomicU8,
+    table: &'a mut MuxTable<K, R>,
+}
+
+impl<K, R: PoolableResource> Deref for MuxShardGuard<'_, K, R> {
+    type Target = MuxTable<K, R>;
+    #[inline]
+    fn deref(&self) -> &Self::Target {
+        self.table
+    }
+}
+
+impl<K, R: PoolableResource> DerefMut for MuxShardGuard<'_, K, R> {
+    #[inline]
+    fn deref_mut(&mut self) -> &mut Self::Target {
+        self.table
+    }
+}
+
+impl<K, R: PoolableResource> Drop for MuxShardGuard<'_, K, R> {
+    #[inline]
+    fn drop(&mut self) {
+        self.lock.store(0, Ordering::Release);
+    }
+}
+
+/// An isolated cache-line aligned partition bucket holding multiplexed connections.
+#[repr(align(64))]
+pub struct MuxShard<K, R: PoolableResource> {
+    lock_state: AtomicU8,
+    table: UnsafeCell<MuxTable<K, R>>,
+}
+
+unsafe impl<K: Send, R: PoolableResource + Send> Send for MuxShard<K, R> {}
+unsafe impl<K: Send, R: PoolableResource + Send> Sync for MuxShard<K, R> {}
+
+impl<K: Eq, R: PoolableResource> Default for MuxShard<K, R> {
+    fn default() -> Self {
+        Self {
+            lock_state: AtomicU8::new(0),
+            table: UnsafeCell::new(MuxTable::new()),
+        }
+    }
+}
+
+impl<K: Eq, R: PoolableResource> MuxShard<K, R> {
+    #[inline]
+    fn lock(&self) -> MuxShardGuard<'_, K, R> {
+        let mut spins = 0u32;
+        while self
+            .lock_state
+            .compare_exchange_weak(0, 1, Ordering::Acquire, Ordering::Relaxed)
+            .is_err()
+        {
+            spins = spins.wrapping_add(1);
+            if spins & 0x3F == 0 {
+                std::thread::yield_now();
+            } else {
+                std::hint::spin_loop();
+            }
+        }
+        MuxShardGuard {
+            lock: &self.lock_state,
+            table: unsafe { &mut *self.table.get() },
+        }
+    }
+}
+
+/// A lane-sharded generic pool for multiplexed connections backed by 4KB page-aligned slabs.
+pub struct MultiplexedPool<K, R>
 where
-    K: Eq + Hash + Clone,
+    K: Eq + Clone,
     R: PoolableResource,
 {
     shards: Box<[MuxShard<K, R>]>,
-    hash_builder: S,
     mask: usize,
     max_connections_per_key: usize,
     rr_cursor: AtomicUsize,
 }
 
-impl<K, R> Default for MultiplexedPool<K, R, FastBuildHasher>
+impl<K, R> Default for MultiplexedPool<K, R>
 where
-    K: Eq + Hash + Clone,
+    K: Eq + Clone,
     R: PoolableResource,
 {
     fn default() -> Self {
@@ -267,9 +372,9 @@ where
     }
 }
 
-impl<K, R> MultiplexedPool<K, R, FastBuildHasher>
+impl<K, R> MultiplexedPool<K, R>
 where
-    K: Eq + Hash + Clone,
+    K: Eq + Clone,
     R: PoolableResource,
 {
     /// Creates a new empty multiplexed pool with probed hardware shard count.
@@ -279,7 +384,7 @@ where
 
     /// Creates a new multiplexed pool with the specified shard count (clamped to power of 2, min 1).
     pub fn with_shards(shard_count: usize) -> Self {
-        Self::with_options(shard_count, shard_count, FastBuildHasher)
+        Self::with_options(shard_count, shard_count)
     }
 
     /// Sets the maximum concurrent connections permitted per individual key/endpoint.
@@ -287,25 +392,9 @@ where
         self.max_connections_per_key = max.max(1);
         self
     }
-}
 
-impl<K, R, S> MultiplexedPool<K, R, S>
-where
-    K: Eq + Hash + Clone,
-    R: PoolableResource,
-    S: BuildHasher,
-{
-    /// Creates a new multiplexed pool with custom shard count and custom hash builder.
-    pub fn with_hasher(shard_count: usize, hash_builder: S) -> Self {
-        Self::with_options(shard_count, shard_count, hash_builder)
-    }
-
-    /// Creates a new multiplexed pool with custom shard count, custom max connections per key, and custom hasher.
-    pub fn with_options(
-        shard_count: usize,
-        max_connections_per_key: usize,
-        hash_builder: S,
-    ) -> Self {
+    /// Creates a new multiplexed pool with custom shard count and custom max connections per key.
+    pub fn with_options(shard_count: usize, max_connections_per_key: usize) -> Self {
         let count = shard_count.max(1).next_power_of_two();
         let mut shards = Vec::with_capacity(count);
         for _ in 0..count {
@@ -314,28 +403,16 @@ where
 
         Self {
             shards: shards.into_boxed_slice(),
-            hash_builder,
             mask: count - 1,
             max_connections_per_key: max_connections_per_key.max(1),
             rr_cursor: AtomicUsize::new(0),
         }
     }
 
+    /// Returns a reference to the shard responsible for a worker lane (`lane & mask`, zero hashing).
     #[inline]
-    fn shard_for(&self, key: &K) -> &MuxShard<K, R> {
-        let idx = (self.hash_builder.hash_one(key) as usize) & self.mask;
-        &self.shards[idx]
-    }
-
-    /// Returns a reference to the shard responsible for `key` biased by a worker lane.
-    ///
-    /// Distributes hot-key multiplexed stream access across independent shards when multiple worker threads
-    /// concurrently access the same destination address.
-    #[inline]
-    pub fn shard_for_lane(&self, key: &K, lane: usize) -> &MuxShard<K, R> {
-        let base = (self.hash_builder.hash_one(key) as usize) & self.mask;
-        let idx = (base ^ lane) & self.mask;
-        &self.shards[idx]
+    pub fn shard_for_lane(&self, _key: &K, lane: usize) -> &MuxShard<K, R> {
+        &self.shards[lane & self.mask]
     }
 
     /// Internal helper scanning and acquiring a stream lease from a specific shard.
@@ -346,16 +423,14 @@ where
         idle_timeout: Duration,
         now: Instant,
     ) -> Option<StreamLease<R>> {
-        // Fast-path: quickly scan candidate under minimal lock hold time
         let candidate = {
-            let guard = shard.table.lock().unwrap_or_else(|e| e.into_inner());
+            let guard = shard.lock();
             let conns = guard.get(key)?;
             let total = conns.len();
             if total == 0 {
                 return None;
             }
 
-            // Least-Loaded selection with round-robin tie breaking
             let start_idx = self.rr_cursor.fetch_add(1, Ordering::Relaxed) % total;
             let mut best: Option<Arc<MultiplexedConnection<R>>> = None;
             let mut min_load = u32::MAX;
@@ -381,15 +456,13 @@ where
             best
         };
 
-        // Try acquire stream lock-free OUTSIDE the shard mutex lock
         if let Some(conn) = candidate
             && let Some(lease) = conn.try_acquire_stream()
         {
             return Some(lease);
         }
 
-        // Slow-path fallback: If candidate was saturated in race or dead connections exist
-        let mut guard = shard.table.lock().unwrap_or_else(|e| e.into_inner());
+        let mut guard = shard.lock();
         let conns = guard.get_mut(key)?;
         let total = conns.len();
         if total == 0 {
@@ -418,7 +491,6 @@ where
             }
         }
 
-        // Only prune dead or at-risk idle connections if one was encountered
         if has_dead {
             conns.retain(|conn| {
                 !(conn.is_idle()
@@ -435,7 +507,7 @@ where
     pub fn connection_count(&self, key: &K) -> usize {
         let mut total = 0;
         for shard in self.shards.iter() {
-            let guard = shard.table.lock().unwrap_or_else(|e| e.into_inner());
+            let guard = shard.lock();
             if let Some(conns) = guard.get(key) {
                 total += conns.len();
             }
@@ -447,7 +519,7 @@ where
     #[inline]
     pub fn connection_count_for_lane(&self, key: &K, lane: usize) -> usize {
         let shard = self.shard_for_lane(key, lane);
-        let guard = shard.table.lock().unwrap_or_else(|e| e.into_inner());
+        let guard = shard.lock();
         guard.get(key).map_or(0, |c| c.len())
     }
 
@@ -455,7 +527,7 @@ where
     #[inline]
     pub fn has_headroom_for_lane(&self, key: &K, lane: usize, max_streams: u32) -> bool {
         let shard = self.shard_for_lane(key, lane);
-        let guard = shard.table.lock().unwrap_or_else(|e| e.into_inner());
+        let guard = shard.lock();
         let Some(conns) = guard.get(key) else {
             return false;
         };
@@ -465,33 +537,18 @@ where
         })
     }
 
-    /// Acquires a stream slot from an existing available multiplexed connection,
-    /// enforcing the safe idle threshold (75% cutoff) on idle connections.
-    ///
-    /// Multi-lane striping queries the caller thread's local lane shard first (< 10 ns, pure RAM)
-    /// to eliminate cross-core lock contention and futex serialization under high concurrency.
+    /// Acquires a stream slot from an existing available multiplexed connection.
     pub fn acquire_stream(&self, key: &K, idle_timeout: Duration) -> Option<StreamLease<R>> {
         let now = Instant::now();
-        let lane = crate::container::shard::current_thread_lane();
+        let lane = current_thread_lane();
         let local_shard = self.shard_for_lane(key, lane);
 
-        // Step 1: Scan local thread lane shard first (100% thread-isolated, zero cross-core contention)
         if let Some(lease) = self.acquire_stream_from_shard(local_shard, key, idle_timeout, now) {
             return Some(lease);
         }
 
-        // Step 2: Fallback to base shard if local lane has no available stream
-        let base_shard = self.shard_for(key);
-        if !std::ptr::eq(local_shard, base_shard)
-            && let Some(lease) = self.acquire_stream_from_shard(base_shard, key, idle_timeout, now)
-        {
-            return Some(lease);
-        }
-
-        // Step 3: Fallback to scan any other shard before failing to avoid spawning redundant connections
         for shard in self.shards.iter() {
             if !std::ptr::eq(shard, local_shard)
-                && !std::ptr::eq(shard, base_shard)
                 && let Some(lease) = self.acquire_stream_from_shard(shard, key, idle_timeout, now)
             {
                 return Some(lease);
@@ -502,16 +559,13 @@ where
     }
 
     /// Acquires a stream slot only if an existing connection is currently idle (0 active streams).
-    ///
-    /// Used by upstream managers during scale-out phase to reuse idle connections before
-    /// spawning new parallel connections.
     pub fn acquire_idle_stream(&self, key: &K, idle_timeout: Duration) -> Option<StreamLease<R>> {
         let now = Instant::now();
-        let lane = crate::container::shard::current_thread_lane();
+        let lane = current_thread_lane();
         let local_shard = self.shard_for_lane(key, lane);
 
         let candidate = {
-            let guard = local_shard.table.lock().unwrap_or_else(|e| e.into_inner());
+            let guard = local_shard.lock();
             guard.get(key).and_then(|conns| {
                 let total = conns.len();
                 if total == 0 {
@@ -543,20 +597,16 @@ where
     }
 
     /// Registers a newly established connection and immediately claims 1 stream lease.
-    ///
-    /// Stores connection into caller's thread-local shard lane to guarantee subsequent
-    /// stream checkouts from this thread hit the same cache line without lock contention.
     pub fn register(&self, key: K, resource: R, max_streams: u32) -> StreamLease<R> {
         let conn = Arc::new(MultiplexedConnection::new(resource, max_streams));
-        // Reserve the first stream slot
         let lease = conn
             .try_acquire_stream()
             .expect("Fresh multiplexed connection must have capacity");
 
-        let lane = crate::container::shard::current_thread_lane();
+        let lane = current_thread_lane();
         let shard = self.shard_for_lane(&key, lane);
-        let mut guard = shard.table.lock().unwrap_or_else(|e| e.into_inner());
-        guard.entry(key).or_default().push(conn);
+        let mut guard = shard.lock();
+        guard.get_or_insert_default(key).push(conn);
         lease
     }
 
@@ -569,16 +619,21 @@ where
         }
         let conn = Arc::new(MultiplexedConnection::new(resource, max_streams));
         let shard = self.shard_for_lane(&key, lane);
-        let mut guard = shard.table.lock().unwrap_or_else(|e| e.into_inner());
-        guard.entry(key).or_default().push(conn);
+        let mut guard = shard.lock();
+        guard.get_or_insert_default(key).push(conn);
     }
 
     /// Returns the total number of physical connections managed across all keys.
     pub fn total_connections(&self) -> usize {
         let mut total = 0;
         for shard in self.shards.iter() {
-            let guard = shard.table.lock().unwrap_or_else(|e| e.into_inner());
-            total += guard.values().map(|v| v.len()).sum::<usize>();
+            let guard = shard.lock();
+            total += guard
+                .conns
+                .as_slice()
+                .iter()
+                .map(|v| v.len())
+                .sum::<usize>();
         }
         total
     }
@@ -587,9 +642,11 @@ where
     pub fn total_active_streams(&self) -> u32 {
         let mut total = 0;
         for shard in self.shards.iter() {
-            let guard = shard.table.lock().unwrap_or_else(|e| e.into_inner());
+            let guard = shard.lock();
             total += guard
-                .values()
+                .conns
+                .as_slice()
+                .iter()
                 .flat_map(|v| v.iter())
                 .map(|c| c.active_streams())
                 .sum::<u32>();
@@ -602,14 +659,13 @@ where
         let now = Instant::now();
         let mut evicted = 0;
         for shard in self.shards.iter() {
-            let mut guard = shard.table.lock().unwrap_or_else(|e| e.into_inner());
-            for conns in guard.values_mut() {
+            let mut guard = shard.lock();
+            for conns in guard.conns.as_mut_slice() {
                 let before = conns.len();
                 conns.retain(|c| !c.is_idle_expired(idle_timeout, now));
                 evicted += before - conns.len();
             }
-            // Clean up empty key entries
-            guard.retain(|_, v| !v.is_empty());
+            guard.retain_non_empty();
         }
         evicted
     }
@@ -621,16 +677,21 @@ where
     {
         let mut drained = 0;
         for shard in self.shards.iter() {
-            let mut guard = shard.table.lock().unwrap_or_else(|e| e.into_inner());
-            for (k, conns) in guard.iter_mut() {
+            let mut guard = shard.lock();
+            let keys = guard.keys.as_slice();
+            let mut mark_drain = Vec::new();
+            for (idx, k) in keys.iter().enumerate() {
                 if predicate(k) {
-                    for c in conns.drain(..) {
-                        c.mark_goaway();
-                        drained += 1;
-                    }
+                    mark_drain.push(idx);
                 }
             }
-            guard.retain(|_, v| !v.is_empty());
+            for idx in mark_drain {
+                for c in guard.conns.as_mut_slice()[idx].drain(..) {
+                    c.mark_goaway();
+                    drained += 1;
+                }
+            }
+            guard.retain_non_empty();
         }
         drained
     }

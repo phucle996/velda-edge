@@ -57,6 +57,14 @@ impl PoolableResource for Http1ClientResource {
     fn touch_at(&mut self, now: Instant) {
         self.last_used_at = now;
     }
+
+    fn on_cold_store(&mut self) {
+        self.stream.detach_for_cold();
+    }
+
+    fn on_hot_restore(&mut self) {
+        self.stream.attach_for_hot();
+    }
 }
 
 /// RAII lease guard for an acquired HTTP/1.1 upstream stream.

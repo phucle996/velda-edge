@@ -14,7 +14,7 @@ use std::time::{Duration, Instant};
 
 use common::{BenchResource, CountingAllocator, calculate_big_o, format_duration};
 use velda_connection_pool::{
-    ConnectionKey, ConnectionProfile, PoolConfig, PoolManager, SequentialLease,
+    CompactPoolKey, ConnectionProfile, PoolConfig, PoolManager, SequentialLease,
 };
 
 #[global_allocator]
@@ -28,9 +28,9 @@ fn bench_acquire_hit_vs_miss() {
     println!("### 1. Connection Pool Acquire Hit vs Miss & Zero-Alloc Invariant\n");
 
     let iters = 200_000;
-    let pool = PoolManager::<ConnectionKey, BenchResource>::new();
+    let pool = PoolManager::<CompactPoolKey, BenchResource>::new();
     let addr = (velda_core::lut::ip::v4_to_u128(0x0a000001), 8080u16.to_be());
-    let key = ConnectionKey::tcp(addr.0, addr.1);
+    let key = CompactPoolKey::tcp(addr.0, addr.1);
 
     // Warm-up: insert reusable connection
     pool.release(&key, BenchResource::new(addr), true, false);
@@ -47,7 +47,8 @@ fn bench_acquire_hit_vs_miss() {
     let (_hit_allocs, _) = ALLOCATOR.snapshot();
 
     // 2. Measure Miss (acquire non-existent key)
-    let miss_key = ConnectionKey::tcp(velda_core::lut::ip::v4_to_u128(0x0a000063), 9999u16.to_be());
+    let miss_key =
+        CompactPoolKey::tcp(velda_core::lut::ip::v4_to_u128(0x0a000063), 9999u16.to_be());
     ALLOCATOR.reset();
     let start_miss = Instant::now();
     for _ in 0..iters {
@@ -100,29 +101,29 @@ fn bench_lease_overhead() {
     println!("### 2. ConnectionProfile RAII Leases Overhead & Zero-Alloc Invariant\n");
 
     let iters = 200_000;
-    let pool = Arc::new(PoolManager::<ConnectionKey, BenchResource>::new());
+    let pool = Arc::new(PoolManager::<CompactPoolKey, BenchResource>::new());
 
     let addr_seq = (velda_core::lut::ip::v4_to_u128(0x0a000101), 80u16.to_be());
-    let key_seq = ConnectionKey::http(addr_seq.0, addr_seq.1, "http/1.1", None, None);
-    let prof_seq = ConnectionProfile::sequential(key_seq.clone(), Duration::from_secs(60));
+    let key_seq = CompactPoolKey::http1(addr_seq.0, addr_seq.1);
+    let prof_seq = ConnectionProfile::sequential(key_seq, Duration::from_secs(60));
     pool.register_profile(&prof_seq, BenchResource::new(addr_seq))
         .release(true);
 
     let addr_excl = (velda_core::lut::ip::v4_to_u128(0x0a000201), 9000u16.to_be());
-    let key_excl = ConnectionKey::tcp(addr_excl.0, addr_excl.1);
-    let prof_excl = ConnectionProfile::exclusive(key_excl.clone(), Duration::from_secs(60));
+    let key_excl = CompactPoolKey::tcp(addr_excl.0, addr_excl.1);
+    let prof_excl = ConnectionProfile::exclusive(key_excl, Duration::from_secs(60));
     pool.register_profile(&prof_excl, BenchResource::new(addr_excl))
         .release(true);
 
     let addr_mux = (velda_core::lut::ip::v4_to_u128(0x0a000301), 443u16.to_be());
-    let key_mux = ConnectionKey::http(
+    let key_mux = CompactPoolKey::new(
         addr_mux.0,
         addr_mux.1,
-        "h2",
-        Some("api.velda.io".into()),
-        Some("h2".into()),
+        velda_connection_pool::PROTO_HTTP2,
+        1,
+        1,
     );
-    let prof_mux = ConnectionProfile::multiplexed(key_mux.clone(), Duration::from_secs(60), 10_000);
+    let prof_mux = ConnectionProfile::multiplexed(key_mux, Duration::from_secs(60), 10_000);
     let _mux_holder = pool.register_profile(&prof_mux, BenchResource::new(addr_mux));
 
     // 1. Sequential Lease (HTTP/1.1 RAII auto-return to LIFO)
@@ -164,7 +165,7 @@ fn bench_lease_overhead() {
     let start_raw = Instant::now();
     for _ in 0..iters {
         if let Some(res) = pool.acquire(&key_seq, Duration::from_secs(60)) {
-            let lease = SequentialLease::new(res, key_seq.clone(), Arc::clone(&pool), false);
+            let lease = SequentialLease::new(res, key_seq, Arc::clone(&pool), false);
             std::hint::black_box(&*lease);
         }
     }
@@ -227,9 +228,9 @@ fn bench_subpool_depth_scaling() {
             idle_timeout: Duration::from_secs(60),
             max_lifetime: None,
         };
-        let pool = PoolManager::<ConnectionKey, BenchResource>::with_config(config);
+        let pool = PoolManager::<CompactPoolKey, BenchResource>::with_config(config);
         let addr = (velda_core::lut::ip::v4_to_u128(0x0a000001), 8080u16.to_be());
-        let key = ConnectionKey::tcp(addr.0, addr.1);
+        let key = CompactPoolKey::tcp(addr.0, addr.1);
 
         for _ in 0..depth {
             pool.release(&key, BenchResource::new(addr), true, false);
@@ -292,13 +293,13 @@ fn bench_eviction_scaling() {
             idle_timeout: Duration::from_secs(30),
             max_lifetime: None,
         };
-        let pool = PoolManager::<ConnectionKey, BenchResource>::with_config(config);
+        let pool = PoolManager::<CompactPoolKey, BenchResource>::with_config(config);
 
         // Populate count connections, half expired, half active
         for i in 0..count {
             let port = 8000 + (i % 2500) as u16;
             let addr = (velda_core::lut::ip::v4_to_u128(0x7F00_0001), port.to_be());
-            let key = ConnectionKey::tcp(addr.0, addr.1);
+            let key = CompactPoolKey::tcp(addr.0, addr.1);
 
             let mut conn = BenchResource::new(addr);
             if i % 2 == 0 {
@@ -335,14 +336,14 @@ fn bench_eviction_scaling() {
 fn bench_drain_matching() {
     println!("### 5. Drain Matching Predicate Invalidation Benchmark\n");
 
-    let pool = PoolManager::<ConnectionKey, BenchResource>::new();
+    let pool = PoolManager::<CompactPoolKey, BenchResource>::new();
     let total_conns = 10_000;
 
     // Populate across 1,000 distinct endpoints
     for i in 0..total_conns {
         let port = 8000 + (i % 1000) as u16;
         let addr = (velda_core::lut::ip::v4_to_u128(0x7F00_0001), port.to_be());
-        let key = ConnectionKey::tcp(addr.0, addr.1);
+        let key = CompactPoolKey::tcp(addr.0, addr.1);
         pool.release(&key, BenchResource::new(addr), true, false);
     }
 
@@ -355,7 +356,7 @@ fn bench_drain_matching() {
     // 1. Drain 1 specific endpoint (out of 1000)
     let target_addr = (velda_core::lut::ip::v4_to_u128(0x7f000001), 8042u16.to_be());
     let start_single = Instant::now();
-    let drained_single = pool.drain_matching(|k| (k.target_ip, k.target_port_be) == target_addr);
+    let drained_single = pool.drain_matching(|k| (k.target_ip(), k.port_be) == target_addr);
     let elapsed_single = start_single.elapsed();
     println!(
         "| {:<24} | {:<14} | {:<16} | {:<14} |",
@@ -367,7 +368,7 @@ fn bench_drain_matching() {
 
     // 2. Drain all endpoints on ports 8000..8250 (25%)
     let start_quarter = Instant::now();
-    let drained_quarter = pool.drain_matching(|k| u16::from_be(k.target_port_be) < 8250);
+    let drained_quarter = pool.drain_matching(|k| u16::from_be(k.port_be) < 8250);
     let elapsed_quarter = start_quarter.elapsed();
     println!(
         "| {:<24} | {:<14} | {:<16} | {:<14} |",
@@ -398,9 +399,9 @@ fn bench_drain_matching() {
 fn bench_connection_reuse_efficiency() {
     println!("### 6. Connection Reuse Multiplier & OS Handshake Savings\n");
 
-    let pool = PoolManager::<ConnectionKey, BenchResource>::new();
+    let pool = PoolManager::<CompactPoolKey, BenchResource>::new();
     let addr = (velda_core::lut::ip::v4_to_u128(0x0a000001), 8080u16.to_be());
-    let key = ConnectionKey::tcp(addr.0, addr.1);
+    let key = CompactPoolKey::tcp(addr.0, addr.1);
 
     let traffic_volumes = [10, 100, 1_000, 10_000, 100_000];
 

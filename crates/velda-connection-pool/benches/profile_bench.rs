@@ -12,7 +12,7 @@ use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use common::{BenchResource, CountingAllocator, format_duration};
-use velda_connection_pool::{ConnectionKey, ConnectionProfile, PoolManager};
+use velda_connection_pool::{CompactPoolKey, ConnectionProfile, PoolManager};
 
 #[global_allocator]
 static ALLOCATOR: CountingAllocator = CountingAllocator::new();
@@ -25,30 +25,30 @@ fn bench_profile_direct_comparison() {
     println!("### 1. ConnectionProfile Comparison: Exclusive vs Sequential vs Multiplexed\n");
 
     let iters = 500_000;
-    let pool = Arc::new(PoolManager::<ConnectionKey, BenchResource>::new());
+    let pool = Arc::new(PoolManager::<CompactPoolKey, BenchResource>::new());
 
     // Setup 3 profiles
     let addr_seq = (velda_core::lut::ip::v4_to_u128(0x0a000101), 80u16.to_be());
-    let key_seq = ConnectionKey::http(addr_seq.0, addr_seq.1, "http/1.1", None, None);
-    let prof_seq = ConnectionProfile::sequential(key_seq.clone(), Duration::from_secs(60));
+    let key_seq = CompactPoolKey::http1(addr_seq.0, addr_seq.1);
+    let prof_seq = ConnectionProfile::sequential(key_seq, Duration::from_secs(60));
     pool.register_profile(&prof_seq, BenchResource::new(addr_seq))
         .release(true);
 
     let addr_excl = (velda_core::lut::ip::v4_to_u128(0x0a000201), 9000u16.to_be());
-    let key_excl = ConnectionKey::tcp(addr_excl.0, addr_excl.1);
-    let prof_excl = ConnectionProfile::exclusive(key_excl.clone(), Duration::from_secs(60));
+    let key_excl = CompactPoolKey::tcp(addr_excl.0, addr_excl.1);
+    let prof_excl = ConnectionProfile::exclusive(key_excl, Duration::from_secs(60));
     pool.register_profile(&prof_excl, BenchResource::new(addr_excl))
         .release(true);
 
     let addr_mux = (velda_core::lut::ip::v4_to_u128(0x0a000301), 443u16.to_be());
-    let key_mux = ConnectionKey::http(
+    let key_mux = CompactPoolKey::new(
         addr_mux.0,
         addr_mux.1,
-        "h2",
-        Some("api.velda.io".into()),
-        Some("h2".into()),
+        velda_connection_pool::PROTO_HTTP2,
+        1,
+        1,
     );
-    let prof_mux = ConnectionProfile::multiplexed(key_mux.clone(), Duration::from_secs(60), 10_000);
+    let prof_mux = ConnectionProfile::multiplexed(key_mux, Duration::from_secs(60), 10_000);
     let _conn_mux = pool.register_profile(&prof_mux, BenchResource::new(addr_mux));
 
     // A. Sequential (HTTP/1.1 Keep-Alive)
@@ -137,11 +137,11 @@ fn bench_concurrency_sequential_vs_multiplexed() {
 
         // --- Scenario 1: Sequential HTTP/1.1 ---
         {
-            let pool = Arc::new(PoolManager::<ConnectionKey, BenchResource>::with_workers(
+            let pool = Arc::new(PoolManager::<CompactPoolKey, BenchResource>::with_workers(
                 threads,
             ));
             let addr = (velda_core::lut::ip::v4_to_u128(0x0a000101), 80u16.to_be());
-            let key = ConnectionKey::tcp(addr.0, addr.1);
+            let key = CompactPoolKey::tcp(addr.0, addr.1);
             let profile = ConnectionProfile::sequential(key, Duration::from_secs(60));
 
             // Pre-seed connections for concurrent threads
@@ -186,17 +186,11 @@ fn bench_concurrency_sequential_vs_multiplexed() {
 
         // --- Scenario 2: Multiplexed HTTP/2 ---
         {
-            let pool = Arc::new(PoolManager::<ConnectionKey, BenchResource>::with_workers(
+            let pool = Arc::new(PoolManager::<CompactPoolKey, BenchResource>::with_workers(
                 threads,
             ));
             let addr = (velda_core::lut::ip::v4_to_u128(0x0a000201), 443u16.to_be());
-            let key = ConnectionKey::http(
-                addr.0,
-                addr.1,
-                "h2",
-                Some("api.velda.io".into()),
-                Some("h2".into()),
-            );
+            let key = CompactPoolKey::new(addr.0, addr.1, velda_connection_pool::PROTO_HTTP2, 1, 1);
             let profile = ConnectionProfile::multiplexed(key, Duration::from_secs(60), 10_000);
 
             // Exactly 1 physical connection shared across all threads
@@ -246,17 +240,11 @@ fn bench_concurrency_sequential_vs_multiplexed() {
 fn bench_stream_saturation_recovery() {
     println!("### 3. Multiplexed Stream Saturation & Recovery\n");
 
-    let pool = Arc::new(PoolManager::<ConnectionKey, BenchResource>::new());
+    let pool = Arc::new(PoolManager::<CompactPoolKey, BenchResource>::new());
     let addr = (velda_core::lut::ip::v4_to_u128(0x0a000301), 443u16.to_be());
-    let key = ConnectionKey::http(
-        addr.0,
-        addr.1,
-        "h2",
-        Some("api.velda.io".into()),
-        Some("h2".into()),
-    );
+    let key = CompactPoolKey::new(addr.0, addr.1, velda_connection_pool::PROTO_HTTP2, 1, 1);
     let max_streams = 128;
-    let profile = ConnectionProfile::multiplexed(key.clone(), Duration::from_secs(60), max_streams);
+    let profile = ConnectionProfile::multiplexed(key, Duration::from_secs(60), max_streams);
 
     let _conn = pool.register_profile(&profile, BenchResource::new(addr));
 

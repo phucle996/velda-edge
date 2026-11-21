@@ -13,7 +13,7 @@ use std::sync::atomic::{AtomicBool, AtomicI64, AtomicU64, Ordering};
 use std::time::{Duration, Instant};
 
 use velda_connection_pool::{
-    ConnectionKey, PoolConfig, PoolManager, PoolableResource, ShardTable, SubPool,
+    ColdPool, CompactPoolKey, HotPool, PoolConfig, PoolManager, PoolableResource, SubPool,
 };
 
 struct TrackingAllocator {
@@ -192,17 +192,18 @@ fn verify_subpool_zero_leak() {
 fn verify_shard_table_zero_leak() {
     // Warm up
     {
-        let table = ShardTable::<ConnectionKey, HeapResource>::with_workers(4);
-        let key = ConnectionKey::tcp(velda_core::lut::ip::v4_to_u128(0x7f000001), 8080u16.to_be());
-        let shard = table.shard_for(&key);
-        let mut guard = shard.lock();
+        let pool = HotPool::<CompactPoolKey, HeapResource>::with_workers(4);
+        let key = CompactPoolKey::tcp(velda_core::lut::ip::v4_to_u128(0x7f000001), 8080u16.to_be());
+        let lane = pool.lane(0);
+        let mut guard = lane.lock();
         guard.insert(key, SubPool::new(10));
     }
 
     let baseline = TRACKER.live_bytes();
 
     {
-        let table = ShardTable::<ConnectionKey, HeapResource>::with_workers(8);
+        let pool = HotPool::<CompactPoolKey, HeapResource>::with_workers(8);
+        let cold = ColdPool::<CompactPoolKey, HeapResource>::with_capacity(64);
         for i in 0..2000 {
             let addr = (
                 velda_core::lut::ip::v4_to_u128(
@@ -210,33 +211,35 @@ fn verify_shard_table_zero_leak() {
                 ),
                 8080u16.to_be(),
             );
-            let key = ConnectionKey::tcp(addr.0, addr.1);
-            let shard = table.shard_for(&key);
-            let mut guard = shard.lock();
-            let subpool = guard.entry(key).or_insert_with(|| SubPool::new(10));
-            subpool.release(HeapResource::new(1024));
+            let key = CompactPoolKey::tcp(addr.0, addr.1);
+            let lane = pool.lane(i);
+            let mut guard = lane.lock();
+            let subpool = guard.get_or_insert_with(key, 10);
+            if let Some(spilled) = subpool.push_or_spill(HeapResource::new(1024))
+                && let Err(mut rejected) = cold.push(key, spilled)
+            {
+                rejected.close();
+            }
         }
 
-        // Drain all shards
-        for shard in table.all_shards() {
-            let mut guard = shard.lock();
-            for (_, mut subpool) in guard.drain() {
-                subpool.clear();
-            }
+        // Drain all lanes and ColdPool
+        cold.clear();
+        for lane in pool.all_lanes() {
+            lane.lock().clear();
         }
     }
 
     let current = TRACKER.live_bytes();
     assert_eq!(
         current, baseline,
-        "ShardTable leaked memory! before={}, after={}",
+        "HotPool/ColdPool leaked memory! before={}, after={}",
         baseline, current
     );
 }
 
 fn verify_acquire_release_lifecycle_zero_leak() {
     let addr = (velda_core::lut::ip::v4_to_u128(0x0a000101), 8080u16.to_be());
-    let key = ConnectionKey::tcp(addr.0, addr.1);
+    let key = CompactPoolKey::tcp(addr.0, addr.1);
     let test_config = PoolConfig {
         max_idle_per_key: 32,
         ..PoolConfig::default()
@@ -244,7 +247,7 @@ fn verify_acquire_release_lifecycle_zero_leak() {
 
     // Warm up
     {
-        let pool = PoolManager::<ConnectionKey, HeapResource>::with_config(test_config);
+        let pool = PoolManager::<CompactPoolKey, HeapResource>::with_config(test_config);
         pool.release(&key, HeapResource::new(2048), true, false);
         let _ = pool.acquire(&key, Duration::from_secs(60));
     }
@@ -252,7 +255,7 @@ fn verify_acquire_release_lifecycle_zero_leak() {
     let baseline = TRACKER.live_bytes();
 
     {
-        let pool = PoolManager::<ConnectionKey, HeapResource>::with_config(test_config);
+        let pool = PoolManager::<CompactPoolKey, HeapResource>::with_config(test_config);
 
         // Prime with 16 connections
         for _ in 0..16 {
@@ -291,7 +294,7 @@ fn verify_acquire_release_lifecycle_zero_leak() {
 
 fn verify_pool_lease_raii_drop_zero_leak() {
     let addr = (velda_core::lut::ip::v4_to_u128(0x0a000201), 8080u16.to_be());
-    let key = ConnectionKey::tcp(addr.0, addr.1);
+    let key = CompactPoolKey::tcp(addr.0, addr.1);
     let test_config = PoolConfig {
         max_idle_per_key: 32,
         ..PoolConfig::default()
@@ -299,7 +302,7 @@ fn verify_pool_lease_raii_drop_zero_leak() {
 
     // Warm up
     {
-        let pool = Arc::new(PoolManager::<ConnectionKey, HeapResource>::with_config(
+        let pool = Arc::new(PoolManager::<CompactPoolKey, HeapResource>::with_config(
             test_config,
         ));
         pool.release(&key, HeapResource::new(1024), true, false);
@@ -309,7 +312,7 @@ fn verify_pool_lease_raii_drop_zero_leak() {
     let baseline = TRACKER.live_bytes();
 
     {
-        let pool = Arc::new(PoolManager::<ConnectionKey, HeapResource>::with_config(
+        let pool = Arc::new(PoolManager::<CompactPoolKey, HeapResource>::with_config(
             test_config,
         ));
 
@@ -344,7 +347,7 @@ fn verify_key_churn_and_drain_zero_leak() {
     let baseline = TRACKER.live_bytes();
 
     {
-        let pool = PoolManager::<ConnectionKey, HeapResource>::new();
+        let pool = PoolManager::<CompactPoolKey, HeapResource>::new();
 
         // Rapidly create 1,000 keys and add resources
         for i in 0..1000 {
@@ -357,7 +360,7 @@ fn verify_key_churn_and_drain_zero_leak() {
                 ),
                 8080u16.to_be(),
             );
-            let key = ConnectionKey::tcp(addr.0, addr.1);
+            let key = CompactPoolKey::tcp(addr.0, addr.1);
             for _ in 0..3 {
                 pool.release(&key, HeapResource::new(2048), true, false);
             }
@@ -389,7 +392,7 @@ fn verify_concurrent_hammer_multithreaded_zero_leak() {
     let baseline = TRACKER.live_bytes();
 
     {
-        let pool = Arc::new(PoolManager::<ConnectionKey, HeapResource>::new());
+        let pool = Arc::new(PoolManager::<CompactPoolKey, HeapResource>::new());
         let workers = 16;
         let ops_per_worker = 5_000;
         let mut handles = Vec::new();
@@ -403,7 +406,7 @@ fn verify_concurrent_hammer_multithreaded_zero_leak() {
                     ),
                     8080u16.to_be(),
                 );
-                let key = ConnectionKey::tcp(addr.0, addr.1);
+                let key = CompactPoolKey::tcp(addr.0, addr.1);
 
                 // Seed with 2 connections per worker
                 pool_clone.release(&key, HeapResource::new(2048), true, false);
@@ -444,7 +447,7 @@ fn verify_eviction_and_unhealthy_zero_leak() {
     let baseline = TRACKER.live_bytes();
 
     {
-        let pool = PoolManager::<ConnectionKey, HeapResource>::new();
+        let pool = PoolManager::<CompactPoolKey, HeapResource>::new();
 
         // Seed 1,000 keys with expired connections
         let past = Instant::now() - Duration::from_secs(3600);
@@ -458,7 +461,7 @@ fn verify_eviction_and_unhealthy_zero_leak() {
                 ),
                 8080u16.to_be(),
             );
-            let key = ConnectionKey::tcp(addr.0, addr.1);
+            let key = CompactPoolKey::tcp(addr.0, addr.1);
             pool.release(&key, HeapResource::with_created_at(2048, past), true, false);
         }
 

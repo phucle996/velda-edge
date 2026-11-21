@@ -2,9 +2,10 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::{Duration, Instant};
 
-use velda_connection_pool::container::probed_max_idle_per_key;
+use velda_connection_pool::probed_max_idle_per_key;
 use velda_connection_pool::{
-    ConnectionKey, ConnectionProfile, PoolConfig, PoolManager, PoolStats, PoolableResource,
+    CompactPoolKey, ConnectionProfile, PROTO_HTTP2, PoolConfig, PoolManager, PoolStats,
+    PoolableResource,
 };
 
 #[derive(Debug)]
@@ -214,10 +215,10 @@ fn test_pool_manager_rejects_unhealthy_or_draining() {
 
 #[test]
 fn test_pool_manager_acquire_profile_sequential() {
-    let pool = Arc::new(PoolManager::<ConnectionKey, MockConn>::new());
+    let pool = Arc::new(PoolManager::<CompactPoolKey, MockConn>::new());
     let addr = (velda_core::lut::ip::v4_to_u128(0x7f000001), 8080u16.to_be());
-    let key = ConnectionKey::tcp(addr.0, addr.1);
-    let profile = ConnectionProfile::sequential(key.clone(), Duration::from_secs(30));
+    let key = CompactPoolKey::tcp(addr.0, addr.1);
+    let profile = ConnectionProfile::sequential(key, Duration::from_secs(30));
 
     // 1. Initial acquire misses
     assert!(pool.acquire_profile(&profile).is_none());
@@ -247,10 +248,10 @@ fn test_pool_manager_acquire_profile_sequential() {
 
 #[test]
 fn test_pool_manager_acquire_profile_exclusive() {
-    let pool = Arc::new(PoolManager::<ConnectionKey, MockConn>::new());
+    let pool = Arc::new(PoolManager::<CompactPoolKey, MockConn>::new());
     let addr = (velda_core::lut::ip::v4_to_u128(0x7f000001), 9090u16.to_be());
-    let key = ConnectionKey::tcp(addr.0, addr.1);
-    let profile = ConnectionProfile::exclusive(key.clone(), Duration::from_secs(30));
+    let key = CompactPoolKey::tcp(addr.0, addr.1);
+    let profile = ConnectionProfile::exclusive(key, Duration::from_secs(30));
 
     // 1. Miss
     assert!(pool.acquire_profile(&profile).is_none());
@@ -276,16 +277,10 @@ fn test_pool_manager_acquire_profile_exclusive() {
 
 #[test]
 fn test_pool_manager_acquire_profile_multiplexed() {
-    let pool = Arc::new(PoolManager::<ConnectionKey, MockConn>::new());
+    let pool = Arc::new(PoolManager::<CompactPoolKey, MockConn>::new());
     let addr = (velda_core::lut::ip::v4_to_u128(0x7f000001), 443u16.to_be());
-    let key = ConnectionKey::http(
-        addr.0,
-        addr.1,
-        "h2",
-        Some("api.velda.io".into()),
-        Some("h2".into()),
-    );
-    let profile = ConnectionProfile::multiplexed(key.clone(), Duration::from_secs(30), 2);
+    let key = CompactPoolKey::new(addr.0, addr.1, PROTO_HTTP2, 1, 1);
+    let profile = ConnectionProfile::multiplexed(key, Duration::from_secs(30), 2);
 
     // 1. Initial acquire misses
     assert!(pool.acquire_profile(&profile).is_none());
@@ -323,10 +318,10 @@ fn test_pool_manager_acquire_profile_multiplexed() {
 
 #[test]
 fn test_pool_manager_drain_and_evict_multiplexed() {
-    let pool = Arc::new(PoolManager::<ConnectionKey, MockConn>::new());
+    let pool = Arc::new(PoolManager::<CompactPoolKey, MockConn>::new());
     let addr = (velda_core::lut::ip::v4_to_u128(0x7f000001), 8443u16.to_be());
-    let key = ConnectionKey::tcp(addr.0, addr.1);
-    let profile = ConnectionProfile::multiplexed(key.clone(), Duration::from_millis(10), 10);
+    let key = CompactPoolKey::tcp(addr.0, addr.1);
+    let profile = ConnectionProfile::multiplexed(key, Duration::from_millis(10), 10);
 
     let conn = MockConn(400, Instant::now(), AtomicBool::new(true));
     let stream = pool.register_profile(&profile, conn);

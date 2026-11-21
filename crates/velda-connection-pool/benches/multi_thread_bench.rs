@@ -12,7 +12,7 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::{Duration, Instant};
 
 use common::{BenchResource, format_duration};
-use velda_connection_pool::{ConnectionKey, ConnectionProfile, PoolManager};
+use velda_connection_pool::{CompactPoolKey, ConnectionProfile, PoolManager};
 
 // ============================================================================
 // Stage 1: Worker Thread Concurrency Scaling (1 .. 256 Workers)
@@ -41,7 +41,7 @@ fn bench_worker_concurrency_scaling() {
     let mut baseline_throughput = 1.0;
 
     for (idx, &workers) in worker_counts.iter().enumerate() {
-        let pool = Arc::new(PoolManager::<ConnectionKey, BenchResource>::with_workers(
+        let pool = Arc::new(PoolManager::<CompactPoolKey, BenchResource>::with_workers(
             workers,
         ));
         let total_requests = workers * iters_per_worker;
@@ -50,7 +50,7 @@ fn bench_worker_concurrency_scaling() {
         for ep_idx in 0..128 {
             let port = 8000 + ep_idx as u16;
             let addr = (velda_core::lut::ip::v4_to_u128(0x7F00_0001), port.to_be());
-            let key = ConnectionKey::tcp(addr.0, addr.1);
+            let key = CompactPoolKey::tcp(addr.0, addr.1);
             pool.release(&key, BenchResource::new(addr), true, false);
         }
 
@@ -65,7 +65,7 @@ fn bench_worker_concurrency_scaling() {
                     let ep_idx = (worker_id * 7 + (i % 32)) % 128;
                     let port = 8000 + ep_idx as u16;
                     let addr = (velda_core::lut::ip::v4_to_u128(0x7F00_0001), port.to_be());
-                    let key = ConnectionKey::tcp(addr.0, addr.1);
+                    let key = CompactPoolKey::tcp(addr.0, addr.1);
 
                     if let Some(conn) = p.acquire(&key, Duration::from_secs(60)) {
                         p.release(&key, conn, true, false);
@@ -135,13 +135,13 @@ fn bench_lock_contention_hotspot() {
 
     // Scenario A: Distributed across 128 keys (contention distributed across shards)
     {
-        let pool = Arc::new(PoolManager::<ConnectionKey, BenchResource>::with_workers(
+        let pool = Arc::new(PoolManager::<CompactPoolKey, BenchResource>::with_workers(
             workers,
         ));
         for ep_idx in 0..128 {
             let port = 8000 + ep_idx as u16;
             let addr = (velda_core::lut::ip::v4_to_u128(0x7F00_0001), port.to_be());
-            let key = ConnectionKey::tcp(addr.0, addr.1);
+            let key = CompactPoolKey::tcp(addr.0, addr.1);
             pool.release(&key, BenchResource::new(addr), true, false);
         }
 
@@ -155,7 +155,7 @@ fn bench_lock_contention_hotspot() {
                     let ep_idx = (worker_id * 7 + (i % 32)) % 128;
                     let port = 8000 + ep_idx as u16;
                     let addr = (velda_core::lut::ip::v4_to_u128(0x7F00_0001), port.to_be());
-                    let key = ConnectionKey::tcp(addr.0, addr.1);
+                    let key = CompactPoolKey::tcp(addr.0, addr.1);
 
                     if let Some(conn) = p.acquire(&key, Duration::from_secs(60)) {
                         p.release(&key, conn, true, false);
@@ -189,11 +189,11 @@ fn bench_lock_contention_hotspot() {
 
     // Scenario B: Hotspot on 1 single key (all 64 threads contend on 1 single Mutex shard)
     {
-        let pool = Arc::new(PoolManager::<ConnectionKey, BenchResource>::with_workers(
+        let pool = Arc::new(PoolManager::<CompactPoolKey, BenchResource>::with_workers(
             workers,
         ));
         let hot_addr = (velda_core::lut::ip::v4_to_u128(0x0a000001), 8080u16.to_be());
-        let hot_key = ConnectionKey::tcp(hot_addr.0, hot_addr.1);
+        let hot_key = CompactPoolKey::tcp(hot_addr.0, hot_addr.1);
 
         for _ in 0..64 {
             pool.release(&hot_key, BenchResource::new(hot_addr), true, false);
@@ -204,7 +204,7 @@ fn bench_lock_contention_hotspot() {
 
         for _ in 0..workers {
             let p = Arc::clone(&pool);
-            let k = hot_key.clone();
+            let k = hot_key;
             handles.push(std::thread::spawn(move || {
                 for _ in 0..iters_per_worker {
                     if let Some(conn) = p.acquire(&k, Duration::from_secs(60)) {
@@ -248,7 +248,7 @@ fn bench_concurrent_traffic_with_background_sweeps() {
 
     let workers = 32;
     let duration = Duration::from_secs(3);
-    let pool = Arc::new(PoolManager::<ConnectionKey, BenchResource>::with_workers(
+    let pool = Arc::new(PoolManager::<CompactPoolKey, BenchResource>::with_workers(
         workers,
     ));
     let stop_signal = Arc::new(AtomicBool::new(false));
@@ -257,7 +257,7 @@ fn bench_concurrent_traffic_with_background_sweeps() {
     for i in 0..256 {
         let port = 8000 + (i as u16);
         let addr = (velda_core::lut::ip::v4_to_u128(0x7F00_0001), port.to_be());
-        let key = ConnectionKey::tcp(addr.0, addr.1);
+        let key = CompactPoolKey::tcp(addr.0, addr.1);
         pool.release(&key, BenchResource::new(addr), true, false);
     }
 
@@ -278,7 +278,7 @@ fn bench_concurrent_traffic_with_background_sweeps() {
                 let ep_idx = (worker_id * 13 + (local_ops as usize % 64)) % 256;
                 let port = 8000 + (ep_idx as u16);
                 let addr = (velda_core::lut::ip::v4_to_u128(0x7F00_0001), port.to_be());
-                let key = ConnectionKey::tcp(addr.0, addr.1);
+                let key = CompactPoolKey::tcp(addr.0, addr.1);
 
                 if let Some(conn) = p.acquire(&key, Duration::from_secs(60)) {
                     p.release(&key, conn, true, false);
@@ -353,18 +353,12 @@ fn bench_multiplexed_stream_concurrency() {
     let iters_per_worker = 100_000;
     let total_requests = workers * iters_per_worker;
 
-    let pool = Arc::new(PoolManager::<ConnectionKey, BenchResource>::with_workers(
+    let pool = Arc::new(PoolManager::<CompactPoolKey, BenchResource>::with_workers(
         workers,
     ));
     let addr = (velda_core::lut::ip::v4_to_u128(0x0a000001), 443u16.to_be());
-    let key = ConnectionKey::http(
-        addr.0,
-        addr.1,
-        "h2",
-        Some("api.velda.io".into()),
-        Some("h2".into()),
-    );
-    let profile = ConnectionProfile::multiplexed(key.clone(), Duration::from_secs(60), 10_000);
+    let key = CompactPoolKey::new(addr.0, addr.1, velda_connection_pool::PROTO_HTTP2, 1, 1);
+    let profile = ConnectionProfile::multiplexed(key, Duration::from_secs(60), 10_000);
 
     // Register 1 physical connection for 64 concurrent threads
     let _conn = pool.register_profile(&profile, BenchResource::new(addr));

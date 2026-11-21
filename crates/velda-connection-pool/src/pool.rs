@@ -1,45 +1,52 @@
-//! High-performance sharded connection pool manager and unified acquisition facade.
+//! Two-tier page-aligned connection pool manager (`HotPool` + `ColdPool`).
 //!
-//! # Architecture & Responsibilities (SRP)
+//! ```text
+//!  acquire():
+//!    [1] hot.current_lane().pop() ──► Hit? ──► return (0 Mutex, 0 epoll_ctl)
+//!         │ Miss
+//!         ▼
+//!    [2] cold.pop() ──► Hit? ──► on_hot_restore() ──► return
+//!         │ Miss
+//!         ▼
+//!       None (caller dials fresh connection via velda-sock)
 //!
-//! [`PoolManager`] is the single composition root and facade for connection reuse.
-//! It does NOT own connection establishment (`connect()` is strictly external),
-//! but coordinates:
-//! - **LIFO Subpools**: For 1:1 transactional HTTP/1.1 and dedicated TCP streams.
-//! - **Multiplexed Pools**: For 1:N concurrent stream-sharing HTTP/2 and HTTP/3 sessions.
-//! - **Hardware Scaled Shards**: Cache-line aligned partitions (`#[repr(align(64))]`) to eliminate multicore lock contention.
+//!  release():
+//!    push into hot.lane(lane) ──► overflow max_idle_per_key?
+//!                                     └─► pop coldest -> on_cold_store() -> cold.push()
+//! ```
 
-use std::hash::Hash;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
-use crate::config::{PoolConfig, PoolStats};
-use crate::container::{
-    MultiplexedPool, ShardTable, SubPool, optimal_max_idle_per_key, optimal_shard_count,
-};
-use crate::key::ConnectionKey;
+use crate::cold::ColdPool;
+use crate::config::{PoolConfig, PoolStats, optimal_max_idle_per_key, optimal_shard_count};
+use crate::hot::{HotPool, current_thread_lane};
+use crate::key::CompactPoolKey;
 use crate::lease::{ConnectionLease, ExclusiveLease, SequentialLease, StreamLease};
+use crate::multiplexed::MultiplexedPool;
 use crate::profile::{ConnectionProfile, ReuseMode};
 use crate::resource::PoolableResource;
+use crate::subpool::SubPool;
 
-/// Sharded connection pool manager generic over key `K` and resource `R`.
-pub struct PoolManager<K = ConnectionKey, R = Box<dyn PoolableResource>>
+/// Two-tier connection pool manager generic over key `K` and resource `R`.
+pub struct PoolManager<K = CompactPoolKey, R = Box<dyn PoolableResource>>
 where
-    K: Eq + Hash + Clone,
+    K: Eq + Clone,
     R: PoolableResource,
 {
-    pub(crate) shards: ShardTable<K, R>,
+    pub(crate) hot: HotPool<K, R>,
+    pub(crate) cold: ColdPool<K, R>,
     pub(crate) multiplexed: MultiplexedPool<K, R>,
     pub(crate) config: PoolConfig,
 }
 
-impl<K: Eq + Hash + Clone, R: PoolableResource> Default for PoolManager<K, R> {
+impl<K: Eq + Clone, R: PoolableResource> Default for PoolManager<K, R> {
     fn default() -> Self {
         Self::new()
     }
 }
 
-impl<K: Eq + Hash + Clone, R: PoolableResource> PoolManager<K, R> {
+impl<K: Eq + Clone, R: PoolableResource> PoolManager<K, R> {
     // ------------------------------------------------------------------------
     // Constructors & Hardware Scaling
     // ------------------------------------------------------------------------
@@ -49,7 +56,7 @@ impl<K: Eq + Hash + Clone, R: PoolableResource> PoolManager<K, R> {
         Self::with_config(PoolConfig::default())
     }
 
-    /// Creates a pool manager with custom configuration dynamically scaled to the system's available CPU parallelism.
+    /// Creates a pool manager with custom configuration dynamically scaled to CPU parallelism.
     pub fn with_config(config: PoolConfig) -> Self {
         let workers = std::thread::available_parallelism()
             .map(|p| p.get())
@@ -66,16 +73,20 @@ impl<K: Eq + Hash + Clone, R: PoolableResource> PoolManager<K, R> {
         Self::with_config_and_workers(config, workers)
     }
 
-    /// Creates a pool manager with custom configuration and dynamic hardware worker shards.
+    /// Creates a pool manager with custom configuration and dynamic hardware worker lanes.
     pub fn with_config_and_workers(config: PoolConfig, workers: usize) -> Self {
         Self::with_config_and_shards(config, optimal_shard_count(workers))
     }
 
-    /// Creates a pool manager with the specified configuration and exact number of shards.
-    pub fn with_config_and_shards(config: PoolConfig, shard_count: usize) -> Self {
+    /// Creates a pool manager with the specified configuration and exact number of lanes.
+    pub fn with_config_and_shards(config: PoolConfig, lane_count: usize) -> Self {
+        let lanes = lane_count.max(1).next_power_of_two();
+        // Size shared ColdPool to absorb overflow across lanes cleanly in contiguous 4KB pages.
+        let cold_cap = (config.max_idle_per_key.max(16) * 2).clamp(64, 4096);
         Self {
-            shards: ShardTable::new(shard_count),
-            multiplexed: MultiplexedPool::with_shards(shard_count),
+            hot: HotPool::new(lanes),
+            cold: ColdPool::with_capacity(cold_cap),
+            multiplexed: MultiplexedPool::with_shards(lanes),
             config,
         }
     }
@@ -90,33 +101,39 @@ impl<K: Eq + Hash + Clone, R: PoolableResource> PoolManager<K, R> {
         &self.multiplexed
     }
 
+    /// Returns a reference to the shared lock-free Cold Pool.
+    #[inline]
+    pub fn cold_pool(&self) -> &ColdPool<K, R> {
+        &self.cold
+    }
+
     /// Returns the active configuration of this pool manager.
     #[inline]
     pub fn config(&self) -> &PoolConfig {
         &self.config
     }
 
-    /// Returns the active shard partition count.
+    /// Returns the active core lane count.
     #[inline]
     pub fn shard_count(&self) -> usize {
-        self.shards.shard_count()
+        self.hot.lane_count()
     }
 
-    /// Checks whether a pool container has been created for `key`.
+    /// Checks whether a hot container has been created for `key`.
     pub fn has_pool(&self, key: &K) -> bool {
-        for shard in self.shards.all_shards() {
-            if shard.lock().contains_key(key) {
+        for lane in self.hot.all_lanes() {
+            if lane.lock().get(key).is_some() {
                 return true;
             }
         }
-        false
+        self.cold.count_for_key(key) > 0
     }
 
-    /// Pre-registers or ensures that a pool container exists for `key`.
+    /// Pre-registers or ensures that a hot container exists for `key` on the current lane.
     pub fn ensure_pool(&self, key: &K) -> bool {
-        let shard = self.shards.shard_for(key);
-        let mut table = shard.lock();
-        if table.contains_key(key) {
+        let lane = self.hot.current_lane();
+        let mut table = lane.lock();
+        if table.get(key).is_some() {
             false
         } else {
             table.insert(key.clone(), SubPool::new(self.config.max_idle_per_key));
@@ -124,47 +141,64 @@ impl<K: Eq + Hash + Clone, R: PoolableResource> PoolManager<K, R> {
         }
     }
 
-    /// Returns the total number of currently idle connections across all pool containers.
+    /// Returns the total number of currently idle connections across Hot lanes + Cold Pool.
     pub fn total_idle_conns(&self) -> usize {
-        let mut count = 0;
-        for shard in self.shards.all_shards() {
-            let table = shard.lock();
-            count += table.values().map(|s| s.len()).sum::<usize>();
+        let mut count = self.cold.len();
+        for lane in self.hot.all_lanes() {
+            let table = lane.lock();
+            count += table.iter().map(|(_, s)| s.len()).sum::<usize>();
         }
         count
     }
 
-    /// Returns the total number of active pool containers across all shards.
+    /// Returns the total number of active key containers across all Hot lanes.
     pub fn total_pool_containers(&self) -> usize {
         let mut count = 0;
-        for shard in self.shards.all_shards() {
-            let table = shard.lock();
-            count += table.len();
+        for lane in self.hot.all_lanes() {
+            count += lane.lock().len();
         }
         count
     }
 
-    /// Returns real-time metrics for pool operations aggregated across striped shards.
+    /// Returns real-time metrics for pool operations aggregated across all lanes.
     pub fn stats(&self) -> PoolStats {
         let mut total = PoolStats::default();
-        for shard in self.shards.all_shards() {
-            total.hits += shard.hits();
-            total.misses += shard.misses();
-            total.releases += shard.releases();
-            total.evictions += shard.evictions();
+        for lane in self.hot.all_lanes() {
+            total.hits += lane.hits();
+            total.misses += lane.misses();
+            total.releases += lane.releases();
+            total.evictions += lane.evictions();
         }
         total
     }
 
-    /// Resets all metrics counters across all shards to zero.
+    /// Resets all metrics counters across all lanes to zero.
     pub fn reset_stats(&self) {
-        for shard in self.shards.all_shards() {
-            shard.reset_stats();
+        for lane in self.hot.all_lanes() {
+            lane.reset_stats();
+        }
+    }
+
+    /// Returns the number of idle connections for `key` in the specified worker lane.
+    #[inline]
+    pub fn idle_conns_for_lane(&self, key: &K, lane: usize) -> usize {
+        let table = self.hot.lane(lane).lock();
+        table.get(key).map_or(0, |s| s.len())
+    }
+
+    /// Updates the maximum idle capacity per key across all active containers.
+    pub fn set_max_idle_per_key(&mut self, max_idle: usize) {
+        self.config.max_idle_per_key = max_idle.max(1);
+        for lane in self.hot.all_lanes() {
+            let mut table = lane.lock();
+            for (_, subpool) in table.iter_mut() {
+                subpool.set_max_idle(self.config.max_idle_per_key);
+            }
         }
     }
 
     // ------------------------------------------------------------------------
-    // Low-Level Resource Acquisition & Return
+    // Low-Level Resource Acquisition & Return (Hot -> Cold 2-Tier)
     // ------------------------------------------------------------------------
 
     /// Attempts to acquire an idle reusable connection for `key` using default lifetime limit.
@@ -172,13 +206,9 @@ impl<K: Eq + Hash + Clone, R: PoolableResource> PoolManager<K, R> {
         self.acquire_with_lifetime(key, idle_timeout, self.config.max_lifetime)
     }
 
-    /// Attempts to acquire an idle connection with explicit max lifetime validation.
-    ///
-    /// # Bare-Metal Hardware Invariant
-    /// - Candidate popping from LIFO subpool executes 100% in RAM under shard lock (< 10 ns).
-    /// - Health verification (`resource.is_healthy()`) and closure of stale sockets execute
-    ///   strictly OUTSIDE the mutex lock, eliminating kernel syscall serialization across CPU cores.
-    /// - Multi-lane striping checks thread-local shard first to eliminate cross-core lock contention.
+    /// Attempts to acquire an idle connection:
+    /// 1. **Tier 1 (Core-Local HotPool)**: Pure contiguous RAM lookup (`0 Mutex`, `0 HashMap`, `0 epoll_ctl`).
+    /// 2. **Tier 2 (Shared Lock-Free ColdPool)**: O(1) lock-free pull when local HotPool is empty.
     pub fn acquire_with_lifetime(
         &self,
         key: &K,
@@ -186,179 +216,104 @@ impl<K: Eq + Hash + Clone, R: PoolableResource> PoolManager<K, R> {
         max_lifetime: Option<Duration>,
     ) -> Option<R> {
         let now = Instant::now();
-        let lane = crate::container::shard::current_thread_lane();
-        let base_shard = self.shards.shard_for(key);
-        let local_shard = self.shards.shard_for_lane(key, lane);
+        let local_lane = self.hot.current_lane();
 
-        // Step 1: Pop candidate from local lane shard (pure RAM, < 10 ns, zero cross-core contention)
+        // Tier 1: Core-local HotPool
         loop {
-            let candidate = {
-                let mut table = local_shard.lock();
-                if let Some(subpool) = table.get_mut(key) {
-                    subpool.pop_candidate(idle_timeout, max_lifetime, now)
-                } else {
-                    None
-                }
-            };
-
+            let candidate = local_lane.pop_candidate(key, idle_timeout, max_lifetime, now);
             match candidate {
                 Some(mut resource) => {
                     if resource.is_healthy() {
                         resource.touch_at(now);
-                        local_shard.record_hit();
+                        local_lane.record_hit();
                         return Some(resource);
-                    } else {
-                        resource.close();
                     }
+                    resource.close();
                 }
                 None => break,
             }
         }
 
-        // Step 2: If local lane has no healthy candidate and local != base, borrow from base shard
-        if !std::ptr::eq(local_shard, base_shard) {
-            loop {
-                let candidate = {
-                    let mut table = base_shard.lock();
-                    if let Some(subpool) = table.get_mut(key) {
-                        subpool.pop_candidate(idle_timeout, max_lifetime, now)
-                    } else {
-                        None
-                    }
-                };
-
-                match candidate {
-                    Some(mut resource) => {
-                        if resource.is_healthy() {
-                            resource.touch_at(now);
-                            base_shard.record_hit();
-                            return Some(resource);
-                        } else {
-                            resource.close();
-                        }
-                    }
-                    None => break,
-                }
-            }
+        // Tier 2: Shared lock-free ColdPool pull (re-binds resource onto acquiring core)
+        if let Some(mut resource) = self.cold.pop(key, idle_timeout, max_lifetime, now) {
+            resource.on_hot_restore();
+            local_lane.record_hit();
+            local_lane.record_cold_pull();
+            return Some(resource);
         }
 
-        // Step 3: Work-stealing across all remaining sibling shards before declaring a miss.
-        // Prevents expensive TCP/TLS reconnections under high concurrency (200-300 clients)
-        // by reusing idle keep-alive connections held in any shard.
-        for shard in self.shards.all_shards() {
-            if std::ptr::eq(shard, local_shard) || std::ptr::eq(shard, base_shard) {
-                continue;
-            }
-            loop {
-                let candidate = {
-                    let mut table = shard.lock();
-                    if let Some(subpool) = table.get_mut(key) {
-                        subpool.pop_candidate(idle_timeout, max_lifetime, now)
-                    } else {
-                        None
-                    }
-                };
-
-                match candidate {
-                    Some(mut resource) => {
-                        if resource.is_healthy() {
-                            resource.touch_at(now);
-                            shard.record_hit();
-                            return Some(resource);
-                        } else {
-                            resource.close();
-                        }
-                    }
-                    None => break,
-                }
-            }
-        }
-
-        local_shard.record_miss();
+        local_lane.record_miss();
         None
     }
 
-    /// Acquires an idle reusable connection wrapped in an RAII [`SequentialLease`].
+    /// Acquires a connection wrapped in a [`SequentialLease`] that auto-returns on drop.
     pub fn acquire_lease(
         self: &Arc<Self>,
         key: &K,
         idle_timeout: Duration,
     ) -> Option<SequentialLease<K, R>> {
-        self.acquire_lease_with_lifetime(key, idle_timeout, self.config.max_lifetime, false)
+        self.acquire_lease_with_lifetime(key, idle_timeout, self.config.max_lifetime)
     }
 
-    /// Acquires an idle reusable connection wrapped in an RAII [`SequentialLease`] with explicit lifetime and draining mode.
+    /// Acquires a [`SequentialLease`] with explicit maximum lifetime validation.
     pub fn acquire_lease_with_lifetime(
         self: &Arc<Self>,
         key: &K,
         idle_timeout: Duration,
         max_lifetime: Option<Duration>,
-        is_draining: bool,
     ) -> Option<SequentialLease<K, R>> {
-        let res = self.acquire_with_lifetime(key, idle_timeout, max_lifetime)?;
+        let resource = self.acquire_with_lifetime(key, idle_timeout, max_lifetime)?;
         Some(SequentialLease::new(
-            res,
+            resource,
             key.clone(),
             Arc::clone(self),
-            is_draining,
+            false,
         ))
     }
 
-    /// Releases a resource back into its designated pool container.
-    ///
-    /// If `is_reusable` is false, `is_draining` is true, or the resource is unhealthy,
-    /// it is immediately closed instead of returned to the pool.
-    /// If the pool container is full (`len >= max_idle_per_key`), excess connections are closed.
+    /// Releases a resource into the calling core's HotPool, spilling the coldest connection
+    /// to the shared ColdPool if the local HotPool reaches `max_idle_per_key`.
     pub fn release(&self, key: &K, mut resource: R, is_reusable: bool, is_draining: bool) {
         if !is_reusable || is_draining || !resource.is_healthy() {
             resource.close();
             return;
         }
 
-        let lane = crate::container::shard::current_thread_lane();
-        let shard = self.shards.shard_for_lane(key, lane);
-        let mut table = shard.lock();
-
-        if let Some(subpool) = table.get_mut(key) {
-            subpool.release(resource);
-        } else {
-            let mut subpool = SubPool::new(self.config.max_idle_per_key);
-            subpool.release(resource);
-            table.insert(key.clone(), subpool);
-        }
-        shard.record_release();
+        let lane = current_thread_lane();
+        self.push_hot_or_spill(key, lane, resource);
     }
 
-    /// Returns the number of currently idle connections for `key` in the designated worker lane shard.
-    #[inline]
-    pub fn idle_conns_for_lane(&self, key: &K, lane: usize) -> usize {
-        let shard = self.shards.shard_for_lane(key, lane);
-        let table = shard.lock();
-        table.get(key).map_or(0, |s| s.len())
-    }
-
-    /// Releases a resource into the pool shard designated for a specific worker lane.
+    /// Releases a pre-warmed resource into the designated core lane (spilling excess to ColdPool).
     pub fn release_to_lane(&self, key: &K, lane: usize, mut resource: R) {
         if !resource.is_healthy() {
             resource.close();
             return;
         }
 
-        let shard = self.shards.shard_for_lane(key, lane);
-        let mut table = shard.lock();
+        self.push_hot_or_spill(key, lane, resource);
+    }
 
-        if let Some(subpool) = table.get_mut(key) {
-            subpool.release(resource);
-        } else {
-            let mut subpool = SubPool::new(self.config.max_idle_per_key);
-            subpool.release(resource);
-            table.insert(key.clone(), subpool);
+    #[inline]
+    fn push_hot_or_spill(&self, key: &K, lane: usize, resource: R) {
+        let hot_lane = self.hot.lane(lane);
+        let spilled = {
+            let mut table = hot_lane.lock();
+            let subpool = table.get_or_insert_with(key.clone(), self.config.max_idle_per_key);
+            subpool.push_or_spill(resource)
+        };
+        hot_lane.record_release();
+
+        if let Some(mut coldest) = spilled {
+            coldest.on_cold_store();
+            hot_lane.record_spill();
+            if let Err(mut rejected) = self.cold.push(key.clone(), coldest) {
+                rejected.close();
+            }
         }
-        shard.record_release();
     }
 
     /// Attempts to acquire an idle connection chosen via pseudo-random sampling (FastRange)
-    /// from the specified worker lane shard, preventing zombie connections from rotting in the pool.
+    /// from the specified worker lane.
     pub fn acquire_random_from_lane(
         &self,
         key: &K,
@@ -367,26 +322,23 @@ impl<K: Eq + Hash + Clone, R: PoolableResource> PoolManager<K, R> {
         seed: u32,
     ) -> Option<R> {
         let now = Instant::now();
-        let shard = self.shards.shard_for_lane(key, lane);
+        let hot_lane = self.hot.lane(lane);
         loop {
             let candidate = {
-                let mut table = shard.lock();
-                if let Some(subpool) = table.get_mut(key) {
+                let mut table = hot_lane.lock();
+                table.get_mut(key).and_then(|subpool| {
                     subpool.pop_random_candidate(idle_timeout, self.config.max_lifetime, now, seed)
-                } else {
-                    None
-                }
+                })
             };
 
             match candidate {
                 Some(mut resource) => {
                     if resource.is_healthy() {
                         resource.touch_at(now);
-                        shard.record_hit();
+                        hot_lane.record_hit();
                         return Some(resource);
-                    } else {
-                        resource.close();
                     }
+                    resource.close();
                 }
                 None => break,
             }
@@ -394,14 +346,12 @@ impl<K: Eq + Hash + Clone, R: PoolableResource> PoolManager<K, R> {
         None
     }
 
-    /// Drains and closes all idle connections for `key` in the designated worker lane shard.
+    /// Drains and closes all idle connections for `key` in the designated worker lane.
     pub fn drain_endpoint_from_lane(&self, key: &K, lane: usize) -> usize {
-        let shard = self.shards.shard_for_lane(key, lane);
-        let mut table = shard.lock();
+        let hot_lane = self.hot.lane(lane);
+        let mut table = hot_lane.lock();
         if let Some(mut subpool) = table.remove(key) {
-            let count = subpool.len();
-            subpool.clear();
-            count
+            subpool.drain_all()
         } else {
             0
         }
@@ -411,26 +361,24 @@ impl<K: Eq + Hash + Clone, R: PoolableResource> PoolManager<K, R> {
     // Sweeping, Eviction, and Draining Operations
     // ------------------------------------------------------------------------
 
-    /// Closes and drains all idle connections for `key`, and removes the pool container across all shards.
+    /// Closes and drains all idle connections for `key` across Hot lanes, Cold Pool, and Multiplexed Pool.
     pub fn drain_key(&self, key: &K) -> usize {
-        let mut shards_drained = 0;
-        for shard in self.shards.all_shards() {
-            let mut table = shard.lock();
+        let mut drained = self.cold.drain_key(key);
+        for lane in self.hot.all_lanes() {
+            let mut table = lane.lock();
             if let Some(mut subpool) = table.remove(key) {
-                shards_drained += subpool.drain_all();
+                drained += subpool.drain_all();
             }
         }
-        let mux_drained = self.multiplexed.drain_matching(|k| k == key);
-        shards_drained + mux_drained
+        drained += self.multiplexed.drain_matching(|k| k == key);
+        drained
     }
 
     /// Drains all idle connections matching a predicate function and prunes their containers.
-    ///
-    /// Ensures zero memory leaks when an entire backend endpoint or service is decommissioned.
     pub fn drain_matching(&self, predicate: impl Fn(&K) -> bool) -> usize {
         let mut total_drained = 0;
-        for shard in self.shards.all_shards() {
-            let mut table = shard.lock();
+        for lane in self.hot.all_lanes() {
+            let mut table = lane.lock();
             table.retain(|k, subpool| {
                 if predicate(k) {
                     total_drained += subpool.drain_all();
@@ -444,49 +392,45 @@ impl<K: Eq + Hash + Clone, R: PoolableResource> PoolManager<K, R> {
         total_drained
     }
 
-    /// Closes all idle connections across all shards and clears all containers.
+    /// Closes all idle connections across Hot lanes, Cold Pool, and Multiplexed Pool.
     pub fn clear(&self) {
-        for shard in self.shards.all_shards() {
-            let mut table = shard.lock();
-            for (_, mut subpool) in table.drain() {
-                subpool.drain_all();
-            }
+        self.cold.clear();
+        for lane in self.hot.all_lanes() {
+            lane.lock().clear();
         }
         self.multiplexed.drain_matching(|_| true);
     }
 
-    /// Sweeps all pool containers across all shards, purging connections that exceeded
-    /// `idle_timeout` or configured `max_lifetime`.
+    /// Sweeps all Hot lanes, Cold Pool, and Multiplexed Pool, purging expired or unhealthy connections.
     pub fn evict_expired(&self, idle_timeout: Duration) -> usize {
         self.evict_expired_with_lifetime(idle_timeout, self.config.max_lifetime)
     }
 
-    /// Sweeps all pool containers with explicit lifetime control.
+    /// Sweeps all containers with explicit lifetime control.
     pub fn evict_expired_with_lifetime(
         &self,
         idle_timeout: Duration,
         max_lifetime: Option<Duration>,
     ) -> usize {
-        let mut total_evicted = 0;
-        for shard in self.shards.all_shards() {
-            let mut table = shard.lock();
-            let mut shard_evicted = 0;
-            for subpool in table.values_mut() {
-                shard_evicted += subpool.evict_expired(idle_timeout, max_lifetime);
+        let mut total_evicted = self.cold.evict_expired(idle_timeout, max_lifetime);
+        for lane in self.hot.all_lanes() {
+            let mut table = lane.lock();
+            let mut lane_evicted = 0;
+            for (_, subpool) in table.iter_mut() {
+                lane_evicted += subpool.evict_expired(idle_timeout, max_lifetime);
             }
-            shard.record_evictions(shard_evicted as u64);
-            total_evicted += shard_evicted;
+            lane.record_evictions(lane_evicted as u64);
+            total_evicted += lane_evicted;
         }
-        let mux_evicted = self.multiplexed.evict_idle(idle_timeout);
-        total_evicted += mux_evicted;
+        total_evicted += self.multiplexed.evict_idle(idle_timeout);
         total_evicted
     }
 
-    /// Prunes pool containers that have continuously remained empty for longer than `empty_ttl`.
+    /// Prunes empty Hot containers that have continuously remained empty for longer than `empty_ttl`.
     pub fn prune_empty_pools(&self, empty_ttl: Duration) -> usize {
         let mut pruned = 0;
-        for shard in self.shards.all_shards() {
-            let mut table = shard.lock();
+        for lane in self.hot.all_lanes() {
+            let mut table = lane.lock();
             table.retain(|_, subpool| {
                 if subpool.is_empty() && subpool.empty_duration() >= empty_ttl {
                     pruned += 1;
@@ -501,26 +445,26 @@ impl<K: Eq + Hash + Clone, R: PoolableResource> PoolManager<K, R> {
 }
 
 // ============================================================================
-// High-Level ConnectionProfile Facade (ConnectionKey-specific)
+// High-Level ConnectionProfile Facade (CompactPoolKey-specific)
 // ============================================================================
 
-impl<R: PoolableResource> PoolManager<ConnectionKey, R> {
+impl<R: PoolableResource> PoolManager<CompactPoolKey, R> {
     /// Attempts to acquire an idle connection or stream slot matching the given [`ConnectionProfile`].
     pub fn acquire_profile(
         self: &Arc<Self>,
         profile: &ConnectionProfile,
-    ) -> Option<ConnectionLease<ConnectionKey, R>> {
+    ) -> Option<ConnectionLease<CompactPoolKey, R>> {
         match profile.reuse_mode {
             ReuseMode::Multiplexed => {
-                let shard = self.shards.shard_for(&profile.key);
+                let lane = self.hot.current_lane();
                 if let Some(stream_lease) = self
                     .multiplexed
                     .acquire_stream(&profile.key, profile.idle_timeout)
                 {
-                    shard.record_hit();
+                    lane.record_hit();
                     Some(ConnectionLease::Multiplexed(stream_lease))
                 } else {
-                    shard.record_miss();
+                    lane.record_miss();
                     None
                 }
             }
@@ -532,7 +476,7 @@ impl<R: PoolableResource> PoolManager<ConnectionKey, R> {
                 )?;
                 Some(ConnectionLease::Sequential(SequentialLease::new(
                     res,
-                    profile.key.clone(),
+                    profile.key,
                     Arc::clone(self),
                     false,
                 )))
@@ -543,8 +487,7 @@ impl<R: PoolableResource> PoolManager<ConnectionKey, R> {
                     profile.idle_timeout,
                     profile.max_lifetime,
                 )?;
-                let lease =
-                    ExclusiveLease::with_pool(res, profile.key.clone(), Arc::clone(self), false);
+                let lease = ExclusiveLease::with_pool(res, profile.key, Arc::clone(self), false);
                 Some(ConnectionLease::Exclusive(lease))
             }
         }
@@ -555,14 +498,14 @@ impl<R: PoolableResource> PoolManager<ConnectionKey, R> {
         self: &Arc<Self>,
         profile: &ConnectionProfile,
         resource: R,
-    ) -> ConnectionLease<ConnectionKey, R> {
-        let shard = self.shards.shard_for(&profile.key);
-        shard.record_release();
+    ) -> ConnectionLease<CompactPoolKey, R> {
+        let lane = self.hot.current_lane();
+        lane.record_release();
 
         match profile.reuse_mode {
             ReuseMode::Multiplexed => {
                 let stream_lease = self.multiplexed.register(
-                    profile.key.clone(),
+                    profile.key,
                     resource,
                     profile.max_concurrent_streams,
                 );
@@ -570,17 +513,13 @@ impl<R: PoolableResource> PoolManager<ConnectionKey, R> {
             }
             ReuseMode::Sequential => ConnectionLease::Sequential(SequentialLease::new(
                 resource,
-                profile.key.clone(),
+                profile.key,
                 Arc::clone(self),
                 false,
             )),
             ReuseMode::Exclusive => {
-                let lease = ExclusiveLease::with_pool(
-                    resource,
-                    profile.key.clone(),
-                    Arc::clone(self),
-                    false,
-                );
+                let lease =
+                    ExclusiveLease::with_pool(resource, profile.key, Arc::clone(self), false);
                 ConnectionLease::Exclusive(lease)
             }
         }
@@ -588,28 +527,25 @@ impl<R: PoolableResource> PoolManager<ConnectionKey, R> {
 
     /// Directly acquires a stream slot on an existing multiplexed connection.
     pub fn acquire_stream(&self, profile: &ConnectionProfile) -> Option<StreamLease<R>> {
-        let shard = self.shards.shard_for(&profile.key);
+        let lane = self.hot.current_lane();
         if let Some(stream) = self
             .multiplexed
             .acquire_stream(&profile.key, profile.idle_timeout)
         {
-            shard.record_hit();
+            lane.record_hit();
             Some(stream)
         } else {
-            shard.record_miss();
+            lane.record_miss();
             None
         }
     }
 
     /// Registers a new physical connection for multiplexed stream sharing and reserves 1 stream slot.
     pub fn register_multiplexed(&self, profile: &ConnectionProfile, resource: R) -> StreamLease<R> {
-        let shard = self.shards.shard_for(&profile.key);
-        shard.record_release();
-        self.multiplexed.register(
-            profile.key.clone(),
-            resource,
-            profile.max_concurrent_streams,
-        )
+        let lane = self.hot.current_lane();
+        lane.record_release();
+        self.multiplexed
+            .register(profile.key, resource, profile.max_concurrent_streams)
     }
 
     /// Acquires an idle connection by value for sequential or exclusive modes.

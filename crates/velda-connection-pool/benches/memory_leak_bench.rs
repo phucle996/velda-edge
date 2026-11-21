@@ -13,7 +13,7 @@ use std::time::{Duration, Instant};
 
 use common::{BenchResource, CountingAllocator, format_bytes};
 use velda_connection_pool::{
-    ConnectionKey, ConnectionProfile, PoolConfig, PoolManager, PoolableResource,
+    CompactPoolKey, ConnectionProfile, PoolConfig, PoolManager, PoolableResource,
 };
 
 #[global_allocator]
@@ -28,7 +28,7 @@ fn bench_steady_state_checkout_return_zero_leak() {
     println!("> Evaluating 5,000,000 sustained acquire and release operations on warm pool...\n");
 
     let iters = 5_000_000;
-    let pool = PoolManager::<ConnectionKey, BenchResource>::new();
+    let pool = PoolManager::<CompactPoolKey, BenchResource>::new();
 
     // Setup 10 diverse connection keys and populate each key with a reusable connection
     let mut keys = Vec::with_capacity(10);
@@ -37,7 +37,7 @@ fn bench_steady_state_checkout_return_zero_leak() {
             velda_core::lut::ip::v4_to_u128(0x0A00_0000 | ((i + 1) as u32)),
             8080u16.to_be(),
         );
-        let key = ConnectionKey::tcp(addr.0, addr.1);
+        let key = CompactPoolKey::tcp(addr.0, addr.1);
         pool.release(&key, BenchResource::new(addr), true, false);
         keys.push(key);
     }
@@ -102,15 +102,15 @@ fn bench_multiplexed_stream_soak_audit() {
     println!("> Evaluating 2,000,000 stream acquisitions on a shared multiplexed connection...\n");
 
     let iters = 2_000_000;
-    let pool = Arc::new(PoolManager::<ConnectionKey, BenchResource>::new());
+    let pool = Arc::new(PoolManager::<CompactPoolKey, BenchResource>::new());
 
     let addr_mux = (velda_core::lut::ip::v4_to_u128(0x0a000501), 443u16.to_be());
-    let key_mux = ConnectionKey::http(
+    let key_mux = CompactPoolKey::new(
         addr_mux.0,
         addr_mux.1,
-        "h2",
-        Some("api.velda.internal".into()),
-        Some("api.velda.internal".into()),
+        velda_connection_pool::PROTO_HTTP2,
+        1,
+        1,
     );
     let prof_mux = ConnectionProfile::multiplexed(key_mux, Duration::from_secs(60), 10_000);
     let _conn = pool.register_profile(&prof_mux, BenchResource::new(addr_mux));
@@ -176,10 +176,10 @@ fn bench_abrupt_lease_drop_lifecycle_audit() {
     );
 
     let iters = 100_000;
-    let pool = Arc::new(PoolManager::<ConnectionKey, BenchResource>::new());
+    let pool = Arc::new(PoolManager::<CompactPoolKey, BenchResource>::new());
 
     let addr_seq = (velda_core::lut::ip::v4_to_u128(0x0a000601), 80u16.to_be());
-    let key_seq = ConnectionKey::http(addr_seq.0, addr_seq.1, "http/1.1", None, None);
+    let key_seq = CompactPoolKey::http1(addr_seq.0, addr_seq.1);
     let prof_seq = ConnectionProfile::sequential(key_seq, Duration::from_secs(60));
     pool.register_profile(&prof_seq, BenchResource::new(addr_seq))
         .release(true);
@@ -249,12 +249,12 @@ fn bench_idle_eviction_sweeper_soak() {
         idle_timeout: Duration::from_secs(10),
         max_lifetime: None,
     };
-    let pool = PoolManager::<ConnectionKey, BenchResource>::with_config(config);
+    let pool = PoolManager::<CompactPoolKey, BenchResource>::with_config(config);
 
     // Warm-up: initialize the 50 subpools in shard containers
     for port in 10000u16..10050 {
         let addr = (velda_core::lut::ip::v4_to_u128(0x7F00_0001), port.to_be());
-        let key = ConnectionKey::tcp(addr.0, addr.1);
+        let key = CompactPoolKey::tcp(addr.0, addr.1);
         let mut conn = BenchResource::new(addr);
         conn.touch_at(Instant::now() - Duration::from_secs(100));
         pool.release(&key, conn, true, false);
@@ -268,7 +268,7 @@ fn bench_idle_eviction_sweeper_soak() {
     for i in 0..iters {
         let port = 10000 + (i % 50) as u16;
         let addr = (velda_core::lut::ip::v4_to_u128(0x7F00_0001), port.to_be());
-        let key = ConnectionKey::tcp(addr.0, addr.1);
+        let key = CompactPoolKey::tcp(addr.0, addr.1);
 
         let mut conn = BenchResource::new(addr);
         // Mark expired

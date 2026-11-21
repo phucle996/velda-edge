@@ -16,11 +16,10 @@
 //! ```
 
 use std::fmt;
-use std::hash::Hash;
 use std::ops::{Deref, DerefMut};
 use std::sync::Arc;
 
-use crate::container::MultiplexedConnection;
+use crate::multiplexed::MultiplexedConnection;
 use crate::pool::PoolManager;
 use crate::resource::PoolableResource;
 
@@ -35,7 +34,7 @@ use crate::resource::PoolableResource;
 /// - If unhealthy or draining, closes the connection immediately.
 pub struct SequentialLease<K, R>
 where
-    K: Eq + Hash + Clone,
+    K: Eq + Clone,
     R: PoolableResource,
 {
     pub resource: Option<R>,
@@ -46,7 +45,7 @@ where
 
 impl<K, R> fmt::Debug for SequentialLease<K, R>
 where
-    K: Eq + Hash + Clone + fmt::Debug,
+    K: Eq + Clone + fmt::Debug,
     R: PoolableResource,
 {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
@@ -60,7 +59,7 @@ where
 
 impl<K, R> SequentialLease<K, R>
 where
-    K: Eq + Hash + Clone,
+    K: Eq + Clone,
     R: PoolableResource,
 {
     /// Creates a new sequential lease wrapping an active connection.
@@ -92,7 +91,7 @@ where
 
 impl<K, R> Deref for SequentialLease<K, R>
 where
-    K: Eq + Hash + Clone,
+    K: Eq + Clone,
     R: PoolableResource,
 {
     type Target = R;
@@ -105,7 +104,7 @@ where
 
 impl<K, R> DerefMut for SequentialLease<K, R>
 where
-    K: Eq + Hash + Clone,
+    K: Eq + Clone,
     R: PoolableResource,
 {
     #[inline]
@@ -116,7 +115,7 @@ where
 
 impl<K, R> Drop for SequentialLease<K, R>
 where
-    K: Eq + Hash + Clone,
+    K: Eq + Clone,
     R: PoolableResource,
 {
     fn drop(&mut self) {
@@ -135,7 +134,7 @@ where
 /// Target destination when an exclusive lease is returned or recycled.
 pub enum ExclusiveReturnTarget<K, R>
 where
-    K: Eq + Hash + Clone,
+    K: Eq + Clone,
     R: PoolableResource,
 {
     /// Closes underlying resource when lease terminates.
@@ -146,7 +145,7 @@ where
 
 impl<K, R> fmt::Debug for ExclusiveReturnTarget<K, R>
 where
-    K: Eq + Hash + Clone,
+    K: Eq + Clone,
     R: PoolableResource,
 {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
@@ -165,7 +164,7 @@ where
 /// - Otherwise, closes the underlying connection immediately on drop to avoid FD leaks and dirty states.
 pub struct ExclusiveLease<K, R>
 where
-    K: Eq + Hash + Clone,
+    K: Eq + Clone,
     R: PoolableResource,
 {
     pub resource: Option<R>,
@@ -177,7 +176,7 @@ where
 
 impl<K, R> fmt::Debug for ExclusiveLease<K, R>
 where
-    K: Eq + Hash + Clone + fmt::Debug,
+    K: Eq + Clone + fmt::Debug,
     R: PoolableResource,
 {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
@@ -192,7 +191,7 @@ where
 
 impl<K, R> ExclusiveLease<K, R>
 where
-    K: Eq + Hash + Clone,
+    K: Eq + Clone,
     R: PoolableResource,
 {
     /// Creates a new standalone exclusive lease with no return pool.
@@ -251,7 +250,7 @@ where
 
 impl<K, R> Deref for ExclusiveLease<K, R>
 where
-    K: Eq + Hash + Clone,
+    K: Eq + Clone,
     R: PoolableResource,
 {
     type Target = R;
@@ -264,7 +263,7 @@ where
 
 impl<K, R> DerefMut for ExclusiveLease<K, R>
 where
-    K: Eq + Hash + Clone,
+    K: Eq + Clone,
     R: PoolableResource,
 {
     #[inline]
@@ -275,7 +274,7 @@ where
 
 impl<K, R> Drop for ExclusiveLease<K, R>
 where
-    K: Eq + Hash + Clone,
+    K: Eq + Clone,
     R: PoolableResource,
 {
     fn drop(&mut self) {
@@ -365,7 +364,7 @@ impl<R: PoolableResource> Drop for StreamLease<R> {
 /// - [`ConnectionLease::Multiplexed`]: Decrements the active stream counter on the shared connection.
 pub enum ConnectionLease<K, R>
 where
-    K: Eq + Hash + Clone,
+    K: Eq + Clone,
     R: PoolableResource,
 {
     /// Sequential transactional lease (HTTP/1.1).
@@ -378,7 +377,7 @@ where
 
 impl<K, R> fmt::Debug for ConnectionLease<K, R>
 where
-    K: Eq + Hash + Clone + fmt::Debug,
+    K: Eq + Clone + fmt::Debug,
     R: PoolableResource,
 {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
@@ -401,7 +400,7 @@ where
 
 impl<K, R> ConnectionLease<K, R>
 where
-    K: Eq + Hash + Clone,
+    K: Eq + Clone,
     R: PoolableResource,
 {
     /// Explicitly releases the connection lease before it naturally falls out of scope.
@@ -425,7 +424,7 @@ where
 
 impl<K, R> Deref for ConnectionLease<K, R>
 where
-    K: Eq + Hash + Clone,
+    K: Eq + Clone,
     R: PoolableResource,
 {
     type Target = R;

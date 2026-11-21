@@ -5,7 +5,7 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::{Duration, Instant};
 
 use velda_connection_pool::{
-    ConnectionKey, MultiplexedPool, PoolManager, PoolableResource, current_thread_lane,
+    CompactPoolKey, MultiplexedPool, PoolManager, PoolableResource, current_thread_lane,
     set_current_thread_lane,
 };
 
@@ -74,9 +74,9 @@ fn test_set_current_thread_lane_synchronizes_threads() {
 
 #[test]
 fn test_pool_manager_shadow_logistics() {
-    let pool = PoolManager::<ConnectionKey, MockConnection>::new();
+    let pool = PoolManager::<CompactPoolKey, MockConnection>::new();
     let addr = (velda_core::lut::ip::v4_to_u128(0x7f000001), 8080u16.to_be());
-    let key = ConnectionKey::tcp(addr.0, addr.1);
+    let key = CompactPoolKey::tcp(addr.0, addr.1);
     let worker_lane = 3;
 
     // Shadow worker thread (lane 3) checks and deposits connections into lane 3

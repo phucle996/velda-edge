@@ -2,7 +2,7 @@
 
 use std::time::{Duration, Instant};
 
-use crate::container::probed_max_idle_per_key;
+use crate::config::probed_max_idle_per_key;
 use crate::resource::PoolableResource;
 
 /// Isolated LIFO container holding idle resources for a single key identity.
@@ -180,6 +180,21 @@ impl<R: PoolableResource> SubPool<R> {
             self.idle_resources.push(resource);
         } else {
             resource.close();
+        }
+    }
+
+    /// Pushes a healthy resource into the hot LIFO stack, returning the coldest (oldest)
+    /// resource if capacity is exceeded so the caller can spill it into the shared ColdPool.
+    #[inline]
+    pub fn push_or_spill(&mut self, resource: R) -> Option<R> {
+        self.empty_since = None;
+        if self.idle_resources.len() < self.max_idle {
+            self.idle_resources.push(resource);
+            None
+        } else {
+            let coldest = self.idle_resources.remove(0);
+            self.idle_resources.push(resource);
+            Some(coldest)
         }
     }
 

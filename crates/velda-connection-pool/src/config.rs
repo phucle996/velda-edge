@@ -59,6 +59,58 @@ pub struct PoolStats {
     pub evictions: u64,
 }
 
+/// Minimum number of idle connections retained per key container.
+pub const MIN_IDLE_PER_KEY: usize = 16;
+
+/// Maximum number of idle connections retained per key container to protect from OS `EMFILE`.
+pub const MAX_IDLE_PER_KEY: usize = 4096;
+
+/// Minimum lane count for concurrency distribution.
+pub const MIN_SHARDS: usize = 8;
+
+/// Maximum lane count for concurrency distribution on ultra-high-core server hardware.
+pub const MAX_SHARDS: usize = 1024;
+
+/// Computes the recommended maximum concurrent streams per multiplexed connection scaled continuously
+/// from available CPU cores and physical RAM bytes.
+#[inline]
+pub fn optimal_max_concurrent_streams(cores: usize, _ram_bytes: usize) -> u32 {
+    ((cores.max(1) * 32) as u32).clamp(64, 256)
+}
+
+/// Reads the optimal maximum concurrent streams pre-computed during cold-start bootstrap.
+#[inline]
+pub fn probed_max_concurrent_streams() -> u32 {
+    let hw = velda_core::hardware::global_hardware_topology();
+    optimal_max_concurrent_streams(hw.available_cores, hw.memory.total_bytes)
+}
+
+/// Computes the optimal maximum idle connections per key container based on worker concurrency.
+#[inline]
+pub fn optimal_max_idle_per_key(workers: usize) -> usize {
+    let hw = velda_core::hardware::global_hardware_topology();
+    velda_core::hardware::compute_optimal_pool_concurrency(workers, hw.memory_bytes).0
+}
+
+/// Reads the optimal maximum idle connections per key pre-computed during cold-start bootstrap.
+#[inline]
+pub fn probed_max_idle_per_key() -> usize {
+    velda_core::hardware::global_hardware_topology().optimal_max_idle_per_key
+}
+
+/// Computes the optimal power-of-two lane count scaled to worker concurrency.
+#[inline]
+pub fn optimal_shard_count(workers: usize) -> usize {
+    let target = (workers.max(1) * 2).next_power_of_two();
+    target.clamp(MIN_SHARDS, MAX_SHARDS)
+}
+
+/// Reads the optimal lane count pre-computed during cold-start bootstrap.
+#[inline]
+pub fn probed_shard_count() -> usize {
+    velda_core::hardware::global_hardware_topology().concurrency_shards
+}
+
 impl PoolStats {
     /// Returns the cache hit ratio as a floating-point value in `[0.0, 1.0]`.
     #[inline]

@@ -35,6 +35,16 @@ pub trait PoolableResource: Send + Sync + fmt::Debug + 'static {
     /// Avoids redundant system clock / vDSO calls on high-frequency hot paths.
     #[inline]
     fn touch_at(&mut self, _now: Instant) {}
+
+    /// Prepares the resource before moving it into the shared cross-core ColdPool
+    /// (e.g., detaching from a core-local epoll reactor).
+    #[inline]
+    fn on_cold_store(&mut self) {}
+
+    /// Restores the resource after pulling it from the shared ColdPool onto the acquiring core
+    /// (e.g., re-registering onto the local core's epoll reactor).
+    #[inline]
+    fn on_hot_restore(&mut self) {}
 }
 
 // Blanket implementation for any boxed PoolableResource
@@ -57,6 +67,16 @@ impl<T: PoolableResource + ?Sized> PoolableResource for Box<T> {
     #[inline]
     fn touch(&mut self) {
         (**self).touch();
+    }
+
+    #[inline]
+    fn on_cold_store(&mut self) {
+        (**self).on_cold_store();
+    }
+
+    #[inline]
+    fn on_hot_restore(&mut self) {
+        (**self).on_hot_restore();
     }
 
     #[inline]

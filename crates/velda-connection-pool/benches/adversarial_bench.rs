@@ -14,7 +14,7 @@ use std::thread;
 use std::time::{Duration, Instant};
 
 use common::{BenchResource, format_duration};
-use velda_connection_pool::{ConnectionKey, PoolManager, PoolableResource};
+use velda_connection_pool::{CompactPoolKey, PoolManager, PoolableResource};
 
 fn main() {
     println!("# ===================================================================");
@@ -44,7 +44,7 @@ fn bench_100_percent_cache_miss_storm() {
     let workers = 32;
     let requests_per_worker = 15_000;
     let total_requests = workers * requests_per_worker;
-    let pool = Arc::new(PoolManager::<ConnectionKey, BenchResource>::with_workers(
+    let pool = Arc::new(PoolManager::<CompactPoolKey, BenchResource>::with_workers(
         workers,
     ));
 
@@ -66,7 +66,7 @@ fn bench_100_percent_cache_miss_storm() {
                     ),
                     port.to_be(),
                 );
-                let key = ConnectionKey::tcp(addr.0, addr.1);
+                let key = CompactPoolKey::tcp(addr.0, addr.1);
 
                 // Acquire with timeout - will ALWAYS miss and lazy-create container
                 if pool.acquire(&key, Duration::from_secs(30)).is_none() {
@@ -105,7 +105,7 @@ fn bench_100_percent_cache_miss_storm() {
     );
     println!("| **Reuse Efficiency** | **0.0% (Cold Start)** | 0 handshakes saved (100% Miss) |");
     println!(
-        "| **Active Containers** | {} | Verified in ShardTable |",
+        "| **Active Containers** | {} | Verified in HotPool |",
         pool.total_pool_containers()
     );
 
@@ -130,7 +130,7 @@ fn bench_100_percent_cache_miss_storm() {
 fn bench_worker_churn_and_restart_storm() {
     println!("### 2. Worker Churn & Restart Storm (1,600 Worker Thread Restarts)\n");
 
-    let pool = Arc::new(PoolManager::<ConnectionKey, BenchResource>::with_workers(
+    let pool = Arc::new(PoolManager::<CompactPoolKey, BenchResource>::with_workers(
         16,
     ));
     let generations = 50;
@@ -144,7 +144,7 @@ fn bench_worker_churn_and_restart_storm() {
             velda_core::lut::ip::v4_to_u128(0xC0A8_0100 | (((ep % 250) + 1) as u32)),
             8080u16.to_be(),
         );
-        let key = ConnectionKey::tcp(addr.0, addr.1);
+        let key = CompactPoolKey::tcp(addr.0, addr.1);
         for _ in 0..8 {
             pool.release(&key, BenchResource::new(addr), true, false);
         }
@@ -165,7 +165,7 @@ fn bench_worker_churn_and_restart_storm() {
                         velda_core::lut::ip::v4_to_u128(0xC0A8_0100 | ((ep + 1) as u32)),
                         8080u16.to_be(),
                     );
-                    let key = ConnectionKey::tcp(addr.0, addr.1);
+                    let key = CompactPoolKey::tcp(addr.0, addr.1);
 
                     if let Some(res) = pool.acquire(&key, Duration::from_secs(60)) {
                         pool.release(&key, res, true, false);
@@ -223,7 +223,7 @@ fn bench_worker_hold_connection_stalls() {
     println!("### 3. Worker Hold-Time Stalls (Worker 'ôm' Connection Under Contention)\n");
 
     let workers = 32;
-    let pool = Arc::new(PoolManager::<ConnectionKey, BenchResource>::with_workers(
+    let pool = Arc::new(PoolManager::<CompactPoolKey, BenchResource>::with_workers(
         workers,
     ));
     let endpoints = 16;
@@ -235,7 +235,7 @@ fn bench_worker_hold_connection_stalls() {
             velda_core::lut::ip::v4_to_u128(0xAC10_0000 | ((ep + 1) as u32)),
             8080u16.to_be(),
         );
-        let key = ConnectionKey::tcp(addr.0, addr.1);
+        let key = CompactPoolKey::tcp(addr.0, addr.1);
         for _ in 0..capacity_per_ep {
             pool.release(&key, BenchResource::new(addr), true, false);
         }
@@ -261,7 +261,7 @@ fn bench_worker_hold_connection_stalls() {
                     velda_core::lut::ip::v4_to_u128(0xAC10_0000 | ((ep + 1) as u32)),
                     8080u16.to_be(),
                 );
-                let key = ConnectionKey::tcp(addr.0, addr.1);
+                let key = CompactPoolKey::tcp(addr.0, addr.1);
 
                 // Acquire lease
                 if let Some(conn) = pool.acquire(&key, Duration::from_secs(30)) {
@@ -337,7 +337,7 @@ fn bench_chaos_maintenance_storm() {
     println!("### 4. Chaos Maintenance Storm (Concurrent Traffic + Violent Draining)\n");
 
     let workers = 32;
-    let pool = Arc::new(PoolManager::<ConnectionKey, BenchResource>::with_workers(
+    let pool = Arc::new(PoolManager::<CompactPoolKey, BenchResource>::with_workers(
         workers,
     ));
     let stop_signal = Arc::new(AtomicBool::new(false));
@@ -350,7 +350,7 @@ fn bench_chaos_maintenance_storm() {
             velda_core::lut::ip::v4_to_u128(0x0A0A_0100 | ((ep + 1) as u32)),
             8080u16.to_be(),
         );
-        let key = ConnectionKey::tcp(addr.0, addr.1);
+        let key = CompactPoolKey::tcp(addr.0, addr.1);
         for _ in 0..8 {
             pool.release(&key, BenchResource::new(addr), true, false);
         }
@@ -366,7 +366,7 @@ fn bench_chaos_maintenance_storm() {
     let chaos_handle = thread::spawn(move || {
         while !chaos_stop.load(Ordering::Relaxed) {
             // Ruthlessly drain 50% of endpoints matching even ports
-            let drained = chaos_pool.drain_matching(|k| (k.target_ip & 1) == 0);
+            let drained = chaos_pool.drain_matching(|k| (k.target_ip() & 1) == 0);
             drained_counter.fetch_add(drained as u64, Ordering::Relaxed);
 
             // Evict expired and prune empty containers
@@ -396,7 +396,7 @@ fn bench_chaos_maintenance_storm() {
                     velda_core::lut::ip::v4_to_u128(0x0A0A_0100 | ((ep + 1) as u32)),
                     8080u16.to_be(),
                 );
-                let key = ConnectionKey::tcp(addr.0, addr.1);
+                let key = CompactPoolKey::tcp(addr.0, addr.1);
 
                 if let Some(res) = pool.acquire(&key, Duration::from_secs(60)) {
                     pool.release(&key, res, true, false);

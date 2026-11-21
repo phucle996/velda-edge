@@ -14,7 +14,8 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::{Duration, Instant};
 
 use velda_connection_pool::{
-    ConnectionKey, ConnectionProfile, PoolConfig, PoolManager, PoolableResource,
+    ALPN_NONE, CompactPoolKey, ConnectionProfile, PROTO_HTTP1, PROTO_HTTP2, PoolConfig,
+    PoolManager, PoolableResource,
 };
 
 #[derive(Debug)]
@@ -77,9 +78,9 @@ impl PoolableResource for MockConnection {
 
 #[test]
 fn test_pool_end_to_end_acquire_and_lease_lifecycle() {
-    let pool = Arc::new(PoolManager::<ConnectionKey, MockConnection>::new());
+    let pool = Arc::new(PoolManager::<CompactPoolKey, MockConnection>::new());
     let addr = (velda_core::lut::ip::v4_to_u128(0x0a00000a), 8080u16.to_be());
-    let key = ConnectionKey::tcp(addr.0, addr.1);
+    let key = CompactPoolKey::tcp(addr.0, addr.1);
 
     // 1. Initial acquire misses with zero container allocation
     assert!(pool.acquire(&key, Duration::from_secs(30)).is_none());
@@ -117,14 +118,13 @@ fn test_pool_end_to_end_acquire_and_lease_lifecycle() {
 
 #[test]
 fn test_pool_protocol_and_sni_isolation() {
-    let pool = PoolManager::<ConnectionKey, MockConnection>::new();
+    let pool = PoolManager::<CompactPoolKey, MockConnection>::new();
     let addr = (velda_core::lut::ip::v4_to_u128(0x0a000001), 443u16.to_be());
 
-    let key_h1 = ConnectionKey::http(addr.0, addr.1, "http1", Some("api.velda.io".into()), None);
-    let key_h2 = ConnectionKey::http(addr.0, addr.1, "http2", Some("api.velda.io".into()), None);
-    let key_other_sni =
-        ConnectionKey::http(addr.0, addr.1, "http2", Some("admin.velda.io".into()), None);
-    let key_tcp = ConnectionKey::tcp(addr.0, addr.1);
+    let key_h1 = CompactPoolKey::new(addr.0, addr.1, PROTO_HTTP1, 1, ALPN_NONE);
+    let key_h2 = CompactPoolKey::new(addr.0, addr.1, PROTO_HTTP2, 1, ALPN_NONE);
+    let key_other_sni = CompactPoolKey::new(addr.0, addr.1, PROTO_HTTP2, 2, ALPN_NONE);
+    let key_tcp = CompactPoolKey::tcp(addr.0, addr.1);
 
     // Release a connection only for HTTP/1.1 with api.velda.io
     pool.release(&key_h1, MockConnection::new(addr), true, false);
@@ -151,9 +151,9 @@ fn test_pool_capacity_and_fd_protection() {
         idle_timeout: Duration::from_secs(30),
         max_lifetime: None,
     };
-    let pool = PoolManager::<ConnectionKey, MockConnection>::with_config(config);
+    let pool = PoolManager::<CompactPoolKey, MockConnection>::with_config(config);
     let addr = (velda_core::lut::ip::v4_to_u128(0x0a000002), 8080u16.to_be());
-    let key = ConnectionKey::tcp(addr.0, addr.1);
+    let key = CompactPoolKey::tcp(addr.0, addr.1);
 
     let conn1 = MockConnection::new(addr);
     let conn2 = MockConnection::new(addr);
@@ -164,17 +164,24 @@ fn test_pool_capacity_and_fd_protection() {
     pool.release(&key, conn2, true, false);
     assert_eq!(pool.total_idle_conns(), 2);
 
-    // 3rd connection exceeds capacity: must be immediately closed to prevent FD exhaustion
+    // 3rd connection exceeds HotLane capacity: oldest spills to ColdPool
     pool.release(&key, conn3, true, false);
-    assert_eq!(pool.total_idle_conns(), 2);
-    assert!(conn3_closed.load(Ordering::Acquire));
+    assert_eq!(pool.total_idle_conns(), 3);
+    assert_eq!(pool.cold_pool().len(), 1);
+    assert!(!conn3_closed.load(Ordering::Acquire));
+
+    // Verify all 3 can be acquired (2 from HotLane, 1 from ColdPool)
+    assert!(pool.acquire(&key, Duration::from_secs(30)).is_some());
+    assert!(pool.acquire(&key, Duration::from_secs(30)).is_some());
+    assert!(pool.acquire(&key, Duration::from_secs(30)).is_some());
+    assert_eq!(pool.total_idle_conns(), 0);
 }
 
 #[test]
 fn test_pool_expiration_and_eviction() {
-    let pool = PoolManager::<ConnectionKey, MockConnection>::new();
+    let pool = PoolManager::<CompactPoolKey, MockConnection>::new();
     let addr = (velda_core::lut::ip::v4_to_u128(0x0a000003), 8080u16.to_be());
-    let key = ConnectionKey::tcp(addr.0, addr.1);
+    let key = CompactPoolKey::tcp(addr.0, addr.1);
 
     // 1. Connection that exceeded max lifetime (created 2 hours ago)
     let expired_lifetime =
@@ -207,9 +214,9 @@ fn test_pool_expiration_and_eviction() {
 
 #[test]
 fn test_pool_empty_duration_pruning() {
-    let pool = PoolManager::<ConnectionKey, MockConnection>::new();
+    let pool = PoolManager::<CompactPoolKey, MockConnection>::new();
     let addr = (velda_core::lut::ip::v4_to_u128(0x0a000004), 8080u16.to_be());
-    let key = ConnectionKey::tcp(addr.0, addr.1);
+    let key = CompactPoolKey::tcp(addr.0, addr.1);
 
     // 1. Ensure pool created; it has no idle connections
     assert!(pool.ensure_pool(&key));
@@ -241,13 +248,13 @@ fn test_pool_empty_duration_pruning() {
 
 #[test]
 fn test_pool_drain_matching_service() {
-    let pool = PoolManager::<ConnectionKey, MockConnection>::new();
+    let pool = PoolManager::<CompactPoolKey, MockConnection>::new();
     let svc_addr = (velda_core::lut::ip::v4_to_u128(0x0a000101), 8080u16.to_be());
     let other_addr = (velda_core::lut::ip::v4_to_u128(0x0a000201), 8080u16.to_be());
 
-    let k1 = ConnectionKey::tcp(svc_addr.0, svc_addr.1);
-    let k2 = ConnectionKey::http(svc_addr.0, svc_addr.1, "http1", None, None);
-    let k_other = ConnectionKey::tcp(other_addr.0, other_addr.1);
+    let k1 = CompactPoolKey::tcp(svc_addr.0, svc_addr.1);
+    let k2 = CompactPoolKey::http1(svc_addr.0, svc_addr.1);
+    let k_other = CompactPoolKey::tcp(other_addr.0, other_addr.1);
 
     pool.release(&k1, MockConnection::new(svc_addr), true, false);
     pool.release(&k2, MockConnection::new(svc_addr), true, false);
@@ -256,7 +263,7 @@ fn test_pool_drain_matching_service() {
     assert_eq!(pool.total_pool_containers(), 3);
 
     // Decommissioning svc_addr drains all its connections AND removes its containers
-    let drained = pool.drain_matching(|k| (k.target_ip, k.target_port_be) == svc_addr);
+    let drained = pool.drain_matching(|k| (k.target_ip(), k.port_be) == svc_addr);
     assert_eq!(drained, 2);
     assert_eq!(pool.total_idle_conns(), 1);
     assert_eq!(pool.total_pool_containers(), 1);
@@ -267,7 +274,7 @@ fn test_pool_drain_matching_service() {
 
 #[tokio::test]
 async fn test_pool_sharding_concurrency() {
-    let pool = Arc::new(PoolManager::<ConnectionKey, MockConnection>::new());
+    let pool = Arc::new(PoolManager::<CompactPoolKey, MockConnection>::new());
     let mut handles = Vec::new();
 
     for worker_id in 0..16 {
@@ -276,7 +283,7 @@ async fn test_pool_sharding_concurrency() {
             for i in 0..100 {
                 let port = 8000 + (worker_id * 4 + (i % 4)) as u16;
                 let addr = (velda_core::lut::ip::v4_to_u128(0x7F00_0001), port.to_be());
-                let key = ConnectionKey::tcp(addr.0, addr.1);
+                let key = CompactPoolKey::tcp(addr.0, addr.1);
 
                 let _ = pool_clone.acquire(&key, Duration::from_secs(30));
                 pool_clone.release(&key, MockConnection::new(addr), true, false);
@@ -303,11 +310,11 @@ async fn test_pool_sharding_concurrency() {
 
 #[test]
 fn test_pool_profiles_end_to_end_integration() {
-    let pool = Arc::new(PoolManager::<ConnectionKey, MockConnection>::new());
+    let pool = Arc::new(PoolManager::<CompactPoolKey, MockConnection>::new());
 
     // 1. Sequential Profile (HTTP/1.1)
     let addr_h1 = (velda_core::lut::ip::v4_to_u128(0x0a0a0101), 80u16.to_be());
-    let key_h1 = ConnectionKey::http(addr_h1.0, addr_h1.1, "http/1.1", None, None);
+    let key_h1 = CompactPoolKey::http1(addr_h1.0, addr_h1.1);
     let prof_h1 = ConnectionProfile::sequential(key_h1, Duration::from_secs(30));
 
     assert!(pool.acquire_profile(&prof_h1).is_none());
@@ -324,7 +331,7 @@ fn test_pool_profiles_end_to_end_integration() {
 
     // 2. Exclusive Profile (Raw TCP)
     let addr_tcp = (velda_core::lut::ip::v4_to_u128(0x0a0a0201), 9000u16.to_be());
-    let key_tcp = ConnectionKey::tcp(addr_tcp.0, addr_tcp.1);
+    let key_tcp = CompactPoolKey::tcp(addr_tcp.0, addr_tcp.1);
     let prof_tcp = ConnectionProfile::exclusive(key_tcp, Duration::from_secs(30));
 
     assert!(pool.acquire_profile(&prof_tcp).is_none());
@@ -338,13 +345,7 @@ fn test_pool_profiles_end_to_end_integration() {
 
     // 3. Multiplexed Profile (HTTP/2)
     let addr_h2 = (velda_core::lut::ip::v4_to_u128(0x0a0a0301), 443u16.to_be());
-    let key_h2 = ConnectionKey::http(
-        addr_h2.0,
-        addr_h2.1,
-        "h2",
-        Some("service.internal".into()),
-        Some("h2".into()),
-    );
+    let key_h2 = CompactPoolKey::new(addr_h2.0, addr_h2.1, PROTO_HTTP2, 3, 1);
     let prof_h2 = ConnectionProfile::multiplexed(key_h2, Duration::from_secs(30), 4);
 
     assert!(pool.acquire_profile(&prof_h2).is_none());
@@ -372,9 +373,9 @@ fn test_pool_profiles_end_to_end_integration() {
 
 #[test]
 fn test_safe_idle_threshold_75_percent_cutoff() {
-    let pool = PoolManager::<ConnectionKey, MockConnection>::new();
+    let pool = PoolManager::<CompactPoolKey, MockConnection>::new();
     let addr = (velda_core::lut::ip::v4_to_u128(0x0a000063), 8080u16.to_be());
-    let key = ConnectionKey::tcp(addr.0, addr.1);
+    let key = CompactPoolKey::tcp(addr.0, addr.1);
     let idle_timeout = Duration::from_secs(100); // 75% cutoff = 75s
 
     // 1. Connection idle for 50s (< 75s cutoff): Safe to reuse
