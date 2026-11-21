@@ -282,7 +282,7 @@ impl ListenerGrpcRouter {
         }
 
         Ok(Self {
-            arena: RouteArena::build(listener_id, entries),
+            arena: RouteArena::build(listener_id, entries)?,
         })
     }
 

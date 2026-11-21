@@ -218,7 +218,7 @@ impl ListenerHttp1Router {
             });
         }
 
-        let arena = RouteArena::build(listener_id, entries);
+        let arena = RouteArena::build(listener_id, entries)?;
         Ok(Self { arena })
     }
 

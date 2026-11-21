@@ -11,6 +11,7 @@ use std::alloc::{Layout, alloc_zeroed, dealloc};
 use std::collections::VecDeque;
 use std::ptr::NonNull;
 
+use crate::error::RouterError;
 use crate::host::{HostPattern, HostTable};
 use crate::path::{LEN_MASKS, common_prefix_len, read_chunk_u64};
 
@@ -237,7 +238,7 @@ impl Clone for RouteArena {
 
 impl Default for RouteArena {
     fn default() -> Self {
-        Self::build(0, Vec::new())
+        Self::build(0, Vec::new()).expect("empty RouteArena build must succeed")
     }
 }
 
@@ -246,7 +247,9 @@ impl RouteArena {
     /// and a separate 4KB page-aligned [`HostTable`].
     ///
     /// Uses `Vec::sort_by` + linear host deduplication — **0 `HashMap` allocations**.
-    pub fn build(listener_id: u32, entries: Vec<ArenaRouteEntry<'_>>) -> Self {
+    /// Returns [`RouterError::InvalidRoute`] if per-node candidates/children exceed `u8::MAX`
+    /// or total nodes/entries/hosts exceed `u16` index bounds.
+    pub fn build(listener_id: u32, entries: Vec<ArenaRouteEntry<'_>>) -> Result<Self, RouterError> {
         let mut pattern_entries = Vec::with_capacity(entries.len());
         let mut catch_all_entries = Vec::new();
         for e in entries {
@@ -270,18 +273,27 @@ impl RouteArena {
             Vec::with_capacity(pattern_entries.len() + catch_all_entries.len());
         let mut hosts: Vec<HostPattern> = Vec::new();
 
-        let intern_host = |host: Option<HostPattern>, hosts: &mut Vec<HostPattern>| -> u16 {
-            let Some(pat) = host else {
-                return ARENA_NONE;
+        let intern_host =
+            |host: Option<HostPattern>, hosts: &mut Vec<HostPattern>| -> Result<u16, RouterError> {
+                let Some(pat) = host else {
+                    return Ok(ARENA_NONE);
+                };
+                if let Some(pos) = hosts.iter().position(|h| *h == pat) {
+                    Ok(pos as u16)
+                } else {
+                    if hosts.len() >= ARENA_NONE as usize {
+                        return Err(RouterError::InvalidRoute {
+                            detail: format!(
+                                "listener {listener_id} exceeds maximum {} unique host patterns",
+                                ARENA_NONE
+                            ),
+                        });
+                    }
+                    let idx = hosts.len() as u16;
+                    hosts.push(pat);
+                    Ok(idx)
+                }
             };
-            if let Some(pos) = hosts.iter().position(|h| *h == pat) {
-                pos as u16
-            } else {
-                let idx = hosts.len() as u16;
-                hosts.push(pat);
-                idx
-            }
-        };
 
         let mut root_builder = BuilderNode {
             prefix: String::new(),
@@ -299,15 +311,32 @@ impl RouteArena {
                 j += 1;
             }
 
+            let count = j - i;
+            if count > u8::MAX as usize {
+                return Err(RouterError::InvalidRoute {
+                    detail: format!(
+                        "pattern '{pat}' on listener {listener_id} has {count} candidates (max {})",
+                        u8::MAX
+                    ),
+                });
+            }
+            if route_entries.len() + count > ARENA_NONE as usize {
+                return Err(RouterError::InvalidRoute {
+                    detail: format!(
+                        "listener {listener_id} exceeds maximum {} route entries",
+                        ARENA_NONE
+                    ),
+                });
+            }
+
             let cand_start = route_entries.len() as u16;
-            let count = (j - i).min(255);
             let mut has_prefix = false;
 
-            for e in &pattern_entries[i..i + count] {
+            for e in &pattern_entries[i..j] {
                 if e.is_prefix {
                     has_prefix = true;
                 }
-                let host_id = intern_host(e.host, &mut hosts);
+                let host_id = intern_host(e.host, &mut hosts)?;
                 route_entries.push(RouteEntry {
                     route_id: e.route_id,
                     method_mask: e.method_mask,
@@ -323,11 +352,19 @@ impl RouteArena {
         let catch_all_start = if catch_all_entries.is_empty() {
             ARENA_NONE
         } else {
+            if route_entries.len() + catch_all_entries.len() > ARENA_NONE as usize {
+                return Err(RouterError::InvalidRoute {
+                    detail: format!(
+                        "listener {listener_id} exceeds maximum {} route entries",
+                        ARENA_NONE
+                    ),
+                });
+            }
             route_entries.len() as u16
         };
-        let catch_all_count = catch_all_entries.len().min(u16::MAX as usize) as u16;
-        for e in catch_all_entries.iter().take(catch_all_count as usize) {
-            let host_id = intern_host(e.host, &mut hosts);
+        let catch_all_count = catch_all_entries.len() as u16;
+        for e in &catch_all_entries {
+            let host_id = intern_host(e.host, &mut hosts)?;
             route_entries.push(RouteEntry {
                 route_id: e.route_id,
                 method_mask: e.method_mask,
@@ -357,8 +394,24 @@ impl RouteArena {
                 continue;
             }
 
-            let start = nodes.len();
             let count = parent_b.children.len();
+            if count > u8::MAX as usize {
+                return Err(RouterError::InvalidRoute {
+                    detail: format!(
+                        "radix node on listener {listener_id} has {count} children (max {})",
+                        u8::MAX
+                    ),
+                });
+            }
+            let start = nodes.len();
+            if start + count > u16::MAX as usize {
+                return Err(RouterError::InvalidRoute {
+                    detail: format!(
+                        "listener {listener_id} exceeds maximum {} radix nodes",
+                        u16::MAX
+                    ),
+                });
+            }
             nodes[parent_idx].children_start = start as u16;
             nodes[parent_idx].children_count = count as u8;
 
@@ -429,11 +482,11 @@ impl RouteArena {
 
         let host_table = HostTable::from_patterns(&hosts);
 
-        Self {
+        Ok(Self {
             ptr,
             capacity,
             host_table,
-        }
+        })
     }
 
     /// Returns the 64-byte cache-aligned arena metadata.
@@ -711,7 +764,7 @@ mod tests {
             },
         ];
 
-        let arena = RouteArena::build(42, entries);
+        let arena = RouteArena::build(42, entries).unwrap();
         assert_eq!((arena.ptr.as_ptr() as usize) % ARENA_PAGE_SIZE, 0);
         assert_eq!(arena.allocated_bytes() % ARENA_PAGE_SIZE, 0);
         assert_eq!(arena.header().listener_id, 42);
@@ -731,5 +784,23 @@ mod tests {
         let cloned = arena.clone();
         assert_eq!(cloned.header().listener_id, 42);
         assert_eq!(cloned.entries(), arena.entries());
+    }
+
+    #[test]
+    fn test_route_arena_rejects_candidate_overflow() {
+        let entries: Vec<ArenaRouteEntry<'_>> = (0..256)
+            .map(|i| ArenaRouteEntry {
+                pattern: "/api",
+                route_id: i as u16,
+                method_mask: 0xFFFF,
+                host: None,
+                specificity: 0,
+                is_prefix: true,
+                is_catch_all: false,
+            })
+            .collect();
+
+        let err = RouteArena::build(7, entries).unwrap_err();
+        assert!(matches!(err, RouterError::InvalidRoute { .. }));
     }
 }

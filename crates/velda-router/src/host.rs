@@ -181,7 +181,7 @@ impl HostPattern {
     /// or 64-bit SWAR fallback.
     #[inline(always)]
     pub fn matches(&self, req: &HostBlocks) -> bool {
-        if req.is_empty() {
+        if req.is_empty() || req.blocks[7] == OVERFLOW_LABEL {
             return false;
         }
 
@@ -242,6 +242,10 @@ fn match_blocks_avx2_wrapper(req: &[u64; 8], pat: &[u64; 8]) -> bool {
 unsafe fn match_blocks_avx2(req: &[u64; 8], pat: &[u64; 8]) -> bool {
     use std::arch::x86_64::*;
 
+    if req[7] == OVERFLOW_LABEL {
+        return false;
+    }
+
     // SAFETY: Both `HostBlocks` and `HostPattern` are `#[repr(C, align(32))]`.
     let r0 = unsafe { _mm256_load_si256(req.as_ptr() as *const __m256i) };
     let p0 = unsafe { _mm256_load_si256(pat.as_ptr() as *const __m256i) };
@@ -273,6 +277,9 @@ unsafe fn match_blocks_avx2(req: &[u64; 8], pat: &[u64; 8]) -> bool {
 #[cfg(any(not(all(target_arch = "x86_64", target_feature = "avx2")), test))]
 #[inline(always)]
 fn match_blocks_swar(req: &[u64; 8], pat: &[u64; 8]) -> bool {
+    if req[7] == OVERFLOW_LABEL {
+        return false;
+    }
     let mut ok = true;
     let mut i = 0;
     while i < 8 {
@@ -747,6 +754,69 @@ mod tests {
         assert!(exact_long.matches(&HostBlocks::parse("authentication.velda.com")));
         assert!(!exact_long.matches(&HostBlocks::parse("cation.authenti.velda.com")));
         assert!(!exact_long.matches(&HostBlocks::parse("sub.authentication.velda.com")));
+    }
+
+    #[test]
+    fn test_overflow_label_rejected_even_with_8th_slot_wildcard() {
+        // Pattern has 7 suffix labels + wildcard at slot 7 (index 7)
+        let pat = HostPattern::compile(Some("*.b.c.d.e.f.g.h")).unwrap();
+        assert_eq!(pat.blocks[7], WILDCARD_LABEL);
+
+        // Valid 8-label request matches slot 7 wildcard
+        let valid_8 = HostBlocks::parse("a.b.c.d.e.f.g.h");
+        assert!(pat.matches(&valid_8));
+
+        // 9-label request overflows into OVERFLOW_LABEL at slot 7 -> MUST be rejected
+        let overflow_9 = HostBlocks::parse("x.a.b.c.d.e.f.g.h");
+        assert_eq!(overflow_9.blocks[7], OVERFLOW_LABEL);
+        assert!(!pat.matches(&overflow_9));
+    }
+
+    #[test]
+    fn test_avx2_swar_equivalence() {
+        let patterns = [
+            "api.velda.io",
+            "*.velda.io",
+            "*.abc.velda.com",
+            "*.b.c.d.e.f.g.h",
+            "authentication.velda.com",
+            "localhost",
+            "[::1]:8080",
+        ];
+        let requests = [
+            "api.velda.io",
+            "API.VELDA.IO:443",
+            "sub.api.velda.io",
+            "velda.io",
+            "node.abc.velda.com",
+            "abc.velda.com",
+            "evil.node.abc.velda.com",
+            "a.b.c.d.e.f.g.h",
+            "x.a.b.c.d.e.f.g.h",
+            "authentication.velda.com",
+            "cation.authenti.velda.com",
+            "very-long-subdomain-label.velda.io",
+            "localhost",
+            "127.0.0.1:8080",
+            "[::1]:443",
+            "",
+        ];
+
+        for pat_str in patterns {
+            let pat = HostPattern::compile(Some(pat_str)).unwrap();
+            for req_str in requests {
+                let req = HostBlocks::parse(req_str);
+                let swar_res = match_blocks_swar(&req.blocks, &pat.blocks);
+                #[cfg(target_arch = "x86_64")]
+                if std::arch::is_x86_feature_detected!("avx2") {
+                    let avx2_res = unsafe { match_blocks_avx2(&req.blocks, &pat.blocks) };
+                    assert_eq!(
+                        avx2_res, swar_res,
+                        "AVX2 vs SWAR mismatch for pat={pat_str:?} req={req_str:?}"
+                    );
+                }
+            }
+        }
     }
 
     #[test]
