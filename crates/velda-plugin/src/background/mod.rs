@@ -18,6 +18,7 @@ use crate::error::PluginError;
 
 pub mod acme_cert_rotator;
 pub mod clickhouse_log_shipper;
+pub mod elasticsearch_log_shipper;
 pub mod health_probe;
 pub mod jwks_rotator;
 pub mod kafka_log_shipper;
@@ -26,12 +27,14 @@ pub mod otlp_log_shipper;
 pub mod otlp_metrics_exporter;
 pub mod otlp_trace_exporter;
 pub mod prometheus_exporter;
+pub mod s3_log_shipper;
 pub mod statsd_exporter;
 pub mod std_log_shipper;
 
 pub use crate::config::OutboundTlsConfig;
 pub use acme_cert_rotator::{AcmeCertRotatorConfig, AcmeCertRotatorPlugin};
 pub use clickhouse_log_shipper::{ClickHouseLogShipperConfig, ClickHouseLogShipperPlugin};
+pub use elasticsearch_log_shipper::{ElasticsearchLogShipperConfig, ElasticsearchLogShipperPlugin};
 pub use health_probe::{HealthProbeConfig, HealthProbePlugin, HealthState};
 pub use jwks_rotator::{JwksRotatorConfig, JwksRotatorPlugin};
 pub use kafka_log_shipper::{KafkaLogShipperConfig, KafkaLogShipperPlugin};
@@ -40,6 +43,7 @@ pub use otlp_log_shipper::{OtlpLogShipperConfig, OtlpLogShipperPlugin};
 pub use otlp_metrics_exporter::{OtlpMetricsExporterConfig, OtlpMetricsExporterPlugin};
 pub use otlp_trace_exporter::{OtlpTraceExporterConfig, OtlpTraceExporterPlugin};
 pub use prometheus_exporter::{PrometheusExporterConfig, PrometheusExporterPlugin};
+pub use s3_log_shipper::{S3LogShipperConfig, S3LogShipperPlugin};
 pub use statsd_exporter::{StatsdExporterConfig, StatsdExporterPlugin};
 pub use std_log_shipper::{StdLogShipperConfig, StdLogShipperPlugin};
 
@@ -169,6 +173,14 @@ pub fn instantiate(
         }
         "clickhouse_log_shipper" => {
             let shipper = ClickHouseLogShipperPlugin::from_config(config)?;
+            Ok(Arc::new(shipper))
+        }
+        "elasticsearch_log_shipper" => {
+            let shipper = ElasticsearchLogShipperPlugin::from_config(config)?;
+            Ok(Arc::new(shipper))
+        }
+        "s3_log_shipper" => {
+            let shipper = S3LogShipperPlugin::from_config(config)?;
             Ok(Arc::new(shipper))
         }
         "kafka_log_shipper" => {

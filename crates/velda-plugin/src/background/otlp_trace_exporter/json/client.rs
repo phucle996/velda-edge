@@ -245,7 +245,7 @@ impl OtlpTraceHttpClient {
         }
         req_header.push_str("\r\n");
 
-        tokio::time::timeout(self.request_timeout, async {
+        let res = tokio::time::timeout(self.request_timeout, async {
             stream
                 .write_all(req_header.as_bytes())
                 .await
@@ -274,12 +274,23 @@ impl OtlpTraceHttpClient {
 
             Ok(())
         })
-        .await
-        .map_err(|_| {
-            PluginError::Io(std::io::Error::new(
-                std::io::ErrorKind::TimedOut,
-                "Request timeout while awaiting OTLP collector HTTP response",
-            ))
-        })?
+        .await;
+
+        match res {
+            Ok(Ok(())) => Ok(()),
+            Ok(Err(e)) => {
+                // Drop persistent socket on any non-2xx or partial read so the next batch
+                // never writes into a server-closed or unsynchronized keep-alive stream.
+                self.stream = None;
+                Err(e)
+            }
+            Err(_) => {
+                self.stream = None;
+                Err(PluginError::Io(std::io::Error::new(
+                    std::io::ErrorKind::TimedOut,
+                    "Request timeout while awaiting OTLP collector HTTP response",
+                )))
+            }
+        }
     }
 }
