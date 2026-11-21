@@ -93,8 +93,13 @@ impl HostBlocks {
     /// Parses an incoming request host string (stripping port/brackets) right-to-left into raw `u64` blocks.
     #[inline]
     pub fn parse(host: &str) -> Self {
-        let clean = clean_host(host);
-        let bytes = clean.as_bytes();
+        Self::parse_bytes(host.as_bytes())
+    }
+
+    /// Parses raw host bytes (stripping port/brackets) right-to-left into raw `u64` blocks.
+    #[inline]
+    pub fn parse_bytes(host_bytes: &[u8]) -> Self {
+        let bytes = clean_host_bytes(host_bytes);
         let len = bytes.len();
         if len == 0 {
             return Self::default();
@@ -104,7 +109,7 @@ impl HostBlocks {
         let mut idx = 0usize;
 
         // Unbracketed IPv6 (contains colons) or single label (e.g. "localhost")
-        if clean.contains(':') || !clean.contains('.') {
+        if bytes.contains(&b':') || !bytes.contains(&b'.') {
             if !push_label_chunks(&mut blocks, &mut idx, bytes) {
                 blocks[7] = OVERFLOW_LABEL;
             }
@@ -155,13 +160,13 @@ impl HostPattern {
             return None;
         }
 
-        let clean = clean_host(host);
-        if clean.is_empty() || clean == "*" {
+        let clean = clean_host_bytes(host.as_bytes());
+        if clean.is_empty() || clean == b"*" {
             return None;
         }
 
-        if let Some(suffix) = clean.strip_prefix("*.") {
-            let parsed = HostBlocks::parse(suffix);
+        if let Some(suffix) = clean.strip_prefix(b"*.") {
+            let parsed = HostBlocks::parse_bytes(suffix);
             let mut blocks = parsed.blocks;
             if let Some(slot) = blocks.iter().position(|&b| b == EMPTY_LABEL) {
                 blocks[slot] = WILDCARD_LABEL;
@@ -170,7 +175,7 @@ impl HostPattern {
             }
             Some(Self { blocks })
         } else {
-            let parsed = HostBlocks::parse(clean);
+            let parsed = HostBlocks::parse_bytes(clean);
             Some(Self {
                 blocks: parsed.blocks,
             })
@@ -526,27 +531,39 @@ pub fn swar_find_colon(bytes: &[u8]) -> Option<usize> {
     None
 }
 
+/// Extracts the hostname bytes without port or IPv6 enclosing brackets, with zero panic branches.
+#[inline]
+pub fn clean_host_bytes(bytes: &[u8]) -> &[u8] {
+    if bytes.first() == Some(&b'[') {
+        // SAFETY: `bytes.first()` is `Some(_)`, so `bytes.len() >= 1`.
+        let tail = unsafe { bytes.get_unchecked(1..) };
+        if let Some(pos) = tail.iter().position(|&b| b == b']') {
+            // SAFETY: `pos` is a valid index returned by `tail.iter().position(...)`.
+            unsafe { tail.get_unchecked(..pos) }
+        } else {
+            bytes
+        }
+    } else if let Some(first_colon) = swar_find_colon(bytes) {
+        // SAFETY: `swar_find_colon` only returns `Some(idx)` with `idx < bytes.len()`.
+        let rest = unsafe { bytes.get_unchecked(first_colon + 1..) };
+        if swar_find_colon(rest).is_some() {
+            bytes
+        } else {
+            // SAFETY: `first_colon < bytes.len()`.
+            unsafe { bytes.get_unchecked(..first_colon) }
+        }
+    } else {
+        bytes
+    }
+}
+
 /// Extracts the hostname without port or IPv6 enclosing brackets.
 #[inline]
 pub fn clean_host(host: &str) -> &str {
-    if host.starts_with('[') {
-        if let Some(close_bracket) = host.find(']') {
-            &host[1..close_bracket]
-        } else {
-            host
-        }
-    } else {
-        let bytes = host.as_bytes();
-        if let Some(first_colon) = swar_find_colon(bytes) {
-            if swar_find_colon(&bytes[first_colon + 1..]).is_some() {
-                host
-            } else {
-                &host[..first_colon]
-            }
-        } else {
-            host
-        }
-    }
+    let cleaned = clean_host_bytes(host.as_bytes());
+    // SAFETY: `clean_host_bytes` only splits at ASCII delimiters `b'['`, `b']'`, and `b':'`,
+    // which are 1-byte UTF-8 code points and never split multi-byte UTF-8 characters.
+    unsafe { std::str::from_utf8_unchecked(cleaned) }
 }
 
 /// Compares two ASCII domain byte slices case-insensitively using Dual 64-bit SWAR registers.
