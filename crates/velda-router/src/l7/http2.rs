@@ -137,15 +137,7 @@ impl Http2RouteRule {
     }
 }
 
-/// Ephemeral exact route registered dynamically (e.g. for ACME challenges).
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct EphemeralHttp2Route {
-    pub path: String,
-    pub route: Http2Route,
-    pub method_mask: MethodMask,
-}
-
-/// Zero-allocation view of an incoming HTTP/1.1 request for route matching.
+/// Zero-allocation view of an incoming HTTP/2 request for route matching.
 #[derive(Debug, Clone, Copy)]
 pub struct Http2RouteRequest<'a> {
     pub path: &'a str,
@@ -190,7 +182,6 @@ impl<'a> Http2RouteRequest<'a> {
 #[derive(Debug, Clone, Default)]
 pub struct ListenerHttp2Router {
     arena: RouteArena,
-    ephemeral_routes: Vec<EphemeralHttp2Route>,
 }
 
 impl ListenerHttp2Router {
@@ -228,25 +219,13 @@ impl ListenerHttp2Router {
         }
 
         let arena = RouteArena::build(listener_id, entries);
-        Ok(Self {
-            arena,
-            ephemeral_routes: Vec::new(),
-        })
+        Ok(Self { arena })
     }
 
     /// Resolves an HTTP/2 route for an incoming request view, returning an 8-byte [`Http2Route`] on register.
     #[inline(always)]
     pub fn route(&self, req: &Http2RouteRequest<'_>) -> Option<Http2Route> {
-        // 1. Ephemeral route fast check (e.g. ACME challenge)
-        if !self.ephemeral_routes.is_empty() {
-            for ep in &self.ephemeral_routes {
-                if ep.path == req.path && ep.method_mask.matches(req.method_mask) {
-                    return Some(ep.route);
-                }
-            }
-        }
-
-        // 2. Contiguous 4KB arena matching
+        // Contiguous 4KB arena matching
         let mut matches = [(0u16, 0u8, false); 32];
         let count = self.arena.match_path(req.path, &mut matches);
         if count == 0 {
@@ -288,28 +267,6 @@ impl ListenerHttp2Router {
         }
 
         None
-    }
-
-    /// Dynamically registers an ephemeral exact-path route into this listener's router.
-    pub fn insert_exact_route(
-        &mut self,
-        exact_path: String,
-        route: Http2Route,
-        method_mask: MethodMask,
-    ) {
-        self.ephemeral_routes
-            .retain(|e| !(e.path == exact_path && e.route.id == route.id));
-        self.ephemeral_routes.push(EphemeralHttp2Route {
-            path: exact_path,
-            route,
-            method_mask,
-        });
-    }
-
-    /// Dynamically removes an ephemeral exact-path route previously registered for this listener.
-    pub fn remove_exact_route(&mut self, exact_path: &str, route_id: u16) {
-        self.ephemeral_routes
-            .retain(|e| !(e.path == exact_path && e.route.id == route_id));
     }
 }
 
@@ -370,43 +327,6 @@ impl Http2Router {
     #[inline]
     pub fn listener_count(&self) -> usize {
         self.listeners.len()
-    }
-
-    /// Dynamically registers an ephemeral exact-path route for a specific listener.
-    pub fn insert_exact_route(
-        &mut self,
-        listener_id: u32,
-        exact_path: String,
-        route: Http2Route,
-        method_mask: MethodMask,
-    ) {
-        match self
-            .listeners
-            .binary_search_by_key(&listener_id, |(id, _)| *id)
-        {
-            Ok(idx) => {
-                self.listeners[idx]
-                    .1
-                    .insert_exact_route(exact_path, route, method_mask);
-            }
-            Err(idx) => {
-                let mut lr = ListenerHttp2Router::default();
-                lr.insert_exact_route(exact_path, route, method_mask);
-                self.listeners.insert(idx, (listener_id, lr));
-            }
-        }
-    }
-
-    /// Dynamically removes an ephemeral exact-path route for a specific listener.
-    pub fn remove_exact_route(&mut self, listener_id: u32, exact_path: &str, route_id: u16) {
-        if let Ok(idx) = self
-            .listeners
-            .binary_search_by_key(&listener_id, |(id, _)| *id)
-        {
-            self.listeners[idx]
-                .1
-                .remove_exact_route(exact_path, route_id);
-        }
     }
 }
 

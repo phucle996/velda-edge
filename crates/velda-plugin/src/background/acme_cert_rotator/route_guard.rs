@@ -1,142 +1,67 @@
-//! Ephemeral Route Injection and RAII Guard for HTTP-01 Challenges.
+//! Static Bootstrap ACME Route Constants & Challenge Lifecycle Guard.
 //!
-//! Bridges the ACME challenge lifecycle into the in-memory router table:
-//! - Injects an exact route: `/.well-known/acme-challenge/<token>` -> `RouteId(u32::MAX)`.
-//! - Pre-bakes the complete static wire response into [`ChallengeStore`] (residing cleanly in L3/RAM).
-//! - Implements [`Drop`] to guarantee unconditional teardown upon success, failure, timeout, or cancellation.
+//! The `/.well-known/acme-challenge/` prefix route is pre-compiled into the immutable
+//! 4KB page-aligned [`RouteArena`](velda_router::arena::RouteArena) at bootstrap with
+//! [`ACME_CHALLENGE_ROUTE_ID`]. At runtime, ACME HTTP-01 challenges only publish and
+//! evict pre-baked wire responses in [`ChallengeStore`](super::challenge::ChallengeStore)
+//! via RAII [`ChallengeGuard`](super::challenge::ChallengeGuard), requiring zero writes
+//! or locks on `Router`.
 
-use std::sync::Arc;
-use std::sync::RwLock;
-
-use velda_router::{Http1Route, Router};
-
-use super::challenge::{CHALLENGE_PATH_PREFIX, ChallengeGuard, ChallengeStore};
-
-/// Ephemeral route identifier reserved strictly for transient ACME HTTP-01 challenge matching.
+/// Route identifier reserved strictly for ACME HTTP-01 challenge matching.
 pub const ACME_CHALLENGE_ROUTE_ID: u16 = u16::MAX;
 
 /// Dummy upstream identifier used because ACME challenges short-circuit directly in memory.
 pub const ACME_DUMMY_UPSTREAM_ID: u16 = 0;
 
-/// Thread-safe registry providing dynamic exact-route registration into the active [`Router`].
-pub struct RouterRegistry {
-    router: Arc<RwLock<Router>>,
-    listener_id: u32,
-}
-
-impl RouterRegistry {
-    /// Creates a new router registry targeting a specific ingress listener.
-    pub fn new(router: Arc<RwLock<Router>>, listener_id: u32) -> Self {
-        Self {
-            router,
-            listener_id,
-        }
-    }
-
-    /// Registers an ephemeral exact route and publishes the challenge response, returning an RAII guard.
-    pub fn register_challenge(
-        &self,
-        token: &str,
-        key_authorization: &str,
-        challenge_store: &Arc<ChallengeStore>,
-    ) -> EphemeralRouteGuard {
-        let exact_path = format!("{CHALLENGE_PATH_PREFIX}{token}");
-
-        // 1. Publish pre-baked wire response in ChallengeStore (L3/RAM resident)
-        let challenge_guard = challenge_store.publish(token, key_authorization);
-
-        // 2. Inject ephemeral exact-path route into the Router table
-        let route = Http1Route {
-            id: ACME_CHALLENGE_ROUTE_ID,
-            listener_id: self.listener_id,
-        };
-
-        if let Ok(mut r) = self.router.write() {
-            r.insert_http1_exact_route(self.listener_id, exact_path.clone(), route);
-        }
-
-        EphemeralRouteGuard {
-            router: Arc::clone(&self.router),
-            listener_id: self.listener_id,
-            exact_path,
-            _challenge_guard: challenge_guard,
-        }
-    }
-}
-
-/// RAII Scope Guard guaranteeing zero memory or route table leakage.
-///
-/// Automatically removes the ephemeral exact route from [`Router`] and unregisters
-/// the pre-baked challenge response from [`ChallengeStore`] when dropped.
-pub struct EphemeralRouteGuard {
-    router: Arc<RwLock<Router>>,
-    listener_id: u32,
-    exact_path: String,
-    _challenge_guard: ChallengeGuard,
-}
-
-impl Drop for EphemeralRouteGuard {
-    fn drop(&mut self) {
-        if let Ok(mut r) = self.router.write() {
-            r.remove_http1_exact_route(self.listener_id, &self.exact_path, ACME_CHALLENGE_ROUTE_ID);
-        }
-        tracing::debug!(
-            path = %self.exact_path,
-            "Ephemeral ACME HTTP-01 challenge route purged from router table"
-        );
-    }
-}
-
 #[cfg(test)]
 mod tests {
+    use super::super::challenge::{CHALLENGE_PATH_PREFIX, ChallengeStore};
     use super::*;
     use velda_core::fnv1a_hash_32;
-    use velda_router::{Http1Route, Http1RouteRequest, Http1Router};
+    use velda_router::{Http1Route, Http1RouteRequest, Http1Router, Router};
 
     #[test]
-    fn test_ephemeral_route_guard_lifecycle() {
+    fn test_static_bootstrap_acme_route_and_challenge_store_lifecycle() {
         let lid = fnv1a_hash_32("listener-http");
-        let http1 = Http1Router::new(vec![Http1Route::new(1, lid, "/api")]).unwrap();
+        let http1 = Http1Router::new(vec![
+            Http1Route::new(1, lid, "/api"),
+            Http1Route::new(ACME_CHALLENGE_ROUTE_ID, lid, CHALLENGE_PATH_PREFIX).with_method("GET"),
+        ])
+        .unwrap();
 
-        let router = Arc::new(RwLock::new(Router::new(
+        let router = Router::new(
             Default::default(),
             Default::default(),
             http1,
             Default::default(),
             Default::default(),
             Default::default(),
-        )));
+        );
 
         let store = ChallengeStore::new();
-        let registry = RouterRegistry::new(Arc::clone(&router), lid);
-
         let token = "challenge_token_xyz";
         let path = format!("{CHALLENGE_PATH_PREFIX}{token}");
+        let req = Http1RouteRequest::new(&path).with_method("GET");
 
-        // 1. Before registration: route does not match
-        let req = Http1RouteRequest::new(&path);
+        // Static bootstrap route is always present in immutable 4KB RouteArena
+        let matched = router.route_http1(lid, &req).unwrap();
+        assert_eq!(matched.id, ACME_CHALLENGE_ROUTE_ID);
+
+        // Before publishing: ChallengeStore has no entry
+        assert!(store.lookup(&path).is_none());
+
+        // Active challenge: ChallengeGuard publishes response into ChallengeStore
         {
-            let r = router.read().unwrap();
-            assert!(r.route_http1(lid, &req).is_none());
-        }
-
-        // 2. Active registration: route matches and store has response
-        {
-            let _guard = registry.register_challenge(token, "token.thumbprint", &store);
-
-            let r = router.read().unwrap();
-            let matched = r.route_http1(lid, &req).unwrap();
-            assert_eq!(matched.id, ACME_CHALLENGE_ROUTE_ID);
-
+            let _guard = store.publish(token, "token.thumbprint");
             let resp = store.lookup(&path).unwrap();
             assert!(resp.starts_with(b"HTTP/1.1 200 OK"));
         }
 
-        // 3. After guard drop: route is unconditionally removed and store is empty
-        {
-            let r = router.read().unwrap();
-            assert!(r.route_http1(lid, &req).is_none());
-            assert!(store.is_empty());
-        }
+        // After guard drop: ChallengeStore is unconditionally purged; Router remains immutable
+        assert!(store.is_empty());
+        assert_eq!(
+            router.route_http1(lid, &req).unwrap().id,
+            ACME_CHALLENGE_ROUTE_ID
+        );
     }
 }

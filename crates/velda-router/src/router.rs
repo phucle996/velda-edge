@@ -69,52 +69,10 @@ impl Router {
         self.http1.listener(listener_id)
     }
 
-    /// Dynamically inserts an ephemeral HTTP/1.1 exact-path route for a specific listener.
-    ///
-    /// Enables background logistics plugins (such as `acme_cert_rotator`) to register temporary
-    /// in-memory endpoints (e.g. `/.well-known/acme-challenge/<token>`) directly in the router table
-    /// without full configuration recompilation or disk I/O.
-    #[inline]
-    pub fn insert_http1_exact_route(
-        &mut self,
-        listener_id: u32,
-        exact_path: String,
-        route: Http1Route,
-    ) {
-        self.http1
-            .insert_exact_route(listener_id, exact_path, route, crate::MethodMask::GET);
-    }
-
-    /// Dynamically removes an ephemeral HTTP/1.1 exact-path route for a specific listener.
-    #[inline]
-    pub fn remove_http1_exact_route(&mut self, listener_id: u32, exact_path: &str, route_id: u16) {
-        self.http1
-            .remove_exact_route(listener_id, exact_path, route_id);
-    }
-
     /// Resolves an HTTP/2 route by `listener_id` and request view.
     #[inline]
     pub fn route_http2(&self, listener_id: u32, req: &Http2RouteRequest<'_>) -> Option<Http2Route> {
         self.http2.route(listener_id, req)
-    }
-
-    /// Dynamically inserts an ephemeral HTTP/2 exact-path route for a specific listener.
-    #[inline]
-    pub fn insert_http2_exact_route(
-        &mut self,
-        listener_id: u32,
-        exact_path: String,
-        route: Http2Route,
-    ) {
-        self.http2
-            .insert_exact_route(listener_id, exact_path, route, crate::MethodMask::GET);
-    }
-
-    /// Dynamically removes an ephemeral HTTP/2 exact-path route for a specific listener.
-    #[inline]
-    pub fn remove_http2_exact_route(&mut self, listener_id: u32, exact_path: &str, route_id: u16) {
-        self.http2
-            .remove_exact_route(listener_id, exact_path, route_id);
     }
 
     /// Resolves an HTTP/3 route by `listener_id` and request view.

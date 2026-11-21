@@ -82,13 +82,11 @@
 use std::future::Future;
 use std::pin::Pin;
 use std::sync::Arc;
-use std::sync::RwLock;
 use std::time::Duration;
 
 use super::validation::AcmeCertRotatorConfig;
 use tokio::sync::watch;
 use velda_core::clock::coarse_sec;
-use velda_router::Router;
 
 use super::challenge::ChallengeStore;
 use super::client::AcmeClient;
@@ -96,7 +94,6 @@ use super::cron::CronSchedule;
 use super::crypto::generate_csr_and_key;
 use super::expiry::{needs_renewal, not_after_unix};
 use super::hot_swap::TlsHotSwapper;
-use super::route_guard::RouterRegistry;
 use super::storage::CertStorage;
 use crate::background::BackgroundPlugin;
 use crate::error::PluginError;
@@ -109,7 +106,6 @@ pub struct AcmeCertRotatorPlugin {
     storage: CertStorage,
     client: AcmeClient,
     challenge_store: Arc<ChallengeStore>,
-    router_registry: Option<RouterRegistry>,
     hot_swapper: TlsHotSwapper,
 }
 
@@ -118,8 +114,6 @@ impl AcmeCertRotatorPlugin {
     pub fn new(
         id: impl Into<String>,
         config: AcmeCertRotatorConfig,
-        router: Option<Arc<RwLock<Router>>>,
-        listener_id: Option<String>,
         hot_swapper: TlsHotSwapper,
     ) -> Result<Self, PluginError> {
         let cron = CronSchedule::parse(&config.schedule)?;
@@ -131,11 +125,6 @@ impl AcmeCertRotatorPlugin {
         )?;
         let challenge_store = ChallengeStore::new();
 
-        let router_registry = match (router, listener_id) {
-            (Some(r), Some(lid)) => Some(RouterRegistry::new(r, velda_core::fnv1a_hash_32(&lid))),
-            _ => None,
-        };
-
         Ok(Self {
             id: id.into(),
             config,
@@ -143,7 +132,6 @@ impl AcmeCertRotatorPlugin {
             storage,
             client,
             challenge_store,
-            router_registry,
             hot_swapper,
         })
     }
@@ -153,20 +141,7 @@ impl AcmeCertRotatorPlugin {
         let cfg = super::validation::validate_acme_cert_rotator_config(&config.id, &config.config)
             .map_err(|e| PluginError::Config(format!("Invalid acme_cert_rotator config: {e}")))?;
 
-        Self::new(config.id.clone(), cfg, None, None, TlsHotSwapper::new(None))
-    }
-
-    /// Attaches an active `Router` and `listener_id` for ephemeral HTTP-01 route injection.
-    pub fn with_router_registry(
-        mut self,
-        router: Arc<RwLock<Router>>,
-        listener_id: impl Into<String>,
-    ) -> Self {
-        self.router_registry = Some(RouterRegistry::new(
-            router,
-            velda_core::fnv1a_hash_32(&listener_id.into()),
-        ));
-        self
+        Self::new(config.id.clone(), cfg, TlsHotSwapper::new(None))
     }
 
     /// Attaches a custom `TlsHotSwapper` controller.
@@ -327,21 +302,8 @@ impl AcmeCertRotatorPlugin {
 
             let key_auth = account_key.key_authorization(&challenge.token);
 
-            // RAII Ephemeral Route & Pre-baked response injection
-            let _guard = if let Some(ref registry) = self.router_registry {
-                Some(registry.register_challenge(
-                    &challenge.token,
-                    &key_auth,
-                    &self.challenge_store,
-                ))
-            } else {
-                None
-            };
-            let _store_guard = if self.router_registry.is_none() {
-                Some(self.challenge_store.publish(&challenge.token, &key_auth))
-            } else {
-                None
-            };
+            // RAII ChallengeStore Guard (publishes response into RAM and purges on Drop)
+            let _store_guard = self.challenge_store.publish(&challenge.token, &key_auth);
 
             // Trigger CA verification
             self.client

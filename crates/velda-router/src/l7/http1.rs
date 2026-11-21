@@ -137,14 +137,6 @@ impl Http1RouteRule {
     }
 }
 
-/// Ephemeral exact route registered dynamically (e.g. for ACME challenges).
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct EphemeralHttp1Route {
-    pub path: String,
-    pub route: Http1Route,
-    pub method_mask: MethodMask,
-}
-
 /// Zero-allocation view of an incoming HTTP/1.1 request for route matching.
 #[derive(Debug, Clone, Copy)]
 pub struct Http1RouteRequest<'a> {
@@ -190,7 +182,6 @@ impl<'a> Http1RouteRequest<'a> {
 #[derive(Debug, Clone, Default)]
 pub struct ListenerHttp1Router {
     arena: RouteArena,
-    ephemeral_routes: Vec<EphemeralHttp1Route>,
 }
 
 impl ListenerHttp1Router {
@@ -228,25 +219,13 @@ impl ListenerHttp1Router {
         }
 
         let arena = RouteArena::build(listener_id, entries);
-        Ok(Self {
-            arena,
-            ephemeral_routes: Vec::new(),
-        })
+        Ok(Self { arena })
     }
 
     /// Resolves an HTTP/1.1 route for an incoming request view, returning an 8-byte [`Http1Route`] on register.
     #[inline(always)]
     pub fn route(&self, req: &Http1RouteRequest<'_>) -> Option<Http1Route> {
-        // 1. Ephemeral route fast check (e.g. ACME challenge)
-        if !self.ephemeral_routes.is_empty() {
-            for ep in &self.ephemeral_routes {
-                if ep.path == req.path && ep.method_mask.matches(req.method_mask) {
-                    return Some(ep.route);
-                }
-            }
-        }
-
-        // 2. Contiguous 4KB arena matching
+        // Contiguous 4KB arena matching
         let mut matches = [(0u16, 0u8, false); 32];
         let count = self.arena.match_path(req.path, &mut matches);
         if count == 0 {
@@ -288,28 +267,6 @@ impl ListenerHttp1Router {
         }
 
         None
-    }
-
-    /// Dynamically registers an ephemeral exact-path route into this listener's router.
-    pub fn insert_exact_route(
-        &mut self,
-        exact_path: String,
-        route: Http1Route,
-        method_mask: MethodMask,
-    ) {
-        self.ephemeral_routes
-            .retain(|e| !(e.path == exact_path && e.route.id == route.id));
-        self.ephemeral_routes.push(EphemeralHttp1Route {
-            path: exact_path,
-            route,
-            method_mask,
-        });
-    }
-
-    /// Dynamically removes an ephemeral exact-path route previously registered for this listener.
-    pub fn remove_exact_route(&mut self, exact_path: &str, route_id: u16) {
-        self.ephemeral_routes
-            .retain(|e| !(e.path == exact_path && e.route.id == route_id));
     }
 }
 
@@ -370,43 +327,6 @@ impl Http1Router {
     #[inline]
     pub fn listener_count(&self) -> usize {
         self.listeners.len()
-    }
-
-    /// Dynamically registers an ephemeral exact-path route for a specific listener.
-    pub fn insert_exact_route(
-        &mut self,
-        listener_id: u32,
-        exact_path: String,
-        route: Http1Route,
-        method_mask: MethodMask,
-    ) {
-        match self
-            .listeners
-            .binary_search_by_key(&listener_id, |(id, _)| *id)
-        {
-            Ok(idx) => {
-                self.listeners[idx]
-                    .1
-                    .insert_exact_route(exact_path, route, method_mask);
-            }
-            Err(idx) => {
-                let mut lr = ListenerHttp1Router::default();
-                lr.insert_exact_route(exact_path, route, method_mask);
-                self.listeners.insert(idx, (listener_id, lr));
-            }
-        }
-    }
-
-    /// Dynamically removes an ephemeral exact-path route for a specific listener.
-    pub fn remove_exact_route(&mut self, listener_id: u32, exact_path: &str, route_id: u16) {
-        if let Ok(idx) = self
-            .listeners
-            .binary_search_by_key(&listener_id, |(id, _)| *id)
-        {
-            self.listeners[idx]
-                .1
-                .remove_exact_route(exact_path, route_id);
-        }
     }
 }
 
@@ -507,40 +427,5 @@ mod tests {
 
         let req_miss = Http1RouteRequest::new("/non-existent");
         assert!(router.route(lid, &req_miss).is_none());
-    }
-
-    #[test]
-    fn test_http1_ephemeral_exact_route_lifecycle() {
-        let lid = fnv1a_hash_32("listener-1");
-        // Test in small listener mode (<= 3 routes)
-        let mut small_router = Http1Router::new(vec![Http1Route::new(1, lid, "/api")]).unwrap();
-
-        let acme_path = "/.well-known/acme-challenge/token123".to_string();
-        let acme_route = Http1Route {
-            id: 9999,
-            listener_id: lid,
-        };
-
-        // Before insertion: 404 / None
-        let req = Http1RouteRequest::new(&acme_path);
-        assert!(small_router.route(lid, &req).is_none());
-
-        // Insert ephemeral route
-        small_router.insert_exact_route(lid, acme_path.clone(), acme_route, MethodMask::GET);
-
-        // After insertion: matches ephemeral route immediately
-        let matched = small_router.route(lid, &req).unwrap();
-        assert_eq!(matched.id, 9999);
-
-        // Existing route still matches without disruption
-        let api_req = Http1RouteRequest::new("/api/v1");
-        assert_eq!(small_router.route(lid, &api_req).unwrap().id, 1);
-
-        // Remove ephemeral route (simulating RAII Drop guard cleanup)
-        small_router.remove_exact_route(lid, &acme_path, 9999);
-
-        // After removal: 404 / None restored cleanly
-        assert!(small_router.route(lid, &req).is_none());
-        assert_eq!(small_router.route(lid, &api_req).unwrap().id, 1);
     }
 }

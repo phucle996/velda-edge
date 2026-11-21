@@ -257,6 +257,33 @@ pub fn build_router(
         }
     }
 
+    // Pre-register static ACME HTTP-01 challenge prefix route into immutable 4KB RouteArena
+    // for all HTTP-family listeners so `acme_cert_rotator` never mutates `Router` at runtime.
+    for listener in listeners {
+        let proto = listener.application.protocol.to_ascii_lowercase();
+        let lid = velda_core::fnv1a_hash_32(&listener.id);
+        if matches!(proto.as_str(), "http" | "http1" | "http/1.1") {
+            builder = builder.add_http1_route(
+                Http1Route::new(
+                    velda_plugin::background::acme_cert_rotator::route_guard::ACME_CHALLENGE_ROUTE_ID,
+                    lid,
+                    velda_plugin::background::acme_cert_rotator::challenge::CHALLENGE_PATH_PREFIX,
+                )
+                .with_method("GET"),
+            );
+        }
+        if matches!(proto.as_str(), "http" | "http2" | "h2") {
+            builder = builder.add_http2_route(
+                Http2Route::new(
+                    velda_plugin::background::acme_cert_rotator::route_guard::ACME_CHALLENGE_ROUTE_ID,
+                    lid,
+                    velda_plugin::background::acme_cert_rotator::challenge::CHALLENGE_PATH_PREFIX,
+                )
+                .with_method("GET"),
+            );
+        }
+    }
+
     builder.build().map_err(|e| EdgeError::InvalidConfig {
         detail: e.to_string(),
     })
