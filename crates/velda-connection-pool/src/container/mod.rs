@@ -253,7 +253,13 @@ mod tests {
         assert_eq!(optimal_max_idle_per_key(32), 256);
         assert_eq!(optimal_max_idle_per_key(64), 256);
         assert_eq!(optimal_max_idle_per_key(128), 256);
-        assert_eq!(optimal_max_idle_per_key(256), 256);
+        assert!((128..=4096).contains(&optimal_max_idle_per_key(256)));
+
+        // Pure mathematical formula check independent of host RAM
+        assert_eq!(
+            velda_core::hardware::compute_optimal_pool_concurrency(256, 32 * 1024 * 1024 * 1024).0,
+            256
+        );
 
         let probed = probed_max_idle_per_key();
         assert!((16..=4096).contains(&probed));
