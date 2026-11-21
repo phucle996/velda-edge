@@ -248,11 +248,12 @@ unsafe fn crc32c_sse42(data: &[u8]) -> u32 {
 /// Computes Castagnoli CRC32-C checksum over the given slice using the fastest available hardware path.
 #[inline]
 pub fn crc32c(data: &[u8]) -> u32 {
-    #[cfg(all(target_arch = "x86_64", target_feature = "sse4.2"))]
+    #[cfg(target_arch = "x86_64")]
     {
-        return unsafe { crc32c_sse42(data) };
+        if is_x86_feature_detected!("sse4.2") {
+            return unsafe { crc32c_sse42(data) };
+        }
     }
-    #[allow(unreachable_code)]
     crc32c_table(data)
 }
 
