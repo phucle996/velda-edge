@@ -4,16 +4,33 @@
 //! ┌─────────────────────────────────────────────────────────────────────────────────────────┐
 //! │                     CONTIGUOUS USER-SPACE ARENAS (k * 4096 B, align=4096)               │
 //! ├─────────────────────────────────────────────────────────────────────────────────────────┤
-//! │  1. Per-Core Cache Arena (jemalloc user-space extent = total_cores * m * 4096 B)        │
-//! │     ├── Core 0 Region [0 .. slots_per_core)   (aligned to 4096B boundary, 0 MESI RFO)   │
-//! │     ├── Core 1 Region [N .. 2*N)              (aligned to 4096B boundary, 0 Mutex)      │
-//! │     └── Slot (16B): tag: AtomicU64 | meta: AtomicU64 [expire:32 | neg:1 | idx:31]       │
+//! │  1. CoreCacheArena (Positive-Only Shortcut: total_lanes * m * 4096 B, 0 Mutex/MESI RFO) │
+//! │     ├── Lane i Region [i*N .. (i+1)*N)  (256 slots x 16B = 4 KB/core, L1d-bounded)      │
+//! │     └── Slot (16B): tag: AtomicU64 | meta: AtomicU64 [expire:32 | record_idx:32]        │
 //! │                                                                                         │
-//! │  2. Contiguous Key Store (read-only shared across cores, k * 4096 B)                    │
-//! │     ├── Index Slots (16B):  tag: u64 | record_idx: u32 | key_len: u8 | _pad[3]          │
-//! │     ├── Key Records (80B):  words: [u64; 8] (64B) | expires_at: u64 | hdr_start/count   │
+//! │  2. ContiguousKeyStore (100% Source of Truth, read-only shared across cores)            │
+//! │     ├── KeyIndexSlot (16B): tag: u64 | record_idx: u32 | key_len: u8 | _pad[3]          │
+//! │     ├── KeyRecord    (80B): words: [u64; 8] (64B) | expires_at: u64 | hdr_start/count   │
 //! │     └── Header Arena:       Box<[(HeaderName, HeaderValue)]>                            │
 //! └─────────────────────────────────────────────────────────────────────────────────────────┘
+//!
+//!                  [ Inbound Key (1..=64B) -> encode_key_words() -> (words, tag) ]
+//!                                               │
+//!                                               ▼
+//!                       CoreCacheArena::probe(lane, tag, coarse_sec())
+//!                              │                               │
+//!                        [ CACHE HIT ]                   [ CACHE MISS ]
+//!                              │                               │
+//!                              │                               ▼
+//!                              │               ContiguousKeyStore::find_record()
+//!                              │                 ├── slot.tag == 0 -> Reject 401 (no cache write)
+//!                              │                 └── match tag     -> record_idx
+//!                              │                               │
+//!                              └───────────────┬───────────────┘
+//!                                              ▼ (offset: record_idx * 80B, 1-2 cache lines)
+//!                              KeyRecord[record_idx] -> ct_eq_words() + expires_at
+//!                                ├── Valid   -> insert_positive() (if miss) + inject_headers
+//!                                └── Invalid -> Reject 401 (never pollutes CoreCacheArena)
 //! ```
 
 use std::alloc::{Layout, alloc_zeroed, dealloc, handle_alloc_error};
