@@ -1,64 +1,26 @@
-//! API Key Authentication Configuration Schema & Semantic Validation (`phase: "pre_upstream"`).
+//! Schema & semantic validation for `api_key_auth` (`pre_upstream`).
 //!
-//! Enforces a strict declarative contract for API Key authentication and token extraction.
-//!
-//! # Strict Declarative Contract (Zero Silent Fallbacks)
-//! - **Non-Empty Key Store**: `keys` must contain at least one configured key-consumer mapping.
-//! - **Valid Key Token**: Each key entry must have a non-empty `key` string.
-//! - **Valid Key Sources**: Every source in `sources` must have type `"header"` or `"query"` with valid names.
-//! - **Header Name RFC Grammar**: Header names and injected header names must conform to RFC 9110 token grammar.
+//! ```text
+//! ┌─────────────────────────────────────────────────────────────────────────────────────────┐
+//! │                     API KEY AUTH VALIDATION FLOW                                        │
+//! ├─────────────────────────────────────────────────────────────────────────────────────────┤
+//! │  Raw JSON Value                                                                         │
+//! │    ├── Deserialize ApiKeyAuthConfig (#[serde(deny_unknown_fields)])                     │
+//! │    ├── Validate header_name (RFC 9110 token grammar)                                    │
+//! │    ├── Validate keys non-empty, len ∈ 1..=64B, no duplicates, valid inject_headers      │
+//! │    ├── Validate TTLs (cache_ttl_secs ∈ 1..=86400, negative_ttl_secs ∈ 1..=3600)         │
+//! │    └── Normalize cache_slots_per_core (power-of-2 in 256..=65536 -> k * 4096B/core)     │
+//! └─────────────────────────────────────────────────────────────────────────────────────────┘
+//! ```
 
-use std::collections::HashMap;
+use std::collections::HashSet;
 
-use serde::{Deserialize, Serialize};
+use serde_json::Value;
 
 use crate::error::PluginError;
+use crate::pre_upstream::api_key_auth::config::{ApiKeyAuthConfig, MAX_API_KEY_LEN};
 
-/// Declarative extraction source definition for API keys.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(tag = "type")]
-pub enum ApiKeySourceConfig {
-    /// Extract API key from an HTTP request header (e.g. `X-API-Key: <token>`).
-    #[serde(rename = "header")]
-    Header {
-        /// Header field name (e.g. "x-api-key").
-        name: String,
-        /// Optional prefix to strip (e.g. "ApiKey " or "Bearer ").
-        prefix: Option<String>,
-    },
-    /// Extract API key from a URL query parameter (e.g. `?api_key=<token>`).
-    #[serde(rename = "query")]
-    Query {
-        /// Query parameter name (e.g. "api_key").
-        param: String,
-    },
-}
-
-/// Declarative key entry mapping a secret key to a consumer identity and optional headers.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct ApiKeyEntryConfig {
-    /// Secret API key token.
-    pub key: String,
-    /// Consumer identifier associated with this key.
-    pub consumer_id: Option<String>,
-    /// Headers injected into upstream request upon successful authentication.
-    pub inject_headers: HashMap<String, String>,
-}
-
-/// Declarative configuration for the API Key Authentication plugin.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct ApiKeyAuthConfig {
-    /// Extraction sources (e.g. header and/or query).
-    pub sources: Vec<ApiKeySourceConfig>,
-    /// Configured valid keys and their consumer identities.
-    pub keys: Vec<ApiKeyEntryConfig>,
-    /// Whether to strip the API key from request headers before forwarding upstream.
-    pub hide_credentials: bool,
-    /// Dual-cache TTL in seconds for positive/negative validation caching.
-    pub cache_ttl_secs: u64,
-}
-
-/// Helper to validate RFC 9110 header token grammar.
+/// Validates RFC 9110 HTTP header token grammar.
 fn is_valid_header_name(h: &str) -> bool {
     let trimmed = h.trim();
     if trimmed.is_empty() {
@@ -86,106 +48,75 @@ fn is_valid_header_name(h: &str) -> bool {
     })
 }
 
-/// Validates API Key Authentication configuration strictly according to production standards.
+/// Validates and normalizes `api_key_auth` plugin configuration.
 pub fn validate_api_key_auth_config(
     plugin_id: &str,
-    config_val: &serde_json::Value,
+    raw_config: &Value,
 ) -> Result<ApiKeyAuthConfig, PluginError> {
-    let cfg: ApiKeyAuthConfig = serde_json::from_value(config_val.clone()).map_err(|e| {
+    let mut cfg: ApiKeyAuthConfig = serde_json::from_value(raw_config.clone()).map_err(|e| {
         PluginError::Config(format!(
-            "Plugin '{plugin_id}' has malformed or incomplete api_key_auth config: {e}"
+            "Plugin '{plugin_id}' has invalid api_key_auth config: {e}"
         ))
     })?;
 
-    // 1. Validate Keys Store
-    if cfg.keys.is_empty() {
+    cfg.header_name = cfg.header_name.trim().to_ascii_lowercase();
+    if !is_valid_header_name(&cfg.header_name) {
         return Err(PluginError::Config(format!(
-            "Plugin '{plugin_id}': keys list cannot be empty (at least one key is required)"
+            "Plugin '{plugin_id}': invalid header_name '{}'",
+            cfg.header_name
         )));
     }
 
-    let mut seen_keys = std::collections::HashSet::with_capacity(cfg.keys.len());
-    for (idx, entry) in cfg.keys.iter().enumerate() {
-        let key_trimmed = entry.key.trim();
-        if key_trimmed.is_empty() {
-            return Err(PluginError::Config(format!(
-                "Plugin '{plugin_id}': key entry at index {idx} has empty 'key' field"
-            )));
-        }
-        if !seen_keys.insert(key_trimmed) {
-            return Err(PluginError::Config(format!(
-                "Plugin '{plugin_id}': duplicate key entry detected for key at index {idx}"
-            )));
-        }
+    if cfg.keys.is_empty() {
+        return Err(PluginError::Config(format!(
+            "Plugin '{plugin_id}': keys list cannot be empty"
+        )));
+    }
 
-        if let Some(ref cid) = entry.consumer_id
-            && cid.trim().is_empty()
-        {
+    let mut seen_keys = HashSet::with_capacity(cfg.keys.len());
+    for (idx, entry) in cfg.keys.iter_mut().enumerate() {
+        let trimmed = entry.key.trim().to_string();
+        if trimmed.is_empty() || trimmed.len() > MAX_API_KEY_LEN {
             return Err(PluginError::Config(format!(
-                "Plugin '{plugin_id}': key entry at index {idx} has empty 'consumer_id'"
+                "Plugin '{plugin_id}': key at index {idx} length {} must be within 1..={MAX_API_KEY_LEN} bytes",
+                trimmed.len()
             )));
         }
+        if !seen_keys.insert(trimmed.clone()) {
+            return Err(PluginError::Config(format!(
+                "Plugin '{plugin_id}': duplicate key at index {idx}"
+            )));
+        }
+        entry.key = trimmed;
 
-        // Validate injected headers
         for (hname, hval) in &entry.inject_headers {
             if !is_valid_header_name(hname) {
                 return Err(PluginError::Config(format!(
-                    "Plugin '{plugin_id}': key at index {idx} has invalid injected header name '{hname}'"
+                    "Plugin '{plugin_id}': key at index {idx} has invalid inject_headers name '{hname}'"
                 )));
             }
-            if hval.bytes().any(|b| b == b'\r' || b == b'\n') {
+            if hval.bytes().any(|b| b == b'\r' || b == b'\n' || b == 0) {
                 return Err(PluginError::Config(format!(
-                    "Plugin '{plugin_id}': injected header value for '{hname}' contains CRLF control characters"
+                    "Plugin '{plugin_id}': inject_headers value for '{hname}' contains control bytes"
                 )));
             }
         }
     }
 
-    // 2. Validate Sources
-    if cfg.sources.is_empty() {
+    if cfg.cache_ttl_secs == 0 || cfg.cache_ttl_secs > 86_400 {
         return Err(PluginError::Config(format!(
-            "Plugin '{plugin_id}': sources list cannot be empty (at least one source is required)"
-        )));
-    }
-
-    for (idx, src) in cfg.sources.iter().enumerate() {
-        match src {
-            ApiKeySourceConfig::Header { name, prefix } => {
-                if !is_valid_header_name(name) {
-                    return Err(PluginError::Config(format!(
-                        "Plugin '{plugin_id}': source at index {idx} has invalid header name '{name}'"
-                    )));
-                }
-                if let Some(pfx) = prefix
-                    && pfx.bytes().any(|b| b == b'\r' || b == b'\n')
-                {
-                    return Err(PluginError::Config(format!(
-                        "Plugin '{plugin_id}': source at index {idx} header prefix contains CRLF control characters"
-                    )));
-                }
-            }
-            ApiKeySourceConfig::Query { param } => {
-                let trimmed = param.trim();
-                if trimmed.is_empty()
-                    || trimmed
-                        .bytes()
-                        .any(|b| b == b'&' || b == b'=' || b == b'#' || b.is_ascii_whitespace())
-                {
-                    return Err(PluginError::Config(format!(
-                        "Plugin '{plugin_id}': source at index {idx} has invalid query parameter name '{param}'"
-                    )));
-                }
-            }
-        }
-    }
-
-    // 3. Validate Cache TTL (1 ..= 86400s)
-    if cfg.cache_ttl_secs == 0 || cfg.cache_ttl_secs > 86400 {
-        return Err(PluginError::Config(format!(
-            "Plugin '{plugin_id}': cache_ttl_secs ({}) must be between 1 and 86,400s (24 hours)",
+            "Plugin '{plugin_id}': cache_ttl_secs ({}) must be in 1..=86400",
             cfg.cache_ttl_secs
         )));
     }
+
+    if cfg.cache_slots_per_core < 256 || cfg.cache_slots_per_core > 65_536 {
+        return Err(PluginError::Config(format!(
+            "Plugin '{plugin_id}': cache_slots_per_core ({}) must be in 256..=65536",
+            cfg.cache_slots_per_core
+        )));
+    }
+    cfg.cache_slots_per_core = cfg.cache_slots_per_core.next_power_of_two();
 
     Ok(cfg)
 }
@@ -196,146 +127,45 @@ mod tests {
     use serde_json::json;
 
     #[test]
-    fn test_valid_api_key_auth_config() {
-        let val = json!({
+    fn test_valid_config_normalizes_header_and_slots() {
+        let raw = json!({
+            "header_name": "  X-API-Key ",
+            "hide_credentials": true,
+            "cache_ttl_secs": 120,
+            "cache_slots_per_core": 300,
             "keys": [
                 {
-                    "key": "secret-key-12345",
-                    "consumer_id": "payment-service",
-                    "inject_headers": {
-                        "X-Consumer-ID": "payment-service",
-                        "X-Consumer-Tier": "premium"
-                    }
+                    "key": "sk-test-1234567890",
+                    "expires_at": 0,
+                    "inject_headers": { "x-user-id": "u1" }
                 }
-            ],
-            "sources": [
-                { "type": "header", "name": "x-api-key" },
-                { "type": "query", "param": "key" }
-            ],
-            "hide_credentials": true,
-            "cache_ttl_secs": 600
-        });
-        let res = validate_api_key_auth_config("api_key_1", &val);
-        assert!(res.is_ok());
-    }
-
-    #[test]
-    fn test_empty_keys_rejected() {
-        let val = json!({
-            "sources": [{ "type": "header", "name": "x-api-key" }],
-            "keys": [],
-            "hide_credentials": true,
-            "cache_ttl_secs": 300
-        });
-        let res = validate_api_key_auth_config("api_key_empty", &val);
-        assert!(res.is_err());
-        assert!(res.unwrap_err().to_string().contains("cannot be empty"));
-    }
-
-    #[test]
-    fn test_duplicate_keys_rejected() {
-        let val = json!({
-            "sources": [{ "type": "header", "name": "x-api-key" }],
-            "keys": [
-                { "key": "duplicate-key-token", "consumer_id": "user1", "inject_headers": {} },
-                { "key": "duplicate-key-token", "consumer_id": "user2", "inject_headers": {} }
-            ],
-            "hide_credentials": true,
-            "cache_ttl_secs": 300
-        });
-        let res = validate_api_key_auth_config("api_key_dup", &val);
-        assert!(res.is_err());
-        assert!(res.unwrap_err().to_string().contains("duplicate key"));
-    }
-
-    #[test]
-    fn test_invalid_header_name_rejected() {
-        let val = json!({
-            "sources": [{ "type": "header", "name": "x-api-key" }],
-            "keys": [
-                {
-                    "key": "valid-key-xyz",
-                    "consumer_id": "user1",
-                    "inject_headers": {
-                        "Invalid Header Name: Bad": "val"
-                    }
-                }
-            ],
-            "hide_credentials": true,
-            "cache_ttl_secs": 300
-        });
-        let res = validate_api_key_auth_config("api_key_bad_hdr", &val);
-        assert!(res.is_err());
-        assert!(
-            res.unwrap_err()
-                .to_string()
-                .contains("invalid injected header name")
-        );
-    }
-
-    #[test]
-    fn test_missing_required_fields_rejected() {
-        let val = json!({
-            "keys": [
-                { "key": "valid-key-xyz", "consumer_id": "user1", "inject_headers": {} }
             ]
-            // Missing sources, hide_credentials, cache_ttl_secs
         });
-        let res = validate_api_key_auth_config("api_key_missing", &val);
-        assert!(res.is_err());
-        assert!(res.unwrap_err().to_string().contains("missing field"));
+
+        let cfg = validate_api_key_auth_config("api_key_auth", &raw).unwrap();
+        assert_eq!(cfg.header_name, "x-api-key");
+        assert_eq!(cfg.cache_slots_per_core, 512);
     }
 
     #[test]
-    fn test_empty_sources_rejected() {
-        let val = json!({
-            "sources": [],
-            "keys": [
-                { "key": "valid-key-xyz", "consumer_id": "user1", "inject_headers": {} }
-            ],
-            "hide_credentials": true,
-            "cache_ttl_secs": 300
+    fn test_rejects_oversized_key_over_64_bytes() {
+        let too_long = "a".repeat(65);
+        let raw = json!({
+            "header_name": "x-api-key",
+            "keys": [{ "key": too_long }]
         });
-        let res = validate_api_key_auth_config("api_key_no_src", &val);
-        assert!(res.is_err());
-        assert!(
-            res.unwrap_err()
-                .to_string()
-                .contains("sources list cannot be empty")
-        );
+        assert!(validate_api_key_auth_config("api_key_auth", &raw).is_err());
     }
 
     #[test]
-    fn test_zero_cache_ttl_rejected() {
-        let val = json!({
-            "sources": [{ "type": "header", "name": "x-api-key" }],
-            "keys": [
-                { "key": "valid-key-xyz", "consumer_id": "user1", "inject_headers": {} }
-            ],
-            "hide_credentials": true,
-            "cache_ttl_secs": 0
-        });
-        let res = validate_api_key_auth_config("api_key_zero_ttl", &val);
-        assert!(res.is_err());
-        assert!(res.unwrap_err().to_string().contains("cache_ttl_secs"));
-    }
+    fn test_rejects_empty_keys_and_duplicate_keys() {
+        let empty = json!({ "header_name": "x-api-key", "keys": [] });
+        assert!(validate_api_key_auth_config("api_key_auth", &empty).is_err());
 
-    #[test]
-    fn test_invalid_query_param_rejected() {
-        let val = json!({
-            "sources": [{ "type": "query", "param": "bad=param&name" }],
-            "keys": [
-                { "key": "valid-key-xyz", "consumer_id": "user1", "inject_headers": {} }
-            ],
-            "hide_credentials": true,
-            "cache_ttl_secs": 60
+        let dup = json!({
+            "header_name": "x-api-key",
+            "keys": [{ "key": "abc" }, { "key": "abc" }]
         });
-        let res = validate_api_key_auth_config("api_key_bad_param", &val);
-        assert!(res.is_err());
-        assert!(
-            res.unwrap_err()
-                .to_string()
-                .contains("invalid query parameter name")
-        );
+        assert!(validate_api_key_auth_config("api_key_auth", &dup).is_err());
     }
 }

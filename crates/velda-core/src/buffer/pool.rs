@@ -437,6 +437,7 @@ mod tests {
 
     #[test]
     fn test_sharded_buffer_pool_sweep_all_cores() {
+        crate::clock::init_clock();
         let config = AdaptivePoolConfig {
             header_slots: 2,
             header_max_cap: 4,

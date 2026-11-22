@@ -1460,6 +1460,7 @@ mod tests {
 
     #[test]
     fn test_payload_slab_pool_adaptive_burst_and_decay() {
+        crate::clock::init_clock();
         // Pool with baseline=2, max_burst_cap=4, idle_ttl_secs=15
         let pool = PayloadSlabPool::with_adaptive_limits(AdaptiveSlabLimits {
             small_baseline: 2,
@@ -1529,6 +1530,7 @@ mod tests {
 
     #[test]
     fn test_shadow_low_watermark_replenishment_and_rss_decay() {
+        crate::clock::init_clock();
         // Pool with baseline=4, max_burst_cap=12, idle_ttl_secs=15
         let pool = PayloadSlabPool::with_adaptive_limits(AdaptiveSlabLimits {
             small_baseline: 4,
@@ -1706,6 +1708,7 @@ mod tests {
 
     #[test]
     fn test_burst_spillover_and_ttl_expiration() {
+        crate::clock::init_clock();
         let pool = PayloadSlabPool::with_adaptive_limits(AdaptiveSlabLimits {
             small_baseline: 2,
             small_max_cap: 5,

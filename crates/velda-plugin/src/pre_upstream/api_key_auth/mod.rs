@@ -1,12 +1,9 @@
-//! Pre-Upstream API Key Authentication Plugin Submodule (`api_key_auth`).
+//! Pre-Upstream API Key Authentication Plugin (`api_key_auth`).
 
-pub mod cache;
+pub mod arena;
+pub mod config;
 pub mod plugin;
-pub mod source;
-
-pub use cache::ApiKeyCache;
-pub use plugin::ApiKeyAuthPlugin;
-pub use source::{ApiKeyEntry, KeySource, MatchedSource, extract_token, extract_token_ref};
-
 pub mod validation;
-pub use validation::*;
+
+pub use config::{ApiKeyAuthConfig, ApiKeyEntryConfig, MAX_API_KEY_LEN};
+pub use plugin::ApiKeyAuthPlugin;

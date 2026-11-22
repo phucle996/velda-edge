@@ -67,20 +67,12 @@ pub fn init_clock() {
     });
 }
 
-/// Returns current Unix epoch time in integer seconds via atomic load.
+/// Returns current Unix epoch time in integer seconds via relaxed atomic load.
 ///
-/// Falls back to `SystemTime::now()` if background worker is not yet started.
+/// Requires [`init_clock()`] to be invoked at process/test startup.
 #[inline(always)]
 pub fn coarse_sec() -> u64 {
-    let sec = COARSE_SECS.load(Ordering::Relaxed);
-    if sec != 0 {
-        sec
-    } else {
-        SystemTime::now()
-            .duration_since(UNIX_EPOCH)
-            .map(|d| d.as_secs())
-            .unwrap_or(0)
-    }
+    COARSE_SECS.load(Ordering::Relaxed)
 }
 
 /// Converts a hardware monotonic [`Instant`] to an absolute Unix Epoch nanosecond timestamp.

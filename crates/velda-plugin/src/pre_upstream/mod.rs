@@ -31,7 +31,7 @@ pub mod request_mirror;
 pub mod request_termination;
 pub mod url_rewrite;
 
-pub use api_key_auth::{ApiKeyAuthPlugin, ApiKeyCache, ApiKeyEntry, KeySource};
+pub use api_key_auth::{ApiKeyAuthConfig, ApiKeyAuthPlugin, ApiKeyEntryConfig};
 pub use api_metering::{
     AccountState, ApiMeteringConfig, ApiMeteringPlugin, ExhaustedAction, MICRO_CREDITS_PER_UNIT,
     MeteringDecision, ShardedMeteringState, TierConfig,

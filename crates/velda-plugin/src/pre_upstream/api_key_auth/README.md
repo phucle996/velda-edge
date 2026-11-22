@@ -1,132 +1,78 @@
-# API Key Authentication Plugin (`api_key_auth`)
+# API Key Authentication (`api_key_auth`)
 
-High-performance L7 ingress authentication engine for B2B APIs, server-to-server microservice integrations, and webhooks. Backed by an in-memory collision-safe hash table, constant-time cryptographic verification, fast-reject length bounds guarding, identity header sanitization, and lock-free zero-allocation request evaluation (< 10ns).
+```mermaid
+flowchart TD
+    Req["Inbound L7Request (HTTP or gRPC HeaderWorkspace)"] --> LenCheck{"Read header_name & check len ∈ 1..=64B"}
+    LenCheck -->|"Missing / 0B / > 64B"| Reject["Action::Reject (401 Unauthorized / UNAUTHENTICATED)"]
+    LenCheck -->|"Valid length (1..=64B)"| Pack["encode_key_words() -> [u64; 8] + tag: u64"]
 
----
+    Pack --> Probe{"CoreCacheArena::probe(lane, tag, coarse_sec())"}
+    Probe -->|"Positive Hit"| VerifyCache{"ct_eq_words() & not expired?"}
+    Probe -->|"Cache Miss"| Store["ContiguousKeyStore::find_record()"]
 
-## 1. Overview & Pipeline Specification
+    Store -->|"Not Found / Expired (No cache write)"| Reject
+    Store -->|"Valid"| PosCache["insert_positive(coarse_sec + cache_ttl)"] --> Apply
 
-| Property | Value |
-| :--- | :--- |
-| **Plugin ID** | `api_key_auth` |
-| **Canonical Phase** | `pre_upstream` |
-| **Execution Order** | Sequential FIFO based on route's `plugins` declaration order (First declared, first executed) |
-| **Reverse Capability** | `PluginCapability::header_only(AccessLevel::Write)` |
-| **Supported Protocols** | `ALL_HTTP` (HTTP/1.1, HTTP/2, HTTP/3) |
-| **Hot-Path Overhead** | ~5 – 10ns; **100% Lock-Free**; **0 heap allocations** |
+    VerifyCache -->|"Valid"| Apply["Remove header_name (if hide_credentials) + Overwrite inject_headers"]
+    VerifyCache -->|"Mismatch / Expired"| Store
+    Apply --> Pass["Action::Continue -> Upstream"]
+```
 
-### What it Protects & Solves
-- **Shields Upstream Backends**: Rejects missing or invalid API keys at the edge with `401 Unauthorized` and `Cache-Control: no-store` (preventing CPDoS), saving 100% of backend CPU cycles, database queries, and thread pool resources.
-- **Constant-Time Verification (CWE-208)**: Uses branchless bitwise XOR constant-time comparison against key bytes to completely eliminate timing side-channel attacks and prevent 64-bit non-cryptographic hash collision forgeries.
-- **Fast-Reject Length Guard**: Bounds checking (`min_key_len ..= max_key_len`) rejects oversized or malformed tokens in < 1ns before any hashing occurs.
-- **Identity Header Sanitization (Privilege Escalation Defense)**: Sanitizes and strips client-supplied identity headers across all keys before injecting authoritative consumer metadata.
-- **Full Credential Hygiene (`hide_credentials`)**: Strips client credentials from both request headers and URI query parameters prior to forwarding upstream.
-- **Lock-Free Hot-Path**: Directly queries the immutable in-memory store in RAM without mutex locking, avoiding core contention and allocation overhead.
+## 1. What This Plugin Does
 
----
+`api_key_auth` authenticates incoming HTTP (`1.1`, `2`, `3`) and gRPC requests on a unified `HeaderWorkspace` against an in-memory, `k * 4096`-byte contiguous key store backed by a lock-free per-core cache arena (`velda_core::clock::coarse_sec()`).
 
-## 2. 100% Explicit Configuration Invariant
+## 2. Where It Sits in Velda Edge
 
-> [!IMPORTANT]
-> **Strict Configuration Contract**: Every configuration parameter must be explicitly declared in `plugins.json`. No silent fallbacks or implicit defaults exist. All extraction sources, key entries, and cache settings must be declared intentionally.
+- **Execution Phase**: `pre_upstream` (runs after route matching, strictly on routes where `api_key_auth` is attached).
+- **Thread Placement**: Inline on Frontline Traffic Workers (`velda-worker-{i}`).
+- **Supported Protocols**: HTTP/1.1, HTTP/2, HTTP/3, and gRPC (`SupportedProtocols::ALL_HTTP | SupportedProtocols::GRPC`).
+- **Capability**: `PluginCapability::header_only(AccessLevel::Write)` (zero payload buffering).
 
-| Field | Type | Required | Constraints / Allowed Values | Recommended Value | Description |
-| :--- | :---: | :---: | :--- | :--- | :--- |
-| `sources` | Array of objects | **Yes** | Non-empty array of source descriptors (`header` or `query`) | `[{"type":"header","name":"x-api-key","prefix":null}]` | Key extraction locations evaluated in sequential FIFO order. |
-| `keys` | Array of objects | **Yes** | Non-empty array of key definitions | `[{"key":"...","consumer_id":"...","inject_headers":{}}]` | Configured active API keys, consumer identities, and metadata to inject. |
-| `hide_credentials` | Boolean | **Yes** | `true` or `false` | `true` | When true, strips matching API key headers and query parameters before forwarding upstream. |
-| `cache_ttl_secs` | Integer (u64) | **Yes** | `1 ..= 86400` seconds | `300` (5 minutes) | Positive authentication cache lifetime in seconds. |
-
-### Source Object Format
-- **Header Source**:
-  - `type`: `"header"`
-  - `name`: Header name string (e.g. `"x-api-key"`, `"authorization"`)
-  - `prefix`: Prefix string to strip (e.g. `"ApiKey "`, `"Bearer "`), or `null` if none
-- **Query Source**:
-  - `type`: `"query"`
-  - `param`: Query parameter name string (e.g. `"api_key"`, `"token"`)
-
-### Key Entry Format
-- `key`: Non-empty secret string token
-- `consumer_id`: Consumer identifier string, or `null` to use `key`
-- `inject_headers`: Key-value map of headers to inject upstream upon successful authentication (`{}` if none)
-
----
-
-## 3. Headers Contract
-
-### Request Headers / Query Inspected
-- Configured header sources (e.g. `X-API-Key`, `Authorization: ApiKey <key>`).
-- Configured query parameters (e.g. `?api_key=<key>`).
-
-### Response Generated on Violation (`401 Unauthorized`)
-- Status: `401 Unauthorized`.
-- Header: `WWW-Authenticate: ApiKey realm="velda-edge"`.
-- Header: `Content-Type: application/json`.
-- Header: `Cache-Control: no-store`.
-- Body: `{"error":"Missing API key"}` or `{"error":"Invalid API key"}`.
-
-### Request Headers Injected Upstream (on Success)
-- All key-value pairs defined in `inject_headers` (e.g. `x-consumer-id: partner-service`).
-
----
-
-## 4. Configuration Examples
-
-### Production Manifest (`plugins.json`)
+## 3. Quick Start Configuration (Multi-Key)
 
 ```json
 {
-  "schema_version": 1,
-  "plugins": [
-    {
-      "id": "api_key_auth",
-      "config": {
-        "sources": [
-          {
-            "type": "header",
-            "name": "x-api-key",
-            "prefix": null
-          },
-          {
-            "type": "header",
-            "name": "authorization",
-            "prefix": "ApiKey "
-          },
-          {
-            "type": "query",
-            "param": "token"
-          }
-        ],
-        "keys": [
-          {
-            "key": "sk-live-alpha-998877665544",
-            "consumer_id": "stripe-webhook",
-            "inject_headers": {
-              "x-consumer-id": "stripe-webhook",
-              "x-consumer-tier": "enterprise"
-            }
-          }
-        ],
-        "hide_credentials": true,
-        "cache_ttl_secs": 300
+  "id": "api_key_auth",
+  "config": {
+    "header_name": "x-api-key",
+    "hide_credentials": true,
+    "cache_ttl_secs": 300,
+    "cache_slots_per_core": 256,
+    "keys": [
+      {
+        "key": "sk-live-enterprise-tenant-a-9f8e7d6c5b4a",
+        "expires_at": 0,
+        "inject_headers": {
+          "x-tenant-id": "tenant-a",
+          "x-tier": "enterprise",
+          "x-rate-tier": "unlimited"
+        }
+      },
+      {
+        "key": "sk-live-partner-b-temp-2026-1a2b3c4d5e6f",
+        "expires_at": 1893456000,
+        "inject_headers": {
+          "x-tenant-id": "partner-b",
+          "x-tier": "standard"
+        }
+      },
+      {
+        "key": "sk-internal-monitor-readonly-778899aabbcc",
+        "expires_at": 0,
+        "inject_headers": {
+          "x-tenant-id": "internal-ops",
+          "x-role": "readonly"
+        }
       }
-    }
-  ]
+    ]
+  }
 }
 ```
 
-### Route Attachment (`routes.json`)
+## 4. Documentation Directory
 
-```json
-{
-  "id": "api-webhooks-route",
-  "match": {
-    "path": "/webhooks/stripe"
-  },
-  "upstream_id": "webhooks-backend",
-  "plugins": [
-    "api_key_auth"
-  ]
-}
-```
+- [**RUNBOOK.md**](RUNBOOK.md): Parameter reference, multi-key configuration recipes, cache sizing, and incident triage.
+- [**ARCHITECTURE.md**](ARCHITECTURE.md): `k * 4096` user-space jemalloc extents, `[u64; 8]` constant-time integer compare, and `coarse_sec()` cache layout.
+- [**BENCHMARK.md**](BENCHMARK.md): First-principles 6-scenario benchmark suite (`KB 01`–`KB 06`) and verified release ASM audit (`0` allocs, `0` spills, `0` lock fences).
+- [**TEST.md**](TEST.md): Verified unit and validation test cases.

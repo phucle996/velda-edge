@@ -1,153 +1,120 @@
-//! Pre-Upstream API Key Authentication Plugin (`api_key_auth`).
+//! `api_key_auth` Pre-Upstream Plugin (`phase: "pre_upstream"`).
 //!
-//! Enforces high-performance L7 API key verification against an in-memory hash store backed by
-//! constant-time cryptographic verification, length bounds checking, managed header sanitization,
-//! and complete credential leakage prevention on the hot path.
+//! ```text
+//! ┌─────────────────────────────────────────────────────────────────────────────────────────┐
+//! │                     API KEY AUTH HOT-PATH EXECUTION (HTTP & gRPC)                       │
+//! ├─────────────────────────────────────────────────────────────────────────────────────────┤
+//! │  L7Request.headers (HeaderWorkspace)                                                    │
+//! │    │                                                                                    │
+//! │    ├── Missing or len ∉ [min_key_len, max_key_len] (<= 64B) ──► Reject(Unauthorized)    │
+//! │    │                                                                                    │
+//! │    ▼ encode_key_words(bytes) -> (words: [u64; 8], tag: u64) + coarse_sec()              │
+//! │    ├── CoreCacheArena::probe(lane, tag, now_sec) [Positive-Only, Spray-Immune]          │
+//! │    │     ├── Positive Hit -> Verify ct_eq_words & expires_at  ► Inject & Continue       │
+//! │    │     └── Miss -> ContiguousKeyStore::find_record()                                  │
+//! │    │           ├── Not Found / Expired (No cache write!) ─────► Reject(Unauthorized)    │
+//! │    │           └── Valid -> insert_positive() ────────────────► Inject & Continue       │
+//! │                                                                                         │
+//! │  On Match: optional remove(header_name), overwrite inject_headers via insert()          │
+//! └─────────────────────────────────────────────────────────────────────────────────────────┘
+//! ```
 
 use std::str::FromStr;
 
-use crate::config::PluginConfig;
 use http::header::{HeaderName, HeaderValue};
-use rustc_hash::FxHashMap;
+use velda_core::clock::coarse_sec;
 use velda_core::{Action, L7Request, RejectReason};
 
-use super::cache::ApiKeyCache;
-use super::source::{ApiKeyEntry, KeySource, MatchedSource, extract_token_ref};
 use crate::capability::{AccessLevel, PluginCapability, SupportedProtocols};
+use crate::config::PluginConfig;
 use crate::error::PluginError;
 use crate::pre_upstream::PreUpstreamPlugin;
+use crate::pre_upstream::api_key_auth::arena::{
+    CompiledKeyInput, ContiguousKeyStore, CoreCacheArena, ct_eq_words, encode_key_words,
+};
+use crate::pre_upstream::api_key_auth::config::MAX_API_KEY_LEN;
+use crate::pre_upstream::api_key_auth::validation::validate_api_key_auth_config;
 
-/// Pre-Upstream API Key Authentication Plugin.
+/// Pre-upstream API key authentication plugin backed by contiguous `k * 4096`-byte arenas.
 pub struct ApiKeyAuthPlugin {
-    pub id: String,
-    pub sources: Vec<KeySource>,
-    pub hide_credentials: bool,
-    /// Fast in-memory hash store: key_hash -> Vec<ApiKeyEntry> (collision-safe)
-    pub keys: FxHashMap<u64, Vec<ApiKeyEntry>>,
-    /// Thread-safe lock-striped Dual Cache (kept for API compatibility)
-    pub cache: ApiKeyCache,
-    /// Minimum valid key length among configured keys
-    pub min_key_len: usize,
-    /// Maximum valid key length among configured keys
-    pub max_key_len: usize,
-    /// Pre-compiled list of all injected header names across keys to sanitize prior to injection
-    pub sanitized_headers: Vec<HeaderName>,
+    id: String,
+    header_name: HeaderName,
+    hide_credentials: bool,
+    cache_ttl_secs: u64,
+    store: ContiguousKeyStore,
+    cache: CoreCacheArena,
 }
 
 impl ApiKeyAuthPlugin {
-    /// Constructs an `ApiKeyAuthPlugin` from raw parameters.
-    pub fn new(
-        id: impl Into<String>,
-        sources: Vec<KeySource>,
-        hide_credentials: bool,
-        keys: FxHashMap<String, (String, Vec<(HeaderName, HeaderValue)>)>,
-        cache: ApiKeyCache,
-    ) -> Self {
-        let mut key_map: FxHashMap<u64, Vec<ApiKeyEntry>> = FxHashMap::default();
-        let mut min_len = usize::MAX;
-        let mut max_len = 0usize;
-        let mut sanitized = Vec::new();
+    /// Instantiates `ApiKeyAuthPlugin` from a declarative [`PluginConfig`].
+    pub fn from_config(config: &PluginConfig) -> Result<Self, PluginError> {
+        let cfg = validate_api_key_auth_config(&config.id, &config.config)?;
 
-        for (raw_key, (consumer_id, injected_headers)) in keys {
-            let trimmed_key = raw_key.trim();
-            let k_len = trimmed_key.len();
-            min_len = min_len.min(k_len);
-            max_len = max_len.max(k_len);
+        let header_name = HeaderName::from_str(&cfg.header_name).map_err(|e| {
+            PluginError::Config(format!(
+                "Invalid header_name '{}' for plugin '{}': {e}",
+                cfg.header_name, config.id
+            ))
+        })?;
 
-            for (hname, _) in &injected_headers {
-                if !sanitized.contains(hname) {
-                    sanitized.push(hname.clone());
-                }
+        let mut compiled_entries = Vec::with_capacity(cfg.keys.len());
+        for k in cfg.keys {
+            let mut hdrs = Vec::with_capacity(k.inject_headers.len());
+            for (hname_str, hval_str) in k.inject_headers {
+                let hname = HeaderName::from_str(&hname_str).map_err(|e| {
+                    PluginError::Config(format!(
+                        "Invalid inject_headers name '{hname_str}' for plugin '{}': {e}",
+                        config.id
+                    ))
+                })?;
+                let hval = HeaderValue::from_str(&hval_str).map_err(|e| {
+                    PluginError::Config(format!(
+                        "Invalid inject_headers value for '{hname_str}' in plugin '{}': {e}",
+                        config.id
+                    ))
+                })?;
+                hdrs.push((hname, hval));
             }
-
-            let hash = ApiKeyCache::hash_key(trimmed_key);
-            key_map.entry(hash).or_default().push(ApiKeyEntry {
-                key: trimmed_key.to_string(),
-                consumer_id,
-                injected_headers,
+            compiled_entries.push(CompiledKeyInput {
+                key_bytes: k.key.into_bytes(),
+                expires_at: k.expires_at,
+                inject_headers: hdrs,
             });
         }
 
-        if min_len == usize::MAX {
-            min_len = 0;
-        }
+        let store = ContiguousKeyStore::compile(compiled_entries);
+        let cache = CoreCacheArena::new(cfg.cache_slots_per_core);
 
-        Self {
-            id: id.into(),
-            sources,
-            hide_credentials,
-            keys: key_map,
+        Ok(Self {
+            id: config.id.clone(),
+            header_name,
+            hide_credentials: cfg.hide_credentials,
+            cache_ttl_secs: cfg.cache_ttl_secs,
+            store,
             cache,
-            min_key_len: min_len,
-            max_key_len: max_len,
-            sanitized_headers: sanitized,
-        }
+        })
     }
 
-    /// Deserializes and constructs an instance directly from a [`PluginConfig`].
-    pub fn from_config(config: &PluginConfig) -> Result<Self, PluginError> {
-        let cfg = super::validation::validate_api_key_auth_config(&config.id, &config.config)
-            .map_err(|e| {
-                PluginError::Config(format!(
-                    "Invalid api_key_auth configuration for '{}': {e}",
-                    config.id
-                ))
-            })?;
+    #[cold]
+    #[inline(never)]
+    fn reject_unauthorized(&self, req: &mut L7Request) -> Action {
+        req.headers.insert_bypass(
+            http::header::WWW_AUTHENTICATE,
+            HeaderValue::from_static("ApiKey realm=\"velda-edge\""),
+        );
+        Action::Reject(RejectReason::Unauthorized)
+    }
 
-        let mut sources = Vec::with_capacity(cfg.sources.len());
-        for src in &cfg.sources {
-            match src {
-                super::validation::ApiKeySourceConfig::Header { name, prefix } => {
-                    let hname = HeaderName::from_str(name).map_err(|e| {
-                        PluginError::Config(format!(
-                            "Invalid header name '{name}' for plugin '{}': {e}",
-                            config.id
-                        ))
-                    })?;
-                    sources.push(KeySource::Header {
-                        name: hname,
-                        prefix: prefix.clone().unwrap_or_default(),
-                    });
-                }
-                super::validation::ApiKeySourceConfig::Query { param } => {
-                    sources.push(KeySource::Query {
-                        param: param.clone(),
-                    });
-                }
-            }
+    #[inline(always)]
+    fn apply_authorized(&self, req: &mut L7Request, record_idx: u32) -> Action {
+        if self.hide_credentials {
+            req.headers.remove(&self.header_name);
         }
-
-        let mut keys_map = FxHashMap::default();
-        for k in &cfg.keys {
-            let consumer_id = k.consumer_id.clone().unwrap_or_else(|| k.key.clone());
-            let mut injected_headers = Vec::with_capacity(k.inject_headers.len());
-            for (hname_str, hval_str) in &k.inject_headers {
-                let hname = HeaderName::from_str(hname_str).map_err(|e| {
-                    PluginError::Config(format!(
-                        "Invalid injected header name '{hname_str}' for plugin '{}': {e}",
-                        config.id
-                    ))
-                })?;
-                let hval = HeaderValue::from_str(hval_str).map_err(|e| {
-                    PluginError::Config(format!(
-                        "Invalid injected header value '{hval_str}' for plugin '{}': {e}",
-                        config.id
-                    ))
-                })?;
-                injected_headers.push((hname, hval));
-            }
-            keys_map.insert(k.key.clone(), (consumer_id, injected_headers));
+        let rec = self.store.record(record_idx);
+        for (name, val) in self.store.headers_for(rec) {
+            req.headers.insert(name.clone(), val.clone());
         }
-
-        let cache = ApiKeyCache::new(64, 2048, cfg.cache_ttl_secs, 10);
-
-        Ok(Self::new(
-            &config.id,
-            sources,
-            cfg.hide_credentials,
-            keys_map,
-            cache,
-        ))
+        Action::Continue
     }
 }
 
@@ -157,78 +124,52 @@ impl PreUpstreamPlugin for ApiKeyAuthPlugin {
         &self.id
     }
 
+    #[inline]
     fn on_upstream_request(&self, req: &mut L7Request, _target_upstream: &mut u16) -> Action {
-        let (entry, matched_source) = {
-            let (token_str, location) = match extract_token_ref(&self.sources, req) {
-                Some(res) => res,
-                None => {
-                    req.headers.insert_bypass(
-                        http::header::WWW_AUTHENTICATE,
-                        HeaderValue::from_static("ApiKey realm=\"velda-edge\""),
-                    );
-                    return Action::Reject(RejectReason::Unauthorized);
-                }
-            };
-
-            // 1. Fast-Reject Length Guard (< 1ns): reject tokens outside valid configured bounds
-            let token_len = token_str.len();
-            if token_len < self.min_key_len || token_len > self.max_key_len {
-                req.headers.insert_bypass(
-                    http::header::WWW_AUTHENTICATE,
-                    HeaderValue::from_static("ApiKey error=\"invalid_key\""),
-                );
-                return Action::Reject(RejectReason::Unauthorized);
-            }
-
-            // 2. Fast O(1) hash indexing
-            let key_hash = ApiKeyCache::hash_key(token_str);
-
-            // 3. Constant-time key comparison to prevent timing attacks and hash collisions
-            let matched_entry = self.keys.get(&key_hash).and_then(|entries| {
-                entries
-                    .iter()
-                    .find(|entry| constant_time_eq(token_str.as_bytes(), entry.key.as_bytes()))
-            });
-
-            let entry = match matched_entry {
-                Some(e) => e,
-                None => {
-                    req.headers.insert_bypass(
-                        http::header::WWW_AUTHENTICATE,
-                        HeaderValue::from_static("ApiKey error=\"invalid_key\""),
-                    );
-                    return Action::Reject(RejectReason::Unauthorized);
-                }
-            };
-
-            (entry, location)
+        let Some(raw_val) = req.headers.get(&self.header_name) else {
+            return self.reject_unauthorized(req);
         };
 
-        // 4. Strip credentials if hide_credentials is true (both headers and query params)
-        if self.hide_credentials {
-            match matched_source {
-                MatchedSource::Header(hdr) => {
-                    req.headers.remove(hdr);
-                }
-                MatchedSource::Query(param) => {
-                    if let Some(new_uri) = strip_query_param(&req.uri, param) {
-                        req.uri = new_uri;
-                    }
-                }
+        let raw_bytes = raw_val.as_bytes().trim_ascii();
+        let key_len = raw_bytes.len();
+        if key_len == 0
+            || key_len > MAX_API_KEY_LEN
+            || key_len < self.store.min_key_len
+            || key_len > self.store.max_key_len
+        {
+            return self.reject_unauthorized(req);
+        }
+
+        let (words, tag) = encode_key_words(raw_bytes);
+        let now = coarse_sec();
+        let lane = self.cache.current_lane();
+
+        if let Some(record_idx) = self.cache.probe(lane, tag, now) {
+            let rec = self.store.record(record_idx);
+            if ct_eq_words(&words, key_len as u8, &rec.words, rec.key_len)
+                && (rec.expires_at == 0 || now < rec.expires_at)
+            {
+                return self.apply_authorized(req, record_idx);
             }
         }
 
-        // 5. Prevent privilege escalation: sanitize all managed identity headers
-        for hname in &self.sanitized_headers {
-            req.headers.remove(hname);
+        let Some(record_idx) = self.store.find_record(tag, &words, key_len as u8) else {
+            return self.reject_unauthorized(req);
+        };
+
+        let rec = self.store.record(record_idx);
+        if rec.expires_at != 0 && now >= rec.expires_at {
+            return self.reject_unauthorized(req);
         }
 
-        // 6. Inject authoritative consumer metadata
-        for (name, val) in &entry.injected_headers {
-            req.headers.insert(name.clone(), val.clone());
+        let mut expire_sec = now.saturating_add(self.cache_ttl_secs);
+        if rec.expires_at != 0 && rec.expires_at < expire_sec {
+            expire_sec = rec.expires_at;
         }
+        self.cache
+            .insert_positive(lane, tag, record_idx, expire_sec);
 
-        Action::Continue
+        self.apply_authorized(req, record_idx)
     }
 
     #[inline(always)]
@@ -238,54 +179,8 @@ impl PreUpstreamPlugin for ApiKeyAuthPlugin {
 
     #[inline(always)]
     fn supported_protocols(&self) -> SupportedProtocols {
-        SupportedProtocols::ALL_HTTP
+        SupportedProtocols::ALL_HTTP.union(SupportedProtocols::GRPC)
     }
-}
-
-/// Constant-time slice equality comparison preventing timing attacks (CWE-208).
-///
-/// Dispatches via the hardware-probed static function pointer (`Bits256` -> `Bits128` -> `Bits64` -> `Bits32`).
-#[inline(always)]
-pub fn constant_time_eq(a: &[u8], b: &[u8]) -> bool {
-    crate::pre_upstream::hmac_auth::canonical::constant_time_eq(a, b)
-}
-
-/// Strips a specific query parameter from a URI, returning a new URI without the secret token.
-fn strip_query_param(uri: &http::Uri, target_param: &str) -> Option<http::Uri> {
-    let query = uri.query()?;
-    let mut new_query = String::with_capacity(query.len());
-    let mut found = false;
-
-    for part in query.split('&') {
-        let key = match part.split_once('=') {
-            Some((k, _)) => k,
-            None => part,
-        };
-        if key == target_param {
-            found = true;
-            continue;
-        }
-        if !new_query.is_empty() {
-            new_query.push('&');
-        }
-        new_query.push_str(part);
-    }
-
-    if !found {
-        return None;
-    }
-
-    let path = uri.path();
-    let new_pq_str = if new_query.is_empty() {
-        path.to_string()
-    } else {
-        format!("{path}?{new_query}")
-    };
-
-    let mut parts = uri.clone().into_parts();
-    parts.path_and_query =
-        Some(http::uri::PathAndQuery::from_maybe_shared(bytes::Bytes::from(new_pq_str)).ok()?);
-    http::Uri::from_parts(parts).ok()
 }
 
 #[cfg(test)]
@@ -295,14 +190,21 @@ mod tests {
     use serde_json::json;
     use velda_core::Body;
 
-    fn build_test_request(headers: HeaderMap, query: Option<&str>) -> L7Request {
-        let path = match query {
-            Some(q) => format!("/api/v1/resource?{q}"),
-            None => "/api/v1/resource".to_string(),
-        };
+    fn make_req(header_val: Option<&'static str>) -> L7Request {
+        let mut headers = HeaderMap::new();
+        if let Some(v) = header_val {
+            headers.insert(
+                HeaderName::from_static("x-api-key"),
+                HeaderValue::from_static(v),
+            );
+        }
+        headers.insert(
+            HeaderName::from_static("x-user-id"),
+            HeaderValue::from_static("spoofed-attacker"),
+        );
         L7Request::new(
             Method::GET,
-            path.parse::<Uri>().unwrap(),
+            Uri::from_static("/v1/orders"),
             Version::HTTP_11,
             headers,
             Body::Empty,
@@ -310,321 +212,21 @@ mod tests {
     }
 
     #[test]
-    fn test_valid_api_key_header_injection() {
-        let mut keys = FxHashMap::default();
-        keys.insert(
-            "sk-secret-12345".to_string(),
-            (
-                "org-alpha".to_string(),
-                vec![
-                    (
-                        HeaderName::from_static("x-consumer-id"),
-                        HeaderValue::from_static("org-alpha"),
-                    ),
-                    (
-                        HeaderName::from_static("x-consumer-tier"),
-                        HeaderValue::from_static("pro"),
-                    ),
-                ],
-            ),
-        );
-
-        let plugin = ApiKeyAuthPlugin::new(
-            "api_key_auth",
-            vec![KeySource::Header {
-                name: HeaderName::from_static("x-api-key"),
-                prefix: String::new(),
-            }],
-            true, // hide_credentials = true
-            keys,
-            ApiKeyCache::new(4, 16, 60, 10),
-        );
-
-        let mut headers = HeaderMap::new();
-        headers.insert(
-            HeaderName::from_static("x-api-key"),
-            HeaderValue::from_static("sk-secret-12345"),
-        );
-        let mut req = build_test_request(headers, None);
-
-        let mut target = 1;
-        let action = plugin.on_upstream_request(&mut req, &mut target);
-        assert!(matches!(action, Action::Continue));
-
-        // Credentials should be stripped when hide_credentials = true
-        assert!(!req.headers.contains_key("x-api-key"));
-
-        // Injected headers should be present
-        assert_eq!(req.headers.get("x-consumer-id").unwrap(), "org-alpha");
-        assert_eq!(req.headers.get("x-consumer-tier").unwrap(), "pro");
-    }
-
-    #[test]
-    fn test_missing_api_key_returns_401_with_no_store() {
-        let plugin = ApiKeyAuthPlugin::new(
-            "api_key_auth",
-            vec![KeySource::Header {
-                name: HeaderName::from_static("x-api-key"),
-                prefix: String::new(),
-            }],
-            false,
-            FxHashMap::default(),
-            ApiKeyCache::new(4, 16, 60, 10),
-        );
-
-        let mut req = build_test_request(HeaderMap::new(), None);
-        let mut target = 1;
-        let action = plugin.on_upstream_request(&mut req, &mut target);
-        assert!(matches!(action, Action::Reject(RejectReason::Unauthorized)));
-        assert_eq!(
-            req.headers.get("www-authenticate").unwrap(),
-            "ApiKey realm=\"velda-edge\""
-        );
-    }
-
-    #[test]
-    fn test_invalid_api_key_rejected_with_no_store() {
-        let mut keys = FxHashMap::default();
-        keys.insert("valid-key-123".to_string(), ("user-1".to_string(), vec![]));
-
-        let plugin = ApiKeyAuthPlugin::new(
-            "api_key_auth",
-            vec![KeySource::Header {
-                name: HeaderName::from_static("x-api-key"),
-                prefix: String::new(),
-            }],
-            false,
-            keys,
-            ApiKeyCache::new(4, 16, 60, 10),
-        );
-
-        let bad_key = "invalid-stolen-key";
-        let mut headers = HeaderMap::new();
-        headers.insert("x-api-key", bad_key.parse().unwrap());
-        let mut req = build_test_request(headers, None);
-
-        let mut target = 1;
-        let action = plugin.on_upstream_request(&mut req, &mut target);
-        assert!(matches!(action, Action::Reject(RejectReason::Unauthorized)));
-        assert_eq!(
-            req.headers.get("www-authenticate").unwrap(),
-            "ApiKey error=\"invalid_key\""
-        );
-    }
-
-    #[test]
-    fn test_authorization_header_with_prefix_and_query_source() {
-        let mut keys = FxHashMap::default();
-        keys.insert(
-            "secret-query-token".to_string(),
-            (
-                "partner-beta".to_string(),
-                vec![(
-                    HeaderName::from_static("x-partner"),
-                    HeaderValue::from_static("beta"),
-                )],
-            ),
-        );
-
-        let plugin = ApiKeyAuthPlugin::new(
-            "api_key_auth",
-            vec![
-                KeySource::Header {
-                    name: http::header::AUTHORIZATION,
-                    prefix: "ApiKey ".to_string(),
-                },
-                KeySource::Query {
-                    param: "key".to_string(),
-                },
-            ],
-            false,
-            keys,
-            ApiKeyCache::new(4, 16, 60, 10),
-        );
-
-        // 1. Authorization header: ApiKey secret-query-token
-        let mut headers = HeaderMap::new();
-        headers.insert(
-            http::header::AUTHORIZATION,
-            "ApiKey secret-query-token".parse().unwrap(),
-        );
-        let mut req_hdr = build_test_request(headers, None);
-        let mut target_hdr = 1;
-        assert!(matches!(
-            plugin.on_upstream_request(&mut req_hdr, &mut target_hdr),
-            Action::Continue
-        ));
-        assert_eq!(req_hdr.headers.get("x-partner").unwrap(), "beta");
-
-        // 2. Query parameter: ?key=secret-query-token
-        let mut req_query =
-            build_test_request(HeaderMap::new(), Some("key=secret-query-token&mode=raw"));
-        let mut target_query = 1;
-        assert!(matches!(
-            plugin.on_upstream_request(&mut req_query, &mut target_query),
-            Action::Continue
-        ));
-        assert_eq!(req_query.headers.get("x-partner").unwrap(), "beta");
-    }
-
-    #[test]
-    fn test_privilege_escalation_sanitizes_spoofed_headers() {
-        let mut keys = FxHashMap::default();
-        // Low privilege key only injects x-consumer-id
-        keys.insert(
-            "sk-low-priv-123".to_string(),
-            (
-                "partner-low".to_string(),
-                vec![(
-                    HeaderName::from_static("x-consumer-id"),
-                    HeaderValue::from_static("partner-low"),
-                )],
-            ),
-        );
-        // High privilege key injects x-consumer-id and x-consumer-role
-        keys.insert(
-            "sk-admin-root-456".to_string(),
-            (
-                "admin-user".to_string(),
-                vec![
-                    (
-                        HeaderName::from_static("x-consumer-id"),
-                        HeaderValue::from_static("admin-user"),
-                    ),
-                    (
-                        HeaderName::from_static("x-consumer-role"),
-                        HeaderValue::from_static("superuser"),
-                    ),
-                ],
-            ),
-        );
-
-        let plugin = ApiKeyAuthPlugin::new(
-            "api_key_auth",
-            vec![KeySource::Header {
-                name: HeaderName::from_static("x-api-key"),
-                prefix: String::new(),
-            }],
-            true,
-            keys,
-            ApiKeyCache::new(4, 16, 60, 10),
-        );
-
-        // Low priv client sends a spoofed x-consumer-role header
-        let mut headers = HeaderMap::new();
-        headers.insert("x-api-key", "sk-low-priv-123".parse().unwrap());
-        headers.insert("x-consumer-role", "superuser".parse().unwrap());
-        let mut req = build_test_request(headers, None);
-
-        let mut target = 1;
-        assert!(matches!(
-            plugin.on_upstream_request(&mut req, &mut target),
-            Action::Continue
-        ));
-
-        // Assert: x-consumer-id is partner-low, and spoofed x-consumer-role is completely stripped!
-        assert_eq!(req.headers.get("x-consumer-id").unwrap(), "partner-low");
-        assert!(!req.headers.contains_key("x-consumer-role"));
-    }
-
-    #[test]
-    fn test_hide_credentials_strips_query_param() {
-        let mut keys = FxHashMap::default();
-        keys.insert(
-            "secret-token-xyz".to_string(),
-            ("user-1".to_string(), vec![]),
-        );
-
-        let plugin = ApiKeyAuthPlugin::new(
-            "api_key_auth",
-            vec![KeySource::Query {
-                param: "api_key".to_string(),
-            }],
-            true, // hide_credentials = true
-            keys,
-            ApiKeyCache::new(4, 16, 60, 10),
-        );
-
-        let mut req = build_test_request(
-            HeaderMap::new(),
-            Some("page=1&api_key=secret-token-xyz&sort=desc"),
-        );
-        let mut target = 1;
-        assert!(matches!(
-            plugin.on_upstream_request(&mut req, &mut target),
-            Action::Continue
-        ));
-
-        // Query param api_key should be completely removed, keeping page=1&sort=desc
-        assert_eq!(req.uri.query(), Some("page=1&sort=desc"));
-    }
-
-    #[test]
-    fn test_length_guard_fast_reject() {
-        let mut keys = FxHashMap::default();
-        keys.insert(
-            "valid-16byte-key".to_string(),
-            ("user-1".to_string(), vec![]),
-        );
-
-        let plugin = ApiKeyAuthPlugin::new(
-            "api_key_auth",
-            vec![KeySource::Header {
-                name: HeaderName::from_static("x-api-key"),
-                prefix: String::new(),
-            }],
-            false,
-            keys,
-            ApiKeyCache::new(4, 16, 60, 10),
-        );
-
-        // 1-character token (< min_key_len) -> rejected
-        let mut headers = HeaderMap::new();
-        headers.insert("x-api-key", "a".parse().unwrap());
-        let mut req = build_test_request(headers, None);
-        let mut target = 1;
-        assert!(matches!(
-            plugin.on_upstream_request(&mut req, &mut target),
-            Action::Reject(RejectReason::Unauthorized)
-        ));
-
-        // 100-character token (> max_key_len) -> rejected
-        let mut headers2 = HeaderMap::new();
-        headers2.insert("x-api-key", "x".repeat(100).parse().unwrap());
-        let mut req2 = build_test_request(headers2, None);
-        let mut target2 = 1;
-        assert!(matches!(
-            plugin.on_upstream_request(&mut req2, &mut target2),
-            Action::Reject(RejectReason::Unauthorized)
-        ));
-    }
-
-    #[test]
-    fn test_constant_time_eq() {
-        assert!(constant_time_eq(b"hello", b"hello"));
-        assert!(!constant_time_eq(b"hello", b"hellp"));
-        assert!(!constant_time_eq(b"hello", b"hell"));
-        assert!(!constant_time_eq(b"hello", b"hello world"));
-    }
-
-    #[test]
-    fn test_from_config_complete_deserialization() {
-        let config = PluginConfig {
-            id: "api_key_auth".into(),
-            phase: String::new(),
+    fn test_valid_key_overwrites_headers_and_caches_per_core() {
+        velda_core::clock::init_clock();
+        let cfg = PluginConfig {
+            id: "api_key_auth".to_string(),
+            phase: "pre_upstream".to_string(),
             config: json!({
-                "sources": [
-                    { "type": "header", "name": "x-api-key" },
-                    { "type": "query", "param": "token" }
-                ],
+                "header_name": "x-api-key",
                 "hide_credentials": true,
-                "cache_ttl_secs": 600,
+                "cache_ttl_secs": 300,
                 "keys": [
                     {
-                        "key": "sk-live-alpha-1234",
-                        "consumer_id": "stripe-integration",
+                        "key": "sk-live-secret-key-001",
+                        "expires_at": 0,
                         "inject_headers": {
-                            "x-consumer-id": "stripe-integration",
+                            "x-user-id": "usr_001",
                             "x-tier": "enterprise"
                         }
                     }
@@ -632,25 +234,66 @@ mod tests {
             }),
         };
 
-        let plugin = ApiKeyAuthPlugin::from_config(&config).expect("valid config");
-        assert_eq!(plugin.id, "api_key_auth");
-        assert_eq!(plugin.sources.len(), 2);
-        assert!(plugin.hide_credentials);
-        assert_eq!(plugin.keys.len(), 1);
+        let plugin = ApiKeyAuthPlugin::from_config(&cfg).unwrap();
+        assert_eq!(plugin.cache.byte_size() % 4096, 0);
 
-        let mut headers = HeaderMap::new();
-        headers.insert("x-api-key", "sk-live-alpha-1234".parse().unwrap());
-        let mut req = build_test_request(headers, None);
-        let mut target = 1;
+        let mut target = 0u16;
+        // First request -> cache miss -> store hit -> cache populate
+        let mut req1 = make_req(Some("sk-live-secret-key-001"));
         assert!(matches!(
-            plugin.on_upstream_request(&mut req, &mut target),
+            plugin.on_upstream_request(&mut req1, &mut target),
             Action::Continue
         ));
-        assert_eq!(
-            req.headers.get("x-consumer-id").unwrap(),
-            "stripe-integration"
-        );
-        assert_eq!(req.headers.get("x-tier").unwrap(), "enterprise");
-        assert!(!req.headers.contains_key("x-api-key"));
+        assert!(req1.headers.get("x-api-key").is_none());
+        assert_eq!(req1.headers.get("x-user-id").unwrap(), "usr_001");
+        assert_eq!(req1.headers.get("x-tier").unwrap(), "enterprise");
+
+        // Second request -> positive cache hit
+        let mut req2 = make_req(Some("sk-live-secret-key-001"));
+        assert!(matches!(
+            plugin.on_upstream_request(&mut req2, &mut target),
+            Action::Continue
+        ));
+        assert_eq!(req2.headers.get("x-user-id").unwrap(), "usr_001");
+    }
+
+    #[test]
+    fn test_invalid_expired_and_oversized_keys_rejected() {
+        velda_core::clock::init_clock();
+        let cfg = PluginConfig {
+            id: "api_key_auth".to_string(),
+            phase: "pre_upstream".to_string(),
+            config: json!({
+                "header_name": "x-api-key",
+                "hide_credentials": false,
+                "keys": [
+                    { "key": "sk-valid-key-12345", "expires_at": 0 },
+                    { "key": "sk-expired-key-1", "expires_at": 1000 }
+                ]
+            }),
+        };
+        let plugin = ApiKeyAuthPlugin::from_config(&cfg).unwrap();
+        let mut target = 0u16;
+
+        // Missing header
+        let mut req_missing = make_req(None);
+        assert!(matches!(
+            plugin.on_upstream_request(&mut req_missing, &mut target),
+            Action::Reject(RejectReason::Unauthorized)
+        ));
+
+        // Wrong key (rejected without polluting CoreCacheArena)
+        let mut req_bad = make_req(Some("sk-wrong-key-12345"));
+        assert!(matches!(
+            plugin.on_upstream_request(&mut req_bad, &mut target),
+            Action::Reject(RejectReason::Unauthorized)
+        ));
+
+        // Expired key (expires_at = 1000 < coarse_sec())
+        let mut req_exp = make_req(Some("sk-expired-key-1"));
+        assert!(matches!(
+            plugin.on_upstream_request(&mut req_exp, &mut target),
+            Action::Reject(RejectReason::Unauthorized)
+        ));
     }
 }

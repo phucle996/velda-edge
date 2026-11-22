@@ -634,6 +634,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_http_cache_store_async_precompression() {
+        velda_core::clock::init_clock();
         let storage = Arc::new(HttpCacheStorage::new(
             "test_async_precomp",
             1024 * 1024,
