@@ -1,4 +1,4 @@
-//! ACME Automated Certificate Rotator Plugin (`phase: "background"`).
+//! ACME Automated Certificate Rotator Plugin.
 //!
 //! Provides zero-downtime, automated Let's Encrypt / ACME RFC 8555 certificate issuance and rotation.
 //! Operates strictly on Shadow Logistics workers (`SCHED_IDLE`), maintaining zero overhead on frontline traffic workers.

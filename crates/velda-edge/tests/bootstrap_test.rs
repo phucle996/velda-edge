@@ -107,7 +107,6 @@ async fn test_bootstrap_with_prometheus_exporter() {
     // Compile plugins.bin with Prometheus exporter
     let exporter_plugin = PluginConfig {
         id: "prometheus_exporter".into(),
-        phase: "background".into(),
         config: serde_json::json!({
             "listen": prom_addr,
             "path": "/metrics",

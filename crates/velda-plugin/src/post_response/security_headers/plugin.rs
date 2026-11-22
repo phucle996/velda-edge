@@ -442,7 +442,6 @@ mod tests {
 
         let p_cfg = PluginConfig {
             id: "my-sec-plugin".to_string(),
-            phase: "post_response".to_string(),
             config: raw_json,
         };
 

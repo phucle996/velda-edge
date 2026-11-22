@@ -1,7 +1,7 @@
 //! Request Termination Pre-Upstream Plugin (`request_termination`).
 //!
 //! # Architecture & Pipeline Invariants
-//! - **Phase**: Pre-Upstream (`pre_upstream`). Statically inferred by Velda Sync (never require `phase` in user config).
+//! - **Stage**: Pre-Upstream (`PreUpstreamPlugin`, fixed at compile time).
 //! - **Zero Upstream Contact**: Returns [`Action::Respond`] immediately, bypassing upstream pool selection,
 //!   endpoint resolution, connection leasing, and network dispatch.
 //! - **Hot-Path Invariant (Zero Allocation)**: Pre-compiles the base [`L7Response`] during configuration ingestion.
@@ -474,7 +474,6 @@ mod tests {
 
         let plugin_cfg = PluginConfig {
             id: "request_termination".into(),
-            phase: "pre_upstream".into(),
             config: json_cfg,
         };
 
@@ -492,7 +491,6 @@ mod tests {
         // Incomplete config must fail validation
         let bad_config = PluginConfig {
             id: "request_termination".into(),
-            phase: "pre_upstream".into(),
             config: serde_json::json!({}),
         };
         assert!(RequestTerminationPlugin::from_config(&bad_config).is_err());

@@ -80,56 +80,34 @@ impl LoadedPlugin {
     }
 }
 
-/// Returns the expected canonical execution phase for a known plugin identifier.
-///
-/// Used for fail-fast PhaseMismatch validation prior to sub-dispatcher delegation.
-pub fn canonical_phase_for_id(id: &str) -> Option<&'static str> {
-    crate::canonical_phase_for_id(id)
-}
-
-/// Instantiates a concrete plugin instance by dispatching to the dedicated phase sub-dispatcher.
+/// Instantiates a concrete plugin instance by delegating to the stage module that owns
+/// `config.id` at compile time (`pre_route`, `pre_upstream`, `post_response`, or `background`).
 ///
 /// # Architecture & Open-Closed Principle (OCP)
 /// Instead of a monolithic "God Factory" matching every plugin inline and parsing raw JSON,
-/// this dispatcher delegates strictly by `config.phase`:
-/// - `pre_route` plugins -> [`crate::pre_route::instantiate`]
-/// - `pre_upstream` plugins -> [`crate::pre_upstream::instantiate`]
-/// - `post_response` plugins -> [`crate::post_response::instantiate`]
-/// - `background` plugins -> [`crate::background::instantiate`]
+/// each stage module owns its plugin IDs at compile time:
+/// - [`crate::pre_route::owns_id`] -> [`crate::pre_route::instantiate`]
+/// - [`crate::pre_upstream::owns_id`] -> [`crate::pre_upstream::instantiate`]
+/// - [`crate::post_response::owns_id`] -> [`crate::post_response::instantiate`]
+/// - [`crate::background::owns_id`] -> [`crate::background::instantiate`]
 ///
 /// Each concrete plugin defines its own `from_config` constructor, enforcing strict module
 /// ownership and ensuring `factory.rs` never bloats as new plugins are added.
 pub fn instantiate_plugin(config: &PluginConfig) -> Result<LoadedPlugin, PluginError> {
-    let effective_phase = if config.phase.is_empty() {
-        canonical_phase_for_id(&config.id).unwrap_or("")
+    let id = config.id.as_str();
+    if crate::pre_route::owns_id(id) {
+        crate::pre_route::instantiate(config).map(LoadedPlugin::PreRoute)
+    } else if crate::pre_upstream::owns_id(id) {
+        crate::pre_upstream::instantiate(config).map(LoadedPlugin::PreUpstream)
+    } else if crate::post_response::owns_id(id) {
+        crate::post_response::instantiate(config).map(LoadedPlugin::PostResponse)
+    } else if crate::background::owns_id(id) {
+        crate::background::instantiate(config).map(LoadedPlugin::Background)
     } else {
-        config.phase.as_str()
-    };
-
-    // 1. Fail-fast PhaseMismatch validation if a known plugin is configured under the wrong phase
-    if let Some(expected_phase) = canonical_phase_for_id(&config.id)
-        && !config.phase.is_empty()
-        && config.phase != expected_phase
-    {
-        return Err(PluginError::PhaseMismatch {
-            plugin_id: config.id.clone(),
-            expected: expected_phase.to_string(),
-            actual: config.phase.clone(),
-        });
-    }
-
-    // 2. Delegate to the dedicated phase sub-dispatcher
-    match effective_phase {
-        "pre_route" => crate::pre_route::instantiate(config).map(LoadedPlugin::PreRoute),
-        "pre_upstream" => crate::pre_upstream::instantiate(config).map(LoadedPlugin::PreUpstream),
-        "post_response" => {
-            crate::post_response::instantiate(config).map(LoadedPlugin::PostResponse)
-        }
-        "background" => crate::background::instantiate(config).map(LoadedPlugin::Background),
-        other => Err(PluginError::Config(format!(
-            "Unknown plugin phase '{other}' for plugin '{}'",
+        Err(PluginError::Config(format!(
+            "Unknown plugin id '{}'",
             config.id
-        ))),
+        )))
     }
 }
 
@@ -297,7 +275,6 @@ mod tests {
     fn test_instantiate_plugins() {
         let cfg_jwt = PluginConfig {
             id: "jwt_auth".into(),
-            phase: "pre_upstream".into(),
             config: serde_json::json!({
                 "algorithm": "HS256",
                 "secret_key": "secret-12345678901234567890",
@@ -323,7 +300,6 @@ mod tests {
 
         let cfg_rate = PluginConfig {
             id: "rate_limit".into(),
-            phase: "pre_upstream".into(),
             config: serde_json::json!({
                 "algorithm": "token_bucket",
                 "backend": "memory",
@@ -340,12 +316,10 @@ mod tests {
 
         let cfg_cors = PluginConfig {
             id: "cors".into(),
-            phase: "post_response".into(),
             config: serde_json::json!({
                 "allow_origins": ["https://example.com"],
                 "allow_credentials": false,
-                "expose_headers": [],
-                "max_age_secs": null
+                "expose_headers": []
             }),
         };
         let p3 = instantiate_plugin(&cfg_cors).expect("Should instantiate cors");
@@ -359,7 +333,6 @@ mod tests {
 
         let cfg_jwt = PluginConfig {
             id: "jwt_auth".into(),
-            phase: "pre_upstream".into(),
             config: serde_json::json!({
                 "algorithm": "HS256",
                 "secret_key": "secret-12345678901234567890",
@@ -386,7 +359,6 @@ mod tests {
 
         let cfg_ip = PluginConfig {
             id: "ip_filter".into(),
-            phase: "pre_route".into(),
             config: serde_json::json!({
                 "mode": "allow",
                 "allow_cidrs": ["127.0.0.1/32"],
@@ -401,12 +373,10 @@ mod tests {
 
         let cfg_cors = PluginConfig {
             id: "cors".into(),
-            phase: "post_response".into(),
             config: serde_json::json!({
                 "allow_origins": ["*"],
                 "allow_credentials": false,
-                "expose_headers": [],
-                "max_age_secs": null
+                "expose_headers": []
             }),
         };
         available.insert("cors".to_string(), instantiate_plugin(&cfg_cors).unwrap());
@@ -454,7 +424,6 @@ mod tests {
 
         let cfg_cors_preflight = PluginConfig {
             id: "cors_preflight".into(),
-            phase: "pre_route".into(),
             config: serde_json::json!({
                 "allowed_origins": ["*"],
                 "allowed_methods": ["GET", "POST", "OPTIONS"],
@@ -470,7 +439,6 @@ mod tests {
 
         let cfg_ip = PluginConfig {
             id: "ip_filter".into(),
-            phase: "pre_route".into(),
             config: serde_json::json!({
                 "mode": "allow",
                 "allow_cidrs": ["127.0.0.1/32"],
@@ -536,12 +504,10 @@ mod tests {
 
         let cfg_cors = PluginConfig {
             id: "cors".into(),
-            phase: "post_response".into(),
             config: serde_json::json!({
                 "allow_origins": ["*"],
                 "allow_credentials": false,
-                "expose_headers": [],
-                "max_age_secs": null
+                "expose_headers": []
             }),
         };
         available.insert("cors".to_string(), instantiate_plugin(&cfg_cors).unwrap());
@@ -576,7 +542,6 @@ mod tests {
 
         let cfg_jwt = PluginConfig {
             id: "jwt_auth".into(),
-            phase: "pre_upstream".into(),
             config: serde_json::json!({
                 "algorithm": "HS256",
                 "secret_key": "secret-12345678901234567890",
@@ -595,7 +560,6 @@ mod tests {
 
         let cfg_rotator = PluginConfig {
             id: "jwks_rotator".into(),
-            phase: "background".into(),
             config: serde_json::json!({
                 "target_jwt_auth_id": "jwt_auth",
                 "jwks_uri": "https://auth.example.com/.well-known/jwks.json",
@@ -623,7 +587,6 @@ mod tests {
 
         let cfg_rotator = PluginConfig {
             id: "jwks_rotator".into(),
-            phase: "background".into(),
             config: serde_json::json!({
                 "target_jwt_auth_id": "jwt_auth",
                 "jwks_uri": "https://auth.example.com/.well-known/jwks.json",

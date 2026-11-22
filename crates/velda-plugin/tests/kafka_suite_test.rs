@@ -2,7 +2,7 @@
 //!
 //! Validates:
 //! 1. Declarative configuration schema, strict parsing, and semantic validation rules.
-//! 2. Canonical phase auto-inference and factory instantiation.
+//! 2. Compile-time factory instantiation (`LoadedPlugin::Background`).
 //! 3. End-to-end Kafka RecordBatch v2 produce over TCP with zstd compression to mock broker.
 //! 4. SASL/PLAIN handshake and authentication wire exchange.
 //! 5. Partition leader failover handling (`NOT_LEADER_OR_FOLLOWER`).
@@ -20,7 +20,7 @@ use velda_observability::{TelemetryRecord, TelemetryStore};
 use velda_plugin::background::BackgroundPlugin;
 use velda_plugin::background::kafka_log_shipper::{client, config, plugin, protocol, validation};
 use velda_plugin::factory::{LoadedPlugin, instantiate_plugin};
-use velda_plugin::{PluginConfig, canonical_phase_for_id, validate_plugin_config};
+use velda_plugin::{PluginConfig, is_known_plugin_id, validate_plugin_config};
 
 fn make_sample_record(id: u64, ts: u32) -> TelemetryRecord {
     let mut rec = TelemetryRecord::zeroed();
@@ -216,14 +216,11 @@ fn test_kafka_config_validation_rules() {
 
 #[test]
 fn test_kafka_factory_registration() {
-    assert_eq!(
-        canonical_phase_for_id("kafka_log_shipper"),
-        Some("background")
-    );
+    assert!(is_known_plugin_id("kafka_log_shipper"));
+    assert!(velda_plugin::background::owns_id("kafka_log_shipper"));
 
     let mut plugin_cfg = PluginConfig {
         id: "kafka_log_shipper".to_string(),
-        phase: "background".to_string(),
         config: serde_json::json!({
             "brokers": ["127.0.0.1:9092"],
             "topic": "velda_logs"
@@ -243,18 +240,29 @@ fn test_kafka_factory_registration() {
 }
 
 #[test]
-fn test_kafka_phase_mismatch_rejected() {
-    let mut plugin_cfg = PluginConfig {
+fn test_kafka_attached_to_route_rejected() {
+    let plugin_cfg = PluginConfig {
         id: "kafka_log_shipper".to_string(),
-        phase: "pre_route".to_string(),
         config: serde_json::json!({
             "brokers": ["127.0.0.1:9092"],
             "topic": "velda_logs"
         }),
     };
+    let loaded = instantiate_plugin(&plugin_cfg).expect("instantiation should succeed");
+    let mut available = rustc_hash::FxHashMap::default();
+    available.insert("kafka_log_shipper".to_string(), loaded);
 
-    let err = validate_plugin_config(&mut plugin_cfg).unwrap_err();
-    assert!(err.to_string().contains("must specify phase 'background'"));
+    let res = velda_plugin::build_route_plugin_plan(
+        "route-1",
+        &["kafka_log_shipper".to_string()],
+        &available,
+        velda_core::ProtocolFamily::Http,
+        velda_core::StreamingMode::DISABLED,
+    );
+    assert!(matches!(
+        res,
+        Err(velda_plugin::PluginError::ProtocolMismatch { .. })
+    ));
 }
 
 #[test]

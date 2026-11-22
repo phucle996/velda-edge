@@ -11,7 +11,6 @@ This document is the operational playbook and configuration guide (**SRE Runbook
 ```json
 {
   "id": "cors_preflight",
-  "phase": "pre_route",
   "config": {
     "allowed_origins": ["https://app.example.com", "https://*.corp.internal"],
     "allowed_methods": ["GET", "POST", "PUT", "DELETE", "OPTIONS"],
@@ -42,7 +41,6 @@ This document is the operational playbook and configuration guide (**SRE Runbook
 ```json
 {
   "id": "saas_cors_preflight",
-  "phase": "pre_route",
   "config": {
     "allowed_origins": ["https://app.velda.io", "https://*.velda.io"],
     "allowed_methods": ["GET", "POST", "PUT", "PATCH", "DELETE", "OPTIONS"],
@@ -59,7 +57,6 @@ This document is the operational playbook and configuration guide (**SRE Runbook
 ```json
 {
   "id": "public_cors_preflight",
-  "phase": "pre_route",
   "config": {
     "allowed_origins": ["*"],
     "allowed_methods": ["GET", "HEAD", "OPTIONS"],

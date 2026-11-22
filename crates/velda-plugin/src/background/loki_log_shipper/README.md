@@ -17,9 +17,9 @@ High-performance, zero-allocation background telemetry exporter for Velda Edge. 
 
 ## 2. Overview & Core Invariants
 
-The `loki_log_shipper` plugin (`phase: "background"`) operates as an autonomous background companion service designed to format, compress, and export access logs without competing with frontline traffic workers:
+The `loki_log_shipper` plugin operates as an autonomous background companion service designed to format, compress, and export access logs without competing with frontline traffic workers:
 
-* **Shadow Worker Execution (`phase: "background"`)**: Operates exclusively on background companion threads (`velda-shadow-{id}`) under Linux `SCHED_IDLE`. Traffic workers serving client HTTP requests never format strings, serialize JSON, or execute outbound network I/O calls.
+* **Shadow Worker Execution**: Operates exclusively on background companion threads (`velda-shadow-{id}`) under Linux `SCHED_IDLE`. Traffic workers serving client HTTP requests never format strings, serialize JSON, or execute outbound network I/O calls.
 * **Lock-Free SPSC Ring Drain**: Frontline traffic workers push 64-byte scalar `AccessLogRecord` structs into core-local Single-Producer Single-Consumer (SPSC) ring buffers without mutexes or lock contention.
 * **Strict Bounded Label Cardinality**: Stream labels are strictly restricted to low-cardinality static metadata and protocol families (`protocol="http"`, `protocol="grpc"`, `protocol="raw"`). High-cardinality values (`request_id`, `ip_address`, `status`, `path`) are serialized inside the log entry line, preventing Loki ingester index explosion.
 * **Zero-Allocation Multi-Stream Serialization**: Reuses persistent scratch vectors across flush cycles via `.clear()`, eliminating memory reallocations during Protobuf encoding or JSON formatting.
@@ -99,7 +99,7 @@ Under the Velda Edge Workload Distribution Model, background logistics plugins a
 ## 4. 100% Explicit Configuration Contract
 
 > [!IMPORTANT]
-> **Strict Configuration Invariant**: Every configuration parameter must be explicitly declared in `plugins.json`. No silent fallbacks or implicit defaults exist. Execution phase is automatically inferred as `background` via `canonical_phase_for_id` based on `id: "loki_log_shipper"`.
+> **Strict Configuration Invariant**: Every configuration parameter must be explicitly declared in `plugins.json`. No silent fallbacks or implicit defaults exist. Execution stage is fixed at compile time (`BackgroundPlugin`).
 
 | Field | Type | Required | Constraints / Allowed Values | Recommended Value | Description |
 | :--- | :---: | :---: | :--- | :--- | :--- |

@@ -212,7 +212,6 @@ mod tests {
     fn test_from_config_deserialization() {
         let cfg = PluginConfig {
             id: "waf_lite".to_string(),
-            phase: "pre_route".to_string(),
             config: json!({
                 "patterns": ["../", "union select", "<script"]
             }),

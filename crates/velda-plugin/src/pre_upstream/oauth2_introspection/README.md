@@ -28,7 +28,6 @@ For detailed specifications, see:
 ```json
 {
   "id": "oauth2_introspection",
-  "phase": "pre_upstream",
   "config": {
     "introspection_url": "http://127.0.0.1:8080/oauth/introspect",
     "client_id": "velda-edge-gateway",

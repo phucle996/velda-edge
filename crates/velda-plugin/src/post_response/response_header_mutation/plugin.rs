@@ -461,7 +461,6 @@ mod tests {
 
         let p_cfg = PluginConfig {
             id: "res_mut".into(),
-            phase: "post_response".into(),
             config: valid_json,
         };
 
@@ -476,7 +475,6 @@ mod tests {
         });
         let bad_cfg = PluginConfig {
             id: "res_mut_bad".into(),
-            phase: "post_response".into(),
             config: invalid_json,
         };
         assert!(ResponseHeaderMutationPlugin::from_config(&bad_cfg).is_err());

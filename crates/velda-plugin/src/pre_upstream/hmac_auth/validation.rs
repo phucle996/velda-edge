@@ -1,4 +1,4 @@
-//! HMAC Authentication Configuration Schema & Semantic Validation (`phase: "pre_upstream"`).
+//! HMAC Authentication Configuration Schema & Semantic Validation.
 //!
 //! Enforces a strict declarative contract for Hash-based Message Authentication Code (HMAC)
 //! request signing, anti-tampering, and anti-replay verification conforming to RFC 2104.

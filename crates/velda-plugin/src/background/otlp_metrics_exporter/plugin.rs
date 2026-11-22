@@ -412,7 +412,6 @@ mod tests {
     fn test_otlp_metrics_exporter_from_config() {
         let p_cfg = PluginConfig {
             id: "otlp_metrics".to_string(),
-            phase: "background".to_string(),
             config: serde_json::json!({
                 "protocol": "grpc",
                 "endpoint": "grpc://127.0.0.1:4317",

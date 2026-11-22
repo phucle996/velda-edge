@@ -339,7 +339,6 @@ mod tests {
 
         let p_cfg = PluginConfig {
             id: "comp_test".into(),
-            phase: "post_response".into(),
             config: valid_json,
         };
 
@@ -363,7 +362,6 @@ mod tests {
         });
         let builtin_cfg = PluginConfig {
             id: "comp_builtin".into(),
-            phase: "post_response".into(),
             config: builtin_json,
         };
         let builtin_plugin = ResponseCompressionPlugin::from_config(&builtin_cfg).unwrap();

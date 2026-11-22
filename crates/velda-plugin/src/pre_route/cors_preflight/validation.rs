@@ -1,4 +1,4 @@
-//! CORS Preflight Configuration Schema & Semantic Validation (`phase: "pre_route"`).
+//! CORS Preflight Configuration Schema & Semantic Validation.
 //!
 //! Enforces a strict declarative contract for CORS Preflight OPTIONS interception.
 //!

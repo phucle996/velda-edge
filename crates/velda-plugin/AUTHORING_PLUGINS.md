@@ -218,26 +218,26 @@ impl PostResponsePlugin for MyDistributedCounterPlugin {
 
 ---
 
-## 5. Step 4: Register in Sub-Dispatcher & Canonical Phase Registry
+## 5. Step 4: Register in Your Stage Sub-Dispatcher
 
-1. **Register in your Phase Sub-Dispatcher** (e.g., [`crates/velda-plugin/src/pre_route/mod.rs`](src/pre_route/mod.rs)):
+Each plugin's execution stage (`pre_route`, `pre_upstream`, `post_response`, or `background`) is fixed at compile time by the module and trait it implements.
+
+1. **Register in your Stage Sub-Dispatcher** (e.g., [`crates/velda-plugin/src/pre_route/mod.rs`](src/pre_route/mod.rs)):
    ```rust
    pub mod api_key;
    pub use api_key::ApiKeyPlugin;
 
-   // Inside instantiate(config):
+   // 1. Add to owns_id(id):
+   pub fn owns_id(id: &str) -> bool {
+       matches!(id, "ip_filter" | "waf_lite" | "api_key" /* ... */)
+   }
+
+   // 2. Inside instantiate(config):
    "api_key" => Ok(Arc::new(ApiKeyPlugin::from_config(config)?)),
    ```
-2. **Register Canonical Phase Mapping** in [`crates/velda-plugin/src/validation.rs`](src/validation.rs) (`canonical_phase_for_id`):
-   ```rust
-   pub fn canonical_phase_for_id(id: &str) -> Option<&'static str> {
-       match id {
-           "ip_filter" | "waf_lite" | "api_key" => Some("pre_route"),
-           // ...
-       }
-   }
-   ```
-   You do **not** need to modify [`factory.rs`](src/factory.rs) or [`velda-edge/src/runtime/plugin.rs`](../velda-edge/src/runtime/plugin.rs) — [`LoadedPlugin`](src/factory.rs) automatically discovers `pbww()` and `run_background()` across all phases.
+2. *(Optional)* If your plugin has a standalone schema validator (`validate_*_config`), wire its match arm inside [`crates/velda-plugin/src/validation.rs`](src/validation.rs).
+
+   You do **not** need to modify [`factory.rs`](src/factory.rs) or [`velda-edge/src/runtime/plugin.rs`](../velda-edge/src/runtime/plugin.rs) — [`LoadedPlugin`](src/factory.rs) automatically discovers `owns_id()`, `pbww()`, and `run_background()` across all stages.
 
 ---
 
@@ -260,7 +260,6 @@ mod tests {
     fn test_api_key_flow() {
         let cfg = PluginConfig {
             id: "api_key".into(),
-            phase: "pre_route".into(),
             config: json!({
                 "header_name": "x-api-key",
                 "keys": ["secret-key-123"]

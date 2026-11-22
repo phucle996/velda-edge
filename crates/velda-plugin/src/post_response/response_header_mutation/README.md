@@ -7,7 +7,7 @@ High-performance, in-place HTTP response header manipulation plugin evaluated du
 >
 > **No Magic Overwrites**: Velda Edge never automatically strips or injects headers without explicit configuration.
 >
-> **Never Specify `phase` in User Configuration**: The execution phase is statically inferred by Velda as `post_response`. Execution order strictly follows the route's `plugins` array order (FIFO).
+> **Compile-Time Stage (`PostResponsePlugin`)**: This plugin always executes in the `post_response` stage. Execution order strictly follows the route's `plugins` array order (FIFO).
 
 ---
 
@@ -16,7 +16,7 @@ High-performance, in-place HTTP response header manipulation plugin evaluated du
 | Property | Value |
 | :--- | :--- |
 | **Plugin ID** | `response_header_mutation` |
-| **Lifecycle Phase** | `post_response` (Statically inferred) |
+| **Lifecycle Phase** | `PostResponsePlugin` (compile-time fixed) |
 | **Supported Protocols** | HTTP only (`http/1.1`, `http/2`, `http/3`) |
 | **Capability** | `PluginCapability::header_only(AccessLevel::Write)` |
 | **Hot Path Latency** | ~10ns to 25ns (In-place mutation, zero heap allocation, SIMD accelerated) |

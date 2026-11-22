@@ -6,7 +6,7 @@ This document specifies the internal subsystem architecture, cacheline memory ge
 
 ## 1. Subsystem Mission & Architectural Boundaries
 
-`otlp_trace_exporter` operates strictly in `phase: "background"` on Shadow Logistics threads (`velda-shadow-{id}` under Linux `SCHED_IDLE`). Its design enforces a hard structural separation between **hot-path telemetry capture** and **background wire serialization / network export**:
+`otlp_trace_exporter` operates strictly as a `BackgroundPlugin` on Shadow Logistics threads (`velda-shadow-{id}` under Linux `SCHED_IDLE`). Its design enforces a hard structural separation between **hot-path telemetry capture** and **background wire serialization / network export**:
 
 1. **Pure-Integer Data Plane Capture (`velda-observability`)**: Frontline traffic workers never handle route strings, upstream names, JSON, or Protobuf. Upon request completion, workers emit only a fixed 64-byte scalar [`SpanRecord`](../../../../velda-observability/src/traces/record.rs) containing numeric IDs (`route_id: u16`, `upstream_id: u16`, `status_code: u16`, timestamps, and binary trace/span IDs).
 2. **Non-Temporal L1D-Bypassing Handoff (`SpscSpanRing`)**: Core-local ring buffers decouple producers (Frontline workers) from the background flusher (`TraceStore::flush_all_lanes`) without mutexes or L1D cache pollution.

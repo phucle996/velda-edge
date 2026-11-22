@@ -1,4 +1,4 @@
-//! WAF Lite Configuration Schema & Semantic Validation (`phase: "pre_route"`).
+//! WAF Lite Configuration Schema & Semantic Validation.
 //!
 //! ```text
 //!  +─────────────────────────────────────────────────────────────────────────+

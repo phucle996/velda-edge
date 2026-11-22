@@ -1,4 +1,4 @@
-//! Resource Limit Configuration Schema & Semantic Validation (`phase: "pre_route"`).
+//! Resource Limit Configuration Schema & Semantic Validation.
 //!
 //! Enforces strict declarative resource limit thresholds for incoming downstream requests
 //! prior to URI routing or body streaming.

@@ -1,4 +1,4 @@
-//! Health Probe Configuration Schema & Semantic Validation (`phase: "background"`).
+//! Health Probe Configuration Schema & Semantic Validation.
 //!
 //! Enforces a strict declarative contract for background health probes.
 //!

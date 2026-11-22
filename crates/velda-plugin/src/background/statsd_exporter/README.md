@@ -17,9 +17,9 @@ High-performance, zero-allocation, connectionless UDP telemetry exporter for Vel
 
 ## 2. Overview & Core Invariants
 
-The `statsd_exporter` is an autonomous background logistics plugin (`phase: "background"`) designed to push real-time Data Plane telemetry without competing with frontline traffic workers:
+The `statsd_exporter` is an autonomous background logistics plugin designed to push real-time Data Plane telemetry without competing with frontline traffic workers:
 
-* **Shadow Worker Execution (`phase: "background"`)**: Operates exclusively on background companion threads (`velda-shadow-{id}`) running under Linux `SCHED_IDLE`. Traffic workers serving client HTTP requests never execute formatting or network syscalls.
+* **Shadow Worker Execution**: Operates exclusively on background companion threads (`velda-shadow-{id}`) running under Linux `SCHED_IDLE`. Traffic workers serving client HTTP requests never execute formatting or network syscalls.
 * **Lock-Free Atomic Extraction**: Reads point-in-time snapshots from `velda-observability` via `MetricsStore::snapshot()` using relaxed atomic loads, completely avoiding locks, mutexes, or synchronization channels on the hot path.
 * **Zero-Allocation Serialization**: Employs a pre-allocated reusable packet arena and a 200-byte 2-digit ASCII lookup table (`DIGIT_PAIRS`), completely eliminating `format!`, `String`, or dynamic vector allocations during metric encoding.
 * **Strict MTU Safety Bounding**: Enforces `max_packet_size` (recommended: $\le 1432$ bytes) to guarantee datagrams fit within standard Ethernet MTU without triggering kernel IP fragmentation. Metric lines are never split across datagram boundaries.
@@ -96,7 +96,7 @@ Under the Velda Edge Workload Distribution Model, background logistics plugins a
 ## 4. 100% Explicit Configuration Contract
 
 > [!IMPORTANT]
-> **Strict Configuration Invariant**: Every configuration parameter must be explicitly declared in `plugins.json`. No silent fallbacks or implicit defaults exist. Execution phase is automatically inferred as `background` via `canonical_phase_for_id` based on `id: "statsd_exporter"`.
+> **Strict Configuration Invariant**: Every configuration parameter must be explicitly declared in `plugins.json`. No silent fallbacks or implicit defaults exist. Execution stage is fixed at compile time (`BackgroundPlugin`).
 
 | Field | Type | Required | Constraints / Allowed Values | Recommended Value | Description |
 | :--- | :---: | :---: | :--- | :--- | :--- |

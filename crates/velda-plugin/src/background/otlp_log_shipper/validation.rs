@@ -1,4 +1,4 @@
-//! OpenTelemetry Log Shipper Schema & Validation (`phase: "background"`).
+//! OpenTelemetry Log Shipper Schema & Validation.
 //!
 //! Validates configuration for [`OtlpLogShipperPlugin`], which drains reference-counted
 //! 64-byte [`velda_observability::TelemetryRecord`] batches across all protocols and ships them

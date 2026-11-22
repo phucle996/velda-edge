@@ -77,7 +77,6 @@ PAYLOAD_HASH
 ```json
 {
   "id": "hmac_auth_prod",
-  "phase": "pre_upstream",
   "config": {
     "access_key_header": "x-access-key-id",
     "signature_header": "x-signature",

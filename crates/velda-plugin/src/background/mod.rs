@@ -1,4 +1,4 @@
-//! Background Execution Phase Plugins (`phase: "background"`).
+//! Background Execution Stage Plugins (`BackgroundPlugin`).
 //!
 //! Background plugins run strictly on Shadow Logistics runtimes isolated from
 //! Data Plane traffic workers (e.g., Prometheus Exporter, Health Probes).
@@ -94,6 +94,28 @@ pub trait BackgroundPlugin: Send + Sync {
     ) -> Result<(), PluginError> {
         Ok(())
     }
+}
+
+/// Compile-time registry check for plugins owned by the `background` stage.
+#[inline]
+pub fn owns_id(id: &str) -> bool {
+    matches!(
+        id,
+        "health_probe"
+            | "prometheus_exporter"
+            | "otlp_metrics_exporter"
+            | "statsd_exporter"
+            | "acme_cert_rotator"
+            | "jwks_rotator"
+            | "loki_log_shipper"
+            | "std_log_shipper"
+            | "otlp_log_shipper"
+            | "clickhouse_log_shipper"
+            | "elasticsearch_log_shipper"
+            | "s3_log_shipper"
+            | "kafka_log_shipper"
+            | "otlp_trace_exporter"
+    )
 }
 
 /// Sub-dispatcher: instantiates background plugin descriptors.

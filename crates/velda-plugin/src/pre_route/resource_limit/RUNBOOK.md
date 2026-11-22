@@ -11,7 +11,6 @@ This document is the operational playbook and configuration guide (**SRE Runbook
 ```json
 {
   "id": "resource_limit",
-  "phase": "pre_route",
   "config": {
     "max_uri_length": 8192,
     "max_headers_count": 128,
@@ -40,7 +39,6 @@ This document is the operational playbook and configuration guide (**SRE Runbook
 ```json
 {
   "id": "strict_api_limits",
-  "phase": "pre_route",
   "config": {
     "max_uri_length": 4096,
     "max_headers_count": 64,
@@ -57,7 +55,6 @@ This document is the operational playbook and configuration guide (**SRE Runbook
 ```json
 {
   "id": "sso_gateway_limits",
-  "phase": "pre_route",
   "config": {
     "max_uri_length": 16384,
     "max_headers_count": 128,

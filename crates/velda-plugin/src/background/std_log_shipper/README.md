@@ -17,9 +17,9 @@ High-throughput, zero-allocation background logging exporter for Velda Edge. Sub
 
 ## 2. Overview & Core Invariants
 
-The `std_log_shipper` plugin (`phase: "background"`) operates as an autonomous background companion service designed to format and persist access logs without competing with frontline traffic workers:
+The `std_log_shipper` plugin operates as an autonomous background companion service designed to format and persist access logs without competing with frontline traffic workers:
 
-* **Shadow Worker Execution (`phase: "background"`)**: Operates exclusively on background companion threads (`velda-shadow-{id}`) under Linux `SCHED_IDLE`. Traffic workers serving client HTTP requests never execute string formatting, serialization, or file I/O syscalls.
+* **Shadow Worker Execution**: Operates exclusively on background companion threads (`velda-shadow-{id}`) under Linux `SCHED_IDLE`. Traffic workers serving client HTTP requests never execute string formatting, serialization, or file I/O syscalls.
 * **Lock-Free SPSC Ring Drain**: Frontline traffic workers push 64-byte scalar `AccessLogRecord` structs into core-local Single-Producer Single-Consumer (SPSC) ring buffers without mutexes or lock contention.
 * **Zero-Allocation Formatting Arena**: `format_std_log_payload` pre-reserves buffer capacity upfront based on batch size and writes formatted bytes directly using static slices, a 200-byte 2-digit ASCII lookup table (`DIGIT_PAIRS`), and 128-bit SSSE3 SIMD vector instructions for request ID hex stamping.
 * **Persistent File Descriptor Reuse**: The target file or stream descriptor is opened once at plugin instantiation and held persistently across all periodic flush cycles, completely eliminating per-cycle `open()` and `close()` syscall overhead.
@@ -100,7 +100,7 @@ Under the Velda Edge Workload Distribution Model, background logistics plugins a
 ## 4. 100% Explicit Configuration Contract
 
 > [!IMPORTANT]
-> **Strict Configuration Invariant**: Every configuration parameter must be explicitly declared in `plugins.json`. No silent fallbacks or implicit defaults exist. Execution phase is automatically inferred as `background` via `canonical_phase_for_id` based on `id: "std_log_shipper"`.
+> **Strict Configuration Invariant**: Every configuration parameter must be explicitly declared in `plugins.json`. No silent fallbacks or implicit defaults exist. Execution stage is fixed at compile time (`BackgroundPlugin`).
 
 | Field | Type | Required | Constraints / Allowed Values | Recommended Value | Description |
 | :--- | :---: | :---: | :--- | :--- | :--- |

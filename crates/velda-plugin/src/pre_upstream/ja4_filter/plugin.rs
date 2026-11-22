@@ -1,4 +1,4 @@
-//! `ja4_filter` Pre-Upstream Plugin (`phase: "pre_upstream"`).
+//! `ja4_filter` Pre-Upstream Plugin.
 //!
 //! ```text
 //! ┌─────────────────────────────────────────────────────────────────────────────────────────┐
@@ -134,7 +134,6 @@ mod tests {
 
         let cfg = PluginConfig {
             id: "ja4_filter".to_string(),
-            phase: "pre_upstream".to_string(),
             config: json!({
                 "deny": [fp_str, format!("0x{hex_id:x}")]
             }),

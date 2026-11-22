@@ -1,4 +1,4 @@
-//! gRPC Fault Injection Configuration Schema & Semantic Validation (`phase: "pre_upstream"`).
+//! gRPC Fault Injection Configuration Schema & Semantic Validation.
 //!
 //! Enforces a strict declarative contract for gRPC chaos engineering.
 //!

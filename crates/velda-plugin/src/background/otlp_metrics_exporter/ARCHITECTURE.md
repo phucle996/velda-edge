@@ -6,7 +6,7 @@ This document details the internal subsystem architecture, threading model, memo
 
 ## 1. Subsystem Mission & Responsibilities
 
-The `otlp_metrics_exporter` is an autonomous background logistics plugin (`phase: "background"`) designed to:
+The `otlp_metrics_exporter` is an autonomous background logistics plugin designed to:
 1. Periodically extract point-in-time telemetry snapshots from `velda-observability` via non-blocking relaxed atomic vector reads.
 2. Serialize metrics into binary OpenTelemetry `ResourceMetrics` Protocol Buffers over persistent HTTP/2 (gRPC) or pre-baked JSON text over HTTP/1.1.
 3. Stream telemetry to an OpenTelemetry Collector daemon (e.g. port 4317 for gRPC or port 4318 for HTTP).

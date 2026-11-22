@@ -1,4 +1,4 @@
-//! Response Header Mutation Configuration Schema & Semantic Validation (`phase: "post_response"`).
+//! Response Header Mutation Configuration Schema & Semantic Validation.
 //!
 //! Enforces a strict declarative contract for mutating HTTP response headers before client delivery.
 //!

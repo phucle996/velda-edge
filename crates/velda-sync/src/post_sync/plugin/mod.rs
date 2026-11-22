@@ -21,7 +21,7 @@ use crate::SyncError;
 
 // Re-export core plugin definitions and validation dispatcher from velda-plugin
 pub use velda_plugin::{
-    PluginConfig, canonical_phase_for_id, canonical_protocol_family_for_id, validate_plugin_config,
+    PluginConfig, canonical_protocol_family_for_id, is_known_plugin_id, validate_plugin_config,
     validate_plugin_dependencies,
 };
 
@@ -136,16 +136,14 @@ fn trim_in_place(s: &mut String) {
 
 /// Validates plugin configuration rules locally without silent fallbacks.
 ///
-/// Internal side effects (auto-trimming whitespace, lowercasing phase) are handled in place.
-/// External side effects (duplicate ID, missing type, invalid phase) return an error to prevent
-/// deploying a broken hook chain to the Data Plane.
+/// Internal side effects (auto-trimming whitespace on ID) are handled in place.
+/// External side effects (empty/duplicate/unknown ID, invalid config) return an error
+/// to prevent deploying a broken hook chain to the Data Plane.
 pub fn validate_plugins(plugins: &mut [PluginConfig]) -> Result<(), SyncError> {
     let mut seen_ids = HashSet::with_capacity(plugins.len());
 
     for plugin in &mut *plugins {
         trim_in_place(&mut plugin.id);
-        trim_in_place(&mut plugin.phase);
-        plugin.phase.make_ascii_lowercase();
 
         // Fail fast: empty plugin ID
         if plugin.id.is_empty() {
@@ -163,25 +161,11 @@ pub fn validate_plugins(plugins: &mut [PluginConfig]) -> Result<(), SyncError> {
             });
         }
 
-        // Auto-infer empty phase from canonical phase mapping
-        if plugin.phase.is_empty()
-            && let Some(canonical) = canonical_phase_for_id(&plugin.id)
-        {
-            plugin.phase = canonical.to_string();
-        }
-
-        let is_valid_phase = matches!(
-            plugin.phase.as_str(),
-            "pre_route" | "pre_upstream" | "post_response" | "background"
-        );
-
-        if !is_valid_phase {
+        // Fail fast: unknown plugin ID
+        if !is_known_plugin_id(&plugin.id) {
             return Err(SyncError::Validation {
                 domain: "plugins".into(),
-                reason: format!(
-                    "Plugin '{}' has invalid phase '{}' (must be pre_route, pre_upstream, post_response, or background)",
-                    plugin.id, plugin.phase
-                ),
+                reason: format!("Unknown plugin ID '{}'", plugin.id),
             });
         }
 
@@ -346,7 +330,6 @@ mod tests {
             "plugins": [
                 {
                     "id": " jwt_auth ",
-                    "phase": "PRE_UPSTREAM",
                     "config": {
                         "algorithm": "HS256",
                         "secret_key": "valid-secret-key-for-test",
@@ -366,14 +349,12 @@ mod tests {
         assert_eq!(plugins.len(), 1);
         validate_plugins(&mut plugins).unwrap();
         assert_eq!(plugins[0].id, "jwt_auth");
-        assert_eq!(plugins[0].phase, "pre_upstream");
     }
 
     #[test]
-    fn test_invalid_phase_fails() {
+    fn test_unknown_plugin_id_fails() {
         let mut plugins = vec![PluginConfig {
-            id: "rate_limit".into(),
-            phase: "invalid_phase".into(),
+            id: "unknown_custom_plugin".into(),
             config: serde_json::json!({}),
         }];
 
@@ -388,7 +369,6 @@ mod tests {
         let tmp = tempdir().unwrap();
         let plugins = vec![PluginConfig {
             id: "jwt_auth".into(),
-            phase: "pre_upstream".into(),
             config: serde_json::json!({ "issuer": "auth.example.com", "secret_key": "valid-secret-key-for-test", "max_age": 3600 }),
         }];
 
@@ -413,7 +393,6 @@ mod tests {
             "plugins": [
                 {
                     "id": "prometheus_exporter",
-                    "phase": "background",
                     "config": {
                         "listen": "0.0.0.0:9090",
                         "path": "/metrics",
@@ -445,40 +424,10 @@ mod tests {
     }
 
     #[test]
-    fn test_prometheus_exporter_must_be_background() {
-        let mut plugins = vec![PluginConfig {
-            id: "prometheus_exporter".into(),
-            phase: "pre_route".into(),
-            config: serde_json::json!({
-                "listen": "0.0.0.0:9090",
-                "path": "/metrics",
-                "protocol": "http",
-                "scrape": {
-                    "timeout_ms": 5000,
-                    "max_concurrency": 16,
-                    "max_buffer_size_kb": 256
-                },
-                "tls": { "mode": "none" },
-                "cors": { "enabled": false, "allow_origins": [], "allow_methods": [], "allow_headers": [] },
-                "auth": { "mode": "none" }
-            }),
-        }];
-
-        let res = validate_plugins(&mut plugins);
-        assert!(res.is_err());
-        assert!(
-            res.unwrap_err()
-                .to_string()
-                .contains("must specify phase 'background'")
-        );
-    }
-
-    #[test]
-    fn test_request_termination_validation_and_phase_inference() {
-        // 1. Empty phase should be auto-inferred to pre_upstream
+    fn test_request_termination_validation() {
+        // 1. Valid request_termination config should succeed
         let mut plugins = vec![PluginConfig {
             id: "request_termination".into(),
-            phase: "".into(),
             config: serde_json::json!({
                 "status_code": 503,
                 "body": "Service Unavailable",
@@ -488,25 +437,10 @@ mod tests {
         }];
 
         assert!(validate_plugins(&mut plugins).is_ok());
-        assert_eq!(plugins[0].phase, "pre_upstream");
 
-        // 2. Mismatched phase should fail
-        let mut invalid_phase_plugins = vec![PluginConfig {
-            id: "request_termination".into(),
-            phase: "post_response".into(),
-            config: serde_json::json!({
-                "status_code": 200,
-                "body": "OK",
-                "content_type": "text/plain",
-                "headers": {}
-            }),
-        }];
-        assert!(validate_plugins(&mut invalid_phase_plugins).is_err());
-
-        // 3. Status code out of range (< 200 or > 599) should fail
+        // 2. Status code out of range (< 200 or > 599) should fail
         let mut invalid_status_plugins = vec![PluginConfig {
             id: "request_termination".into(),
-            phase: "pre_upstream".into(),
             config: serde_json::json!({
                 "status_code": 199,
                 "body": "Bad",
@@ -518,7 +452,6 @@ mod tests {
 
         let mut invalid_status_high = vec![PluginConfig {
             id: "request_termination".into(),
-            phase: "pre_upstream".into(),
             config: serde_json::json!({
                 "status_code": 600,
                 "body": "Bad",

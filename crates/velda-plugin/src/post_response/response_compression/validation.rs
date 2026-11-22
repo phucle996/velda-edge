@@ -1,4 +1,4 @@
-//! Response Compression Configuration Schema & Semantic Validation (`phase: "post_response"`).
+//! Response Compression Configuration Schema & Semantic Validation.
 //!
 //! Enforces a strict declarative contract for HTTP payload compression algorithms and thresholds.
 //!

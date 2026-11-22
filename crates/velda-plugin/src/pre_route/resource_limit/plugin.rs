@@ -334,7 +334,6 @@ mod tests {
     fn test_from_config_custom_and_defaults() {
         let config = PluginConfig {
             id: "resource_limit".into(),
-            phase: String::new(),
             config: json!({
                 "max_uri_length": 8192,
                 "max_headers_count": 32,
@@ -353,7 +352,6 @@ mod tests {
         // Incomplete/empty config must fail validation (100% explicit configuration required)
         let empty_config = PluginConfig {
             id: "resource_limit".into(),
-            phase: String::new(),
             config: json!({}),
         };
         assert!(ResourceLimitPlugin::from_config(&empty_config).is_err());

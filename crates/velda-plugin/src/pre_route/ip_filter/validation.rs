@@ -1,4 +1,4 @@
-//! IP Filter Configuration Schema & Semantic Validation (`phase: "pre_route"`).
+//! IP Filter Configuration Schema & Semantic Validation.
 //!
 //! Enforces a strict declarative contract for the IP / CIDR Subnet Access Filter plugin.
 //!

@@ -11,7 +11,6 @@ Velda Edge enforces a **100% Explicit Configuration Invariant**: all parameters 
 ```json
 {
   "id": "api_jwt_auth",
-  "phase": "pre_upstream",
   "config": {
     "algorithm": "RS256",
     "secret_key": null,
@@ -74,7 +73,6 @@ Use these validated configuration presets for your architecture:
 ```json
 {
   "id": "public_jwt_auth",
-  "phase": "pre_upstream",
   "config": {
     "algorithm": "RS256",
     "secret_key": null,
@@ -107,7 +105,6 @@ Use these validated configuration presets for your architecture:
 ```json
 {
   "id": "mesh_jwt_auth",
-  "phase": "pre_upstream",
   "config": {
     "algorithm": "HS256",
     "secret_key": "env:MESH_SHARED_SECRET_KEY_STRONG_256",
@@ -138,7 +135,6 @@ Use these validated configuration presets for your architecture:
 ```json
 {
   "id": "banking_jwt_auth",
-  "phase": "pre_upstream",
   "config": {
     "algorithm": "ES256",
     "secret_key": null,
@@ -171,7 +167,6 @@ Use these validated configuration presets for your architecture:
 ```json
 {
   "id": "omnichannel_jwt_auth",
-  "phase": "pre_upstream",
   "config": {
     "algorithm": "RS256",
     "secret_key": null,

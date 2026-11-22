@@ -1,4 +1,4 @@
-//! HTTP Fault Injection Configuration Schema & Semantic Validation (`phase: "pre_upstream"`).
+//! HTTP Fault Injection Configuration Schema & Semantic Validation.
 //!
 //! Enforces a strict declarative contract for HTTP chaos engineering and resilience testing.
 //!

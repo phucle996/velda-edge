@@ -32,7 +32,7 @@
 +-----------------------------------------------------------------------------------+
 ```
 
-The **`prometheus_exporter`** plugin is Velda Edge's dedicated telemetry export daemon (`phase: "background"`). It serves OpenMetrics and Prometheus text-format scrape endpoints (`GET /metrics`) on an isolated management port (e.g. `0.0.0.0:9090`), decoupled from the Data Plane request serving path.
+The **`prometheus_exporter`** plugin is Velda Edge's dedicated telemetry export daemon. It serves OpenMetrics and Prometheus text-format scrape endpoints (`GET /metrics`) on an isolated management port (e.g. `0.0.0.0:9090`), decoupled from the Data Plane request serving path.
 
 ---
 
@@ -57,7 +57,7 @@ The **`prometheus_exporter`** plugin is Velda Edge's dedicated telemetry export 
 ## 2. Where It Sits in Velda Edge
 
 - **Subsystem**: `crates/velda-plugin/src/background/prometheus_exporter/`
-- **Execution Phase**: `phase: "background"`
+- **Execution Stage**: `BackgroundPlugin` (compile-time fixed)
 - **Runtime Placement**: Operates entirely on the Shadow Logistics Worker (`velda-shadow-{i}`) running under `SCHED_IDLE` on its assigned core $i$.
 - **Data Plane Touchpoints**:
   - Frontline Traffic Workers (`velda-worker-{0..N-1}`) **never** format metrics, never serialize strings, and never execute scrape socket I/O.

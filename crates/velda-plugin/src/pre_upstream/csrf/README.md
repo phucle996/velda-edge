@@ -16,7 +16,7 @@ High-performance, cryptographic Layer 7 CSRF defense plugin evaluated during the
 | Property | Value |
 | :--- | :--- |
 | **Plugin ID** | `csrf` (alias: `csrf_protection`) |
-| **Lifecycle Phase** | `pre_upstream` (Statically inferred) |
+| **Lifecycle Phase** | `PreUpstreamPlugin` (compile-time fixed) |
 | **Supported Protocols** | HTTP only (`http/1.1`, `http/2`, `http/3`) |
 | **Capability** | `PluginCapability::header_only(AccessLevel::Read)` |
 | **Hot Path Latency** | Safe methods: ~0.5ns (Bitmask $O(1)$) \| Mutating checks: ~150ns (HMAC + 128-bit SIMD) |

@@ -11,7 +11,6 @@ This document is the operational playbook, configuration reference, and recommen
 ```json
 {
   "id": "waf_lite",
-  "phase": "pre_route",
   "config": {
     "patterns": [
       "../",
@@ -99,7 +98,6 @@ Because `waf_lite` ships with zero hidden built-in rules, you have complete cont
 ```json
 {
   "id": "waf_lite_api",
-  "phase": "pre_route",
   "config": {
     "patterns": [
       "../", "..\\", "..;/", "..;\\",
@@ -119,7 +117,6 @@ Because `waf_lite` ships with zero hidden built-in rules, you have complete cont
 ```json
 {
   "id": "waf_lite_minimal",
-  "phase": "pre_route",
   "config": {
     "patterns": [
       "../", "..\\", "/etc/passwd", ".env", ".git/", "${jndi:", "class.module.classloader"

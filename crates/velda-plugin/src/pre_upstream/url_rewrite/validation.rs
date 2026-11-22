@@ -1,4 +1,4 @@
-//! URL Rewrite Configuration Schema & Semantic Validation (`phase: "pre_upstream"`).
+//! URL Rewrite Configuration Schema & Semantic Validation.
 //!
 //! Enforces a strict declarative contract for path and query string transformation.
 //!

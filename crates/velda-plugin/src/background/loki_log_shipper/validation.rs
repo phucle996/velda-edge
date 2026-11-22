@@ -1,4 +1,4 @@
-//! Grafana Loki Log Shipper Schema & Semantic Validation (`phase: "background"`).
+//! Grafana Loki Log Shipper Schema & Semantic Validation.
 //!
 //! Validates configuration for the background Loki exporter (`loki_log_shipper`), which drains
 //! reference-counted 64-byte [`velda_observability::TelemetryRecord`] batches and ships them to

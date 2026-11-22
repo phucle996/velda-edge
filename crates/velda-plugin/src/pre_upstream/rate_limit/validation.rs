@@ -1,4 +1,4 @@
-//! Rate Limit Configuration Schema & Semantic Validation (`phase: "pre_upstream"`).
+//! Rate Limit Configuration Schema & Semantic Validation.
 //!
 //! Enforces a strict declarative contract for token bucket and sliding window rate limiting.
 //!

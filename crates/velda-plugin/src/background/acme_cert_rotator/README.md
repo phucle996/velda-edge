@@ -9,7 +9,7 @@
 |         │ HTTPS JWS (Account Registration & Order Creation)                       |
 |         ▼                                                                         |
 |  ┌─────────────────────────────────────────────────────────────────────────────┐  |
-|  │ acme_cert_rotator (phase: "background", SCHED_IDLE)                          │  |
+|  │ acme_cert_rotator (BackgroundPlugin, SCHED_IDLE)                             │  |
 |  │  - Runs on background logistics worker (never blocks request traffic)       │  |
 |  │  - Dual-Trigger: Cold-start bootstrap expiry check + UTC Cron schedule      │  |
 |  │  - Pre-bakes HTTP-01 wire response & injects ephemeral route into Router    │  |
@@ -31,7 +31,7 @@
 +-----------------------------------------------------------------------------------+
 ```
 
-The **`acme_cert_rotator`** plugin is Velda Edge's automated certificate lifecycle engine (`phase: "background"`). It autonomously manages X.509 TLS certificate issuance, validation, and renewal via the ACME protocol (RFC 8555) using Let's Encrypt, ZeroSSL, or private ACME CAs, hot-swapping renewed certificates into the data plane with zero downtime and zero dropped connections.
+The **`acme_cert_rotator`** plugin is Velda Edge's automated certificate lifecycle engine. It autonomously manages X.509 TLS certificate issuance, validation, and renewal via the ACME protocol (RFC 8555) using Let's Encrypt, ZeroSSL, or private ACME CAs, hot-swapping renewed certificates into the data plane with zero downtime and zero dropped connections.
 
 ---
 
@@ -56,7 +56,7 @@ The **`acme_cert_rotator`** plugin is Velda Edge's automated certificate lifecyc
 ## 2. Where It Sits in Velda Edge
 
 - **Subsystem**: `crates/velda-plugin/src/background/acme_cert_rotator/`
-- **Execution Phase**: `phase: "background"`
+- **Execution Stage**: `BackgroundPlugin` (compile-time fixed)
 - **Runtime Placement**: Operates entirely on the Shadow Logistics Worker (`velda-shadow-{i}`) running under `SCHED_IDLE`, decoupled from frontline traffic workers.
 - **Data Plane Touchpoints**:
   - Injects transient routes into `velda_router::Router`.

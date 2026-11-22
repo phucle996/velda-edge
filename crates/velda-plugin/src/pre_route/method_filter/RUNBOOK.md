@@ -11,7 +11,6 @@ This document is the operational playbook and configuration guide (**SRE Runbook
 ```json
 {
   "id": "method_filter",
-  "phase": "pre_route",
   "config": {
     "allowed_methods": ["GET", "POST", "PUT", "DELETE", "OPTIONS"]
   }
@@ -34,7 +33,6 @@ This document is the operational playbook and configuration guide (**SRE Runbook
 ```json
 {
   "id": "rest_api_methods",
-  "phase": "pre_route",
   "config": {
     "allowed_methods": ["GET", "HEAD", "POST", "PUT", "PATCH", "DELETE", "OPTIONS"]
   }
@@ -47,7 +45,6 @@ This document is the operational playbook and configuration guide (**SRE Runbook
 ```json
 {
   "id": "readonly_edge_methods",
-  "phase": "pre_route",
   "config": {
     "allowed_methods": ["GET", "HEAD"]
   }

@@ -1,4 +1,4 @@
-//! Canary Traffic Splitting Configuration Schema & Semantic Validation (`phase: "pre_upstream"`).
+//! Canary Traffic Splitting Configuration Schema & Semantic Validation.
 //!
 //! Enforces a strict declarative contract for canary routing, percentage rollouts,
 //! multi-source hash keys, and rule-based traffic steering.

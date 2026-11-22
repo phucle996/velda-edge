@@ -163,7 +163,6 @@ fn test_suite_grpc_fault_plan_compilation() {
 
     let config = PluginConfig {
         id: "grpc_fault_injection".to_string(),
-        phase: "pre_upstream".to_string(),
         config: json_cfg,
     };
 

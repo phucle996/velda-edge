@@ -16,7 +16,7 @@ Client-side browser hardening, modern origin isolation (COOP, COEP, CORP), and O
 | Property | Value |
 | :--- | :--- |
 | **Plugin ID** | `security_headers` |
-| **Lifecycle Phase** | `post_response` (Statically inferred) |
+| **Lifecycle Phase** | `PostResponsePlugin` (compile-time fixed) |
 | **Supported Protocols** | HTTP only (`http/1.1`, `http/2`, `http/3`) |
 | **Capability** | `PluginCapability::header_only(AccessLevel::Write)` |
 | **Hot Path Latency** | ~5ns to 12ns (Pre-baked inline array, O(1) atomic ref-count clone) |

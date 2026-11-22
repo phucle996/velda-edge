@@ -1,4 +1,4 @@
-//! `api_key_auth` Pre-Upstream Plugin (`phase: "pre_upstream"`).
+//! `api_key_auth` Pre-Upstream Plugin.
 //!
 //! ```text
 //! ┌─────────────────────────────────────────────────────────────────────────────────────────┐
@@ -221,7 +221,6 @@ mod tests {
         velda_core::clock::init_clock();
         let cfg = PluginConfig {
             id: "api_key_auth".to_string(),
-            phase: "pre_upstream".to_string(),
             config: json!({
                 "header_name": "x-api-key",
                 "hide_credentials": true,
@@ -267,7 +266,6 @@ mod tests {
         velda_core::clock::init_clock();
         let cfg = PluginConfig {
             id: "api_key_auth".to_string(),
-            phase: "pre_upstream".to_string(),
             config: json!({
                 "header_name": "x-api-key",
                 "hide_credentials": false,

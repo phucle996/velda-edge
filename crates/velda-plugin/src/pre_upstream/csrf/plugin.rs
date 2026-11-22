@@ -1,4 +1,4 @@
-//! Cross-Site Request Forgery (CSRF) Protection Plugin (`phase: "pre_upstream"`).
+//! Cross-Site Request Forgery (CSRF) Protection Plugin.
 //!
 //! Enforces defense-in-depth protection against cross-site request forgery, neutralizing
 //! W3C Simple Request bypasses (`<form enctype="text/plain">`), subdomain cookie tossing

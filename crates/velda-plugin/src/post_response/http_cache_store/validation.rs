@@ -1,4 +1,4 @@
-//! HTTP Cache Store Configuration Schema & Semantic Validation (`phase: "post_response"`).
+//! HTTP Cache Store Configuration Schema & Semantic Validation.
 //!
 //! Enforces a strict declarative contract for HTTP caching and response storage.
 //!

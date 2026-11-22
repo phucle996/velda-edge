@@ -132,7 +132,6 @@ fn test_std_log_format_all() {
 async fn test_std_log_shipper_from_plugin_config() {
     let cfg = PluginConfig {
         id: "std_log_shipper".to_string(),
-        phase: "background".to_string(),
         config: serde_json::json!({
             "target": "stdout",
             "format": "json",

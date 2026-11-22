@@ -603,7 +603,6 @@ mod tests {
 
         let sync_cfg = crate::config::PluginConfig {
             id: "full-config-test".into(),
-            phase: "pre_upstream".into(),
             config: json_cfg,
         };
 

@@ -1,4 +1,4 @@
-//! JWKS Key Rotator Schema & Semantic Validation (`phase: "background"`).
+//! JWKS Key Rotator Schema & Semantic Validation.
 //!
 //! ```text
 //!                  JWKS ROTATOR SEMANTIC VALIDATION PIPELINE
@@ -18,7 +18,7 @@
 //! ```
 //!
 //! # Architectural Invariants
-//! - **Strict Background Phase**: Runs exclusively in `phase: "background"`.
+//! - **Strict Background Phase**: Runs exclusively as a compile-time `BackgroundPlugin`.
 //! - **Inter-Plugin Dependency**: Rotator operates as a companion writer to `jwt_auth`
 //!   and is strictly rejected if `jwt_auth` is not present in the configuration.
 

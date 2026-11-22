@@ -443,7 +443,6 @@ mod tests {
 
         let config = PluginConfig {
             id: "request_mirror".into(),
-            phase: String::new(),
             config: json_cfg,
         };
 
@@ -457,7 +456,6 @@ mod tests {
         // Empty config must fail validation
         let bad_config = PluginConfig {
             id: "request_mirror".into(),
-            phase: String::new(),
             config: serde_json::json!({}),
         };
         assert!(RequestMirrorPlugin::from_config(&bad_config).is_err());

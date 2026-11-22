@@ -1,4 +1,4 @@
-//! OAuth 2.0 Token Introspection Configuration Schema & Semantic Validation (`phase: "pre_upstream"`).
+//! OAuth 2.0 Token Introspection Configuration Schema & Semantic Validation.
 //!
 //! Enforces a strict declarative contract for RFC 7662 OAuth 2.0 Token Introspection.
 //! Allows edge verification of opaque reference tokens against an upstream Authorization Server (IdP)

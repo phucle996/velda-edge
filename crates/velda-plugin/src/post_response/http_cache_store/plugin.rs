@@ -757,7 +757,6 @@ mod tests {
 
         let p_cfg = PluginConfig {
             id: "cache_store_test".into(),
-            phase: "post_response".into(),
             config: valid_json,
         };
 
@@ -772,7 +771,6 @@ mod tests {
         });
         let bad_p_cfg = PluginConfig {
             id: "cache_store_bad".into(),
-            phase: "post_response".into(),
             config: invalid_json,
         };
         assert!(HttpCacheStorePlugin::from_config(&bad_p_cfg).is_err());

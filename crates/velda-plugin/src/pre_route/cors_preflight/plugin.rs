@@ -1,4 +1,4 @@
-//! Cross-Origin Resource Sharing (CORS) Preflight Pre-Route Plugin (`phase: "pre_route"`).
+//! Cross-Origin Resource Sharing (CORS) Preflight Pre-Route Plugin.
 //!
 //! Intercepts downstream HTTP `OPTIONS` preflight requests prior to route matching,
 //! authentication evaluation, or upstream dispatch, immediately returning an RFC-compliant
@@ -474,7 +474,6 @@ mod tests {
     fn test_from_config_full_deserialization() {
         let config = PluginConfig {
             id: "cors_preflight".into(),
-            phase: "pre_route".into(),
             config: json!({
                 "allowed_origins": ["https://*.example.com", "https://app.test.io"],
                 "allowed_methods": ["GET", "POST", "PUT", "DELETE"],
@@ -497,7 +496,6 @@ mod tests {
         // Incomplete config must fail validation
         let bad_config = PluginConfig {
             id: "cors_preflight".into(),
-            phase: "pre_route".into(),
             config: json!({}),
         };
         assert!(CorsPreflightPlugin::from_config(&bad_config).is_err());

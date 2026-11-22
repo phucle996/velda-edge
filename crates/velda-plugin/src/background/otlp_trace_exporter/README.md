@@ -17,9 +17,9 @@ Asynchronous, fail-open background telemetry exporter for Velda Edge. Subscribes
 
 ## 2. Overview & Core Invariants
 
-The `otlp_trace_exporter` plugin (`phase: "background"`) acts as the dedicated background exporter for Velda Edge distributed spans without sharing locks, heap allocations, or network sockets with frontline traffic workers:
+The `otlp_trace_exporter` plugin acts as the dedicated background exporter for Velda Edge distributed spans without sharing locks, heap allocations, or network sockets with frontline traffic workers:
 
-* **Shadow Worker Isolation (`phase: "background"`)**: Executes exclusively on background companion threads (`velda-shadow-{id}`) configured under Linux `SCHED_IDLE`. Frontline workers serving downstream client traffic never serialize spans, format Protobuf/JSON, or execute outbound collector network I/O.
+* **Shadow Worker Isolation**: Executes exclusively on background companion threads (`velda-shadow-{id}`) configured under Linux `SCHED_IDLE`. Frontline workers serving downstream client traffic never serialize spans, format Protobuf/JSON, or execute outbound collector network I/O.
 * **Lock-Free SPSC Ring Handoff (`TraceStore`)**: Frontline workers record spans by writing a 64-byte scalar [`SpanRecord`] into a core-local SPSC ring buffer (`DEFAULT_TRACE_CORE_RING_CAPACITY = 4096` slots = 256 KB per core) using non-temporal streaming stores (`VMOVNTDQ` / `MOVNTDQ`) to avoid polluting L1 data caches.
 * **Direct Wire Protobuf Serializer (gRPC Mode)**: `OtlpTraceProtoEnvelope` pre-bakes static `Resource` (`service.name`) and `InstrumentationScope` (`velda.edge.router`) framing bytes at initialization and encodes spans directly into a reusable byte buffer without constructing intermediate Prost AST object trees or heap-allocated `String` attributes.
 * **Page-Aligned Zero-Copy Catalog Integration**: Route targets (`http.target`, span name `<method> <route>`) and upstream names (`net.peer.name`) are pulled lock-free as raw byte slices (`&[u8]`) directly from 4KB page-aligned [`velda_router::RouteCatalog`] and [`velda_upstream::UpstreamCatalog`] snapshots via `ArcSwapOption`.
@@ -85,7 +85,7 @@ Under the Velda Edge Workload Distribution Model, `OtlpTraceExporterPlugin::weig
 ## 4. Explicit Configuration Contract
 
 > [!IMPORTANT]
-> **Strict Configuration Invariant**: All parameters below must be explicitly present in `plugins.json` and pass `validate_otlp_trace_exporter_config`. Execution phase is inferred as `"background"` via `canonical_phase_for_id` for `id: "otlp_trace_exporter"`.
+> **Strict Configuration Invariant**: All parameters below must be explicitly present in `plugins.json` and pass `validate_otlp_trace_exporter_config`. Execution stage is fixed at compile time (`BackgroundPlugin`).
 
 | Field | Type | Required | Constraints / Validation Rules | Example Value | Description |
 | :--- | :---: | :---: | :--- | :--- | :--- |

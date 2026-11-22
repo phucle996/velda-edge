@@ -1,4 +1,4 @@
-//! Standard Stream Log Shipper Schema & Validation (`phase: "background"`).
+//! Standard Stream Log Shipper Schema & Validation.
 //!
 //! Validates configuration for [`StdLogShipperPlugin`], which drains reference-counted
 //! 64-byte [`velda_observability::TelemetryRecord`] batches across all protocols (HTTP/1, H2, H3,

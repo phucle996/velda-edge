@@ -7,7 +7,7 @@ High-performance HTTP request short-circuiting plugin evaluated during the `pre_
 >
 > **Zero Upstream Dispatch**: When this plugin executes, upstream endpoint selection, circuit breakers, and connection pool leasing are completely bypassed.
 >
-> **Never Specify `phase` in User Configuration**: The execution phase is statically inferred by Velda as `pre_upstream`.
+> **Compile-Time Stage (`PreUpstreamPlugin`)**: This plugin always executes in the `pre_upstream` stage.
 >
 > **System-Level Request ID Invariant**: The synthetic response automatically carries the incoming request's `x-request-id`, ensuring full observability continuity across `post_response` plugins (such as `security_headers` and `cors`).
 
@@ -18,7 +18,7 @@ High-performance HTTP request short-circuiting plugin evaluated during the `pre_
 | Property | Value |
 | :--- | :--- |
 | **Plugin ID** | `request_termination` |
-| **Lifecycle Phase** | `pre_upstream` (Statically inferred) |
+| **Lifecycle Phase** | `PreUpstreamPlugin` (compile-time fixed) |
 | **Supported Protocols** | HTTP only (`http/1.1`, `http/2`, `http/3`) |
 | **Capability** | `PluginCapability::header_only(AccessLevel::Read)` |
 | **Hot Path Latency** | ~5ns to 15ns (Pre-compiled response, static byte slice, zero heap allocation) |

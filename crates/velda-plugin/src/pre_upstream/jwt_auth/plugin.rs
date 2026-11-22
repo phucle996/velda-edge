@@ -1,4 +1,4 @@
-//! JWT Authentication Pre-Upstream Plugin (`phase: "pre_upstream"`).
+//! JWT Authentication Pre-Upstream Plugin.
 //!
 //! ```text
 //!                          JWT AUTH PRE-UPSTREAM WORKFLOW
@@ -402,7 +402,6 @@ mod tests {
     fn test_on_upstream_request_missing_token() {
         let config = PluginConfig {
             id: "jwt_auth".into(),
-            phase: "pre_upstream".into(),
             config: default_jwt_json("my-secret-key", serde_json::json!({})),
         };
 
@@ -429,7 +428,6 @@ mod tests {
         let secret = "secret-12345678901234567890";
         let config = PluginConfig {
             id: "jwt_auth".into(),
-            phase: "pre_upstream".into(),
             config: default_jwt_json(
                 secret,
                 serde_json::json!({
@@ -490,7 +488,6 @@ mod tests {
         let secret = "secret-12345678901234567890";
         let config = PluginConfig {
             id: "jwt_auth".into(),
-            phase: "pre_upstream".into(),
             config: default_jwt_json(secret, serde_json::json!({})),
         };
 
@@ -541,7 +538,6 @@ mod tests {
         let secret = "cookie-secret";
         let config = PluginConfig {
             id: "jwt_auth".into(),
-            phase: "pre_upstream".into(),
             config: serde_json::json!({
                 "algorithm": "HS256",
                 "secret_key": secret,
@@ -602,7 +598,6 @@ mod tests {
     fn test_malformed_multibyte_utf8_auth_header_does_not_panic() {
         let config = PluginConfig {
             id: "jwt_auth".into(),
-            phase: "pre_upstream".into(),
             config: serde_json::json!({
                 "algorithm": "HS256",
                 "secret_key": "my-secret-key",

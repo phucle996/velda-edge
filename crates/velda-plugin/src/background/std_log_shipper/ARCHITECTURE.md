@@ -6,7 +6,7 @@ This document details the internal subsystem architecture, threading model, memo
 
 ## 1. Subsystem Mission & Responsibilities
 
-The `std_log_shipper` is an autonomous background logistics plugin (`phase: "background"`) designed to:
+The `std_log_shipper` is an autonomous background logistics plugin designed to:
 1. Drain reference-counted 64-byte `AccessLogRecord` batches from `velda-observability::LogStore` via lock-free core-local SPSC ring buffers.
 2. Serialize access logs into structured NDJSON (`"json"`), human-readable text (`"text"`), or NCSA Common Log Format (`"clf"`).
 3. Stream formatted byte batches to `stdout`, `stderr`, or a persistent filesystem path without dynamic heap reallocations.

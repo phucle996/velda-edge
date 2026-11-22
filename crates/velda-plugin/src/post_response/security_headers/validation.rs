@@ -1,4 +1,4 @@
-//! Security Headers Configuration Schema & Semantic Validation (`phase: "post_response"`).
+//! Security Headers Configuration Schema & Semantic Validation.
 //!
 //! Enforces a strict declarative contract for browser defensive response headers,
 //! incorporating modern OWASP and W3C origin isolation security policies.

@@ -794,7 +794,6 @@ mod tests {
         });
         let config = PluginConfig {
             id: "header_mutation".into(),
-            phase: String::new(),
             config: json_cfg,
         };
         let plugin = HeaderMutationPlugin::from_config(&config).expect("valid config");
@@ -807,7 +806,6 @@ mod tests {
 
         let bad_config = PluginConfig {
             id: "header_mutation".into(),
-            phase: String::new(),
             config: serde_json::json!({}),
         };
         assert!(HeaderMutationPlugin::from_config(&bad_config).is_err());

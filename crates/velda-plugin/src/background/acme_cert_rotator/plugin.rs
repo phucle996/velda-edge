@@ -1,4 +1,4 @@
-//! ACME Certificate Rotator Background Service (`phase: "background"`).
+//! ACME Certificate Rotator Background Service.
 //!
 //! Drives the automated certificate lifecycle on dedicated Shadow Logistics workers:
 //! 1. **Bootstrap Execution**: Inspects existing certificates on disk. If absent or expiring

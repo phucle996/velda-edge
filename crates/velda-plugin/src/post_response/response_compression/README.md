@@ -7,7 +7,7 @@ High-performance, content-negotiated HTTP response body compression plugin evalu
 >
 > **Exact Request Workspace Borrowing**: Inspects `Accept-Encoding` directly from the borrowed in-flight request headers workspace (`req_headers`), guaranteeing zero cross-request contamination in pipelined and multiplexed connections.
 >
-> **Never Specify `phase` in User Configuration**: The execution phase is statically inferred by Velda as `post_response`. Execution order strictly follows the route's `plugins` array order (FIFO).
+> **Compile-Time Stage (`PostResponsePlugin`)**: This plugin always executes in the `post_response` stage. Execution order strictly follows the route's `plugins` array order (FIFO).
 
 ---
 
@@ -30,7 +30,7 @@ The `response_compression` subsystem maintains a complete suite of specialized t
 | Property | Value |
 | :--- | :--- |
 | **Plugin ID** | `response_compression` |
-| **Lifecycle Phase** | `post_response` (Statically inferred) |
+| **Lifecycle Phase** | `PostResponsePlugin` (compile-time fixed) |
 | **Supported Protocols** | HTTP only (`http/1.1`, `http/2`, `http/3`) |
 | **Capability** | `PluginCapability { header: AccessLevel::Write, payload: AccessLevel::Write }` |
 | **Compression Codecs** | `zstd` (RFC 8878), `br` (RFC 7932), `gzip` (RFC 1952), `deflate` (RFC 1951) |

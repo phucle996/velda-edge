@@ -38,7 +38,7 @@
 +-----------------------------------------------------------------------------------+
 ```
 
-The **`jwt_auth`** plugin is Velda Edge's cryptographic authentication engine at L7 (`phase: "pre_upstream"`). It enforces identity verification by validating RFC 7519 JSON Web Tokens, evaluating expiration and custom claim policies, and projecting authenticated identity context directly into upstream request headers.
+The **`jwt_auth`** plugin is Velda Edge's cryptographic authentication engine at L7. It enforces identity verification by validating RFC 7519 JSON Web Tokens, evaluating expiration and custom claim policies, and projecting authenticated identity context directly into upstream request headers.
 
 ---
 
@@ -61,9 +61,9 @@ The **`jwt_auth`** plugin is Velda Edge's cryptographic authentication engine at
 ## 2. Where It Sits in Velda Edge
 
 - **Subsystem**: `crates/velda-plugin/src/pre_upstream/jwt_auth/`
-- **Execution Phase**: `phase: "pre_upstream"`
+- **Execution Stage**: `PreUpstreamPlugin` (compile-time fixed)
 - **Pipeline Placement**: Executes immediately after route matching and before forwarding requests to the upstream connection pool.
-- **Companion Relationship**: Can be paired with `jwks_rotator` (`phase: "background"`). When paired, `jwt_auth` dynamically verifies tokens against the in-memory key table published by `jwks_rotator`.
+- **Companion Relationship**: Can be paired with `jwks_rotator`. When paired, `jwt_auth` dynamically verifies tokens against the in-memory key table published by `jwks_rotator`.
 
 ---
 
@@ -96,12 +96,11 @@ The **`jwt_auth`** plugin is Velda Edge's cryptographic authentication engine at
 
 ## 5. Quick Start Configuration
 
-Add the plugin to your route or global `plugins.json` under the `"pre_upstream"` phase:
+Add the plugin to your `plugins.json` (and reference its ID in route `plugins`):
 
 ```json
 {
   "id": "api_jwt_auth",
-  "phase": "pre_upstream",
   "config": {
     "algorithm": "RS256",
     "secret_key": null,

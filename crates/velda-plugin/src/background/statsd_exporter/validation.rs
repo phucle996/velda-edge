@@ -1,4 +1,4 @@
-//! StatsD / DogStatsD Metrics Exporter Schema & Semantic Validation (`phase: "background"`).
+//! StatsD / DogStatsD Metrics Exporter Schema & Semantic Validation.
 
 use serde::{Deserialize, Serialize};
 

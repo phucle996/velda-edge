@@ -17,9 +17,9 @@ High-performance, zero-allocation background telemetry exporter for Velda Edge. 
 
 ## 2. Overview & Core Invariants
 
-The `otlp_log_shipper` plugin (`phase: "background"`) operates as an autonomous background companion service designed to format and export structured access logs without competing with frontline traffic workers:
+The `otlp_log_shipper` plugin operates as an autonomous background companion service designed to format and export structured access logs without competing with frontline traffic workers:
 
-* **Shadow Worker Execution (`phase: "background"`)**: Operates exclusively on background companion threads (`velda-shadow-{id}`) under Linux `SCHED_IDLE`. Traffic workers serving client HTTP requests never format strings, serialize JSON, or execute outbound network I/O.
+* **Shadow Worker Execution**: Operates exclusively on background companion threads (`velda-shadow-{id}`) under Linux `SCHED_IDLE`. Traffic workers serving client HTTP requests never format strings, serialize JSON, or execute outbound network I/O.
 * **Lock-Free SPSC Ring Drain**: Frontline traffic workers push 64-byte scalar `AccessLogRecord` structs into core-local Single-Producer Single-Consumer (SPSC) ring buffers without mutexes or lock contention.
 * **Pre-Baked Wire Skeletons (Protobuf)**: In gRPC mode, static Resource, Scope, and log record header framing bytes are pre-computed into static byte skeletons. Record attributes and timestamps are stamped directly into memory via raw pointer arithmetic, eliminating Prost runtime AST heap allocations.
 * **Pre-Baked Chunk Interleaving & SIMD Itoa (JSON)**: In HTTP mode, static JSON fragments, a 200-byte 2-digit ASCII lookup table (`DIGIT_PAIRS`), and SSSE3 `PSHUFB` vector instructions convert 128-bit trace and request IDs into 32 hex characters in parallel without scalar branching.
@@ -93,7 +93,7 @@ Under the Velda Edge Workload Distribution Model, background logistics plugins a
 ## 4. 100% Explicit Configuration Contract
 
 > [!IMPORTANT]
-> **Strict Configuration Invariant**: Every configuration parameter must be explicitly declared in `plugins.json`. No silent fallbacks or implicit defaults exist. Execution phase is automatically inferred as `background` via `canonical_phase_for_id` based on `id: "otlp_log_shipper"`.
+> **Strict Configuration Invariant**: Every configuration parameter must be explicitly declared in `plugins.json`. No silent fallbacks or implicit defaults exist. Execution stage is fixed at compile time (`BackgroundPlugin`).
 
 | Field | Type | Required | Constraints / Allowed Values | Recommended Value | Description |
 | :--- | :---: | :---: | :--- | :--- | :--- |

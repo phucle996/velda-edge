@@ -730,7 +730,6 @@ mod tests {
         });
         let config = PluginConfig {
             id: "canary".into(),
-            phase: String::new(),
             config: json_cfg,
         };
         let plugin = CanaryPlugin::from_config(&config).expect("valid config");

@@ -1,4 +1,4 @@
-//! Request Mirror Configuration Schema & Semantic Validation (`phase: "pre_upstream"`).
+//! Request Mirror Configuration Schema & Semantic Validation.
 //!
 //! Enforces a strict declarative contract for shadow traffic mirroring.
 //!

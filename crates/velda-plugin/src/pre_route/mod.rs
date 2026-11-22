@@ -1,4 +1,4 @@
-//! Pre-Route Execution Phase Plugins (`phase: "pre_route"`).
+//! Pre-Route Execution Stage Plugins (`PreRoutePlugin`).
 //!
 //! Evaluated on downstream requests immediately following L7 protocol decoding
 //! and before route lookup (e.g., JWT authentication, IP blacklisting, WAF inspection).
@@ -79,11 +79,25 @@ pub fn run_pre_route_plugins(chain: &[Arc<dyn PreRoutePlugin>], req: &mut L7Requ
     Action::Continue
 }
 
-/// Sub-dispatcher: instantiates concrete [`PreRoutePlugin`] instances for this phase.
+/// Compile-time registry check for plugins owned by the `pre_route` stage.
+#[inline]
+pub fn owns_id(id: &str) -> bool {
+    matches!(
+        id,
+        "ip_filter"
+            | "cors_preflight"
+            | "resource_limit"
+            | "waf_lite"
+            | "method_filter"
+            | "https_redirect"
+    )
+}
+
+/// Sub-dispatcher: instantiates concrete [`PreRoutePlugin`] instances for this stage.
 ///
 /// # Open-Closed Principle (OCP)
-/// Adding a new pre-route plugin requires adding exactly 1 match arm here, delegating
-/// config extraction and validation to the plugin's own `from_config` implementation.
+/// Adding a new pre-route plugin requires adding its ID to [`owns_id`] and 1 match arm here,
+/// delegating config extraction and validation to the plugin's own `from_config` implementation.
 pub fn instantiate(
     config: &crate::config::PluginConfig,
 ) -> Result<Arc<dyn PreRoutePlugin>, crate::error::PluginError> {
@@ -111,7 +125,6 @@ mod tests {
     fn test_pre_route_ip_filter_execution() {
         let config = crate::config::PluginConfig {
             id: "ip_filter".into(),
-            phase: "pre_route".into(),
             config: serde_json::json!({
                 "mode": "deny",
                 "allow_cidrs": [],

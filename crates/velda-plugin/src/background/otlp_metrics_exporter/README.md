@@ -17,9 +17,9 @@ High-performance, zero-allocation background telemetry exporter for Velda Edge. 
 
 ## 2. Overview & Core Invariants
 
-The `otlp_metrics_exporter` plugin (`phase: "background"`) operates as an autonomous background companion service designed to stream OpenTelemetry telemetry without competing with frontline traffic workers:
+The `otlp_metrics_exporter` plugin operates as an autonomous background companion service designed to stream OpenTelemetry telemetry without competing with frontline traffic workers:
 
-* **Shadow Worker Execution (`phase: "background"`)**: Operates exclusively on background companion threads (`velda-shadow-{id}`) under Linux `SCHED_IDLE`. Traffic workers serving client HTTP requests never execute serialization, Protobuf encoding, or outbound network calls.
+* **Shadow Worker Execution**: Operates exclusively on background companion threads (`velda-shadow-{id}`) under Linux `SCHED_IDLE`. Traffic workers serving client HTTP requests never execute serialization, Protobuf encoding, or outbound network calls.
 * **Lock-Free Atomic Extraction**: Reads point-in-time snapshots from `velda-observability` via `MetricsStore::snapshot()` using relaxed atomic loads, completely eliminating locks, mutexes, and thread contention on the hot path.
 * **Zero-Alloc In-Place Wire Skeleton (Protobuf)**: In gRPC mode, pre-renders the complete OpenTelemetry ResourceMetrics AST into a static binary wire skeleton once at startup, caching fixed-length byte offsets for timestamps and counters. Each flush cycle patches values directly into memory with zero dynamic heap allocations.
 * **Pre-Baked Chunk Interleaving & SIMD Itoa (JSON)**: In HTTP mode, employs a pre-rendered JSON template, a 200-byte 2-digit ASCII lookup table (`DIGIT_PAIRS`), and 128-bit SSE2 vector itoa for timestamps, eliminating `serde_json` runtime parsing and dynamic string allocations.
@@ -94,7 +94,7 @@ Under the Velda Edge Workload Distribution Model, background logistics plugins a
 ## 4. 100% Explicit Configuration Contract
 
 > [!IMPORTANT]
-> **Strict Configuration Invariant**: Every configuration parameter must be explicitly declared in `plugins.json`. No silent fallbacks or implicit defaults exist. Execution phase is automatically inferred as `background` via `canonical_phase_for_id` based on `id: "otlp_metrics_exporter"`.
+> **Strict Configuration Invariant**: Every configuration parameter must be explicitly declared in `plugins.json`. No silent fallbacks or implicit defaults exist. Execution stage is fixed at compile time (`BackgroundPlugin`).
 
 | Field | Type | Required | Constraints / Allowed Values | Recommended Value | Description |
 | :--- | :---: | :---: | :--- | :--- | :--- |

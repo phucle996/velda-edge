@@ -1,4 +1,4 @@
-//! Kafka Log Shipper Schema & Semantic Validation (`phase: "background"`).
+//! Kafka Log Shipper Schema & Semantic Validation.
 
 use super::config::{KafkaLogShipperConfig, KafkaTransportSecurity};
 use crate::error::PluginError;

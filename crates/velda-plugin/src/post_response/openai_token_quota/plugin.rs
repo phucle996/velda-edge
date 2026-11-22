@@ -1,4 +1,4 @@
-//! `openai_token_quota` Post-Response Plugin (`phase: "post_response"`).
+//! `openai_token_quota` Post-Response Plugin.
 //!
 //! Hot-Path Execution Mechanism (Zero Heap Allocation, Zero Mutex, Zero Blocking I/O):
 //!
@@ -284,7 +284,6 @@ mod tests {
         velda_core::clock::init_clock();
         let cfg = PluginConfig {
             id: "openai_token_quota".to_string(),
-            phase: "post_response".to_string(),
             config: json!({
                 "consumer_id_headers": ["x-tenant-id"]
             }),
@@ -314,7 +313,6 @@ mod tests {
         velda_core::clock::init_clock();
         let cfg = PluginConfig {
             id: "openai_token_quota".to_string(),
-            phase: "post_response".to_string(),
             config: json!({
                 "mode": "local",
                 "consumer_id_headers": ["x-tenant-id", "x-user-id"],

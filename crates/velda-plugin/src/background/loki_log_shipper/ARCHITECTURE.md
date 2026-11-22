@@ -6,7 +6,7 @@ This document details the internal subsystem architecture, threading model, memo
 
 ## 1. Subsystem Mission & Responsibilities
 
-The `loki_log_shipper` is an autonomous background logistics plugin (`phase: "background"`) designed to:
+The `loki_log_shipper` is an autonomous background logistics plugin designed to:
 1. Drain reference-counted 64-byte `AccessLogRecord` batches from `velda-observability::LogStore` via lock-free core-local SPSC ring buffers.
 2. Partition log records into protocol family streams (`protocol="http"`, `protocol="grpc"`, `protocol="raw"`) to guarantee bounded label cardinality.
 3. Serialize records into Grafana Loki Push payloads over persistent HTTP/2 (gRPC `/logproto.Pusher/Push` on port 9096) or persistent HTTP/1.1 Keep-Alive JSON (`/loki/api/v1/push` on port 3100).

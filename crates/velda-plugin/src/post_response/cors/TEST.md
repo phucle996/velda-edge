@@ -1,185 +1,37 @@
-# CORS Post-Response Plugin (`cors`) — Test & Verification Report
+# Verification & Test Report (`post_response::cors`)
 
-This document records the official testing methodology, test scenarios, edge-case assertions, and empirical verification results for the **`cors`** post-response plugin (W3C Fetch / RFC 6454 / RFC 9110).
+## 1. Execution Summary
 
----
-
-## 1. Objectives & Architectural Invariants
-
-The `cors` plugin executes at the Layer 7 egress phase on outgoing upstream responses, ensuring:
-- **RFC 6454 Credential Security**: Never emits `Access-Control-Allow-Origin: *` when credentials are permitted (`allow_credentials: true`). Always reflects the validated downstream `Origin`.
-- **Cache Poisoning Defense (RFC 9110)**: Guarantees that any origin-sensitive response includes `Vary: Origin`, protecting downstream CDNs and browser caches from cross-origin cache poisoning.
-- **Header Preservation**: Preserves upstream-generated headers (`Vary: Accept-Encoding`, `Cache-Control`, `Content-Encoding`) without overwriting or destructive string replacements.
-- **Strict Disallowed Origin Suppression**: Requests bearing unauthorized `Origin` values receive clean upstream responses with zero CORS headers, preventing JavaScript access.
-- **Fast Non-CORS Pass-Through**: Non-cross-origin traffic (no `Origin` header) incurs zero header manipulation.
+| Command | Scope | Result |
+| :--- | :--- | :---: |
+| `cargo test -p velda-plugin -- post_response::cors` | Unit tests across `origin.rs`, `validation.rs`, `plugin.rs` | **13 passed; 0 failed** |
+| `cargo test -p velda-plugin --test cors_suite_test` | End-to-end `cors_preflight` + `cors` integration suite | **8 passed; 0 failed** |
 
 ---
 
-## 2. Testing Methodology & Environment Setup
+## 2. Verified Test Matrix
 
-Testing spans four verification tiers:
+### Unit Tests (`cargo test -p velda-plugin -- post_response::cors`)
+- `origin::tests::test_subdomain_injection_defenses` — Validates CVE-2020-7662 path/userinfo/port injection blocking and multi-byte UTF-8 slice safety.
+- `validation::tests::test_valid_cors_response` — Validates exact, subdomain, credentials, and expose header configuration.
+- `validation::tests::test_wildcard_with_credentials_rejected` — Rejects `*` when `allow_credentials: true`.
+- `validation::tests::test_null_with_credentials_rejected` — Rejects `null` when `allow_credentials: true`.
+- `validation::tests::test_expose_wildcard_with_credentials_rejected` — Rejects `*` in `expose_headers` when `allow_credentials: true`.
+- `validation::tests::test_origin_with_userinfo_rejected` — Rejects embedded `@` userinfo in origin patterns.
+- `validation::tests::test_missing_required_fields_rejected` — Enforces zero silent fallbacks.
+- `plugin::tests::test_swar_vary_scanner` — Verifies 64-bit SWAR case-insensitive `"origin"` / `"*"` matching.
+- `plugin::tests::test_wildcard_without_credentials` — Verifies `*` emission without `Vary: Origin` or credentials.
+- `plugin::tests::test_rust_constructor_rejects_wildcard_with_credentials` — Verifies RFC 6454 parity on `CorsResponsePlugin::new`.
+- `plugin::tests::test_scrubs_upstream_cors_leak_on_missing_or_disallowed_origin` — Verifies removal of upstream CORS headers and preservation of `Vary: Origin`.
+- `plugin::tests::test_single_source_of_truth_overrides_and_scrubs_disabled_headers` — Verifies Edge overrides `Allow-Origin` and removes `Allow-Credentials` / `Expose-Headers` when disabled.
+- `plugin::tests::test_from_config_complete_with_expose_headers` — Verifies JSON deserialization, subdomain matching, exposed headers, and multi-value `Vary` appending.
 
-```mermaid
-flowchart LR
-    subgraph ClientHost["Azure VM2 (Client Runner)"]
-        client["wrk / curl\n(Sends Origin Header)"]
-    end
-
-    subgraph GatewayHost["Azure VM1 (Velda Edge Gateway)"]
-        upstream_call["Upstream Fetch\n(Returns Upstream Headers)"]
-        post["post_response: cors\n(Template Injection + Vary Append)"]
-    end
-
-    subgraph UpstreamHost["Azure VM2 (Backend Mock)"]
-        backend["HTTP Service\n(Emits Vary: Accept-Encoding)"]
-    end
-
-    client -->|"GET /api/data (Origin: https://app.example.com)"| upstream_call
-    upstream_call -->|"Fetch Data"| backend
-    backend -->|"200 OK with Vary: Accept-Encoding"| post
-    post -->|"Inject CORS Headers + Append Vary: Origin"| client
-```
-
-### Tier 1: Whitebox Unit Tests
-- Implemented in [`crates/velda-plugin/src/post_response/cors/plugin.rs`](./plugin.rs).
-- Verifies `on_response` behavior across wildcard, exact, and subdomain origin configurations, credentials enforcement, expose headers joining, and `Vary` multi-value appends.
-
-### Tier 2: Egress Header Preservation Tests
-- Asserts that upstream response headers (`Content-Type`, `Content-Length`, `Vary: Accept-Encoding`, `ETag`) are strictly preserved.
-- Validates that multiple `Vary` headers are handled via HTTP multi-value lists rather than string concatenations.
-
-### Tier 3: Crate Integration Tests
-- Implemented in [`crates/velda-plugin/tests/cors_suite_test.rs`](../../../tests/cors_suite_test.rs).
-- Executes coordinated workflows involving preflight `OPTIONS` and standard `GET`/`POST` responses across configured routes.
-
-### Tier 4: Distributed Azure VM Live Cluster
-- Gateway on Azure VM1 (4 vCPUs) and Client/Upstream on Azure VM2 (2 vCPUs) over Accelerated Networking VNet.
-- Asserts end-to-end latency, throughput parity, and RFC compliance under sustained concurrent traffic.
-
----
-
-## 3. Test Scenarios & Detailed Verification Matrix
-
-### 3.1 Scenario Matrix
-
-| ID | Test Scenario | Request Origin | Upstream Headers | Configured Plugin Settings | Expected Response Headers | Status |
-| :---: | :--- | :--- | :--- | :--- | :--- | :---: |
-| **P1** | **Default Wildcard** | `https://random.com` | `(none)` | `allow_origins: ["*"]`<br>`credentials: false` | `access-control-allow-origin: *`<br>*(No Vary: Origin)* | **PASS** |
-| **P2** | **Exact Origin Reflection** | `https://app.example.com` | `(none)` | `allow_origins: ["https://app.example.com"]`<br>`credentials: false` | `access-control-allow-origin: https://app.example.com`<br>`vary: Origin` | **PASS** |
-| **P3** | **Credentials Enforcement** | `https://app.example.com` | `(none)` | `allow_origins: ["https://app.example.com"]`<br>`credentials: true` | `access-control-allow-origin: https://app.example.com`<br>`access-control-allow-credentials: true`<br>`vary: Origin` | **PASS** |
-| **P4** | **Subdomain Wildcard** | `https://api.corp.internal` | `(none)` | `allow_origins: ["https://*.corp.internal"]`<br>`credentials: true` | `access-control-allow-origin: https://api.corp.internal`<br>`access-control-allow-credentials: true`<br>`vary: Origin` | **PASS** |
-| **P5** | **Disallowed Origin** | `https://malicious.com` | `x-custom: value` | `allow_origins: ["https://app.example.com"]` | `x-custom: value`<br>*(Zero CORS headers injected)* | **PASS** |
-| **P6** | **Non-CORS Request** | *(No Origin)* | `content-type: text/plain` | `allow_origins: ["*"]` | `content-type: text/plain`<br>*(Zero CORS headers injected)* | **PASS** |
-| **P7** | **Multi-Value Vary Append** | `https://app.example.com` | `vary: Accept-Encoding` | `allow_origins: ["https://app.example.com"]` | `vary: Accept-Encoding`<br>`vary: Origin`<br>*(Both headers preserved cleanly)* | **PASS** |
-| **P8** | **Existing Vary: Origin Idempotency** | `https://app.example.com` | `vary: Origin, Accept-Encoding` | `allow_origins: ["https://app.example.com"]` | `vary: Origin, Accept-Encoding`<br>*(No duplicate Vary header appended)* | **PASS** |
-| **P9** | **Expose Headers Injection** | `https://app.example.com` | `(none)` | `expose_headers: ["x-request-id", "x-total-count"]` | `access-control-expose-headers: x-request-id, x-total-count` | **PASS** |
-| **P10**| **Max-Age Injection** | `https://app.example.com` | `(none)` | `max_age_secs: 86400` | `access-control-max-age: 86400` | **PASS** |
-| **P11**| **SWAR 64-Bit Origin Word Scanner** | `https://app.example.com` | `vary: accept-encoding, ORIGIN, user-agent` | `allow_origins: ["https://app.example.com"]` | `vary: accept-encoding, ORIGIN, user-agent`<br>*(Phát hiện chuẩn xác 64-bit SWAR, không duplicate)* | **PASS** |
-| **P12**| **Fast-Path Vary Single Hash (No Vary)** | `https://app.example.com` | `(none)` | `allow_origins: ["https://app.example.com"]` | `vary: Origin`<br>*(Single hash lookup fast-path, 0 loops)* | **PASS** |
-
----
-
-## 4. Edge-Case Invariant Verification
-
-### 4.1 SWAR 64-Bit Integer Origin Scanner & Vary Preservation
-Cơ chế SWAR 64-bit sử dụng mặt nạ lowercase `0x0000_2020_2020_2020` và hằng số `0x0000_6e69_6769_726f` để nhận diện token `"origin"` trong đúng 1 chu kỳ ALU:
-
-```rust
-#[test]
-fn test_swar_origin_scanner() {
-    assert!(is_token_origin_swar(b"origin"));
-    assert!(is_token_origin_swar(b"Origin"));
-    assert!(is_token_origin_swar(b"ORIGIN"));
-    assert!(is_token_origin_swar(b"oRiGiN"));
-    assert!(!is_token_origin_swar(b"origix"));
-    assert!(!is_token_origin_swar(b"accept"));
-
-    assert!(contains_origin_or_star(b"origin"));
-    assert!(contains_origin_or_star(b"Origin"));
-    assert!(contains_origin_or_star(b"Accept-Encoding, Origin"));
-    assert!(contains_origin_or_star(b"Accept-Encoding, origin, User-Agent"));
-    assert!(contains_origin_or_star(b"*"));
-    assert!(contains_origin_or_star(b"Accept-Encoding, *"));
-    assert!(!contains_origin_or_star(b"Accept-Encoding, User-Agent"));
-    assert!(!contains_origin_or_star(b"Accept-Language"));
-}
-```
-
-### 4.2 Cache Poisoning Prevention & Vary Header Idempotency
-When an upstream service already emits a `Vary` header (such as `Vary: Accept-Encoding, User-Agent`), naive CORS plugins often overwrite it with `Vary: Origin`, destroying HTTP compression caching downstream.
-
-#### Test Verification Code:
-```rust
-#[test]
-fn test_preserve_existing_vary_headers() {
-    let plugin = CorsResponsePlugin::new("cors", "https://app.example.com", false);
-    let mut resp = L7Response::empty(StatusCode::OK);
-    resp.headers.insert(VARY, HeaderValue::from_static("Accept-Encoding"));
-    
-    let mut req_headers = HeaderMap::new();
-    req_headers.insert(ORIGIN, "https://app.example.com".parse().unwrap());
-
-    plugin.on_response(&req_headers, &mut resp);
-
-    let vary_values: Vec<_> = resp.headers.get_all(VARY).iter().map(|v| v.to_str().unwrap()).collect();
-    assert_eq!(vary_values, vec!["Accept-Encoding", "Origin"]);
-}
-```
-**Result**: Passes. Both headers are returned independently on the wire, complying fully with RFC 9110 Section 12.5.5.
-
-### 4.2 Disallowed Origin Isolation
-When an attacker sends an origin not listed in the whitelist:
-```http
-GET /api/data HTTP/1.1
-Host: gateway.example.com
-Origin: https://attacker.com
-```
-**Assertion**:
-- `resp.headers.get(ACCESS_CONTROL_ALLOW_ORIGIN)` is `None`.
-- `resp.headers.get(ACCESS_CONTROL_ALLOW_CREDENTIALS)` is `None`.
-- Downstream browser blocks JavaScript access to response data per the Same-Origin Policy.
-
----
-
-## 5. Live Azure Cluster Verification Summary
-
-Live verification was performed between Azure VM1 (`<GATEWAY_VM_IP>`) and Azure VM2 (`<CLIENT_VM_IP>`):
-
-```bash
-# Valid Origin Request with Credentials:
-curl -s -D - -o /dev/null \
-  -H "Origin: https://app.example.com" \
-  http://<GATEWAY_HOST>/api/data
-
-HTTP/1.1 200 OK
-content-type: text/plain
-content-length: 4
-access-control-allow-origin: https://app.example.com
-access-control-allow-credentials: true
-access-control-expose-headers: x-request-id
-vary: Origin
-```
-
-```bash
-# Unauthorized Origin Probe:
-curl -s -D - -o /dev/null \
-  -H "Origin: https://hacker.com" \
-  http://<GATEWAY_HOST>/api/data
-
-HTTP/1.1 200 OK
-content-type: text/plain
-content-length: 4
-# Zero CORS headers emitted. Same-Origin Policy enforced.
-```
-
----
-
-## 6. Coverage Summary
-
-| Component | Coverage Focus | Test Cases | Status |
-| :--- | :--- | :---: | :---: |
-| `CorsResponsePlugin::on_response` | Header injection, wildcard vs exact reflection, credentials | 12 | **PASS** |
-| `Vary` Header Merging | Multi-value append, case-insensitive idempotency, RFC 9110 | 6 | **PASS** |
-| Subdomain Pattern Matching | 256-byte LUT verification, DNS character bounds, prefix/suffix | 8 | **PASS** |
-| Pass-Through Bypasses | Missing Origin, disallowed Origin | 4 | **PASS** |
-| **Total** | **Comprehensive Post-Response CORS Verification** | **30** | **100% PASS** |
+### Integration Suite (`cargo test -p velda-plugin --test cors_suite_test`)
+- `test_spa_multi_phase_lifecycle`
+- `test_preflight_method_bitmask_rejection`
+- `test_preflight_unauthorized_origin_rejection`
+- `test_subdomain_pattern_and_cve_2020_7662_defense`
+- `test_non_cors_traffic_pass_through`
+- `test_wildcard_origin_without_credentials`
+- `test_vary_header_idempotency`
+- `test_edge_single_source_of_truth_scrubs_upstream_cors`

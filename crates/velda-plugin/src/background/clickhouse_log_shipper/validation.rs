@@ -1,4 +1,4 @@
-//! ClickHouse Log Shipper Schema & Semantic Validation (`phase: "background"`).
+//! ClickHouse Log Shipper Schema & Semantic Validation.
 
 use crate::error::PluginError;
 

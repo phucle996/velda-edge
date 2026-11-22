@@ -48,7 +48,7 @@ Declare the plugin in `/etc/velda/config/plugins.json`:
 }
 ```
 
-> **Strict Configuration Invariant**: Every configuration parameter must be explicitly declared in `plugins.json`. Execution phase is automatically inferred as `background` via `canonical_phase_for_id` based on `id: "kafka_log_shipper"`.
+> **Strict Configuration Invariant**: Every configuration parameter must be explicitly declared in `plugins.json`. Execution stage is fixed at compile time (`BackgroundPlugin`).
 
 ### Configuration Parameters
 

@@ -199,7 +199,6 @@ fn create_jwt_hs256(kid: Option<&str>, secret_bytes: &[u8], sub: &str) -> String
 fn make_jwt_plugin_config(id: &str, secret: &str) -> PluginConfig {
     PluginConfig {
         id: id.into(),
-        phase: "pre_upstream".into(),
         config: json!({
             "algorithm": "HS256",
             "secret_key": secret,
@@ -268,7 +267,6 @@ async fn test_jwt_jwks_rotation_e2e_flow() {
     // 3. Instantiate jwks_rotator plugin targeting auth_jwt
     let rotator_config = PluginConfig {
         id: "rotator_jwks".into(),
-        phase: "background".into(),
         config: json!({
             "target_jwt_auth_id": "auth_jwt",
             "jwks_uri": jwks_uri,
@@ -402,7 +400,6 @@ async fn test_jwks_slot_overflow_clamping() {
 
     let rotator_config = PluginConfig {
         id: "rotator_overflow".into(),
-        phase: "background".into(),
         config: json!({
             "target_jwt_auth_id": "auth_jwt_overflow",
             "jwks_uri": jwks_uri,
@@ -459,7 +456,6 @@ async fn test_jwks_idp_outage_resilience() {
 
     let rotator_config = PluginConfig {
         id: "rotator_resilience".into(),
-        phase: "background".into(),
         config: json!({
             "target_jwt_auth_id": "auth_jwt_resilience",
             "jwks_uri": jwks_uri,
@@ -510,7 +506,6 @@ async fn test_concurrent_request_validation_during_rotation() {
 
     let rotator_config = PluginConfig {
         id: "rotator_concurrent".into(),
-        phase: "background".into(),
         config: json!({
             "target_jwt_auth_id": "auth_jwt_concurrent",
             "jwks_uri": jwks_uri,

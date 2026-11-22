@@ -6,7 +6,7 @@ This document details the internal subsystem architecture, socket allocation mod
 
 ## 1. Subsystem Mission & Responsibilities
 
-The `statsd_exporter` is an autonomous background logistics plugin (`phase: "background"`) designed to:
+The `statsd_exporter` is an autonomous background logistics plugin designed to:
 1. Periodically extract point-in-time telemetry snapshots from `velda-observability` via non-blocking relaxed atomic vector reads.
 2. Serialize metrics into DogStatsD (tag-based) or Standard StatsD (dot-notation) line protocol text without dynamic heap allocation.
 3. Pack metric lines into strictly bounded UDP datagrams matching host MTU boundaries ($\le 1432$ bytes).

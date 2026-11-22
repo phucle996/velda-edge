@@ -1,4 +1,4 @@
-//! JWKS Background Key Rotator Plugin (`phase: "background"`).
+//! JWKS Background Key Rotator Plugin.
 
 pub mod config;
 pub mod fetcher;

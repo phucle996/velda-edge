@@ -11,7 +11,6 @@ All fields must be declared under `config` when configuring `jwks_rotator` in `p
 ```json
 {
   "id": "auth0_rotator",
-  "phase": "background",
   "config": {
     "target_jwt_auth_id": "api_jwt_auth",
     "jwks_uri": "https://auth.example.com/.well-known/jwks.json",
@@ -44,7 +43,6 @@ Use these tuned configurations based on your operational environment:
 ```json
 {
   "id": "public_edge_jwks_rotator",
-  "phase": "background",
   "config": {
     "target_jwt_auth_id": "edge_jwt_auth",
     "jwks_uri": "https://company.us.auth0.com/.well-known/jwks.json",
@@ -64,7 +62,6 @@ Use these tuned configurations based on your operational environment:
 ```json
 {
   "id": "canary_jwks_rotator",
-  "phase": "background",
   "config": {
     "target_jwt_auth_id": "canary_jwt_auth",
     "jwks_uri": "https://idp-staging.internal.net/.well-known/jwks.json",
@@ -84,7 +81,6 @@ Use these tuned configurations based on your operational environment:
 ```json
 {
   "id": "wan_jwks_rotator",
-  "phase": "background",
   "config": {
     "target_jwt_auth_id": "wan_jwt_auth",
     "jwks_uri": "https://auth.remote-region.corp/.well-known/jwks.json",
@@ -179,12 +175,10 @@ curl -s https://auth.example.com/.well-known/jwks.json | jq '.keys[] | {kid: .ki
    ```json
    {
      "id": "jwt_auth_ingress",      <--- Must match exactly
-     "phase": "pre_upstream",
      ...
    },
    {
      "id": "jwks_rotator_bg",
-     "phase": "background",
      "config": {
        "target_jwt_auth_id": "jwt_auth_ingress"  <--- Must match exactly
      }

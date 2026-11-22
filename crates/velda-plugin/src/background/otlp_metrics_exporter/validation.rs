@@ -1,4 +1,4 @@
-//! OpenTelemetry Metrics Exporter Schema & Semantic Validation (`phase: "background"`).
+//! OpenTelemetry Metrics Exporter Schema & Semantic Validation.
 
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;

@@ -1,4 +1,4 @@
-//! HTTP Cache Lookup Configuration Schema & Semantic Validation (`phase: "pre_upstream"`).
+//! HTTP Cache Lookup Configuration Schema & Semantic Validation.
 //!
 //! Enforces a strict declarative contract for HTTP caching and in-memory cache lookup.
 //!

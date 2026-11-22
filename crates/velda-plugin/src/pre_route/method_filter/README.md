@@ -28,7 +28,7 @@
 +-----------------------------------------------------------------------------------+
 ```
 
-The **`method_filter`** plugin is Velda Edge's 1-cycle HTTP method allowlist and verb-tampering guard (`phase: "pre_route"`). It converts incoming HTTP request methods into compact `HttpMethod` integer discriminants (`0..=9`) and evaluates them against a pre-compiled 16-bit bitmask before route lookup, WAF scanning, or body streaming.
+The **`method_filter`** plugin is Velda Edge's 1-cycle HTTP method allowlist and verb-tampering guard. It converts incoming HTTP request methods into compact `HttpMethod` integer discriminants (`0..=9`) and evaluates them against a pre-compiled 16-bit bitmask before route lookup, WAF scanning, or body streaming.
 
 ---
 
@@ -46,7 +46,7 @@ The **`method_filter`** plugin is Velda Edge's 1-cycle HTTP method allowlist and
 ## 2. Where It Sits in Velda Edge
 
 - **Subsystem**: `crates/velda-plugin/src/pre_route/method_filter/`
-- **Execution Phase**: `phase: "pre_route"`
+- **Execution Stage**: `PreRoutePlugin` (compile-time fixed)
 - **Runtime Placement**: Executed inline on Frontline Traffic Workers (`velda-worker-{i}`).
 - **Recommended Pipeline Order**: `ip_filter` $\to$ `method_filter` $\to$ `resource_limit` $\to$ `cors_preflight` $\to$ `waf_lite`.
 
@@ -64,7 +64,6 @@ The **`method_filter`** plugin is Velda Edge's 1-cycle HTTP method allowlist and
 ```json
 {
   "id": "method_filter",
-  "phase": "pre_route",
   "config": {
     "allowed_methods": ["GET", "POST", "PUT", "DELETE", "OPTIONS"]
   }

@@ -1,4 +1,4 @@
-//! Header Mutation Configuration Schema & Semantic Validation (`phase: "pre_upstream"`).
+//! Header Mutation Configuration Schema & Semantic Validation.
 //!
 //! Enforces a strict declarative contract for mutating downstream request headers
 //! prior to upstream forwarding.

@@ -23,7 +23,7 @@
 +-----------------------------------------------------------------------------------+
 ```
 
-The **`cors_preflight`** plugin intercepts browser CORS preflight `OPTIONS` requests at the **Velda Edge** ingress perimeter (`phase: "pre_route"`), terminating valid preflights with `204 No Content` before route lookup or upstream connection leasing.
+The **`cors_preflight`** plugin intercepts browser CORS preflight `OPTIONS` requests at the **Velda Edge** ingress perimeter, terminating valid preflights with `204 No Content` before route lookup or upstream connection leasing.
 
 ---
 
@@ -41,7 +41,7 @@ The **`cors_preflight`** plugin intercepts browser CORS preflight `OPTIONS` requ
 ## 2. Where It Sits in Velda Edge
 
 - **Subsystem**: `crates/velda-plugin/src/pre_route/cors_preflight/`
-- **Execution Phase**: `phase: "pre_route"`
+- **Execution Stage**: `PreRoutePlugin` (compile-time fixed)
 - **Runtime Placement**: Executed inline on Frontline Traffic Workers (`velda-worker-{i}`).
 
 ---
@@ -58,7 +58,6 @@ The **`cors_preflight`** plugin intercepts browser CORS preflight `OPTIONS` requ
 ```json
 {
   "id": "cors_preflight",
-  "phase": "pre_route",
   "config": {
     "allowed_origins": ["https://app.example.com", "https://*.corp.internal"],
     "allowed_methods": ["GET", "POST", "PUT", "DELETE", "OPTIONS"],

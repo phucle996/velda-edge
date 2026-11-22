@@ -208,7 +208,6 @@ async fn test_s3_shipper_end_to_end_sigv4_and_zstd() {
 fn test_validation_accepts_es_and_s3_background_plugins() {
     let mut es = PluginConfig {
         id: "elasticsearch_log_shipper".to_string(),
-        phase: "background".to_string(),
         config: serde_json::json!({
             "endpoints": ["http://127.0.0.1:9200"],
             "index": "velda-logs"
@@ -216,7 +215,6 @@ fn test_validation_accepts_es_and_s3_background_plugins() {
     };
     let mut s3 = PluginConfig {
         id: "s3_log_shipper".to_string(),
-        phase: "background".to_string(),
         config: serde_json::json!({
             "endpoint": "http://127.0.0.1:9000",
             "bucket": "velda-bucket",

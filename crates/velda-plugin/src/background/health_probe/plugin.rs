@@ -356,7 +356,6 @@ mod tests {
         });
         let config = PluginConfig {
             id: "health_probe".into(),
-            phase: String::new(),
             config: json_cfg,
         };
 

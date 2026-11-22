@@ -1,4 +1,4 @@
-//! Post-Response Execution Phase Plugins (`phase: "post_response"`).
+//! Post-Response Execution Stage Plugins (`PostResponsePlugin`).
 //!
 //! Evaluated on upstream responses immediately before encoding and transmitting
 //! frames back to the downstream client (e.g., security response headers, compression, response body masking).
@@ -19,7 +19,7 @@ pub mod response_compression;
 pub mod response_header_mutation;
 pub mod security_headers;
 
-pub use cors::{CorsConfig, CorsResponsePlugin};
+pub use cors::{CorsConfig, CorsOriginPattern, CorsResponsePlugin};
 pub use http_cache_store::{HttpCacheStoreConfig, HttpCacheStorePlugin};
 pub use openai_token_quota::{
     OpenAiTokenQuotaConfig, OpenAiTokenQuotaPlugin, SharedUsageArena, TokenUsage,
@@ -83,11 +83,25 @@ pub fn run_post_response_plugins(
     resp.headers.render();
 }
 
-/// Sub-dispatcher: instantiates concrete [`PostResponsePlugin`] instances for this phase.
+/// Compile-time registry check for plugins owned by the `post_response` stage.
+#[inline]
+pub fn owns_id(id: &str) -> bool {
+    matches!(
+        id,
+        "security_headers"
+            | "cors"
+            | "http_cache_store"
+            | "response_header_mutation"
+            | "response_compression"
+            | "openai_token_quota"
+    )
+}
+
+/// Sub-dispatcher: instantiates concrete [`PostResponsePlugin`] instances for this stage.
 ///
 /// # Open-Closed Principle (OCP)
-/// Adding a new post-response plugin requires adding exactly 1 match arm here, delegating
-/// config extraction and validation to the plugin's own `from_config` implementation.
+/// Adding a new post-response plugin requires adding its ID to [`owns_id`] and 1 match arm here,
+/// delegating config extraction and validation to the plugin's own `from_config` implementation.
 pub fn instantiate(
     config: &crate::config::PluginConfig,
 ) -> Result<Arc<dyn PostResponsePlugin>, crate::error::PluginError> {
@@ -136,11 +150,8 @@ mod tests {
 
     #[test]
     fn test_post_response_cors_injection() {
-        let plugin = Arc::new(CorsResponsePlugin::new(
-            "cors-1",
-            "https://app.example.com",
-            true,
-        ));
+        let plugin =
+            Arc::new(CorsResponsePlugin::new("cors-1", "https://app.example.com", true).unwrap());
         let chain: Vec<Arc<dyn PostResponsePlugin>> = vec![plugin];
 
         let mut resp = L7Response::empty(StatusCode::NO_CONTENT);

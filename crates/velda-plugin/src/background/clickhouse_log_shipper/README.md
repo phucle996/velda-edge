@@ -18,12 +18,11 @@
 
 ## 2. Configuration Reference
 
-Declare the plugin under the `"background"` phase in `/etc/velda/config/plugins.json`:
+Declare the plugin in `/etc/velda/config/plugins.json`:
 
 ```json
 {
   "id": "clickhouse_log_shipper",
-  "phase": "background",
   "config": {
     "endpoint": "http://192.168.1.50:8123",
     "transport_security": "plain",

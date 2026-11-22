@@ -11,7 +11,6 @@ This document is the operational playbook and configuration guide (**SRE Runbook
 ```json
 {
   "id": "ip_filter",
-  "phase": "pre_route",
   "config": {
     "mode": "deny",
     "allow_cidrs": ["10.0.0.0/8"],
@@ -40,7 +39,6 @@ This document is the operational playbook and configuration guide (**SRE Runbook
 ```json
 {
   "id": "admin_ip_whitelist",
-  "phase": "pre_route",
   "config": {
     "mode": "allow",
     "allow_cidrs": ["10.100.0.0/16", "172.16.50.0/24", "2001:db8:corp::/48"],
@@ -57,7 +55,6 @@ This document is the operational playbook and configuration guide (**SRE Runbook
 ```json
 {
   "id": "public_ip_denylist",
-  "phase": "pre_route",
   "config": {
     "mode": "deny",
     "allow_cidrs": ["198.51.100.42/32"],

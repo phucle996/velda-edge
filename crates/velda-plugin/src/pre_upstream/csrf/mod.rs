@@ -1,4 +1,4 @@
-//! Cross-Site Request Forgery (CSRF) Protection Plugin (`phase: "pre_upstream"`).
+//! Cross-Site Request Forgery (CSRF) Protection Plugin.
 
 pub mod plugin;
 pub mod token;

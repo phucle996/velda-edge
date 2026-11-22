@@ -1,4 +1,4 @@
-//! JWT Authentication Configuration Schema & Semantic Validation (`phase: "pre_upstream"`).
+//! JWT Authentication Configuration Schema & Semantic Validation.
 //!
 //! Enforces a strict declarative contract for JWT token extraction, cryptographic verification,
 //! and claims-to-headers mapping.

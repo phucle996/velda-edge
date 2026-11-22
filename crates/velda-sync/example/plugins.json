@@ -134,13 +134,11 @@
         "expose_headers": [
           "x-request-id"
         ],
-        "allow_credentials": true,
-        "max_age_secs": 86400
+        "allow_credentials": true
       }
     },
     {
       "id": "std_log_shipper",
-      "phase": "background",
       "config": {
         "target": "stdout",
         "format": "json",
@@ -181,7 +179,6 @@
     },
     {
       "id": "hmac_auth",
-      "phase": "pre_upstream",
       "config": {
         "access_key_header": "x-access-key-id",
         "signature_header": "x-signature",
@@ -209,7 +206,6 @@
     },
     {
       "id": "oauth2_introspection",
-      "phase": "pre_upstream",
       "config": {
         "introspection_url": "http://127.0.0.1:8080/oauth/introspect",
         "client_id": "velda-edge-gateway",

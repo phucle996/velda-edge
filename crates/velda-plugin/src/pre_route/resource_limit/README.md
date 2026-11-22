@@ -21,7 +21,7 @@
 +-----------------------------------------------------------------------------------+
 ```
 
-The **`resource_limit`** plugin is Velda Edge's O(1) structural bounds enforcer (`phase: "pre_route"`). It rejects oversized URIs and header floods before downstream routing, WAF scanning, or body streaming consumes CPU or memory.
+The **`resource_limit`** plugin is Velda Edge's O(1) structural bounds enforcer. It rejects oversized URIs and header floods before downstream routing, WAF scanning, or body streaming consumes CPU or memory.
 
 ---
 
@@ -39,7 +39,7 @@ The **`resource_limit`** plugin is Velda Edge's O(1) structural bounds enforcer 
 ## 2. Where It Sits in Velda Edge
 
 - **Subsystem**: `crates/velda-plugin/src/pre_route/resource_limit/`
-- **Execution Phase**: `phase: "pre_route"`
+- **Execution Stage**: `PreRoutePlugin` (compile-time fixed)
 - **Runtime Placement**: Executed inline on Frontline Traffic Workers (`velda-worker-{i}`).
 - **Recommended Pipeline Order**: `ip_filter` $\to$ `resource_limit` $\to$ `cors_preflight` $\to$ `waf_lite`.
 
@@ -57,7 +57,6 @@ The **`resource_limit`** plugin is Velda Edge's O(1) structural bounds enforcer 
 ```json
 {
   "id": "resource_limit",
-  "phase": "pre_route",
   "config": {
     "max_uri_length": 8192,
     "max_headers_count": 128,

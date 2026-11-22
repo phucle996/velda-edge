@@ -470,7 +470,6 @@ mod tests {
 
         let config = PluginConfig {
             id: "grpc_fault_injection".to_string(),
-            phase: "pre_upstream".to_string(),
             config: json_cfg,
         };
 

@@ -1,4 +1,4 @@
-//! Pre-Upstream Execution Phase Plugins (`phase: "pre_upstream"`).
+//! Pre-Upstream Execution Stage Plugins (`PreUpstreamPlugin`).
 //!
 //! Evaluated after route and endpoint selection, immediately before forwarding the
 //! request to the target backend (e.g., token injection, request header mutation, upstream rate limiting).
@@ -148,11 +148,37 @@ pub fn run_pre_upstream_plugins(
     Action::Continue
 }
 
-/// Sub-dispatcher: instantiates concrete [`PreUpstreamPlugin`] instances for this phase.
+/// Compile-time registry check for plugins owned by the `pre_upstream` stage.
+#[inline]
+pub fn owns_id(id: &str) -> bool {
+    matches!(
+        id,
+        "api_key_auth"
+            | "jwt_auth"
+            | "rate_limit"
+            | "header_mutation"
+            | "canary"
+            | "request_mirror"
+            | "url_rewrite"
+            | "http_cache_lookup"
+            | "http_fault_injection"
+            | "grpc_fault_injection"
+            | "request_termination"
+            | "csrf"
+            | "csrf_protection"
+            | "hmac_auth"
+            | "oauth2_introspection"
+            | "consumer_quota"
+            | "api_metering"
+            | "ja4_filter"
+    )
+}
+
+/// Sub-dispatcher: instantiates concrete [`PreUpstreamPlugin`] instances for this stage.
 ///
 /// # Open-Closed Principle (OCP)
-/// Adding a new pre-upstream plugin requires adding exactly 1 match arm here, delegating
-/// config extraction and validation to the plugin's own `from_config` implementation.
+/// Adding a new pre-upstream plugin requires adding its ID to [`owns_id`] and 1 match arm here,
+/// delegating config extraction and validation to the plugin's own `from_config` implementation.
 pub fn instantiate(
     config: &crate::config::PluginConfig,
 ) -> Result<Arc<dyn PreUpstreamPlugin>, crate::error::PluginError> {

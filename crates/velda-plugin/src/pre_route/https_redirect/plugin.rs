@@ -1,4 +1,4 @@
-//! `https_redirect` Pre-Route Plugin (`phase: "pre_route"`).
+//! `https_redirect` Pre-Route Plugin.
 //!
 //! ```text
 //! ┌─────────────────────────────────────────────────────────────────────────────────────────┐
@@ -310,7 +310,6 @@ mod tests {
 
         let bad_cfg = PluginConfig {
             id: "https_redirect".to_string(),
-            phase: "pre_route".to_string(),
             config: json!({ "status_code": 302 }),
         };
         assert!(HttpsRedirectPlugin::from_config(&bad_cfg).is_err());

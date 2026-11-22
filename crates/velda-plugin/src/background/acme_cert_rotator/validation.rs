@@ -1,4 +1,4 @@
-//! ACME Certificate Rotator Schema & Semantic Validation (`phase: "background"`).
+//! ACME Certificate Rotator Schema & Semantic Validation.
 
 use serde::{Deserialize, Serialize};
 

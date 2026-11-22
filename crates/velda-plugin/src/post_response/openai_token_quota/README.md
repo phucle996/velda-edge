@@ -1,6 +1,6 @@
 # OpenAI Token Quota (`openai_token_quota`)
 
-Zero-allocation, shared-arena post-response plugin (`phase: "post_response"`) for counting LLM prompt, completion, total, and cached tokens directly from upstream OpenAI-compatible, Anthropic, and Gemini JSON payloads and injecting standard response headers.
+Zero-allocation, shared-arena post-response plugin for counting LLM prompt, completion, total, and cached tokens directly from upstream OpenAI-compatible, Anthropic, and Gemini JSON payloads and injecting standard response headers.
 
 ---
 

@@ -31,7 +31,7 @@
 +-----------------------------------------------------------------------------------+
 ```
 
-The **`health_probe`** plugin is Velda Edge's dedicated container health and readiness daemon (`phase: "background"`). It runs an out-of-band, zero-allocation HTTP management server on a dedicated port (e.g., `0.0.0.0:9091`) to serve orchestrator liveness and readiness checks (`/livez`, `/readyz`) completely isolated from the Data Plane request serving path.
+The **`health_probe`** plugin is Velda Edge's dedicated container health and readiness daemon. It runs an out-of-band, zero-allocation HTTP management server on a dedicated port (e.g., `0.0.0.0:9091`) to serve orchestrator liveness and readiness checks (`/livez`, `/readyz`) completely isolated from the Data Plane request serving path.
 
 ---
 
@@ -57,7 +57,7 @@ The **`health_probe`** plugin is Velda Edge's dedicated container health and rea
 ## 2. Where It Sits in Velda Edge
 
 - **Subsystem**: `crates/velda-plugin/src/background/health_probe/`
-- **Execution Phase**: `phase: "background"`
+- **Execution Stage**: `BackgroundPlugin` (compile-time fixed)
 - **Runtime Placement**: Operates entirely on the Shadow Logistics Worker (`velda-shadow-{i}`) running under `SCHED_IDLE` on its assigned core $i$ (recommended: Core 0).
 - **Data Plane Touchpoints**:
   - Frontline Traffic Workers (`velda-worker-{0..N-1}`) **never** interact with the probe listener, never route health checks, and never send messages over `mpsc` channels to this plugin.

@@ -1,4 +1,4 @@
-//! OpenTelemetry Trace Exporter Schema & Validation (`phase: "background"`).
+//! OpenTelemetry Trace Exporter Schema & Validation.
 //!
 //! Validates configuration for [`OtlpTraceExporterPlugin`], which drains reference-counted
 //! [`velda_observability::TelemetryRecord`] batches from [`velda_observability::TelemetryStore`]

@@ -239,7 +239,6 @@ mod tests {
     fn test_from_config_deserialization() {
         let cfg = PluginConfig {
             id: "method_filter".to_string(),
-            phase: "pre_route".to_string(),
             config: json!({
                 "allowed_methods": ["GET", "HEAD"]
             }),

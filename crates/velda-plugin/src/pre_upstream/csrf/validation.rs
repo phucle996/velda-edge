@@ -1,4 +1,4 @@
-//! CSRF Protection Schema & Semantic Validation (`phase: "pre_upstream"`).
+//! CSRF Protection Schema & Semantic Validation.
 
 use serde::{Deserialize, Serialize};
 

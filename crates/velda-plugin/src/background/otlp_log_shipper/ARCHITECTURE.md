@@ -6,7 +6,7 @@ This document details the internal subsystem architecture, threading model, memo
 
 ## 1. Subsystem Mission & Responsibilities
 
-The `otlp_log_shipper` is an autonomous background logistics plugin (`phase: "background"`) designed to:
+The `otlp_log_shipper` is an autonomous background logistics plugin designed to:
 1. Drain reference-counted 64-byte `AccessLogRecord` batches from `velda-observability::LogStore` via lock-free core-local SPSC ring buffers.
 2. Serialize access logs into compliant OpenTelemetry `ExportLogsServiceRequest` payloads via direct Protobuf wire skeletons over HTTP/2 (gRPC) or pre-baked JSON envelopes over HTTP/1.1.
 3. Stream telemetry to an OpenTelemetry Collector daemon (e.g. port 4317 for gRPC or port 4318 for HTTP).

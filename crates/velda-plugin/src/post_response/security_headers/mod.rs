@@ -1,4 +1,4 @@
-//! Security Headers Post-Response Plugin Module (`phase: "post_response"`).
+//! Security Headers Post-Response Plugin Module.
 //!
 //! Provides client-side browser hardening, modern origin isolation (COOP, COEP, CORP),
 //! and OWASP compliance on outgoing HTTP responses with zero heap allocation on the hot path.

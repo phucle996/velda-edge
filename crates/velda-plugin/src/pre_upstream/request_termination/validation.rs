@@ -1,4 +1,4 @@
-//! Request Termination Configuration Schema & Semantic Validation (`phase: "pre_upstream"`).
+//! Request Termination Configuration Schema & Semantic Validation.
 //!
 //! Enforces a strict declarative contract for short-circuiting requests with synthetic responses.
 //!

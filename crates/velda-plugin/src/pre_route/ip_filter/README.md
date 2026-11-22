@@ -28,7 +28,7 @@
 +-----------------------------------------------------------------------------------+
 ```
 
-The **`ip_filter`** plugin is Velda Edge's high-throughput network perimeter access controller (`phase: "pre_route"`). It enforces zero-trust IPv4 and IPv6 CIDR allowlists and denylists directly on raw header bytes before route lookup, body streaming, or upstream connection leasing.
+The **`ip_filter`** plugin is Velda Edge's high-throughput network perimeter access controller. It enforces zero-trust IPv4 and IPv6 CIDR allowlists and denylists directly on raw header bytes before route lookup, body streaming, or upstream connection leasing.
 
 ---
 
@@ -48,7 +48,7 @@ The **`ip_filter`** plugin is Velda Edge's high-throughput network perimeter acc
 ## 2. Where It Sits in Velda Edge
 
 - **Subsystem**: `crates/velda-plugin/src/pre_route/ip_filter/`
-- **Execution Phase**: `phase: "pre_route"`
+- **Execution Stage**: `PreRoutePlugin` (compile-time fixed)
 - **Runtime Placement**: Executed inline on Frontline Traffic Workers (`velda-worker-{i}`) as the first security gate before `resource_limit` and `waf_lite`.
 
 ---
@@ -65,7 +65,6 @@ The **`ip_filter`** plugin is Velda Edge's high-throughput network perimeter acc
 ```json
 {
   "id": "ip_filter",
-  "phase": "pre_route",
   "config": {
     "mode": "deny",
     "allow_cidrs": ["10.0.0.0/8"],

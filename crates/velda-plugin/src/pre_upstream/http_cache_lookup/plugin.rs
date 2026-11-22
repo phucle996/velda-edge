@@ -805,7 +805,6 @@ mod tests {
         });
         let config = PluginConfig {
             id: "http_cache_lookup".into(),
-            phase: String::new(),
             config: json_cfg,
         };
         let plugin = HttpCacheLookupPlugin::from_config(&config).expect("valid config");
@@ -822,7 +821,6 @@ mod tests {
         // Incomplete config must fail validation
         let bad_config = PluginConfig {
             id: "http_cache_lookup".into(),
-            phase: String::new(),
             config: serde_json::json!({}),
         };
         assert!(HttpCacheLookupPlugin::from_config(&bad_config).is_err());

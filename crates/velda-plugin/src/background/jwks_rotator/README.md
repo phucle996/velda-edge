@@ -9,7 +9,7 @@
 |         │ Periodic GET /.well-known/jwks.json (HTTPS)                             |
 |         ▼                                                                         |
 |  ┌─────────────────────────────────────────────────────────────────────────────┐  |
-|  │ jwks_rotator (phase: "background", SCHED_IDLE)                              │  |
+|  │ jwks_rotator (BackgroundPlugin, SCHED_IDLE)                                 │  |
 |  │  - Runs on background logistics worker (never blocks request traffic)       │  |
 |  │  - Fetches and parses RFC 7517 keys into RAM (up to 8 keys)                 │  |
 |  │  - Preserves emergency static key at Slot 0 (optional)                      │  |
@@ -17,13 +17,13 @@
 |                                         │ Atomic Pointer Swap (Zero-Lock)         |
 |                                         ▼                                         |
 |  ┌─────────────────────────────────────────────────────────────────────────────┐  |
-|  │ jwt_auth (phase: "pre_upstream", Frontline Workers)                         │  |
+|  │ jwt_auth (PreUpstreamPlugin, Frontline Workers)                             │  |
 |  │  - Validates inbound JWT tokens against current in-memory key table         │  |
 |  └─────────────────────────────────────────────────────────────────────────────┘  |
 +-----------------------------------------------------------------------------------+
 ```
 
-The **`jwks_rotator`** plugin is a background service in Velda Edge (`phase: "background"`). It automatically polls external Identity Providers (IdPs) like Auth0, Keycloak, or Okta, parses their JSON Web Key Sets (RFC 7517), and supplies updated cryptographic public keys to companion `jwt_auth` plugins in real time without restarting the gateway or dropping active requests.
+The **`jwks_rotator`** plugin is a background service in Velda Edge. It automatically polls external Identity Providers (IdPs) like Auth0, Keycloak, or Okta, parses their JSON Web Key Sets (RFC 7517), and supplies updated cryptographic public keys to companion `jwt_auth` plugins in real time without restarting the gateway or dropping active requests.
 
 ---
 
@@ -45,9 +45,9 @@ The **`jwks_rotator`** plugin is a background service in Velda Edge (`phase: "ba
 ## 2. Where It Sits in Velda Edge
 
 - **Subsystem**: `crates/velda-plugin/src/background/jwks_rotator/`
-- **Execution Phase**: `phase: "background"`
+- **Execution Stage**: `BackgroundPlugin` (compile-time fixed)
 - **Runtime Placement**: Spawns as a cooperative async background daemon when Velda Edge boots, running independently of the L7 request pipeline.
-- **Companion Relationship**: Directly pairs with an instance of `jwt_auth` (`phase: "pre_upstream"`). The rotator updates the key table that `jwt_auth` reads during request validation.
+- **Companion Relationship**: Directly pairs with an instance of `jwt_auth`. The rotator updates the key table that `jwt_auth` reads during request validation.
 
 ---
 
@@ -64,12 +64,11 @@ The **`jwks_rotator`** plugin is a background service in Velda Edge (`phase: "ba
 
 ## 4. Quick Start Configuration
 
-Add the plugin to your `plugins.json` under the `"background"` phase:
+Add the plugin to your `plugins.json`:
 
 ```json
 {
   "id": "auth0_rotator",
-  "phase": "background",
   "config": {
     "target_jwt_auth_id": "api_jwt_auth",
     "jwks_uri": "https://company.us.auth0.com/.well-known/jwks.json",

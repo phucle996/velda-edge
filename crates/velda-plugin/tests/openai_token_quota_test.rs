@@ -54,7 +54,6 @@ fn test_plugin_on_response_hierarchical_shared_arena() {
     velda_core::clock::init_clock();
     let cfg = PluginConfig {
         id: "openai_token_quota".into(),
-        phase: "post_response".into(),
         config: serde_json::json!({
             "consumer_id_headers": ["x-tenant-id", "x-user-id"],
             "ledger_slots": 4096
@@ -110,7 +109,6 @@ fn test_distributed_mode_continues_local_counting_when_redis_disconnected() {
     velda_core::clock::init_clock();
     let cfg = PluginConfig {
         id: "openai_token_quota".into(),
-        phase: "post_response".into(),
         config: serde_json::json!({
             "mode": "distributed",
             "consumer_id_headers": ["x-tenant-id", "x-user-id"],
@@ -149,7 +147,6 @@ fn test_plugin_zero_cached_tokens_emits_zero_unconditionally() {
     velda_core::clock::init_clock();
     let cfg = PluginConfig {
         id: "openai_token_quota".into(),
-        phase: "post_response".into(),
         config: serde_json::json!({
             "consumer_id_headers": ["x-consumer-id"]
         }),
@@ -189,7 +186,6 @@ fn test_plugin_no_usage_in_body() {
     velda_core::clock::init_clock();
     let cfg = PluginConfig {
         id: "openai_token_quota".into(),
-        phase: "post_response".into(),
         config: serde_json::json!({
             "consumer_id_headers": ["x-consumer-id"]
         }),
@@ -216,7 +212,6 @@ async fn test_pbww_and_run_background_shutdown() {
 
     let local_cfg = PluginConfig {
         id: "openai_token_quota".into(),
-        phase: "post_response".into(),
         config: serde_json::json!({
             "mode": "local",
             "consumer_id_headers": ["x-consumer-id"]
@@ -230,7 +225,6 @@ async fn test_pbww_and_run_background_shutdown() {
 
     let dist_cfg = PluginConfig {
         id: "openai_token_quota".into(),
-        phase: "post_response".into(),
         config: serde_json::json!({
             "mode": "distributed",
             "consumer_id_headers": ["x-consumer-id"],

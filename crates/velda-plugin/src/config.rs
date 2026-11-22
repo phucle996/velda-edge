@@ -39,8 +39,6 @@ impl OutboundTlsConfig {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct PluginConfig {
     pub id: String,
-    #[serde(default)]
-    pub phase: String, // "pre_route", "pre_upstream", "post_response", "background"
     #[serde(with = "json_value_bincode")]
     pub config: serde_json::Value,
 }

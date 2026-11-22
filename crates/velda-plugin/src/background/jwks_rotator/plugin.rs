@@ -1,4 +1,4 @@
-//! JWKS Background Key Rotator Plugin (`phase: "background"`).
+//! JWKS Background Key Rotator Plugin.
 //!
 //! ```text
 //!                      JWKS BACKGROUND ROTATION RUNTIME
@@ -234,7 +234,6 @@ mod tests {
         });
         let config = PluginConfig {
             id: "jwks_rotator".into(),
-            phase: "background".into(),
             config: json,
         };
 
@@ -288,7 +287,6 @@ mod tests {
         });
         let config = PluginConfig {
             id: "jwks_rotator".into(),
-            phase: "background".into(),
             config: json,
         };
 

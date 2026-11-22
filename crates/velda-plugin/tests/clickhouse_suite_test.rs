@@ -4,8 +4,8 @@
 //! 1. End-to-end RowBinary batch export over persistent HTTP/1.1 to mock ClickHouse server.
 //! 2. End-to-end JSONEachRow batch export over persistent HTTP/1.1.
 //! 3. Auto-creation of table `velda_access_logs` on startup via `ensure_table()`.
-//! 4. Factory registration and phase auto-inference (`canonical_phase_for_id`).
-//! 5. Phase mismatch rejection when configured under wrong phase.
+//! 4. Compile-time factory registration (`is_known_plugin_id` / `LoadedPlugin::Background`).
+//! 5. Rejection when attaching a background-only plugin to an HTTP route.
 
 use std::sync::Arc;
 use std::sync::atomic::Ordering;
@@ -21,7 +21,7 @@ use velda_plugin::background::clickhouse_log_shipper::{
     ClickHouseLogShipperConfig, ClickHouseLogShipperPlugin,
 };
 use velda_plugin::factory::{LoadedPlugin, instantiate_plugin};
-use velda_plugin::{PluginConfig, canonical_phase_for_id, validate_plugin_config};
+use velda_plugin::{PluginConfig, is_known_plugin_id, validate_plugin_config};
 
 fn make_sample_record(id: u64, ts: u32) -> TelemetryRecord {
     let mut rec = TelemetryRecord::zeroed();
@@ -219,16 +219,12 @@ async fn test_clickhouse_json_e2e() {
 }
 
 #[test]
-fn test_clickhouse_phase_and_validation() {
-    assert_eq!(
-        canonical_phase_for_id("clickhouse_log_shipper"),
-        Some("background")
-    );
+fn test_clickhouse_validation() {
+    assert!(is_known_plugin_id("clickhouse_log_shipper"));
+    assert!(velda_plugin::background::owns_id("clickhouse_log_shipper"));
 
-    // Auto-inference of empty phase
     let mut cfg = PluginConfig {
         id: "clickhouse_log_shipper".into(),
-        phase: "".into(),
         config: serde_json::json!({
             "endpoint": "http://127.0.0.1:8123",
             "database": "velda_analytics",
@@ -237,28 +233,13 @@ fn test_clickhouse_phase_and_validation() {
         }),
     };
 
-    validate_plugin_config(&mut cfg).expect("validation should succeed and infer phase");
-    assert_eq!(cfg.phase, "background");
-
-    // Phase mismatch rejection
-    let mut bad_cfg = PluginConfig {
-        id: "clickhouse_log_shipper".into(),
-        phase: "pre_route".into(),
-        config: serde_json::json!({
-            "endpoint": "http://127.0.0.1:8123",
-            "database": "velda_analytics"
-        }),
-    };
-
-    let err = validate_plugin_config(&mut bad_cfg).unwrap_err();
-    assert!(err.to_string().contains("must specify phase 'background'"));
+    validate_plugin_config(&mut cfg).expect("validation should succeed");
 }
 
 #[test]
 fn test_clickhouse_factory() {
     let cfg = PluginConfig {
         id: "clickhouse_log_shipper".into(),
-        phase: "background".into(),
         config: serde_json::json!({
             "endpoint": "http://127.0.0.1:8123",
             "database": "velda_analytics",

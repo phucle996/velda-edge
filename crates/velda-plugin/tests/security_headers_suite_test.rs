@@ -181,7 +181,6 @@ fn test_suite_from_config_full_manifest_roundtrip() {
 
     let plugin_cfg = PluginConfig {
         id: "edge_sec_enterprise".to_string(),
-        phase: "post_response".to_string(),
         config: manifest_json,
     };
 

@@ -1,4 +1,4 @@
-//! HTTP Method Filter Configuration Schema & Semantic Validation (`phase: "pre_route"`).
+//! HTTP Method Filter Configuration Schema & Semantic Validation.
 //!
 //! ```text
 //!  +─────────────────────────────────────────────────────────────────────────+

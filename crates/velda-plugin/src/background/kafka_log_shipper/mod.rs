@@ -1,4 +1,4 @@
-//! Kafka Log Shipper Background Plugin (`phase: "background"`).
+//! Kafka Log Shipper Background Plugin.
 
 pub mod client;
 pub mod compress;

@@ -328,7 +328,6 @@ mod tests {
         });
         let config = PluginConfig {
             id: "ip_filter".into(),
-            phase: String::new(),
             config: valid_json,
         };
         let plugin = IpFilterPlugin::from_config(&config).expect("valid config");
@@ -343,7 +342,6 @@ mod tests {
         });
         let bad_config = PluginConfig {
             id: "ip_filter".into(),
-            phase: String::new(),
             config: incomplete_json,
         };
         assert!(IpFilterPlugin::from_config(&bad_config).is_err());

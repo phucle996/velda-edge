@@ -12,7 +12,9 @@ use http::header::{
 };
 use http::{HeaderMap, HeaderValue, Method, StatusCode, Uri, Version};
 use velda_core::{Action, Body, L7Request, L7Response, RejectReason};
-use velda_plugin::post_response::{CorsConfig, CorsResponsePlugin, PostResponsePlugin};
+use velda_plugin::post_response::{
+    CorsConfig, CorsOriginPattern, CorsResponsePlugin, PostResponsePlugin,
+};
 use velda_plugin::pre_route::{CorsPreflightPlugin, OriginPattern, PreRoutePlugin};
 
 fn make_test_request(
@@ -75,17 +77,14 @@ fn build_test_response_plugin() -> CorsResponsePlugin {
         "test-cors-response",
         CorsConfig {
             allow_origins: vec![
-                OriginPattern::Exact("https://app.example.com".to_string()),
-                OriginPattern::Subdomain {
-                    prefix: "https://".to_string(),
-                    suffix: ".corp.internal".to_string(),
-                },
+                CorsOriginPattern::parse("https://app.example.com"),
+                CorsOriginPattern::parse("https://*.corp.internal"),
             ],
             allow_credentials: true,
             expose_headers: vec!["X-Request-ID".to_string(), "X-Total-Count".to_string()],
-            max_age_secs: Some(86400),
         },
     )
+    .unwrap()
 }
 
 #[test]
@@ -330,10 +329,10 @@ fn test_non_cors_traffic_pass_through() {
         .insert(CONTENT_TYPE, HeaderValue::from_static("application/json"));
     response_plugin.on_response(&req.headers, &mut resp);
 
-    // Headers must remain completely unaltered
+    // Headers must remain free of CORS grants; Vary: Origin prevents cache poisoning on origin-dependent policy
     assert!(resp.headers.get(ACCESS_CONTROL_ALLOW_ORIGIN).is_none());
     assert!(resp.headers.get(ACCESS_CONTROL_ALLOW_CREDENTIALS).is_none());
-    assert!(resp.headers.get(VARY).is_none());
+    assert_eq!(resp.headers.get(VARY).unwrap(), "Origin");
     assert_eq!(resp.headers.get(CONTENT_TYPE).unwrap(), "application/json");
 
     // 2. OPTIONS request without CORS preflight headers (Standard HTTP WebDAV or RFC 9110 OPTIONS)
@@ -357,12 +356,12 @@ fn test_wildcard_origin_without_credentials() {
     let response = CorsResponsePlugin::with_config(
         "response-wildcard",
         CorsConfig {
-            allow_origins: vec![OriginPattern::Any],
+            allow_origins: vec![CorsOriginPattern::Any],
             allow_credentials: false,
             expose_headers: Vec::new(),
-            max_age_secs: None,
         },
-    );
+    )
+    .unwrap();
 
     let mut req = make_test_request(
         Method::OPTIONS,
@@ -437,4 +436,76 @@ fn test_vary_header_idempotency() {
 
     let vary_count = resp2.headers.get_all(VARY).iter().count();
     assert_eq!(vary_count, 1, "Must detect origin in comma-separated list");
+}
+
+#[test]
+fn test_edge_single_source_of_truth_scrubs_upstream_cors() {
+    let response_plugin =
+        CorsResponsePlugin::new("cors-strict", "https://app.velda.io", false).unwrap();
+
+    // Upstream attempts to grant overly permissive wildcard + credentials + max-age
+    let mut upstream_resp = L7Response::empty(StatusCode::OK);
+    upstream_resp
+        .headers
+        .insert(ACCESS_CONTROL_ALLOW_ORIGIN, HeaderValue::from_static("*"));
+    upstream_resp.headers.insert(
+        ACCESS_CONTROL_ALLOW_CREDENTIALS,
+        HeaderValue::from_static("true"),
+    );
+    upstream_resp.headers.insert(
+        ACCESS_CONTROL_EXPOSE_HEADERS,
+        HeaderValue::from_static("x-internal-secret"),
+    );
+    upstream_resp
+        .headers
+        .insert(ACCESS_CONTROL_MAX_AGE, HeaderValue::from_static("86400"));
+
+    // 1. Disallowed origin -> Edge strips all upstream CORS grants and preserves Vary: Origin
+    let evil_req = make_test_request(Method::GET, "/api", Some("https://evil.com"), None, None);
+    let mut resp_evil = upstream_resp.clone();
+    response_plugin.on_response(&evil_req.headers, &mut resp_evil);
+    assert!(resp_evil.headers.get(ACCESS_CONTROL_ALLOW_ORIGIN).is_none());
+    assert!(
+        resp_evil
+            .headers
+            .get(ACCESS_CONTROL_ALLOW_CREDENTIALS)
+            .is_none()
+    );
+    assert!(
+        resp_evil
+            .headers
+            .get(ACCESS_CONTROL_EXPOSE_HEADERS)
+            .is_none()
+    );
+    assert!(resp_evil.headers.get(ACCESS_CONTROL_MAX_AGE).is_none());
+    assert_eq!(resp_evil.headers.get(VARY).unwrap(), "Origin");
+
+    // 2. Allowed origin -> Edge overrides Allow-Origin and scrubs disabled credentials/expose/max-age
+    let good_req = make_test_request(
+        Method::GET,
+        "/api",
+        Some("https://app.velda.io"),
+        None,
+        None,
+    );
+    let mut resp_good = upstream_resp;
+    response_plugin.on_response(&good_req.headers, &mut resp_good);
+    assert_eq!(
+        resp_good.headers.get(ACCESS_CONTROL_ALLOW_ORIGIN).unwrap(),
+        "https://app.velda.io"
+    );
+    assert!(
+        resp_good
+            .headers
+            .get(ACCESS_CONTROL_ALLOW_CREDENTIALS)
+            .is_none()
+    );
+    assert!(
+        resp_good
+            .headers
+            .get(ACCESS_CONTROL_EXPOSE_HEADERS)
+            .is_none()
+    );
+    assert!(resp_good.headers.get(ACCESS_CONTROL_MAX_AGE).is_none());
+    assert_eq!(resp_good.headers.get(VARY).unwrap(), "Origin");
 }

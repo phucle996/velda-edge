@@ -34,7 +34,7 @@
 +-----------------------------------------------------------------------------------+
 ```
 
-The **`waf_lite`** plugin is Velda Edge's zero-regex, config-driven Layer 7 perimeter firewall (`phase: "pre_route"`). It inspects request URI paths, query strings, and the leading 32 KB of request payloads against user-supplied attack signatures using SIMD-accelerated Aho-Corasick matching before route lookup or upstream connection leasing.
+The **`waf_lite`** plugin is Velda Edge's zero-regex, config-driven Layer 7 perimeter firewall. It inspects request URI paths, query strings, and the leading 32 KB of request payloads against user-supplied attack signatures using SIMD-accelerated Aho-Corasick matching before route lookup or upstream connection leasing.
 
 ---
 
@@ -55,7 +55,7 @@ The **`waf_lite`** plugin is Velda Edge's zero-regex, config-driven Layer 7 peri
 ## 2. Where It Sits in Velda Edge
 
 - **Subsystem**: `crates/velda-plugin/src/pre_route/waf_lite/`
-- **Execution Phase**: `phase: "pre_route"`
+- **Execution Stage**: `PreRoutePlugin` (compile-time fixed)
 - **Runtime Placement**: Executed inline on Frontline Traffic Workers (`velda-worker-{i}`) immediately after L7 ingress decode, before routing and body streaming.
 - **Recommended Pipeline Order**: `ip_filter` $\to$ `resource_limit` $\to$ `cors_preflight` $\to$ `waf_lite`.
 
@@ -75,7 +75,6 @@ Declare the plugin in your `plugins.json`:
 ```json
 {
   "id": "waf_lite",
-  "phase": "pre_route",
   "config": {
     "patterns": [
       "../",
