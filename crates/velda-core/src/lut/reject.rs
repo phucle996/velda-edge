@@ -41,9 +41,9 @@ const STATUS_499: StatusCode = match StatusCode::from_u16(499) {
     Err(_) => panic!("Valid status code 499"),
 };
 
-/// Dense O(1) lookup table indexed directly by `RejectReason as usize` (0..16).
-/// Total footprint: 17 * 32 bytes = 544 bytes (100% L1D cache-resident).
-pub static REJECT_STATIC_METAS: [RejectStaticMeta; 17] = [
+/// Dense O(1) lookup table indexed directly by `RejectReason as usize` (0..18).
+/// Total footprint: 19 * 32 bytes = 608 bytes (100% L1D cache-resident).
+pub static REJECT_STATIC_METAS: [RejectStaticMeta; 19] = [
     // Slot 0: BadRequest
     RejectStaticMeta {
         status: StatusCode::BAD_REQUEST,
@@ -145,6 +145,18 @@ pub static REJECT_STATIC_METAS: [RejectStaticMeta; 17] = [
         status: StatusCode::GATEWAY_TIMEOUT,
         content_len_str: "20",
         body: b"504 Gateway Timeout\n",
+    },
+    // Slot 17: WafBlocked (Indistinguishable from Forbidden on the wire)
+    RejectStaticMeta {
+        status: StatusCode::FORBIDDEN,
+        content_len_str: "14",
+        body: b"403 Forbidden\n",
+    },
+    // Slot 18: IpBlocked (Indistinguishable from Forbidden on the wire)
+    RejectStaticMeta {
+        status: StatusCode::FORBIDDEN,
+        content_len_str: "14",
+        body: b"403 Forbidden\n",
     },
 ];
 

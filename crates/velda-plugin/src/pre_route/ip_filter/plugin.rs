@@ -4,48 +4,47 @@
 //! Enforces zero-allocation bitmask CIDR matching on IPv4/IPv6 addresses with allow/deny modes
 //! and exception precedence.
 //!
+//! ```text
+//!  PreRoutePlugin Flow (ip_filter::on_request):
+//!
+//!             Inbound L7Request
+//!                     │
+//!                     ▼
+//!      +──────────────────────────────+
+//!      | Check client_ip_source       |
+//!      | - XForwardedFor vs XRealIp   |
+//!      +──────────────────────────────+
+//!                     │
+//!                     ▼
+//!      +──────────────────────────────+
+//!      | stream::evaluate_stream      |
+//!      |   (Streaming on Registers)   |
+//!      +──────────────────────────────+
+//!          │                      │
+//!   (AllowList Mode)       (DenyList Mode)
+//!          │                      │
+//!          ▼                      ▼
+//!   Any hop in deny?       Hop in allow?
+//!     ├─► Yes: REJECT 403    ├─► Yes: Excused (skip deny)
+//!     └─► No:                └─► No:
+//!   Every hop in allow?         Hop in deny?
+//!     ├─► Yes: CONTINUE           ├─► Yes: REJECT 403
+//!     └─► No:  REJECT 403         └─► No:  CONTINUE
+//! ```
+//!
 //! Full schema specification, allowed values, and configuration examples:
 //! See [`README.md`](./README.md).
 
-use crate::config::PluginConfig;
-use velda_core::{Action, L7Request, RejectReason};
-
-use super::network::{
-    ClientIpSource, IpExtractionError, IpNetwork, ParsedIp, compact_and_sort_v4,
-    compact_and_sort_v6,
-};
 use crate::capability::{AccessLevel, PluginCapability, SupportedProtocols};
+use crate::config::PluginConfig;
 use crate::error::PluginError;
 use crate::pre_route::PreRoutePlugin;
+use velda_core::{Action, L7Request};
 
-/// Operational filtering mode.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum IpFilterMode {
-    /// Only permitted IPs can access (Whitelist).
-    AllowList,
-    /// Specified IPs are blocked (Blacklist).
-    DenyList,
-}
-
-/// Comprehensive configuration for IP and CIDR access control.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct IpFilterConfig {
-    pub mode: IpFilterMode,
-    pub allow_cidrs: Vec<IpNetwork>,
-    pub deny_cidrs: Vec<IpNetwork>,
-    pub client_ip_source: ClientIpSource,
-}
-
-impl Default for IpFilterConfig {
-    fn default() -> Self {
-        Self {
-            mode: IpFilterMode::DenyList,
-            allow_cidrs: Vec::new(),
-            deny_cidrs: Vec::new(),
-            client_ip_source: ClientIpSource::default(),
-        }
-    }
-}
+use super::config::{ClientIpSource, IpFilterConfig, IpFilterMode, IpNetwork};
+use super::engine::IpFilterEngine;
+pub use super::engine::{match_cidr_v4, match_cidr_v4_64};
+use super::stream::evaluate_stream;
 
 /// Pre-Route IP Filter Plugin instance.
 #[derive(Debug, Clone)]
@@ -55,13 +54,8 @@ pub struct IpFilterPlugin {
     pub allow_cidrs: Vec<IpNetwork>,
     pub deny_cidrs: Vec<IpNetwork>,
     pub client_ip_source: ClientIpSource,
-    // Optimization: Structure-of-Arrays (SoA) compacted & sorted bitwise tables for 256-bit SIMD scanning
-    allow_v4_nets: Vec<u32>,
-    allow_v4_masks: Vec<u32>,
-    deny_v4_nets: Vec<u32>,
-    deny_v4_masks: Vec<u32>,
-    allow_v6: Vec<(u128, u128)>,
-    deny_v6: Vec<(u128, u128)>,
+    pub allow_engine: IpFilterEngine,
+    pub deny_engine: IpFilterEngine,
 }
 
 impl IpFilterPlugin {
@@ -85,31 +79,8 @@ impl IpFilterPlugin {
 
     /// Constructs an IP filter with full configuration options.
     pub fn with_config(id: impl Into<String>, config: IpFilterConfig) -> Self {
-        let mut raw_allow_v4 = Vec::with_capacity(config.allow_cidrs.len());
-        let mut raw_allow_v6 = Vec::with_capacity(config.allow_cidrs.len());
-        for net in &config.allow_cidrs {
-            match *net {
-                IpNetwork::V4 { net, mask } => raw_allow_v4.push((net, mask)),
-                IpNetwork::V6 { net, mask } => raw_allow_v6.push((net, mask)),
-            }
-        }
-
-        let mut raw_deny_v4 = Vec::with_capacity(config.deny_cidrs.len());
-        let mut raw_deny_v6 = Vec::with_capacity(config.deny_cidrs.len());
-        for net in &config.deny_cidrs {
-            match *net {
-                IpNetwork::V4 { net, mask } => raw_deny_v4.push((net, mask)),
-                IpNetwork::V6 { net, mask } => raw_deny_v6.push((net, mask)),
-            }
-        }
-
-        let allow_v4 = compact_and_sort_v4(&raw_allow_v4);
-        let deny_v4 = compact_and_sort_v4(&raw_deny_v4);
-        let allow_v6 = compact_and_sort_v6(&raw_allow_v6);
-        let deny_v6 = compact_and_sort_v6(&raw_deny_v6);
-
-        let (allow_v4_nets, allow_v4_masks): (Vec<u32>, Vec<u32>) = allow_v4.into_iter().unzip();
-        let (deny_v4_nets, deny_v4_masks): (Vec<u32>, Vec<u32>) = deny_v4.into_iter().unzip();
+        let allow_engine = IpFilterEngine::from_cidrs(&config.allow_cidrs);
+        let deny_engine = IpFilterEngine::from_cidrs(&config.deny_cidrs);
 
         Self {
             id: id.into(),
@@ -117,12 +88,8 @@ impl IpFilterPlugin {
             allow_cidrs: config.allow_cidrs,
             deny_cidrs: config.deny_cidrs,
             client_ip_source: config.client_ip_source,
-            allow_v4_nets,
-            allow_v4_masks,
-            deny_v4_nets,
-            deny_v4_masks,
-            allow_v6,
-            deny_v6,
+            allow_engine,
+            deny_engine,
         }
     }
 
@@ -190,6 +157,16 @@ impl IpFilterPlugin {
             },
         ))
     }
+
+    #[inline(always)]
+    pub fn matches_allow(&self, ip: super::stream::ParsedIp) -> bool {
+        self.allow_engine.matches_ip(ip)
+    }
+
+    #[inline(always)]
+    pub fn matches_deny(&self, ip: super::stream::ParsedIp) -> bool {
+        self.deny_engine.matches_ip(ip)
+    }
 }
 
 impl PreRoutePlugin for IpFilterPlugin {
@@ -198,64 +175,18 @@ impl PreRoutePlugin for IpFilterPlugin {
         &self.id
     }
 
-    /// Evaluates downstream request client IP chain against configured CIDR rules.
+    /// Evaluates downstream request client IP chain against configured CIDR rules on the fly.
     ///
-    /// # Zero-Trust Multi-Hop Evaluation Invariants & Precedence:
-    /// - **AllowList Mode**:
-    ///   1. If ANY hop in the extracted chain matches `deny_cidrs` (exception) -> REJECT 403 Forbidden.
-    ///   2. Else if EVERY hop in the extracted chain matches `allow_cidrs` -> PASS (`Action::Continue`).
-    ///   3. Else (any hop is outside `allow_cidrs`) -> REJECT 403 Forbidden.
-    /// - **DenyList Mode**:
-    ///   1. For each hop in the extracted chain: if the hop matches `allow_cidrs` (exception), that hop is excused.
-    ///   2. Else if the hop matches `deny_cidrs` -> immediately REJECT 403 Forbidden.
-    ///   3. If no hop triggers a deny rule -> PASS (`Action::Continue`).
+    /// Delegates directly to the streaming evaluator for zero-allocation, register-only matching.
+    #[inline(always)]
     fn on_request(&self, req: &mut L7Request) -> Action {
-        let extracted = match self.client_ip_source.extract_all_parsed_ips(req) {
-            Ok(ips) => ips,
-            Err(IpExtractionError::Missing) => {
-                return match self.mode {
-                    IpFilterMode::AllowList => Action::Reject(RejectReason::Forbidden),
-                    IpFilterMode::DenyList => Action::Continue,
-                };
-            }
-            Err(IpExtractionError::Malformed) => {
-                // Anti-evasion: Malformed forwarding header, spoofed multi-header, or hop flood is strictly rejected
-                return Action::Reject(RejectReason::Forbidden);
-            }
-        };
-
-        let hops = extracted.as_slice();
-        let has_deny = !self.deny_v4_nets.is_empty() || !self.deny_v6.is_empty();
-        let has_allow = !self.allow_v4_nets.is_empty() || !self.allow_v6.is_empty();
-
-        match self.mode {
-            IpFilterMode::AllowList => {
-                // Single-pass bitwise verification: checks deny exceptions and accumulates allow status
-                // using a branchless bitwise OR to avoid CPU pipeline stalls
-                let mut unallowed = false;
-                for &hop_ip in hops {
-                    if has_deny && self.matches_deny(hop_ip) {
-                        return Action::Reject(RejectReason::Forbidden);
-                    }
-                    unallowed |= !self.matches_allow(hop_ip);
-                }
-                if unallowed {
-                    Action::Reject(RejectReason::Forbidden)
-                } else {
-                    Action::Continue
-                }
-            }
-            IpFilterMode::DenyList => {
-                // Single-pass stream evaluation: an allow exception excuses only this specific hop
-                for &hop_ip in hops {
-                    let excused = has_allow && self.matches_allow(hop_ip);
-                    if !excused && self.matches_deny(hop_ip) {
-                        return Action::Reject(RejectReason::Forbidden);
-                    }
-                }
-                Action::Continue
-            }
-        }
+        evaluate_stream(
+            req,
+            self.client_ip_source,
+            self.mode,
+            &self.allow_engine,
+            &self.deny_engine,
+        )
     }
 
     #[inline(always)]
@@ -266,68 +197,6 @@ impl PreRoutePlugin for IpFilterPlugin {
     #[inline(always)]
     fn supported_protocols(&self) -> SupportedProtocols {
         SupportedProtocols::ALL_L7
-    }
-}
-
-/// Evaluates IPv4 CIDR rules in pure Rust.
-#[inline(always)]
-pub fn match_cidr_v4(ip: u32, nets: &[u32], masks: &[u32]) -> bool {
-    match_cidr_v4_64(ip, nets, masks)
-}
-
-/// Evaluates 2 IPv4 CIDR rules per cycle using 64-bit SWAR registers.
-#[inline]
-pub fn match_cidr_v4_64(ip: u32, nets: &[u32], masks: &[u32]) -> bool {
-    let len = nets.len().min(masks.len());
-    let pair_len = len & !1;
-    let ip64 = ((ip as u64) << 32) | (ip as u64);
-    let mut i = 0;
-
-    while i < pair_len {
-        let m64 = ((masks[i + 1] as u64) << 32) | (masks[i] as u64);
-        let n64 = ((nets[i + 1] as u64) << 32) | (nets[i] as u64);
-        let diff = (ip64 & m64) ^ n64;
-        if (diff as u32) == 0 || (diff >> 32) == 0 {
-            return true;
-        }
-        i += 2;
-    }
-
-    if i < len && (ip & masks[i]) == nets[i] {
-        return true;
-    }
-    false
-}
-
-impl IpFilterPlugin {
-    #[inline(always)]
-    fn matches_allow(&self, ip: ParsedIp) -> bool {
-        match ip {
-            ParsedIp::V4(bits) => match_cidr_v4(bits, &self.allow_v4_nets, &self.allow_v4_masks),
-            ParsedIp::V6(bits) => {
-                for &(net, mask) in &self.allow_v6 {
-                    if (bits & mask) == net {
-                        return true;
-                    }
-                }
-                false
-            }
-        }
-    }
-
-    #[inline(always)]
-    fn matches_deny(&self, ip: ParsedIp) -> bool {
-        match ip {
-            ParsedIp::V4(bits) => match_cidr_v4(bits, &self.deny_v4_nets, &self.deny_v4_masks),
-            ParsedIp::V6(bits) => {
-                for &(net, mask) in &self.deny_v6 {
-                    if (bits & mask) == net {
-                        return true;
-                    }
-                }
-                false
-            }
-        }
     }
 }
 
@@ -371,7 +240,7 @@ mod tests {
         let mut req3 = make_request_with_ip("172.16.0.1");
         assert!(matches!(
             plugin.on_request(&mut req3),
-            Action::Reject(RejectReason::Forbidden)
+            Action::Reject(RejectReason::IpBlocked)
         ));
     }
 
@@ -403,7 +272,7 @@ mod tests {
         let mut req1 = make_request_with_ip("203.0.113.5");
         assert!(matches!(
             plugin.on_request(&mut req1),
-            Action::Reject(RejectReason::Forbidden)
+            Action::Reject(RejectReason::IpBlocked)
         ));
 
         let mut req2 = make_request_with_ip("8.8.8.8");
@@ -423,7 +292,7 @@ mod tests {
         let mut req = make_request_with_ip("::ffff:203.0.113.5");
         assert!(matches!(
             plugin.on_request(&mut req),
-            Action::Reject(RejectReason::Forbidden)
+            Action::Reject(RejectReason::IpBlocked)
         ));
     }
 
@@ -440,7 +309,7 @@ mod tests {
         let mut req = make_request_with_ip("invalid_ip_format");
         assert!(matches!(
             plugin.on_request(&mut req),
-            Action::Reject(RejectReason::Forbidden)
+            Action::Reject(RejectReason::IpBlocked)
         ));
     }
 
@@ -495,14 +364,14 @@ mod tests {
         let mut spoofed_external = make_request_with_ip("10.1.2.3, 203.0.113.5");
         assert!(matches!(
             plugin.on_request(&mut spoofed_external),
-            Action::Reject(RejectReason::Forbidden)
+            Action::Reject(RejectReason::IpBlocked)
         ));
 
         // Attacker at denied subnet 10.99.1.5 spoofs X-Forwarded-For: 10.1.2.3
         let mut spoofed_denied_hop = make_request_with_ip("10.1.2.3, 10.99.1.5");
         assert!(matches!(
             plugin.on_request(&mut spoofed_denied_hop),
-            Action::Reject(RejectReason::Forbidden)
+            Action::Reject(RejectReason::IpBlocked)
         ));
     }
 
@@ -527,14 +396,14 @@ mod tests {
         let mut smuggled_exception = make_request_with_ip("203.0.113.10, 203.0.113.5");
         assert!(matches!(
             plugin.on_request(&mut smuggled_exception),
-            Action::Reject(RejectReason::Forbidden)
+            Action::Reject(RejectReason::IpBlocked)
         ));
 
         // Blacklisted attacker (203.0.113.5) behind a benign public IP (8.8.8.8)
         let mut hidden_second_hop = make_request_with_ip("8.8.8.8, 203.0.113.5");
         assert!(matches!(
             plugin.on_request(&mut hidden_second_hop),
-            Action::Reject(RejectReason::Forbidden)
+            Action::Reject(RejectReason::IpBlocked)
         ));
     }
 
@@ -557,7 +426,7 @@ mod tests {
             .insert("x-real-ip", HeaderValue::from_static("10.0.0.1"));
         assert!(matches!(
             plugin.on_request(&mut req),
-            Action::Reject(RejectReason::Forbidden)
+            Action::Reject(RejectReason::IpBlocked)
         ));
     }
 
@@ -589,7 +458,7 @@ mod tests {
             .append("x-real-ip", HeaderValue::from_static("203.0.113.5"));
         assert!(matches!(
             plugin_real_ip.on_request(&mut req_dup),
-            Action::Reject(RejectReason::Forbidden)
+            Action::Reject(RejectReason::IpBlocked)
         ));
 
         // Comma-separated list inside single-value X-Real-IP must be rejected
@@ -606,7 +475,7 @@ mod tests {
         );
         assert!(matches!(
             plugin_real_ip.on_request(&mut req_comma),
-            Action::Reject(RejectReason::Forbidden)
+            Action::Reject(RejectReason::IpBlocked)
         ));
     }
 
@@ -626,7 +495,7 @@ mod tests {
             assert!(
                 matches!(
                     plugin.on_request(&mut req),
-                    Action::Reject(RejectReason::Forbidden)
+                    Action::Reject(RejectReason::IpBlocked)
                 ),
                 "Octal / leading-zero IPv4 payload '{octal_payload}' must be rejected"
             );
@@ -661,7 +530,7 @@ mod tests {
             assert!(
                 matches!(
                     plugin.on_request(&mut req),
-                    Action::Reject(RejectReason::Forbidden)
+                    Action::Reject(RejectReason::IpBlocked)
                 ),
                 "Port smuggling payload '{bad_port_payload}' must be rejected"
             );
@@ -700,7 +569,7 @@ mod tests {
             assert!(
                 matches!(
                     plugin.on_request(&mut req),
-                    Action::Reject(RejectReason::Forbidden)
+                    Action::Reject(RejectReason::IpBlocked)
                 ),
                 "IPv6-tunneled IPv4 payload '{tunneled_payload}' must be canonicalized and blocked"
             );
@@ -724,7 +593,7 @@ mod tests {
         let mut req_flood = make_request_with_ip(&flood_17);
         assert!(matches!(
             plugin.on_request(&mut req_flood),
-            Action::Reject(RejectReason::Forbidden)
+            Action::Reject(RejectReason::IpBlocked)
         ));
 
         // Trailing comma or empty hop ("10.0.0.1, ") or trailing garbage ("10.0.0.1, garbage")
@@ -738,7 +607,7 @@ mod tests {
             assert!(
                 matches!(
                     plugin.on_request(&mut req),
-                    Action::Reject(RejectReason::Forbidden)
+                    Action::Reject(RejectReason::IpBlocked)
                 ),
                 "Malformed XFF chain '{malformed_chain}' must be rejected"
             );

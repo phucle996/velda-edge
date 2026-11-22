@@ -1,5 +1,28 @@
 //! Zero-hash, 256-bit AVX2 / 64-bit SWAR host and authority matching (`velda_router::host`).
 //!
+//! # Architecture & Block Layout
+//! ```text
+//!  +─────────────────────────────────────────────────────────────────────────+
+//!  |                      VELDA HOST & AUTHORITY MATCHER                     |
+//!  +─────────────────────────────────────────────────────────────────────────+
+//!  |                                                                         |
+//!  | Inbound Hostname: "api.velda.io"                                        |
+//!  |                                                                         |
+//!  | 1. Right-to-Left Domain Parsing (TLD -> SLD -> Subdomain):              |
+//!  |    Slot 0: "IO"      (u64 le bytes: 0x0000_0000_0000_4F49)             |
+//!  |    Slot 1: "VELDA"   (u64 le bytes: 0x0000_0041_444C_4556)             |
+//!  |    Slot 2: "API"     (u64 le bytes: 0x0000_0000_0049_5041)             |
+//!  |    Slots 3..7: EMPTY_LABEL (0_u64)                                      |
+//!  |                                                                         |
+//!  | 2. Contiguous 4KB Page-Aligned HostTable [8 x u64 Blocks]:              |
+//!  |    Pattern: "*.velda.io" -> [IO, VELDA, WILDCARD_LABEL, 0, 0, 0, 0, 0] |
+//!  |                                                                         |
+//!  | 3. Multi-Target Compile-Time Fast Matching:                             |
+//!  |    ├─ x86-64-v3 (AVX2):  2x vpcmpeqq (4 lanes/cycle) -> zero AVX-512   |
+//!  |    └─ Non-AVX2 / ARM64:  64-bit SWAR integer comparison pipeline        |
+//!  +─────────────────────────────────────────────────────────────────────────+
+//! ```
+//!
 //! # Microarchitectural Rationale
 //! - **100% Zero-Hash Raw `u64` Label Blocks**: Domain labels are packed right-to-left
 //!   (TLD -> SLD -> Subdomain) directly into 64-bit integers (`u64`), with ASCII letters
@@ -211,33 +234,8 @@ fn match_blocks_fast(req: &[u64; 8], pat: &[u64; 8]) -> bool {
     }
     #[cfg(not(all(target_arch = "x86_64", target_feature = "avx2")))]
     {
-        #[cfg(target_arch = "x86_64")]
-        {
-            (*MATCH_BLOCKS_FN)(req, pat)
-        }
-        #[cfg(not(target_arch = "x86_64"))]
-        {
-            match_blocks_swar(req, pat)
-        }
+        match_blocks_swar(req, pat)
     }
-}
-
-#[cfg(all(target_arch = "x86_64", not(target_feature = "avx2")))]
-type MatchBlocksFn = fn(&[u64; 8], &[u64; 8]) -> bool;
-
-#[cfg(all(target_arch = "x86_64", not(target_feature = "avx2")))]
-static MATCH_BLOCKS_FN: std::sync::LazyLock<MatchBlocksFn> = std::sync::LazyLock::new(|| {
-    if std::arch::is_x86_feature_detected!("avx2") {
-        match_blocks_avx2_wrapper
-    } else {
-        match_blocks_swar
-    }
-});
-
-#[cfg(all(target_arch = "x86_64", not(target_feature = "avx2")))]
-fn match_blocks_avx2_wrapper(req: &[u64; 8], pat: &[u64; 8]) -> bool {
-    // SAFETY: Verified AVX2 support once at initialization via LazyLock.
-    unsafe { match_blocks_avx2(req, pat) }
 }
 
 /// 256-bit AVX2 vector host matcher (`_mm256_cmpeq_epi64` / `vpcmpeqq`):

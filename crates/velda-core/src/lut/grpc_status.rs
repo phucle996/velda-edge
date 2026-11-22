@@ -232,7 +232,9 @@ impl GrpcStatus {
             | RejectReason::HeaderFieldsTooLarge
             | RejectReason::UriTooLong => Self::InvalidArgument,
             RejectReason::Unauthorized => Self::Unauthenticated,
-            RejectReason::Forbidden => Self::PermissionDenied,
+            RejectReason::Forbidden | RejectReason::WafBlocked | RejectReason::IpBlocked => {
+                Self::PermissionDenied
+            }
             RejectReason::NotFound => Self::NotFound,
             RejectReason::MethodNotAllowed => Self::Unimplemented,
             RejectReason::RequestTimeout | RejectReason::GatewayTimeout => Self::DeadlineExceeded,

@@ -73,20 +73,23 @@ flowchart TD
 
 ## 3. Subsystem Architecture
 
-### 3.1 Fast-Path IP & Multi-Hop Chain Decoder (`network.rs`)
+### 3.1 Streaming Zero-Allocation Token Parser & Evaluator (`stream.rs`)
 
-Operates directly on raw byte slices with zero heap allocations:
-- `ExtractedIps`: Stack-allocated `[ParsedIp; 16]` buffer holding up to 16 parsed hops.
+Operates directly on raw byte slices with zero heap allocations and zero stack buffers:
+- On-the-fly streaming evaluation: Tokens are parsed directly into CPU registers (`ParsedIp`), eliminating intermediate stack buffers (`[ParsedIp; 16]`) and eliminating `memcpy` overhead.
 - `parse_ipv4_bytes(bytes: &[u8]) -> Option<u32>`: Parses 4 decimal octets into native `u32` bits in ~2ns. Rejects leading zeros (`oct_len > 0 && val == 0`) to prevent CVE-2021-28918 octal parser differentials.
 - `is_valid_port_bytes(port: &[u8]) -> bool`: Enforces strict `1..=65535` numeric port validation with no leading zeros or trailing `@userinfo`.
-- `canonicalize_v6_bits(bits: u128) -> ParsedIp`: Canonicalizes RFC 4291 mapped (`::ffff:0:0/96`), RFC 2765 SIIT (`::ffff:0:0:0/96`), RFC 6052 NAT64 (`64:ff9b::/96`), and RFC 4291 compatible (`::a.b.c.d`) addresses to `ParsedIp::V4(u32)`.
+- `extract_embedded_ipv4(bits: u128, raw_str_has_dots: bool) -> Option<u32>`: Canonicalizes RFC 4291 mapped (`::ffff:0:0/96`), RFC 2765 SIIT (`::ffff:0:0:0/96`), RFC 6052 NAT64 (`64:ff9b::/96`), and RFC 4291 compatible (`::a.b.c.d`) addresses to `ParsedIp::V4(u32)`.
 
-### 3.2 Subnet Compaction & Sorting (`network.rs`)
+### 3.2 Contiguous Flat Memory Matching Engine (`engine.rs`)
 
-During initialization and sync:
-1. Deduplicates identical `(net, mask)` pairs.
-2. Sorts by prefix length ascending: masks with fewer ones (`/0`, `/8`, `/16`) appear before (`/24`, `/32`).
-3. Prunes child subnets: if `(net_b & parent_mask) == parent_net`, subnet B is omitted.
+Rules are compiled into two contiguous flat memory partitions:
+1. **Exact IP Partition** (`/32` IPv4, `/128` IPv6): Matched first with exact equality (`==`), bypassing subnet mask loads completely for single-IP blocklists.
+2. **Subnet Range Partition** (`/1..=/31` IPv4, `/1..=/127` IPv6): Evaluated using 64-bit SWAR vector arithmetic (`(ip64 & m64) ^ n64 == 0`), processing non-byte-aligned CIDRs (e.g. `/20`, `/23`) without prefix expansion state explosion.
+3. **Subnet Compaction & Sorting**:
+   - Deduplicates identical `(net, mask)` pairs.
+   - Sorts by prefix length ascending: masks with fewer ones (`/0`, `/8`, `/16`) appear before (`/24`, `/32`).
+   - Prunes child subnets: if `(net_b & parent_mask) == parent_net`, subnet B is omitted.
 
 ### 3.3 Configuration Normalization, Compaction & Shadowing Defense (`velda-sync`)
 

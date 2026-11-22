@@ -172,7 +172,9 @@ unsafe fn format_u32_fallback(mut n: u32, out: *mut u8) -> usize {
         temp[curr + 1] = DIGIT_PAIRS[rem + 1];
     }
     let len = 10 - curr;
-    core::ptr::copy_nonoverlapping(temp.as_ptr().add(curr), out, len);
+    unsafe {
+        core::ptr::copy_nonoverlapping(temp.as_ptr().add(curr), out, len);
+    }
     len
 }
 

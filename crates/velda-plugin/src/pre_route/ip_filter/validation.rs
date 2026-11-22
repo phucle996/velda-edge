@@ -2,6 +2,37 @@
 //!
 //! Enforces a strict declarative contract for the IP / CIDR Subnet Access Filter plugin.
 //!
+//! ```text
+//!  Validation & Shadowing Defense Pipeline (validate_ip_filter_config):
+//!
+//!   Raw JSON/YAML Config
+//!            │
+//!            ▼
+//!   +─────────────────────────────────────────────────────────+
+//!   | 1. Format & Strict Mode Check ("allow" / "deny")        |
+//!   | 2. Parse & Canonicalize all CIDRs                       |
+//!   | 3. Contradictory Rule Detection (allow == deny)         |
+//!   +─────────────────────────────────────────────────────────+
+//!            │
+//!            ▼
+//!   +─────────────────────────────────────────────────────────+
+//!   | 4. Cross-List Shadowing Analysis                        |
+//!   |    - Allow mode: broad deny rule covers narrow allow?   |
+//!   |      => Reject as DEAD/SHADOWED rule                    |
+//!   |    - Deny mode:  broad allow rule covers narrow deny?   |
+//!   |      => Reject as DEAD/SHADOWED rule                    |
+//!   +─────────────────────────────────────────────────────────+
+//!            │
+//!            ▼
+//!   +─────────────────────────────────────────────────────────+
+//!   | 5. Intra-List Subsumption Compaction                    |
+//!   |    [10.0.0.0/8, 10.1.0.0/16] ──► [10.0.0.0/8]           |
+//!   +─────────────────────────────────────────────────────────+
+//!            │
+//!            ▼
+//!    Validated & Compacted Schema
+//! ```
+//!
 //! # Strict Declarative Contract (Zero Silent Fallbacks)
 //! - **Explicit Mode**: `mode` must be explicitly declared as `"allow"` or `"deny"`.
 //! - **Valid CIDR / IP Format**: Every CIDR entry in `allow_cidrs` and `deny_cidrs` must parse into a valid IPv4 or IPv6 address or subnet prefix.

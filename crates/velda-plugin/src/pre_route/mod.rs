@@ -15,13 +15,15 @@ use crate::capability::{Direction, PluginCapability, SupportedProtocols};
 
 pub mod cors_preflight;
 pub mod ip_filter;
+pub mod method_filter;
 pub mod resource_limit;
 pub mod waf_lite;
 
 pub use cors_preflight::{CorsPreflightPlugin, OriginPattern};
 pub use ip_filter::{IpFilterMode, IpFilterPlugin};
+pub use method_filter::{MethodFilterConfig, MethodFilterPlugin};
 pub use resource_limit::{ResourceLimitPlugin, ResourceLimits};
-pub use waf_lite::{ThreatVector, WafLitePlugin, WafMode, WafScope};
+pub use waf_lite::{WafLiteConfig, WafLitePlugin};
 
 /// Contract for plugins evaluated prior to route matching.
 pub trait PreRoutePlugin: Send + Sync {
@@ -76,6 +78,7 @@ pub fn instantiate(
         "cors_preflight" => Ok(Arc::new(CorsPreflightPlugin::from_config(config)?)),
         "resource_limit" => Ok(Arc::new(ResourceLimitPlugin::from_config(config)?)),
         "waf_lite" => Ok(Arc::new(WafLitePlugin::from_config(config)?)),
+        "method_filter" => Ok(Arc::new(MethodFilterPlugin::from_config(config)?)),
         other => Err(crate::error::PluginError::Config(format!(
             "Unsupported pre_route plugin '{other}' for plugin '{}'",
             config.id
@@ -119,9 +122,9 @@ mod tests {
         let action = run_pre_route_plugins(&chain, &mut req);
         match action {
             Action::Reject(reason) => {
-                assert_eq!(reason, velda_core::RejectReason::Forbidden);
+                assert_eq!(reason, velda_core::RejectReason::IpBlocked);
             }
-            _ => panic!("Expected Action::Reject(Forbidden)"),
+            _ => panic!("Expected Action::Reject(IpBlocked)"),
         }
     }
 }

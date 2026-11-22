@@ -1,108 +1,78 @@
-# Web Application Firewall Lite Plugin (`waf_lite`) — Architectural Specification
+# Web Application Firewall Lite (`waf_lite`) — Deep Architecture Specification
 
-This document specifies the internal engine design, hardware-optimized execution pipeline, anti-evasion normalization algorithms, and memory invariants of the **`waf_lite`** pre-route perimeter firewall plugin.
-
----
-
-## 1. System Mindset & Architectural Invariants
-
-The `waf_lite` plugin operates at the ingress pre-route phase of Velda Edge, enforcing high-throughput Layer 7 threat rejection at the edge perimeter before downstream route matching or upstream connection leasing. It adheres strictly to six core architectural invariants:
-
-1. **Pre-Route Ingress Isolation**:
-   Evaluates incoming requests **prior** to router table resolution, authentication plugins (`jwt_auth`, `hmac_auth`, `oauth2_introspection`), payload reading, or upstream connection leasing. Malicious scanners probing non-existent paths or admin interfaces are neutralized immediately, shielding backend connection pools.
-2. **Deterministic $O(N)$ Zero-Regex Execution**:
-   Replaces backtracking regular expressions (PCRE/regex) with SIMD multi-pattern Aho-Corasick automata (`aho_corasick::AhoCorasick`). Scanning latency is strictly linear with respect to input byte length, completely eliminating Regular Expression Denial of Service (ReDoS) vulnerabilities.
-3. **Zero Heap Allocation & Zero UTF-8 Validation on Hot Path**:
-   All scanning and normalization operate directly on raw byte slices (`&[u8]`). Inputs $\le 1024$ bytes (99.99% of paths, queries, and headers) are normalized in-place on a fixed stack buffer (`[0u8; 1024]`). Eliminating `std::str::from_utf8` validation prevents CPU overhead and completely removes `String::from_utf8_lossy` heap allocation fallbacks.
-4. **Two-Stage Anti-Evasion & Comment-Smuggling Defense**:
-   Normalizes request vectors and defends against comment-wrapping and parameter-pollution bypasses:
-   - *Triple Percent-Encoding Defense*: Up to 3 recursive in-place passes handle nested percent sequences (`%25252e` $\to$ `%252e` $\to$ `%2e` $\to$ `.`).
-   - *Form-Urlencoded Query Space*: Decodes `+` to ASCII space `' '` for query string parameters.
-   - *Stage A (Pre-Comment-Strip Scan)*: Evaluates percent-decoded, lowercased bytes *before* SQL comment stripping so attackers cannot hide `<script>`, `${jndi:...}`, or `;whoami` inside `/* ... */`.
-   - *Stage B (Bounded Comment & Whitespace Compaction)*: Folds `\t`, `\r`, `\n`, multiple spaces, and bounded SQL comments (`/* ... */`, `-- ... [\r\n]`, `# ... [\r\n]`) into a single space `' '` without crossing `&`, `<`, or `$`, and without truncating trailing parameters on unterminated `-- `.
-   - *Raw Non-ASCII Byte Defense*: Inspects raw `HeaderValue::as_bytes()` directly, preventing bypass via `0x80`–`0xFF` byte prefixing.
-   - *Duplicate Header Smuggling Defense*: Inspects all occurrences of duplicate headers (`HeaderMap::get_all`).
-5. **Automatic Compile-Time & Sync-Time Deduplication ("Khử trùng")**:
-   `velda-sync` automatically strips any `custom_blocked_patterns` or `custom_blocked_user_agents` that are already covered by (exact match or superstring of) [`dictionary.rs`](./dictionary.rs) built-ins or repeated within the custom list, persisting the deduplicated configuration into `plugins.bin`.
-6. **Pre-Baked Static Responses**:
-   Rejections clone an immutable pre-allocated `403 Forbidden` response template (`L7Response::from_bytes`) in single-digit nanoseconds. Detect mode injects pre-baked static `HeaderValue` constants without runtime string parsing.
+This document specifies the low-level memory layout, deterministic finite automaton (DFA) execution, anti-evasion invariants, and machine-code properties of **`waf_lite`**.
 
 ---
 
-## 2. End-to-End Request Hot-Path Pipeline
+## 1. Execution Pipeline & Subsystem Boundaries
 
-```mermaid
-flowchart TD
-    subgraph IngressFastPath["Phase 1: Ingress Fast-Path Gating"]
-        A["Incoming L7Request"] --> B["Extract URI Path / Query / Header bytes"]
-        B --> C{"needs_normalization?\n(Has '%', uppercase, '+', '/*', '--', '#', or control)"}
-        C -- "No (Clean Input)" --> D["Direct SIMD Match\n(WafMatcher::match_slice)"]
-        C -- "Yes" --> E{"bytes.len() <= 1024?"}
-        E -- "Yes" --> F["Stack Buffer [0u8; 1024]"]
-        E -- "No" --> G["Heap Buffer Vec<u8>"]
-    end
-
-    subgraph AntiEvasion["Phase 2: Multi-Pass Decoding & Two-Stage Scan"]
-        F --> H["decode_percent_multi_pass (up to 3 passes)\n+ ASCII Lowercase + '+' to ' '"]
-        G --> H
-        H --> I["Stage A: Match on Decoded Bytes\n(Catches /*<script>*/, /*${jndi:}*/, /*;whoami*/)"]
-        I -- "Threat Found" --> M{"WafMode"}
-        I -- "Clean & has_compaction_markers" --> K["Stage B: compact_whitespace_and_comments\n(Bounded /*...*/, --...\\n, #...\\n -> ' ')"]
-        K --> L["Match on Compacted Bytes\n(Catches UNION/**/SELECT, UNION--\\nSELECT)"]
-    end
-
-    subgraph ActionDispatch["Phase 3: Action Enforcement"]
-        D -- "Threat Found" --> M
-        L -- "Threat Found" --> M
-        M -- "Block" --> N["Return Action::Respond(403 Forbidden)\n(Pre-baked static Bytes clone)"]
-        M -- "DetectOnly" --> O["Inject x-waf-threat-* headers\n(Action::Continue)"]
-        D -- "Clean" --> P["Advance to Next Vector / Return Action::Continue"]
-        L -- "Clean" --> P
-    end
+```text
++─────────────────────────────────────────────────────────────────────────────+
+|                       WAF_LITE HOT-PATH ARCHITECTURE                        |
++─────────────────────────────────────────────────────────────────────────────+
+|                                                                             |
+|  WafLitePlugin::on_request(&self, req: &mut L7Request)                      |
+|     │  [Stack Frame: 40 B (5 callee-saved pushes, 0 subq)]                  |
+|     │                                                                       |
+|     ├─► [matcher.pattern_ac.is_none()?] ──► YES (cmpb $-1 + je) ──► Continue|
+|     │                                                                       |
+|     ├─► 1. URI Path  (req.uri.path().as_bytes(),  convert_plus = false)     |
+|     ├─► 2. URI Query (req.uri.query().as_bytes(), convert_plus = true)      |
+|     └─► 3. Body Cap  (min(req.body.len(), 32768) via branchless cmovbq)     |
+|                                │                                            |
+|                                ▼                                            |
+|                     WafMatcher::check_bytes(slice)                          |
+|                                │                                            |
+|                  [needs_normalization(slice) == false?]                     |
+|                     /                                \                      |
+|                   YES                                 NO                    |
+|                   /                                     \                   |
+|        Zero-Copy Direct                       In-Place Normalization        |
+|        AhoCorasick::find(slice)               (Stack [u8; 1024] or <=32KB)  |
+|                                               1. decode_percent_multi_pass  |
+|                                               2. Stage A: AC::find(decoded) |
+|                                               3. compact_whitespace_comments|
+|                                               4. Stage B: AC::find(compact) |
+|                                │                                            |
+|                       Matched == true?                                      |
+|                         /          \                                        |
+|                       YES           NO                                      |
+|                       /               \                                     |
+|    Action::Reject(WafBlocked)     Action::Continue                          |
++─────────────────────────────────────────────────────────────────────────────+
 ```
 
 ---
 
-## 3. Core Architectural Subsystems
+## 2. Algorithmic & Memory Complexity Proofs
 
-### 3.1 Static Dictionary & Threat Classification (`dictionary.rs`)
+### 2.1 $\mathcal{O}(N)$ Serving Complexity Independent of Rule Count $K$
+- During configuration compilation (`WafMatcher::new`), all $K$ normalized patterns (total byte length $M = \sum |p_i|$) are sorted (`sort_unstable`), deduplicated (`dedup`), and compiled into a single **SIMD-accelerated Aho-Corasick DFA** (Teddy vector matching on x86-64).
+- On the request hot path, each byte $b_i$ of input length $N$ triggers $\mathcal{O}(1)$ state transitions. Total scan cost is $\mathcal{O}(N)$, independent of $K$.
 
-[`dictionary.rs`](./dictionary.rs) owns the zero-allocation static knowledge base:
-- `ThreatVector`: 1-byte `Copy` enum (`PathTraversal`, `SqlInjection`, `CrossSiteScripting`, `RemoteCodeExecution`, `MaliciousScanner`, `CustomPattern`).
-- `BUILTIN_ATTACK_SIGNATURES: &[(&str, ThreatVector)]`: 119 curated, non-overlapping lowercase attack signatures across Path Traversal, SQLi, XSS, Log4j, Shell RCE, and Framework CVEs.
-- `BUILTIN_MALICIOUS_USER_AGENTS: &[&str]`: 15 automated scanner User-Agent substrings.
-
-### 3.2 SIMD Multi-Pattern Matching Engine (`WafMatcher` in `scanner.rs`)
-
-`WafMatcher` compiles built-in and deduplicated custom signatures into two deterministic finite automata (`aho_corasick::AhoCorasick`):
-
-```
-WafMatcher
-├── pattern_ac: AhoCorasick (SIMD multi-pattern automaton for attack signatures)
-├── pattern_meta: Vec<ThreatVector> (Indexed 1:1 with pattern automaton IDs)
-└── ua_ac: AhoCorasick (SIMD multi-pattern automaton for malicious scanners)
-```
-
-No closure wrappers or temporary `Vec<u8>` allocations are used during construction or serving. `WafMatcher::check_patterns` and `WafMatcher::check_user_agent` operate directly on raw byte slices `&[u8]`.
+### 2.2 Anti-DoS Payload Window Bounding ($\mathcal{O}(1)$ Upper Bound)
+- Request body inspection is strictly bounded by `MAX_BODY_SCAN_BYTES = 32_768` (32 KB):
+  $$\text{ScanLen}(L) = \min(L, 32\,768) \implies T_{\text{body}}(L) \le \alpha \cdot 32\,768 = \mathcal{O}(1)$$
+- Compiled as a single branchless `cmpq $32768, %rsi` + `cmovbq %rsi, %rdx` sequence on x86-64.
 
 ---
 
-## 4. Security & Evasion Mitigations Matrix
+## 3. Anti-Evasion Normalization Mechanics
 
-| Attack Vector / Evasion Technique | Exploit Syntax / Payload | Vulnerability in Naive WAF | Mitigation in `waf_lite` |
-| :--- | :--- | :--- | :--- |
-| **Double / Triple URL-Encoding** | `%25252e%25252e%25252fetc/passwd` | Single decode stops at `%252e` or `%2e`, missing `../`. | 3-pass in-place decoding collapses nested `%25` sequences to `../`. |
-| **SQL Inline & Line Comments** | `UNION/**/SELECT`, `UNION--%0aSELECT` | Split keywords evade fixed `union select` signature. | Stage B folds bounded `/*...*/`, `--...[\r\n]`, and `#...[\r\n]` into `' '`. |
-| **Comment-Wrapped XSS / RCE** | `/*<script>alert(1)</script>*/`, `/*${jndi:...}*/` | Naive comment stripping deletes `<script>` or `${jndi:}` before matching. | Stage A scans percent-decoded bytes *before* comment folding, and comment folding refuses to cross `<` or `$`. |
-| **Parameter Smuggling via Comments** | `?a=/*&id=1'+UNION+SELECT+1&b=*/` | Comment stripper deletes middle query parameters between `/*` and `*/`. | Comment folding aborts on `&`, preserving all query parameters. |
-| **Unterminated `--` Truncation** | `?a=--%20&id=1'+UNION+SELECT+1` | Treating `-- ` without `\n` as EOF comment truncates rest of query string. | Single-line `--` only folds when terminated by `\n` or `\r`. |
-| **Non-ASCII Byte Evasion** | `Referer: \x80${jndi:ldap...}` | `HeaderValue::to_str()` fails with `Err`, skipping header scan entirely. | Scans raw `val.as_bytes()` directly without UTF-8 validation. |
-| **Duplicate Header Smuggling** | Multiple `User-Agent` / custom headers | `req.headers.get()` inspects only the first header. | Iterates over `req.headers.get_all(hdr)` for every configured header. |
+### 3.1 Monotonic In-Place Pointer Invariant ($r_t \ge w_t$)
+In `decode_percent_multi_pass`, `%XX` (3 bytes) decodes to 1 byte, while literal characters copy 1-to-1. By induction:
+- Base: $r_0 = 0 \ge w_0 = 0$.
+- Step: Either $(r_{t+1}, w_{t+1}) = (r_t + 3, w_t + 1)$ or $(r_t + 1, w_t + 1)$, preserving $r_t \ge w_t$.
+- Therefore, writing `out[w] = b` **never overwrites unread input** `out[r..]`, permitting up to **3 nested decoding passes** (`%25252e` $\to$ `%252e` $\to$ `%2e` $\to$ `.`) strictly in-place on a single buffer (`[0u8; 1024]` on stack for URI/small payloads).
+
+### 3.2 Two-Stage Comment Scanning & Delimiter Barriers
+- **Stage A (Pre-Strip)**: Scans percent-decoded, ASCII-lowercased bytes *before* comment folding so payloads wrapped inside SQL comments (`/*<script>*/`, `/*${jndi:...}*/`) are caught immediately.
+- **Stage B (Post-Strip)**: Collapses SQL inline comments (`/*...*/`, preserving MySQL executable `/*!`) and terminated line comments (`--...\n`, `#...\n`) into a single space, catching fragmented SQLi (`UNION/**/SELECT`).
+- **Smuggling Barrier**: Comment scanning aborts upon encountering `&`, `<`, or `$`, preventing cross-parameter comment smuggling (`?a=/*&id=union+select&b=*/`).
 
 ---
 
-## 5. Thread Safety & Lifecycle Architecture
+## 4. Zero Information Leakage & Cache Footprint
 
-1. **Immutable Configuration**: Once compiled during bootstrap or dynamic configuration sync (`velda-sync`), `WafLitePlugin` is completely immutable. Worker threads share access via `Arc<dyn PreRoutePlugin>` without mutexes, rwlocks, or atomic synchronization on the hot path.
-2. **Thread-Local Stack Buffer**: The 1024-byte normalization buffer resides on the worker thread's execution stack (`[0u8; 1024]`), guaranteeing zero contention across CPU cores.
-3. **Dynamic Reconfiguration**: Route plugin plans are updated via LKG atomic pointer swapping (`Arc<PluginTable>`). Updating WAF signatures or operational modes requires zero gateway restarts and incurs zero connection drops.
+- **Wire Indistinguishability**: `RejectReason::WafBlocked` (discriminant `17`) maps in `REJECT_STATIC_METAS` to `(403, "14", b"403 Forbidden\n")` and gRPC `PermissionDenied ("Forbidden")` — bit-for-bit identical to `RejectReason::Forbidden` (`2`) and `RejectReason::IpBlocked` (`18`). Mutual information leaked to external attackers is $I(\text{Source}; Y) = 0\text{ bits}$.
+- **L1 Cache Footprint (`x86-64-v3`)**: `WafLitePlugin::on_request` uses a `40 B` stack frame (1 L1d cache line) and `178` ASM lines (~10 L1i cache lines), with 0 heap allocations (`alloc::*` = 0).

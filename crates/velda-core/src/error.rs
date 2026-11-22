@@ -143,13 +143,19 @@ pub enum RejectReason {
 
     /// Upstream backend failed to reply within configured deadline.
     GatewayTimeout = 16,
+
+    /// Request denied by Web Application Firewall pattern inspection.
+    WafBlocked = 17,
+
+    /// Request denied by network IP address or CIDR policy.
+    IpBlocked = 18,
 }
 
 impl RejectReason {
     /// Total number of distinct rejection reasons in the canonical codebook.
-    pub const COUNT: usize = 17;
+    pub const COUNT: usize = 19;
 
-    /// Converts a raw 8-bit integer into a [`RejectReason`] if within range `0..17`.
+    /// Converts a raw 8-bit integer into a [`RejectReason`] if within range `0..19`.
     #[inline(always)]
     pub const fn from_u8(v: u8) -> Option<Self> {
         if (v as usize) < Self::COUNT {
@@ -179,6 +185,8 @@ impl RejectReason {
             Self::BadGateway => "Bad Gateway",
             Self::ServiceUnavailable => "Service Unavailable",
             Self::GatewayTimeout => "Gateway Timeout",
+            Self::WafBlocked => "Forbidden",
+            Self::IpBlocked => "Forbidden",
         }
     }
 }

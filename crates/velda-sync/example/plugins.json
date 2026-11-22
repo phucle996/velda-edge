@@ -26,13 +26,15 @@
     {
       "id": "waf_lite",
       "config": {
-        "mode": "block",
-        "check_path": true,
-        "check_query": true,
-        "check_user_agent": true,
-        "check_headers": [],
-        "custom_blocked_patterns": [],
-        "custom_blocked_user_agents": []
+        "patterns": [
+          "../",
+          "..\\",
+          "/etc/passwd",
+          "' or '1'='1",
+          "union select",
+          "<script",
+          "${jndi:"
+        ]
       }
     },
     {

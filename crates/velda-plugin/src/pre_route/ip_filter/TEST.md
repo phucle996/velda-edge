@@ -37,11 +37,12 @@ The `ip_filter` test suite validates four core functional and security areas:
 
 | Suite / File | Test Function | Purpose / Assertion |
 | :--- | :--- | :--- |
-| `network.rs` | `test_ipv4_cidr_matching` | Verifies bitwise `(ip & mask) == net` for IPv4 subnets. |
-| `network.rs` | `test_ipv6_cidr_matching` | Verifies bitwise matching for IPv6 subnets. |
-| `network.rs` | `test_ipv4_mapped_ipv6_matching` | Verifies that `::ffff:192.168.1.50` matches `192.168.1.0/24` and `::ffff:192.168.1.0/120` compiles to IPv4 `/24`. |
-| `network.rs` | `test_parse_ip_bytes` | Tests fast-path parsing of plain IPv4, IPv4:port, quoted IPv4, bracketed IPv6:port, and mapped IPv6. |
-| `network.rs` | `test_compact_and_sort_v4` | Verifies that subsumed child subnets (`/16`, `/32` inside `/8`) are pruned and broadest subnets sort first. |
+| `config.rs` | `test_ipv4_cidr_matching` | Verifies bitwise `(ip & mask) == net` for IPv4 subnets. |
+| `config.rs` | `test_ipv6_cidr_matching` | Verifies bitwise matching for IPv6 subnets. |
+| `config.rs` | `test_ipv4_mapped_and_translated_ipv6_matching` | Verifies that `::ffff:192.168.1.50` matches `192.168.1.0/24` and `::ffff:192.168.1.0/120` compiles to IPv4 `/24`. |
+| `stream.rs` | `test_parse_ip_bytes_and_adversarial_inputs` | Tests fast-path parsing of plain IPv4, IPv4:port, quoted IPv4, bracketed IPv6:port, mapped IPv6, and adversarial inputs. |
+| `engine.rs` | `test_compact_and_sort_v4` | Verifies that subsumed child subnets (`/16`, `/32` inside `/8`) are pruned and broadest subnets sort first. |
+| `engine.rs` | `test_engine_partitioning_and_matching` | Verifies exact partition and subnet SWAR partition matching. |
 | `plugin.rs` | `test_allow_list_mode` | Verifies permitted IPs return `Action::Continue` and non-permitted IPs return `Action::Respond(403)`. |
 | `plugin.rs` | `test_allow_list_mode_with_port_and_quotes` | Verifies port and quote stripping during allowlist evaluation. |
 | `plugin.rs` | `test_deny_list_mode` | Verifies blocked IPs return `Action::Respond(403)` and clean IPs return `Action::Continue`. |

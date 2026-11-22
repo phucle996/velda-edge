@@ -245,16 +245,17 @@ unsafe fn crc32c_sse42(data: &[u8]) -> u32 {
     }
 }
 
-/// Computes Castagnoli CRC32-C checksum over the given slice using the fastest available hardware path.
+/// Computes Castagnoli CRC32-C checksum over the given slice using compile-time target dispatch.
 #[inline]
 pub fn crc32c(data: &[u8]) -> u32 {
-    #[cfg(target_arch = "x86_64")]
+    #[cfg(all(target_arch = "x86_64", target_feature = "sse4.2"))]
     {
-        if is_x86_feature_detected!("sse4.2") {
-            return unsafe { crc32c_sse42(data) };
-        }
+        unsafe { crc32c_sse42(data) }
     }
-    crc32c_table(data)
+    #[cfg(not(all(target_arch = "x86_64", target_feature = "sse4.2")))]
+    {
+        crc32c_table(data)
+    }
 }
 
 // ── Zigzag Varint Encoding ───────────────────────────────────────────────────

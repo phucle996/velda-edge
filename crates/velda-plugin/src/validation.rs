@@ -51,6 +51,7 @@ pub fn canonical_phase_for_id(id: &str) -> Option<&'static str> {
         "cors_preflight" => Some("pre_route"),
         "resource_limit" => Some("pre_route"),
         "waf_lite" => Some("pre_route"),
+        "method_filter" => Some("pre_route"),
         "rate_limit" => Some("pre_upstream"),
         "header_mutation" => Some("pre_upstream"),
         "canary" => Some("pre_upstream"),
@@ -198,6 +199,21 @@ pub fn validate_plugin_config(plugin: &mut PluginConfig) -> Result<(), PluginErr
                 &plugin.id,
                 &plugin.config,
             )?;
+            plugin.config =
+                serde_json::to_value(normalized).map_err(|e| PluginError::Config(e.to_string()))?;
+        }
+        "method_filter" => {
+            if plugin.phase != "pre_route" {
+                return Err(PluginError::Config(format!(
+                    "Plugin '{}' must specify phase 'pre_route'",
+                    plugin.id
+                )));
+            }
+            let normalized =
+                crate::pre_route::method_filter::validation::validate_method_filter_config(
+                    &plugin.id,
+                    &plugin.config,
+                )?;
             plugin.config =
                 serde_json::to_value(normalized).map_err(|e| PluginError::Config(e.to_string()))?;
         }
