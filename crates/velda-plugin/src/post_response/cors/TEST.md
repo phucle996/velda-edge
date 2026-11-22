@@ -22,8 +22,8 @@
 - `plugin::tests::test_swar_vary_scanner` — Verifies 64-bit SWAR case-insensitive `"origin"` / `"*"` matching.
 - `plugin::tests::test_wildcard_without_credentials` — Verifies `*` emission without `Vary: Origin` or credentials.
 - `plugin::tests::test_rust_constructor_rejects_wildcard_with_credentials` — Verifies RFC 6454 parity on `CorsResponsePlugin::new`.
-- `plugin::tests::test_scrubs_upstream_cors_leak_on_missing_or_disallowed_origin` — Verifies removal of upstream CORS headers and preservation of `Vary: Origin`.
-- `plugin::tests::test_single_source_of_truth_overrides_and_scrubs_disabled_headers` — Verifies Edge overrides `Allow-Origin` and removes `Allow-Credentials` / `Expose-Headers` when disabled.
+- `plugin::tests::test_disallowed_origin_writes_no_cors_headers` — Verifies a disallowed or missing `Origin` writes no `Access-Control-*` header and only adds `Vary: Origin`.
+- `plugin::tests::test_allowed_origin_writes_only_enabled_headers` — Verifies an allowed `Origin` writes `Allow-Origin` and only the other headers enabled in config.
 - `plugin::tests::test_from_config_complete_with_expose_headers` — Verifies JSON deserialization, subdomain matching, exposed headers, and multi-value `Vary` appending.
 
 ### Integration Suite (`cargo test -p velda-plugin --test cors_suite_test`)
@@ -34,4 +34,4 @@
 - `test_non_cors_traffic_pass_through`
 - `test_wildcard_origin_without_credentials`
 - `test_vary_header_idempotency`
-- `test_edge_single_source_of_truth_scrubs_upstream_cors`
+- `test_validate_then_write_never_writes_for_invalid_origin`

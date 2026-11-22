@@ -115,15 +115,17 @@ impl CorsOriginPattern {
             Self::Any => true,
             Self::Exact(expected) => expected.eq_ignore_ascii_case(origin),
             Self::Subdomain { prefix, suffix } => {
-                if origin.len() <= prefix.len() + suffix.len() {
+                let Some((o_prefix, after_prefix)) = origin.split_at_checked(prefix.len()) else {
+                    return false;
+                };
+                if after_prefix.len() <= suffix.len() || !o_prefix.eq_ignore_ascii_case(prefix) {
                     return false;
                 }
-                let (o_prefix, rest) = origin.split_at(prefix.len());
-                if !o_prefix.eq_ignore_ascii_case(prefix) {
+                let wildcard_len = after_prefix.len() - suffix.len();
+                let Some((wildcard_part, o_suffix)) = after_prefix.split_at_checked(wildcard_len)
+                else {
                     return false;
-                }
-                let wildcard_len = origin.len() - prefix.len() - suffix.len();
-                let (wildcard_part, o_suffix) = rest.split_at(wildcard_len);
+                };
                 if !o_suffix.eq_ignore_ascii_case(suffix) {
                     return false;
                 }
@@ -143,6 +145,12 @@ pub fn validate_origin_pattern(
     if trimmed.is_empty() {
         return Err(PluginError::Config(format!(
             "Plugin '{plugin_id}': origin pattern cannot be empty"
+        )));
+    }
+
+    if !trimmed.is_ascii() {
+        return Err(PluginError::Config(format!(
+            "Plugin '{plugin_id}': origin '{trimmed}' must contain ASCII characters only"
         )));
     }
 

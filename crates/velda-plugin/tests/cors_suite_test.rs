@@ -439,48 +439,25 @@ fn test_vary_header_idempotency() {
 }
 
 #[test]
-fn test_edge_single_source_of_truth_scrubs_upstream_cors() {
+fn test_validate_then_write_never_writes_for_invalid_origin() {
     let response_plugin =
         CorsResponsePlugin::new("cors-strict", "https://app.velda.io", false).unwrap();
 
-    // Upstream attempts to grant overly permissive wildcard + credentials + max-age
-    let mut upstream_resp = L7Response::empty(StatusCode::OK);
-    upstream_resp
-        .headers
-        .insert(ACCESS_CONTROL_ALLOW_ORIGIN, HeaderValue::from_static("*"));
-    upstream_resp.headers.insert(
-        ACCESS_CONTROL_ALLOW_CREDENTIALS,
-        HeaderValue::from_static("true"),
-    );
-    upstream_resp.headers.insert(
-        ACCESS_CONTROL_EXPOSE_HEADERS,
-        HeaderValue::from_static("x-internal-secret"),
-    );
-    upstream_resp
-        .headers
-        .insert(ACCESS_CONTROL_MAX_AGE, HeaderValue::from_static("86400"));
+    // Disallowed or missing Origin -> only `Vary: Origin` is written; no Access-Control-* header.
+    for origin in [Some("https://evil.com"), None] {
+        let req = make_test_request(Method::GET, "/api", origin, None, None);
+        let mut resp = L7Response::empty(StatusCode::OK);
+        let len_before = resp.headers.len();
+        response_plugin.on_response(&req.headers, &mut resp);
 
-    // 1. Disallowed origin -> Edge strips all upstream CORS grants and preserves Vary: Origin
-    let evil_req = make_test_request(Method::GET, "/api", Some("https://evil.com"), None, None);
-    let mut resp_evil = upstream_resp.clone();
-    response_plugin.on_response(&evil_req.headers, &mut resp_evil);
-    assert!(resp_evil.headers.get(ACCESS_CONTROL_ALLOW_ORIGIN).is_none());
-    assert!(
-        resp_evil
-            .headers
-            .get(ACCESS_CONTROL_ALLOW_CREDENTIALS)
-            .is_none()
-    );
-    assert!(
-        resp_evil
-            .headers
-            .get(ACCESS_CONTROL_EXPOSE_HEADERS)
-            .is_none()
-    );
-    assert!(resp_evil.headers.get(ACCESS_CONTROL_MAX_AGE).is_none());
-    assert_eq!(resp_evil.headers.get(VARY).unwrap(), "Origin");
+        assert!(resp.headers.get(ACCESS_CONTROL_ALLOW_ORIGIN).is_none());
+        assert!(resp.headers.get(ACCESS_CONTROL_ALLOW_CREDENTIALS).is_none());
+        assert!(resp.headers.get(ACCESS_CONTROL_EXPOSE_HEADERS).is_none());
+        assert_eq!(resp.headers.get(VARY).unwrap(), "Origin");
+        assert_eq!(resp.headers.len(), len_before + 1);
+    }
 
-    // 2. Allowed origin -> Edge overrides Allow-Origin and scrubs disabled credentials/expose/max-age
+    // Allowed Origin with credentials/expose disabled -> only Allow-Origin (+ Vary) is written.
     let good_req = make_test_request(
         Method::GET,
         "/api",
@@ -488,7 +465,8 @@ fn test_edge_single_source_of_truth_scrubs_upstream_cors() {
         None,
         None,
     );
-    let mut resp_good = upstream_resp;
+    let mut resp_good = L7Response::empty(StatusCode::OK);
+    let len_before = resp_good.headers.len();
     response_plugin.on_response(&good_req.headers, &mut resp_good);
     assert_eq!(
         resp_good.headers.get(ACCESS_CONTROL_ALLOW_ORIGIN).unwrap(),
@@ -506,6 +484,6 @@ fn test_edge_single_source_of_truth_scrubs_upstream_cors() {
             .get(ACCESS_CONTROL_EXPOSE_HEADERS)
             .is_none()
     );
-    assert!(resp_good.headers.get(ACCESS_CONTROL_MAX_AGE).is_none());
     assert_eq!(resp_good.headers.get(VARY).unwrap(), "Origin");
+    assert_eq!(resp_good.headers.len(), len_before + 2);
 }

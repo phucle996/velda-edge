@@ -5,21 +5,20 @@
         │
         ▼
   [post_response: cors] (Frontline Worker, pbww = 0)
-        ├─ Scrub preflight-only upstream headers (`Allow-Methods`, `Allow-Headers`, `Max-Age`)
+        ├─ Read-only: match `req_headers["origin"]` against `CorsOriginPattern[]`
         ├─ If `needs_vary_origin`: ensure `Vary: Origin` (RFC 9110 §12.5.5 cache safety)
-        └─ Match `req_headers["origin"]` against `CorsOriginPattern[]`:
-             ├─ Missing / Disallowed ─► `.remove()` `Allow-Origin`, `Allow-Credentials`, `Expose-Headers`
-             └─ Allowed               ─► Direct `.insert()` static `HeaderValue`s & scrub disabled headers
+        └─ Origin missing / disallowed ─► return, no `Access-Control-*` header written
+           Origin allowed              ─► one `.insert()` per enabled header (never write-then-remove)
 ```
 
 ---
 
 ## 1. What This Plugin Does
 
-`cors` enforces Cross-Origin Resource Sharing (`RFC 6454`, `WHATWG Fetch`, `RFC 9110 §12.5.5`) on outgoing HTTP responses as the **authoritative Edge Single Source of Truth**:
-- Emits or overrides `Access-Control-Allow-Origin` (`*` or reflected origin), `Access-Control-Allow-Credentials`, and `Access-Control-Expose-Headers`.
-- Strips stale or overly permissive backend CORS headers whenever an origin is missing, unauthorized, or a feature (`allow_credentials`, `expose_headers`) is disabled at the Edge.
-- Strips preflight-only headers (`Access-Control-Allow-Methods`, `Access-Control-Allow-Headers`, `Access-Control-Max-Age`) from normal responses.
+`cors` enforces Cross-Origin Resource Sharing (`RFC 6454`, `WHATWG Fetch`, `RFC 9110 §12.5.5`) on outgoing HTTP responses with a validate-then-write flow:
+- Validates the request `Origin` first, without touching the response.
+- For an allowed `Origin`, inserts `Access-Control-Allow-Origin` (`*` or reflected origin), plus `Access-Control-Allow-Credentials` and `Access-Control-Expose-Headers` only when enabled in config.
+- For a missing or disallowed `Origin`, writes no `Access-Control-*` header. It does not read or remove CORS headers already present on the upstream response.
 - Appends `Vary: Origin` across all outcomes (allowed, disallowed, and missing `Origin`) whenever the CORS policy varies by `Origin` (`!allow_all_origins || allow_credentials`).
 
 ## 2. Where It Sits in Velda Edge

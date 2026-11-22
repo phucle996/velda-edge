@@ -3,8 +3,8 @@
 ## 1. Design Principles
 
 1. **Self-Contained Ownership**: Completely isolated inside `crates/velda-plugin/src/post_response/cors/` (`origin.rs`, `validation.rs`, `plugin.rs`, `mod.rs`) with zero cross-phase imports from `pre_route`.
-2. **Edge Single Source of Truth**: Scrubs preflight-only headers (`Allow-Methods`, `Allow-Headers`, `Max-Age`) on every response and removes any backend-leaked `Allow-Origin`, `Allow-Credentials`, or `Expose-Headers` when disabled or disallowed.
-3. **Direct 1-Shot `HeaderWorkspace` Writes**: Pre-bakes immutable `HeaderValue` templates at config compile time (`HeaderValue::from_static` / atomic `Bytes` ref-count clones) and writes/removes directly on `resp.headers` without routing static strings through `HeaderWorkspace`'s `u128` numeric register deferrals.
+2. **Validate Then Write**: Origin matching is read-only and completes before any response header is touched. A missing or disallowed `Origin` writes no `Access-Control-*` header; the plugin never writes a header and removes it later.
+3. **Direct 1-Shot Writes**: Pre-bakes immutable `HeaderValue` templates at config compile time (`HeaderValue::from_static` / atomic `Bytes` ref-count clones) and inserts each enabled header exactly once on `resp.headers`, without routing static strings through `HeaderWorkspace`'s `u128` numeric register deferrals.
 4. **RFC 9110 §12.5.5 Cache Poisoning Immunity**: Any origin-dependent policy emits `Vary: Origin` unconditionally across allowed, disallowed, and non-`Origin` responses while deduplicating upstream `Vary` lists via a 64-bit SWAR scanner.
 
 ---
@@ -13,23 +13,23 @@
 
 ```mermaid
 flowchart TD
-    A["Upstream L7Response"] --> B["Scrub Preflight Headers (Allow-Methods, Allow-Headers, Max-Age)"]
+    A["Upstream L7Response"] --> B["Read-only: is_origin_allowed(req Origin)"]
     B --> C{"flags & NEEDS_VARY_ORIGIN != 0?"}
-    C -- "Yes" --> D{"Vary exists on resp?"}
-    D -- "No" --> E["insert(Vary, 'Origin')"]
-    D -- "Yes" --> F["64-bit SWAR scan -> append('Origin') if absent"]
+    C -- "Yes" --> D{"get_all(Vary).next()?"}
+    D -- "None" --> E["insert(Vary, 'Origin')"]
+    D -- "Some" --> F["64-bit SWAR scan -> append('Origin') if absent"]
     C -- "No (* without creds)" --> G["Check req_headers['origin']"]
     E --> G
     F --> G
     G --> H{"Origin present & matches CorsOriginPattern?"}
-    H -- "No" --> I["remove(Allow-Origin, Allow-Credentials, Expose-Headers)"]
-    H -- "Yes" --> J["insert(Allow-Origin) + static_headers[0..len] + scrub disabled"]
+    H -- "No" --> I["return (no Access-Control-* written)"]
+    H -- "Yes" --> J["insert(Allow-Origin) + Allow-Credentials if enabled + Expose-Headers if configured"]
 ```
 
 ### 2.1 Struct Layout (`CorsResponsePlugin`)
 - `flags: u8`: 4-bit configuration mask (`ALLOW_ALL_ORIGINS`, `ALLOW_CREDENTIALS`, `REFLECT_ORIGIN`, `NEEDS_VARY_ORIGIN`).
 - `origin_kind: u8`: Jump discriminator (`ANY = 0`, `SINGLE_EXACT = 1`, `MULTI = 2`).
-- `static_headers: [(HeaderName, HeaderValue); 2]` + `static_headers_len: u8`: Contiguous L1-resident pre-baked array holding optional `Allow-Credentials: true` and `Expose-Headers`.
+- `expose_headers: Option<HeaderValue>`: Pre-validated `Access-Control-Expose-Headers` value (`Allow-Credentials` uses compile-time static `"true"` without cloning).
 
 ---
 

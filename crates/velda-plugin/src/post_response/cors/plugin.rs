@@ -1,34 +1,31 @@
 //! Cross-Origin Resource Sharing (CORS) Post-Response Plugin.
 //!
-//! Authoritatively enforces Edge CORS policy as the **Single Source of Truth** on all outgoing
-//! upstream responses before downstream encoding (`RFC 9110 §12.5.5` & `WHATWG Fetch`):
+//! Validate-then-write CORS enforcement on outgoing upstream responses
+//! (`RFC 9110 §12.5.5` & `WHATWG Fetch`). The response header map is only written after every
+//! decision is made; no header is written and then removed.
 //!
 //! ```text
-//!   Upstream L7Response
+//!   req_headers["origin"] ──► is_origin_allowed()   (read-only, no response access)
 //!         │
 //!         ▼
-//!   [1] Strip stale/preflight CORS headers (`Allow-Methods`, `Allow-Headers`, `Max-Age`)
+//!   [1] needs_vary_origin (`allow_credentials || !allow_all_origins`)
+//!         └─► ensure `Vary: Origin` (SWAR scan of existing `Vary`), for ALL outcomes
 //!         │
 //!         ▼
-//!   [2] If `needs_vary_origin` (`allow_credentials || !allow_all_origins`):
-//!         Ensure `Vary: Origin` is present across ALL outcomes (allowed, disallowed, missing Origin)
-//!         via zero-alloc 64-bit SWAR scanner to prevent CDN/proxy cache poisoning (RFC 9110 §12.5.5)
+//!   [2] Origin missing or disallowed ─► return (no `Access-Control-*` written)
 //!         │
 //!         ▼
-//!   [3] Inspect downstream `req_headers["origin"]` against `CorsOriginPattern[]`
-//!         ├─ Missing or Disallowed ─► `.remove()` `Allow-Origin`, `Allow-Credentials`, `Expose-Headers`
-//!         └─ Allowed               ─► Direct 1-shot `resp.headers.insert(...)` (static HeaderValues):
-//!                                       • `Access-Control-Allow-Origin`: `*` or reflected `Origin`
-//!                                       • `Access-Control-Allow-Credentials`: `"true"` or `.remove()`
-//!                                       • `Access-Control-Expose-Headers`: pre-baked or `.remove()`
+//!   [3] Origin allowed ─► one `insert` per enabled header:
+//!         • `Access-Control-Allow-Origin`      (`*` or reflected `Origin`)
+//!         • `Access-Control-Allow-Credentials` (`"true"`, only if enabled)
+//!         • `Access-Control-Expose-Headers`    (pre-baked, only if configured)
 //! ```
 
+use http::header::HeaderValue;
 use http::header::{
-    ACCESS_CONTROL_ALLOW_CREDENTIALS, ACCESS_CONTROL_ALLOW_HEADERS, ACCESS_CONTROL_ALLOW_METHODS,
-    ACCESS_CONTROL_ALLOW_ORIGIN, ACCESS_CONTROL_EXPOSE_HEADERS, ACCESS_CONTROL_MAX_AGE, ORIGIN,
-    VARY,
+    ACCESS_CONTROL_ALLOW_CREDENTIALS, ACCESS_CONTROL_ALLOW_ORIGIN, ACCESS_CONTROL_EXPOSE_HEADERS,
+    ORIGIN, VARY,
 };
-use http::header::{HeaderName, HeaderValue};
 use velda_core::{HeaderWorkspace, L7Response};
 
 use crate::capability::{AccessLevel, PluginCapability, SupportedProtocols};
@@ -104,9 +101,7 @@ pub struct CorsResponsePlugin {
     pub config: CorsConfig,
     pub flags: u8,
     pub origin_kind: u8,
-    pub static_headers: [(HeaderName, HeaderValue); 2],
-    pub static_headers_len: u8,
-    pub has_expose_headers: bool,
+    pub expose_headers: Option<HeaderValue>,
 }
 
 impl CorsResponsePlugin {
@@ -192,40 +187,40 @@ impl CorsResponsePlugin {
             ORIGIN_KIND_MULTI
         };
 
-        let mut static_headers: [(HeaderName, HeaderValue); 2] = [
-            (
-                ACCESS_CONTROL_ALLOW_CREDENTIALS,
-                HeaderValue::from_static("true"),
-            ),
-            (ACCESS_CONTROL_EXPOSE_HEADERS, HeaderValue::from_static("")),
-        ];
-        let mut static_headers_len = 0u8;
-
-        if config.allow_credentials {
-            static_headers_len += 1;
+        for pattern in &config.allow_origins {
+            let is_ascii_valid = match pattern {
+                CorsOriginPattern::Any => true,
+                CorsOriginPattern::Exact(b) => b.iter().all(|&c| (0x21..=0x7e).contains(&c)),
+                CorsOriginPattern::Subdomain { prefix, suffix } => {
+                    prefix.iter().all(|&c| (0x21..=0x7e).contains(&c))
+                        && suffix.iter().all(|&c| (0x21..=0x7e).contains(&c))
+                }
+            };
+            if !is_ascii_valid {
+                return Err(PluginError::Config(format!(
+                    "Plugin '{plugin_id}': allow_origins patterns must contain visible ASCII characters only"
+                )));
+            }
         }
 
-        let mut has_expose_headers = false;
-        if !config.expose_headers.is_empty() {
+        let expose_headers = if config.expose_headers.is_empty() {
+            None
+        } else {
             let joined = config.expose_headers.join(", ");
             let val = HeaderValue::from_str(&joined).map_err(|e| {
                 PluginError::Config(format!(
                     "Plugin '{plugin_id}': invalid expose_headers value '{joined}': {e}"
                 ))
             })?;
-            static_headers[static_headers_len as usize] = (ACCESS_CONTROL_EXPOSE_HEADERS, val);
-            static_headers_len += 1;
-            has_expose_headers = true;
-        }
+            Some(val)
+        };
 
         Ok(Self {
             id: plugin_id,
             config,
             flags,
             origin_kind,
-            static_headers,
-            static_headers_len,
-            has_expose_headers,
+            expose_headers,
         })
     }
 
@@ -249,19 +244,19 @@ impl CorsResponsePlugin {
     }
 
     #[inline(always)]
-    fn is_origin_allowed(&self, origin: &[u8]) -> bool {
+    fn is_origin_allowed(&self, origin: &HeaderValue) -> bool {
         match self.origin_kind {
-            ORIGIN_KIND_ANY => true,
+            ORIGIN_KIND_ANY => origin.to_str().is_ok(),
             ORIGIN_KIND_SINGLE_EXACT => self
                 .config
                 .allow_origins
                 .first()
-                .is_some_and(|p| p.matches_bytes(origin)),
+                .is_some_and(|p| p.matches_bytes(origin.as_bytes())),
             _ => self
                 .config
                 .allow_origins
                 .iter()
-                .any(|p| p.matches_bytes(origin)),
+                .any(|p| p.matches_bytes(origin.as_bytes())),
         }
     }
 }
@@ -279,43 +274,37 @@ impl PostResponsePlugin for CorsResponsePlugin {
 
     #[inline]
     fn on_response(&self, req_headers: &HeaderWorkspace, resp: &mut L7Response) {
-        // 1. Always scrub preflight-only headers that must never appear on actual responses.
-        resp.headers.remove(ACCESS_CONTROL_ALLOW_METHODS);
-        resp.headers.remove(ACCESS_CONTROL_ALLOW_HEADERS);
-        resp.headers.remove(ACCESS_CONTROL_MAX_AGE);
+        // Step 1 (read-only): decide everything before touching the response.
+        let allowed_origin = req_headers
+            .get(ORIGIN)
+            .filter(|val| self.is_origin_allowed(val));
 
-        // 2. Emit Vary: Origin unconditionally on origin-dependent policies (RFC 9110 §12.5.5)
-        // so caches key responses on Origin even when Origin is absent or rejected.
+        // Step 2 (write): `Vary: Origin` for origin-dependent policies (RFC 9110 §12.5.5),
+        // emitted for allowed, disallowed and missing `Origin` alike.
         if (self.flags & CORS_FLAG_NEEDS_VARY_ORIGIN) != 0 {
-            if !resp.headers.contains_key(VARY) {
-                resp.headers
-                    .insert(VARY, HeaderValue::from_static("Origin"));
-            } else {
-                let has_origin = resp
-                    .headers
-                    .get_all(VARY)
-                    .iter()
-                    .any(|v| vary_contains_origin_or_star(v.as_bytes()));
-                if !has_origin {
+            let mut vary_iter = resp.headers.get_all(VARY).iter();
+            match vary_iter.next() {
+                None => {
                     resp.headers
-                        .append(VARY, HeaderValue::from_static("Origin"));
+                        .insert(VARY, HeaderValue::from_static("Origin"));
+                }
+                Some(first) => {
+                    let has_origin = vary_contains_origin_or_star(first.as_bytes())
+                        || vary_iter.any(|v| vary_contains_origin_or_star(v.as_bytes()));
+                    if !has_origin {
+                        resp.headers
+                            .append(VARY, HeaderValue::from_static("Origin"));
+                    }
                 }
             }
         }
 
-        // 3. Validate downstream Origin; scrub all backend CORS headers if missing or disallowed.
-        let allowed_origin = req_headers.get(ORIGIN).filter(|val| {
-            val.to_str()
-                .is_ok_and(|s| self.is_origin_allowed(s.as_bytes()))
-        });
+        // Step 3: missing or disallowed Origin -> no `Access-Control-*` header is written.
         let Some(origin_val) = allowed_origin else {
-            resp.headers.remove(ACCESS_CONTROL_ALLOW_ORIGIN);
-            resp.headers.remove(ACCESS_CONTROL_ALLOW_CREDENTIALS);
-            resp.headers.remove(ACCESS_CONTROL_EXPOSE_HEADERS);
             return;
         };
 
-        // 4. Write authoritative Edge CORS headers directly (1-shot HeaderValue insert).
+        // Step 4 (write): allowed Origin -> each enabled header is inserted exactly once.
         let allow_origin_val = if (self.flags & CORS_FLAG_REFLECT_ORIGIN) != 0 {
             origin_val.clone()
         } else {
@@ -324,15 +313,16 @@ impl PostResponsePlugin for CorsResponsePlugin {
         resp.headers
             .insert(ACCESS_CONTROL_ALLOW_ORIGIN, allow_origin_val);
 
-        for (name, val) in &self.static_headers[..self.static_headers_len as usize] {
-            resp.headers.insert(name.clone(), val.clone());
+        if (self.flags & CORS_FLAG_ALLOW_CREDENTIALS) != 0 {
+            resp.headers.insert(
+                ACCESS_CONTROL_ALLOW_CREDENTIALS,
+                HeaderValue::from_static("true"),
+            );
         }
 
-        if (self.flags & CORS_FLAG_ALLOW_CREDENTIALS) == 0 {
-            resp.headers.remove(ACCESS_CONTROL_ALLOW_CREDENTIALS);
-        }
-        if !self.has_expose_headers {
-            resp.headers.remove(ACCESS_CONTROL_EXPOSE_HEADERS);
+        if let Some(ref expose_val) = self.expose_headers {
+            resp.headers
+                .insert(ACCESS_CONTROL_EXPOSE_HEADERS, expose_val.clone());
         }
     }
 
@@ -387,53 +377,34 @@ mod tests {
     }
 
     #[test]
-    fn test_scrubs_upstream_cors_leak_on_missing_or_disallowed_origin() {
+    fn test_disallowed_origin_writes_no_cors_headers() {
         let plugin = CorsResponsePlugin::new("cors", "https://app.velda.io", true).unwrap();
 
-        // Simulate permissive/leaky backend response
-        let mut resp = L7Response::empty(StatusCode::OK);
-        resp.headers
-            .insert(ACCESS_CONTROL_ALLOW_ORIGIN, HeaderValue::from_static("*"));
-        resp.headers.insert(
-            ACCESS_CONTROL_ALLOW_CREDENTIALS,
-            HeaderValue::from_static("true"),
-        );
-        resp.headers.insert(
-            ACCESS_CONTROL_EXPOSE_HEADERS,
-            HeaderValue::from_static("x-internal"),
-        );
-        resp.headers
-            .insert(ACCESS_CONTROL_MAX_AGE, HeaderValue::from_static("99999"));
+        for origin in [Some("https://evil.com"), None] {
+            let mut resp = L7Response::empty(StatusCode::OK);
+            let len_before = resp.headers.len();
+            let mut req_headers = HeaderWorkspace::default();
+            if let Some(o) = origin {
+                req_headers.insert(ORIGIN, HeaderValue::from_static(o));
+            }
 
-        let mut req_headers = HeaderWorkspace::default();
-        req_headers.insert(ORIGIN, HeaderValue::from_static("https://evil.com"));
+            plugin.on_response(&req_headers, &mut resp);
 
-        plugin.on_response(&req_headers, &mut resp);
-
-        assert!(!resp.headers.contains_key(ACCESS_CONTROL_ALLOW_ORIGIN));
-        assert!(!resp.headers.contains_key(ACCESS_CONTROL_ALLOW_CREDENTIALS));
-        assert!(!resp.headers.contains_key(ACCESS_CONTROL_EXPOSE_HEADERS));
-        assert!(!resp.headers.contains_key(ACCESS_CONTROL_MAX_AGE));
-        // RFC 9110 §12.5.5: origin-dependent policy emits Vary: Origin even on rejected origin
-        assert_eq!(resp.headers.get(VARY).unwrap(), "Origin");
+            assert!(!resp.headers.contains_key(ACCESS_CONTROL_ALLOW_ORIGIN));
+            assert!(!resp.headers.contains_key(ACCESS_CONTROL_ALLOW_CREDENTIALS));
+            assert!(!resp.headers.contains_key(ACCESS_CONTROL_EXPOSE_HEADERS));
+            // RFC 9110 §12.5.5: origin-dependent policy emits Vary: Origin even on rejected origin
+            assert_eq!(resp.headers.get(VARY).unwrap(), "Origin");
+            // Only `Vary` was added; nothing else was written.
+            assert_eq!(resp.headers.len(), len_before + 1);
+        }
     }
 
     #[test]
-    fn test_single_source_of_truth_overrides_and_scrubs_disabled_headers() {
+    fn test_allowed_origin_writes_only_enabled_headers() {
         let plugin = CorsResponsePlugin::new("cors", "https://app.velda.io", false).unwrap();
 
         let mut resp = L7Response::empty(StatusCode::OK);
-        resp.headers
-            .insert(ACCESS_CONTROL_ALLOW_ORIGIN, HeaderValue::from_static("*"));
-        resp.headers.insert(
-            ACCESS_CONTROL_ALLOW_CREDENTIALS,
-            HeaderValue::from_static("true"),
-        );
-        resp.headers.insert(
-            ACCESS_CONTROL_EXPOSE_HEADERS,
-            HeaderValue::from_static("x-secret"),
-        );
-
         let mut req_headers = HeaderWorkspace::default();
         req_headers.insert(ORIGIN, HeaderValue::from_static("https://app.velda.io"));
 

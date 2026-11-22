@@ -401,8 +401,11 @@ impl HeaderWorkspace {
 
     #[inline(always)]
     pub fn contains_key<K: AsHeaderName>(&self, name: K) -> bool {
-        let key = header_key(name.as_str().as_bytes());
-        if self.get_raw_by_key(key).is_some() {
+        if self.numeric_len > 0
+            && self
+                .get_raw_by_key(header_key(name.as_str().as_bytes()))
+                .is_some()
+        {
             return true;
         }
         self.headers.contains_key(name)
@@ -450,7 +453,8 @@ impl HeaderWorkspace {
         }
     }
 
-    #[inline(always)]
+    #[cold]
+    #[inline(never)]
     fn remove_numeric_by_key(&mut self, key: u64) {
         let mut len = self.numeric_len as usize;
         let mut i = 0;
@@ -569,8 +573,10 @@ impl HeaderWorkspace {
     /// Reads a header as a `u64` integer via 64-bit integer key lookup or branchless wire byte parsing.
     #[inline]
     pub fn get_u64<K: AsHeaderName>(&self, name: K) -> Option<u64> {
-        let key = header_key(name.as_str().as_bytes());
-        if let Some((raw, NumericFmt::U64)) = self.get_raw_by_key(key) {
+        if self.numeric_len > 0
+            && let Some((raw, NumericFmt::U64)) =
+                self.get_raw_by_key(header_key(name.as_str().as_bytes()))
+        {
             return Some(raw as u64);
         }
         let bytes = self.headers.get(name)?.as_bytes();
@@ -591,11 +597,20 @@ impl HeaderWorkspace {
     /// Reads a header as a 128-bit hexadecimal integer via 64-bit integer key lookup or wire bytes.
     #[inline]
     pub fn get_hex128<K: AsHeaderName>(&self, name: K) -> Option<u128> {
-        let key = header_key(name.as_str().as_bytes());
-        if let Some((raw, NumericFmt::Hex128)) = self.get_raw_by_key(key) {
-            return Some(raw);
-        }
-        if key == KEY_X_REQUEST_ID && self.request_id_raw != 0 {
+        if self.numeric_len > 0 {
+            let key = header_key(name.as_str().as_bytes());
+            if let Some((raw, NumericFmt::Hex128)) = self.get_raw_by_key(key) {
+                return Some(raw);
+            }
+            if key == KEY_X_REQUEST_ID && self.request_id_raw != 0 {
+                return Some(self.request_id_raw);
+            }
+        } else if self.request_id_raw != 0
+            && name
+                .as_str()
+                .as_bytes()
+                .eq_ignore_ascii_case(b"x-request-id")
+        {
             return Some(self.request_id_raw);
         }
         parse_hex_128(self.headers.get(name)?.as_bytes())
@@ -604,8 +619,9 @@ impl HeaderWorkspace {
     /// Reads a header as an RFC 4291 `u128` IP integer via 64-bit integer key lookup or zero-allocation wire byte parsing.
     #[inline]
     pub fn get_ip_u128<K: AsHeaderName>(&self, name: K) -> Option<u128> {
-        let key = header_key(name.as_str().as_bytes());
-        if let Some((raw, fmt)) = self.get_raw_by_key(key) {
+        if self.numeric_len > 0
+            && let Some((raw, fmt)) = self.get_raw_by_key(header_key(name.as_str().as_bytes()))
+        {
             return match fmt {
                 NumericFmt::Ipv4 => Some(crate::lut::ip::encode_ipv4_u128(raw as u32)),
                 NumericFmt::Ipv6 => Some(raw),
@@ -668,15 +684,11 @@ impl HeaderWorkspace {
         self.headers.reserve(additional);
     }
 
-    /// Removes a header from the workspace (protecting Slot 0 `x-request-id`).
-    #[inline]
+    /// Removes a header from the workspace.
+    #[inline(always)]
     pub fn remove<K: AsHeaderName>(&mut self, name: K) -> Option<HeaderValue> {
-        let key = header_key(name.as_str().as_bytes());
-        if key == KEY_X_REQUEST_ID {
-            return None;
-        }
         if self.numeric_len > 0 {
-            self.remove_numeric_by_key(key);
+            self.remove_numeric_by_key(header_key(name.as_str().as_bytes()));
         }
         self.headers.remove(name)
     }
@@ -999,7 +1011,8 @@ mod tests {
         ws.insert(CONTENT_TYPE, HeaderValue::from_static("application/json"));
         ws.insert(AUTHORIZATION, HeaderValue::from_static("Bearer token123"));
         assert_eq!(ws.len(), 3);
-        assert!(ws.remove(&HeaderWorkspace::X_REQUEST_ID).is_none());
+        assert!(ws.remove(&HeaderWorkspace::X_REQUEST_ID).is_some());
+        assert_eq!(ws.len(), 2);
 
         ws.reset();
         assert_eq!(ws.len(), 1);
