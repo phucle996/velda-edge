@@ -38,6 +38,28 @@ pub const fn fnv1a_hash_32(name: &str) -> u32 {
     hash
 }
 
+/// Canonical 64-bit FNV-1a deterministic fingerprint ID for JA4 byte slices.
+///
+/// Maps a canonical 36-byte JA4 string (e.g. `t13d1516h2_8daaf6152771_e5627efa2ab1`)
+/// into a non-zero `u64` identifier (`0` is reserved for unavailable / non-TLS).
+#[inline]
+pub const fn ja4_fingerprint_id_bytes(bytes: &[u8]) -> u64 {
+    let mut hash: u64 = 0xcbf2_9ce4_8422_2325;
+    let mut i = 0;
+    while i < bytes.len() {
+        hash ^= bytes[i] as u64;
+        hash = hash.wrapping_mul(0x0100_0000_01b3);
+        i += 1;
+    }
+    if hash == 0 { 1 } else { hash }
+}
+
+/// Canonical 64-bit FNV-1a deterministic fingerprint ID for JA4 string slices.
+#[inline]
+pub const fn ja4_fingerprint_id(ja4: &str) -> u64 {
+    ja4_fingerprint_id_bytes(ja4.as_bytes())
+}
+
 /// Context associated with a single request.
 ///
 /// `RequestContext` is the main object passed through the Velda
@@ -77,6 +99,9 @@ pub struct RequestState {
     /// Ingress arrival timestamp in nanoseconds from hardware clock.
     pub ingress_time_nanos: u64,
 
+    /// Compact 64-bit JA4 TLS ClientHello fingerprint (`0` if non-TLS / unavailable).
+    pub ja4: u64,
+
     /// Client IP address encoded as RFC 4291 `u128` integer (`0` if unset).
     pub client_ip: u128,
 
@@ -96,6 +121,8 @@ pub struct RequestState {
     pub upstream_completed: bool,
 }
 
+const _: () = assert!(std::mem::size_of::<RequestState>() <= 64);
+
 impl Default for RequestState {
     #[inline]
     fn default() -> Self {
@@ -111,6 +138,7 @@ impl RequestState {
         Self {
             request_id,
             ingress_time_nanos,
+            ja4: 0,
             client_ip: 0,
             route_id: UNMATCHED_ROUTE_ID,
             upstream_id: UNASSIGNED_UPSTREAM_ID,

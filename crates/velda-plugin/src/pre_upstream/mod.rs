@@ -23,6 +23,7 @@ pub mod header_mutation;
 pub mod hmac_auth;
 pub mod http_cache_lookup;
 pub mod http_fault_injection;
+pub mod ja4_filter;
 pub mod jwt_auth;
 pub mod oauth2_introspection;
 pub mod rate_limit;
@@ -52,6 +53,7 @@ pub use http_fault_injection::{
     HeaderMatchRule, HttpAbortConfig, HttpDelayConfig, HttpFaultCondition,
     HttpFaultInjectionPlugin, IpRangeMatcher,
 };
+pub use ja4_filter::{Ja4FilterConfig, Ja4FilterPlugin};
 pub use jwt_auth::{JwtAlgorithm, JwtAuthPlugin, TokenSource};
 pub use oauth2_introspection::{
     ClaimToHeaderConfig, IdpKeepAliveClient, IntrospectionCache, Oauth2IntrospectionConfig,
@@ -159,6 +161,7 @@ pub fn instantiate(
         "oauth2_introspection" => Ok(Arc::new(Oauth2IntrospectionPlugin::from_config(config)?)),
         "consumer_quota" => Ok(Arc::new(ConsumerQuotaPlugin::from_config(config)?)),
         "api_metering" => Ok(Arc::new(ApiMeteringPlugin::from_config(config)?)),
+        "ja4_filter" => Ok(Arc::new(Ja4FilterPlugin::from_config(config)?)),
         other => Err(crate::error::PluginError::Config(format!(
             "Unsupported pre_upstream plugin '{other}' for plugin '{}'",
             config.id

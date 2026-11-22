@@ -14,12 +14,14 @@ use velda_core::{Action, L7Request};
 use crate::capability::{Direction, PluginCapability, SupportedProtocols};
 
 pub mod cors_preflight;
+pub mod https_redirect;
 pub mod ip_filter;
 pub mod method_filter;
 pub mod resource_limit;
 pub mod waf_lite;
 
 pub use cors_preflight::{CorsPreflightPlugin, OriginPattern};
+pub use https_redirect::{HttpsRedirectConfig, HttpsRedirectPlugin};
 pub use ip_filter::{IpFilterMode, IpFilterPlugin};
 pub use method_filter::{MethodFilterConfig, MethodFilterPlugin};
 pub use resource_limit::{ResourceLimitPlugin, ResourceLimits};
@@ -79,6 +81,7 @@ pub fn instantiate(
         "resource_limit" => Ok(Arc::new(ResourceLimitPlugin::from_config(config)?)),
         "waf_lite" => Ok(Arc::new(WafLitePlugin::from_config(config)?)),
         "method_filter" => Ok(Arc::new(MethodFilterPlugin::from_config(config)?)),
+        "https_redirect" => Ok(Arc::new(HttpsRedirectPlugin::from_config(config)?)),
         other => Err(crate::error::PluginError::Config(format!(
             "Unsupported pre_route plugin '{other}' for plugin '{}'",
             config.id

@@ -54,6 +54,9 @@ pub async fn handle_grpc_tcp(
             return;
         };
 
+        let ja4 =
+            DownstreamMeta::peek_tcp_ja4(&connection.stream, tls_server.params().handshake_timeout)
+                .await;
         match tls_server.accept_with_timeout(connection).await {
             Ok(tls_stream) => {
                 // gRPC protocol specification: gRPC over TCP/TLS is strictly framed atop HTTP/2 binary framing.
@@ -87,7 +90,8 @@ pub async fn handle_grpc_tcp(
                 );
 
                 let meta =
-                    DownstreamMeta::new(listener_id, peer, local_addr, true, None, &rt.buffer_pool);
+                    DownstreamMeta::new(listener_id, peer, local_addr, true, None, &rt.buffer_pool)
+                        .with_ja4(ja4);
                 run_grpc_tcp_loop(tls_stream, meta, config, sampling, runtime).await;
             }
             Err(e) => {
@@ -334,6 +338,7 @@ async fn dispatch_grpc_tcp_request_stream(
             );
             l7_req.state.request_id = request_id;
             l7_req.state.client_ip = meta.peer_ip;
+            l7_req.state.ja4 = meta.ja4;
 
             if let Some(hooks) = &plan.pre_route_hooks {
                 let mut action = velda_plugin::run_pre_route_plugins(hooks, &mut l7_req);

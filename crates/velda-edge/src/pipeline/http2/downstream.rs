@@ -58,6 +58,9 @@ pub async fn handle_http2_stream(
             return;
         };
 
+        let ja4 =
+            DownstreamMeta::peek_tcp_ja4(&connection.stream, tls_server.params().handshake_timeout)
+                .await;
         match tls_server.accept_with_timeout(connection).await {
             Ok(tls_stream) => {
                 // RFC 9113 Section 3.3 mandate: HTTP/2 over TLS MUST negotiate ALPN identification "h2".
@@ -92,7 +95,8 @@ pub async fn handle_http2_stream(
                     true,
                     alt_svc,
                     &rt.buffer_pool,
-                );
+                )
+                .with_ja4(ja4);
                 run_http2_loop(tls_stream, meta, config, sampling, runtime).await;
             }
             Err(e) => {
@@ -642,6 +646,7 @@ async fn serve_http2_stream(
             );
             l7_req.state.request_id = request_id;
             l7_req.state.client_ip = meta.peer_ip;
+            l7_req.state.ja4 = meta.ja4;
 
             if let Some(hooks) = &plan.pre_route_hooks {
                 let mut action = velda_plugin::run_pre_route_plugins(hooks, &mut l7_req);

@@ -60,6 +60,9 @@ pub async fn handle_http1_stream(
             return;
         };
 
+        let ja4 =
+            DownstreamMeta::peek_tcp_ja4(&connection.stream, tls_server.params().handshake_timeout)
+                .await;
         match tls_server.accept_with_timeout(connection).await {
             Ok(tls_stream) => {
                 // RFC 9112 Section 2: Dedicated HTTP/1.1 over TLS listener strictly requires ALPN "http/1.1".
@@ -92,7 +95,8 @@ pub async fn handle_http1_stream(
                     true,
                     alt_svc,
                     &rt.buffer_pool,
-                );
+                )
+                .with_ja4(ja4);
                 run_http1_loop(tls_stream, meta, streaming, config, sampling, runtime).await;
             }
             Err(e) => {
@@ -439,6 +443,7 @@ pub async fn run_http1_loop<IO>(
                 );
                 l7_req.state.request_id = request_id;
                 l7_req.state.client_ip = meta.peer_ip;
+                l7_req.state.ja4 = meta.ja4;
 
                 if let Some(hooks) = &plan.pre_route_hooks {
                     let mut action = velda_plugin::run_pre_route_plugins(hooks, &mut l7_req);

@@ -52,6 +52,7 @@ pub fn canonical_phase_for_id(id: &str) -> Option<&'static str> {
         "resource_limit" => Some("pre_route"),
         "waf_lite" => Some("pre_route"),
         "method_filter" => Some("pre_route"),
+        "https_redirect" => Some("pre_route"),
         "rate_limit" => Some("pre_upstream"),
         "header_mutation" => Some("pre_upstream"),
         "canary" => Some("pre_upstream"),
@@ -65,6 +66,7 @@ pub fn canonical_phase_for_id(id: &str) -> Option<&'static str> {
         "csrf_protection" => Some("pre_upstream"),
         "consumer_quota" => Some("pre_upstream"),
         "api_metering" => Some("pre_upstream"),
+        "ja4_filter" => Some("pre_upstream"),
         "security_headers" => Some("post_response"),
         "cors" => Some("post_response"),
         "http_cache_store" => Some("post_response"),
@@ -95,6 +97,7 @@ pub fn canonical_protocol_family_for_id(id: &str) -> Option<&'static str> {
         "grpc_fault_injection" => Some("grpc"),
         "http_fault_injection" => Some("http"),
         "cors_preflight" => Some("http"),
+        "https_redirect" => Some("http"),
         "cors" => Some("http"),
         "http_cache_lookup" => Some("http"),
         "http_cache_store" => Some("http"),
@@ -211,6 +214,21 @@ pub fn validate_plugin_config(plugin: &mut PluginConfig) -> Result<(), PluginErr
             }
             let normalized =
                 crate::pre_route::method_filter::validation::validate_method_filter_config(
+                    &plugin.id,
+                    &plugin.config,
+                )?;
+            plugin.config =
+                serde_json::to_value(normalized).map_err(|e| PluginError::Config(e.to_string()))?;
+        }
+        "https_redirect" => {
+            if plugin.phase != "pre_route" {
+                return Err(PluginError::Config(format!(
+                    "Plugin '{}' must specify phase 'pre_route'",
+                    plugin.id
+                )));
+            }
+            let normalized =
+                crate::pre_route::https_redirect::validation::validate_https_redirect_config(
                     &plugin.id,
                     &plugin.config,
                 )?;
@@ -402,6 +420,19 @@ pub fn validate_plugin_config(plugin: &mut PluginConfig) -> Result<(), PluginErr
             )?;
             plugin.config =
                 serde_json::to_value(normalized).map_err(|e| PluginError::Config(e.to_string()))?;
+        }
+        "ja4_filter" => {
+            if plugin.phase != "pre_upstream" {
+                return Err(PluginError::Config(format!(
+                    "Plugin '{}' must specify phase 'pre_upstream'",
+                    plugin.id
+                )));
+            }
+            plugin.config =
+                crate::pre_upstream::ja4_filter::validation::validate_ja4_filter_config(
+                    &plugin.id,
+                    &plugin.config,
+                )?;
         }
         "security_headers" => {
             if plugin.phase != "post_response" {

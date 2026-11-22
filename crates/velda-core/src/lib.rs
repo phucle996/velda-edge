@@ -63,6 +63,7 @@ pub use l7::response::L7Response;
 
 pub use context::{
     RequestContext, RequestState, UNASSIGNED_UPSTREAM_ID, UNMATCHED_ROUTE_ID, fnv1a_hash_32,
+    ja4_fingerprint_id, ja4_fingerprint_id_bytes,
 };
 
 // -----------------------------------------------------------------------------
