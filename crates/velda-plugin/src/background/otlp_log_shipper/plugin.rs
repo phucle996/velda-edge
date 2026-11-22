@@ -115,7 +115,7 @@ impl BackgroundPlugin for OtlpLogShipperPlugin {
     }
 
     #[inline(always)]
-    fn weight(&self) -> u32 {
+    fn pbww(&self) -> u32 {
         70
     }
 

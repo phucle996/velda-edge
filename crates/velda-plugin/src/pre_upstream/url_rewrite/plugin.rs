@@ -126,6 +126,11 @@ impl PreUpstreamPlugin for UrlRewritePlugin {
         &self.id
     }
 
+    #[inline(always)]
+    fn pbww(&self) -> u32 {
+        0
+    }
+
     fn on_upstream_request(&self, req: &mut L7Request, _target_upstream: &mut u16) -> Action {
         let current_path = req.uri.path();
         let current_query = req.uri.query();

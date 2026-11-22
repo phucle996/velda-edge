@@ -78,7 +78,7 @@ impl BackgroundPlugin for StdLogShipperPlugin {
     }
 
     #[inline(always)]
-    fn weight(&self) -> u32 {
+    fn pbww(&self) -> u32 {
         15
     }
 

@@ -155,6 +155,11 @@ impl PreUpstreamPlugin for HttpFaultInjectionPlugin {
         &self.id
     }
 
+    #[inline(always)]
+    fn pbww(&self) -> u32 {
+        0
+    }
+
     /// Evaluates the request against fault injection rules.
     ///
     /// # Flat Sequential Workflow

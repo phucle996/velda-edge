@@ -105,6 +105,11 @@ impl PreRoutePlugin for MethodFilterPlugin {
         &self.id
     }
 
+    #[inline(always)]
+    fn pbww(&self) -> u32 {
+        0
+    }
+
     #[inline]
     fn on_request(&self, req: &mut L7Request) -> Action {
         let method_id: u8 = match req.method {

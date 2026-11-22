@@ -214,7 +214,7 @@ impl BackgroundPlugin for StatsdExporterPlugin {
     }
 
     #[inline(always)]
-    fn weight(&self) -> u32 {
+    fn pbww(&self) -> u32 {
         20
     }
 

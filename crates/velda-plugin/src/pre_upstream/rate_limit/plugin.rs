@@ -122,11 +122,6 @@ impl RateLimitPlugin {
     pub fn with_config(id: impl Into<String>, config: RateLimitConfig) -> Self {
         let redis_pool = RedisConnectionPool::new(config.redis.clone());
 
-        // Spawn shadow synchronization worker if configured for Redis backend
-        if config.backend == RateLimitBackend::Redis {
-            redis_pool.start_shadow_worker();
-        }
-
         Self {
             id: id.into(),
             config,
@@ -247,6 +242,13 @@ impl RateLimitPlugin {
             }
         });
 
+        let pbww = json
+            .get("pbww")
+            .or_else(|| json.get("shadow_weight"))
+            .and_then(|v| v.as_u64())
+            .map(|w| (w as u32).clamp(1, 100))
+            .unwrap_or(40);
+
         let redis_cfg = RedisConfig {
             url: redis_url,
             username: redis_username,
@@ -257,6 +259,7 @@ impl RateLimitPlugin {
             timeout_ms: redis_timeout_ms,
             batch_sync_interval_ms,
             batch_max_size,
+            pbww,
         };
 
         let key_headers = cfg
@@ -292,6 +295,27 @@ impl PreUpstreamPlugin for RateLimitPlugin {
     #[inline(always)]
     fn id(&self) -> &str {
         &self.id
+    }
+
+    #[inline(always)]
+    fn pbww(&self) -> u32 {
+        if self.config.backend == RateLimitBackend::Redis && self.config.redis.url.is_some() {
+            self.config.redis.pbww.clamp(1, 100)
+        } else {
+            0
+        }
+    }
+
+    fn run_background(
+        self: std::sync::Arc<Self>,
+        shutdown: tokio::sync::watch::Receiver<bool>,
+    ) -> Option<crate::BackgroundTaskFuture> {
+        if self.config.backend != RateLimitBackend::Redis || self.config.redis.url.is_none() {
+            return None;
+        }
+        Some(Box::pin(async move {
+            self.redis_pool.run_shadow_worker(shutdown).await
+        }))
     }
 
     /// Evaluates rate limiting on hot path prior to upstream dispatch.

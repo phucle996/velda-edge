@@ -1,81 +1,69 @@
 # Authoring Plugins for Velda Edge
 
-A step-by-step developer guide for designing, implementing, registering, and testing custom plugins in the **Velda Edge Data Plane**.
+A step-by-step developer guide for designing, scheduling (**PBWW**), registering, and verifying plugins in the **Velda Edge Data Plane**.
 
 ---
 
-## 1. Architectural Mindset
+## 1. Engineering Mindset & Non-Negotiables
 
-Before writing code, understand the core constraints of the Velda Edge Data Plane:
+Before writing code, review the core invariants in `AGENTS.md` and `.agent/rules/code-architecture-rules.md`:
 
-1. **Flat Workflows (AGENTS.md §2.2 & §2.3)**:
-   - Keep workflows linear and readable top-to-bottom.
-   - Do not chop cohesive logic into artificial micro-helpers or broad trait hierarchies.
-2. **Hot-Path Zero-IO (AGENTS.md §2.4)**:
-   - Plugins execute on the request serving hot path.
-   - **NEVER** parse JSON, perform disk I/O, make network/RPC calls, or allocate unbounded heap memory in `on_request`, `on_upstream_request`, or `on_response`.
-   - All configuration parsing occurs **once** at sync time via `from_config`.
-3. **Module Ownership (AGENTS.md §2.2)**:
-   - Each plugin owns its own configuration schema, validation, and defaults inside its own module file.
-   - Central factories only dispatch; they do not parse plugin-specific configurations.
+1. **Flat Workflows (`AGENTS.md §2.2 & §2.3`)**:
+   - Keep request evaluation linear and readable top-to-bottom within a single cohesive function.
+   - Include an ASCII mechanism diagram in the top-level module doc (`//!`) of every core implementation file.
+2. **Zero-IO Hot Path (`AGENTS.md §2.4`)**:
+   - **NEVER** parse JSON, perform disk I/O, acquire coarse locks across threads, allocate unbounded heap memory, or open network connections in `on_request`, `on_upstream_request`, or `on_response`.
+   - All JSON parsing, validation, regex/CIDR compilation, and arena allocation happen **once** inside `from_config`.
+3. **Never Spawn Detached OS Threads or Tasks**:
+   - **NEVER** call `std::thread::spawn` or `tokio::spawn` inside `from_config`.
+   - Persistent background loops (Redis sync, exporters, key rotators) **MUST** be scheduled through the unified **PBWW** scheduler (`pbww()` + `run_background()`) so Velda places them on `SCHED_IDLE` Shadow Workers and shuts them down cleanly on hot-reload.
+4. **Module Ownership**:
+   - Each plugin owns its `config.rs`, `validation.rs`, and `plugin.rs`. Central dispatchers never inspect plugin-specific JSON fields.
 
 ---
 
-## 2. Step 1: Select the Execution Phase
+## 2. Step 1: Choose Traffic Phase & Background Scheduling Mode
 
-Choose the earliest phase that satisfies your plugin's requirements:
+First, pick the earliest **Traffic Phase** (where it intercepts live traffic):
 
-| Phase | Trait | Location | When to Use |
+| Phase | Trait | Directory | Primary Purpose |
 | :--- | :--- | :--- | :--- |
-| **`pre_route`** | [`PreRoutePlugin`](src/pre_route/mod.rs) | `src/pre_route/` | Authentication, IP firewalls, WAF header checks, DDoS filtering. Fails fast **before** router matching and body reading. |
-| **`pre_upstream`** | [`PreUpstreamPlugin`](src/pre_upstream/mod.rs) | `src/pre_upstream/` | Request header mutations, backend authentication token injection, local token bucket rate limiting. Runs **after** the target upstream pool/endpoint is chosen. |
-| **`post_response`** | [`PostResponsePlugin`](src/post_response/mod.rs) | `src/post_response/` | Security response headers (HSTS, CSP), CORS response headers, response header scrubbing. Mutates [`L7Response`](../velda-core/src/l7/response.rs) in place. |
-| **`background`** | [`BackgroundPlugin`](src/background/mod.rs) | `src/background/` | Long-lived shadow background services (telemetry exporters, health probes). Runs strictly on dedicated Shadow Workers. |
+| **`pre_route`** | [`PreRoutePlugin`](src/pre_route/mod.rs) | `src/pre_route/` | Auth, IP filtering, WAF checks, URI/header bounds. Runs **before** router lookup. |
+| **`pre_upstream`** | [`PreUpstreamPlugin`](src/pre_upstream/mod.rs) | `src/pre_upstream/` | Header injection/mutation, rate limiting, canary rerouting. Runs **after** endpoint selection. |
+| **`post_response`** | [`PostResponsePlugin`](src/post_response/mod.rs) | `src/post_response/` | Response token metering, security headers, CORS, compression. Mutates [`L7Response`](../velda-core/src/l7/response.rs). |
+| **`background`** | [`BackgroundPlugin`](src/background/mod.rs) | `src/background/` | Standalone daemons with no traffic hook (telemetry exporters, ACME/JWKS rotators, probes). |
+
+Second, determine your plugin's **Shadow Logistics Model**:
+
+- **Hot-Path Only (`pbww() == 0`)**: Does zero work off the request path. Simply return `0` from `pbww()`.
+- **Hybrid Hot-Path + Background Daemon (`pbww() ∈ 1..=100`)**: Hot path updates lock-free atomics/arenas on RAM; a persistent loop syncs with Redis or external systems in the background. Return `0` if background sync is disabled in config (e.g. `local` mode), or `1..=100` when active, and implement `run_background()`.
+- **Per-Request One-Shot Offload (`pbww() == 0` + [`try_dispatch_shadow`](src/hook.rs))**: For sporadic tasks triggered by an individual request (e.g., `request_mirror`, stale token refresh in `oauth2_introspection`), dispatch a one-shot `ShadowTask` to the core-local paired Shadow Worker via `crate::hook::try_dispatch_shadow(task)`.
 
 ---
 
-## 3. Step 2: Implement the Plugin Struct
+## 3. Step 2: Implement Struct & `from_config`
 
-Create a new file in the appropriate directory (e.g., `crates/velda-plugin/src/pre_route/api_key.rs`).
-
-Define a plain struct holding the compiled, read-only configuration in RAM:
+Create a module folder under your chosen phase (e.g., `src/pre_route/api_key/plugin.rs`). Keep `from_config` strictly CPU-only (zero socket creation):
 
 ```rust
 use std::collections::HashSet;
 use http::header::HeaderName;
 use velda_core::{Action, L7Request, RejectReason};
-use velda_sync::post_sync::plugin::PluginConfig;
 
 use crate::capability::{AccessLevel, PluginCapability, SupportedProtocols};
+use crate::config::PluginConfig;
 use crate::error::PluginError;
-use super::PreRoutePlugin;
+use crate::pre_route::PreRoutePlugin;
 
 /// Example API Key Authentication Plugin.
 #[derive(Debug, Clone)]
-pub struct ApiKeyAuthPlugin {
+pub struct ApiKeyPlugin {
     pub id: String,
     pub header_name: HeaderName,
     pub valid_keys: HashSet<String>,
 }
 
-impl ApiKeyAuthPlugin {
-    /// Constructs a new instance directly from parameters.
-    pub fn new(
-        id: impl Into<String>,
-        header_name: HeaderName,
-        keys: impl IntoIterator<Item = impl Into<String>>,
-    ) -> Self {
-        Self {
-            id: id.into(),
-            header_name,
-            valid_keys: keys.into_iter().map(|k| k.into()).collect(),
-        }
-    }
-
-    /// Deserializes and constructs an instance directly from a [`PluginConfig`].
-    ///
-    /// # Module Ownership Invariant
-    /// Configuration field extraction, defaults, and sanitization belong strictly here.
+impl ApiKeyPlugin {
     pub fn from_config(config: &PluginConfig) -> Result<Self, PluginError> {
         let header_str = config
             .config
@@ -90,215 +78,221 @@ impl ApiKeyAuthPlugin {
             ))
         })?;
 
-        let mut keys = HashSet::new();
+        let mut valid_keys = HashSet::new();
         if let Some(arr) = config.config.get("keys").and_then(|v| v.as_array()) {
             for item in arr {
-                if let Some(key_str) = item.as_str() {
-                    keys.insert(key_str.trim().to_string());
+                if let Some(s) = item.as_str() {
+                    let trimmed = s.trim();
+                    if !trimmed.is_empty() {
+                        valid_keys.insert(trimmed.to_string());
+                    }
                 }
             }
         }
 
-        if keys.is_empty() {
+        if valid_keys.is_empty() {
             return Err(PluginError::Config(format!(
                 "Plugin '{}' must specify at least one valid key in 'keys'",
                 config.id
             )));
         }
 
-        Ok(Self::new(&config.id, header_name, keys))
+        Ok(Self {
+            id: config.id.clone(),
+            header_name,
+            valid_keys,
+        })
     }
 }
 ```
 
 ---
 
-## 4. Step 3: Implement the Phase Trait
+## 4. Step 3: Implement the Phase Trait & Declare `pbww()`
 
-Implement the corresponding phase trait on your struct:
+### Option A: Pure Hot-Path Plugin (`pbww() == 0`)
+
+Notice `pbww(&self) -> u32` has **no default implementation** — the compiler requires every plugin to explicitly declare its background weight:
 
 ```rust
-impl PreRoutePlugin for ApiKeyAuthPlugin {
+impl PreRoutePlugin for ApiKeyPlugin {
     #[inline(always)]
     fn id(&self) -> &str {
         &self.id
     }
 
-    fn on_request(&self, req: &mut L7Request) -> Action {
-        let key_opt = req
-            .headers
-            .get(&self.header_name)
-            .and_then(|v| v.to_str().ok());
+    #[inline(always)]
+    fn pbww(&self) -> u32 {
+        0
+    }
 
-        match key_opt {
-            Some(key) if self.valid_keys.contains(key) => {
-                // Key matches: continue request processing
-                Action::Continue
-            }
-            Some(_) => {
-                // Invalid key: short-circuit with 401 Unauthorized via canonical Reject
-                Action::Reject(RejectReason::Unauthorized)
-            }
-            None => {
-                // Missing key: short-circuit with 401 Unauthorized via canonical Reject
-                Action::Reject(RejectReason::Unauthorized)
-            }
+    fn on_request(&self, req: &mut L7Request) -> Action {
+        let Some(key_val) = req.headers.get(&self.header_name) else {
+            return Action::Reject(RejectReason::Unauthorized);
+        };
+        let Ok(key_str) = key_val.to_str() else {
+            return Action::Reject(RejectReason::Unauthorized);
+        };
+
+        if self.valid_keys.contains(key_str) {
+            Action::Continue
+        } else {
+            Action::Reject(RejectReason::Unauthorized)
         }
     }
 
-    /// Declares the reverse-permission capabilities required by this plugin.
     #[inline(always)]
     fn capability(&self) -> PluginCapability {
-        // We only read request headers; zero payload access required.
         PluginCapability::header_only(AccessLevel::Read)
     }
 
-    /// Hardcoded network/application protocols supported by this plugin.
     #[inline(always)]
     fn supported_protocols(&self) -> SupportedProtocols {
-        // Compatible with HTTP/1.1, HTTP/2, and HTTP/3
         SupportedProtocols::ALL_HTTP
     }
 }
 ```
 
-### Understanding Authority Contracts ([`Action`](../velda-core/src/lifecycle.rs))
+### Option B: Hybrid Plugin with Background Sync Loop (`pbww() > 0`)
 
-* **`Action::Continue`**: Allows the pipeline to proceed to the next plugin or route matching.
-* **`Action::Respond(response)`**: Short-circuits immediately with a custom, user-provided [`L7Response`]. Used when the plugin supplies explicit body content, custom non-error status codes (e.g., CORS `204 No Content`), or cached payloads.
-* **`Action::Reject(RejectReason)`**: Canonical pipeline rejection for standard security or rate-limiting violations (e.g., [`RejectReason::Forbidden`], [`RejectReason::TooManyRequests`]).
-  - **Zero-Alloc Hot Path**: The plugin does not construct an HTTP body or allocate an `L7Response`. Downstream ingress protocols (HTTP/1.1, HTTP/2, HTTP/3, gRPC) synthesize their own precompiled protocol-native responses (e.g., gRPC status codes vs HTTP status codes).
-  - **Header Isolation & Virtual 3-Column Tagging**:
-    - By default, all headers in `req.headers` are Bit 0 (normal/upstream only) and are **strictly stripped** on rejection to eliminate information disclosure and header reflection risks.
-    - **Permanent Pre-loaded Slot 0 (`x-request-id`)**: Every workspace is pre-initialized with `(x-request-id, <id>)` in Slot 0 as a Bit 1 Bypass header (`bypass_len = 1`). Normal `insert()` calls do not sniff or inspect headers, operating at native `HeaderMap` speed.
-    - If a plugin must return specific headers upon rejection (e.g., `Retry-After`, `x-ratelimit-*`, `WWW-Authenticate`), mark them with Bit 1 via `req.headers.insert_bypass(name, value)`. Up to `MAX_BYPASS_HEADERS = 8` sidecar slots are supported without heap allocation. The pipeline merges all Bit 1 headers when handling `Action::Reject`.
-* **`Action::Delay { duration, and_then }`**: Non-blocking asynchronous sleep before proceeding to the boxed `and_then` action (used for fault injection / artificial latency).
+If a traffic-phase plugin also maintains a persistent background loop (e.g., Redis lease synchronization):
+
+1. Return `0` when the background feature is disabled in config, or `1..=100` (e.g. `self.shadow_weight`) when enabled.
+2. Override `run_background(self: Arc<Self>, shutdown: watch::Receiver<bool>)`.
+3. Open outbound sockets (TCP/TLS/Redis) **lazily inside the returned future** — they will execute directly on whichever `velda-shadow-{i}` core the Greedy LPT scheduler assigns to this plugin.
+4. Select cleanly on `shutdown.changed()` so hot-reloads tear down old connections immediately.
+
+```rust
+impl PostResponsePlugin for MyDistributedCounterPlugin {
+    fn id(&self) -> &str {
+        &self.id
+    }
+
+    #[inline(always)]
+    fn pbww(&self) -> u32 {
+        if self.distributed_enabled {
+            self.shadow_weight.clamp(1, 100)
+        } else {
+            0
+        }
+    }
+
+    fn run_background(
+        self: Arc<Self>,
+        mut shutdown: tokio::sync::watch::Receiver<bool>,
+    ) -> Option<crate::BackgroundTaskFuture> {
+        if !self.distributed_enabled {
+            return None;
+        }
+        Some(Box::pin(async move {
+            // Open Redis / remote client HERE on the assigned Shadow Worker runtime.
+            let mut interval = tokio::time::interval(std::time::Duration::from_millis(250));
+            loop {
+                tokio::select! {
+                    _ = interval.tick() => {
+                        // Sync lock-free shared state deltas
+                    }
+                    _ = shutdown.changed() => {
+                        if *shutdown.borrow() {
+                            break;
+                        }
+                    }
+                }
+            }
+            Ok(())
+        }))
+    }
+
+    // on_response(), capability(), supported_protocols() ...
+}
+```
+
+### Understanding `Action` Contracts (`velda-core`)
+
+- **`Action::Continue`**: Pass to the next plugin or stage.
+- **`Action::Respond(L7Response)`**: Short-circuit immediately with a custom [`L7Response`](../velda-core/src/l7/response.rs).
+- **`Action::Reject(RejectReason)`**: Protocol-agnostic rejection (`Unauthorized`, `Forbidden`, `TooManyRequests`, etc.). The ingress protocol engine renders the native HTTP or gRPC error response.
+  - All Bit-0 headers in `req.headers` are stripped on rejection.
+  - Use `req.headers.insert_bypass(name, val)` / `insert_bypass_u64(...)` for client-facing rejection headers (`Retry-After`, `WWW-Authenticate`).
+- **`Action::Delay { duration, and_then }`**: Non-blocking async delay before applying `and_then`.
 
 ---
 
-## 5. Step 4: Register in the Phase Sub-Dispatcher
+## 5. Step 4: Register in Sub-Dispatcher & Canonical Phase Registry
 
-### 1. Export in Phase Module
-Open the `mod.rs` of your selected phase (e.g., [`crates/velda-plugin/src/pre_route/mod.rs`](src/pre_route/mod.rs)):
+1. **Register in your Phase Sub-Dispatcher** (e.g., [`crates/velda-plugin/src/pre_route/mod.rs`](src/pre_route/mod.rs)):
+   ```rust
+   pub mod api_key;
+   pub use api_key::ApiKeyPlugin;
 
-```rust
-pub mod api_key;
-pub use api_key::ApiKeyAuthPlugin;
-
-pub fn instantiate(
-    config: &velda_sync::post_sync::plugin::PluginConfig,
-) -> Result<Arc<dyn PreRoutePlugin>, crate::error::PluginError> {
-    match config.id.as_str() {
-        "ip_filter" => Ok(Arc::new(IpFilterPlugin::from_config(config)?)),
-        // Add your plugin here:
-        "waf_lite" => Ok(Arc::new(WafLitePlugin::from_config(config)?)),
-        other => Err(crate::error::PluginError::Config(format!(
-            "Unsupported pre_route plugin '{other}' for plugin '{}'",
-            config.id
-        ))),
-    }
-}
-```
-
-### 2. Register Canonical Phase in velda-sync
-Open [`crates/velda-sync/src/post_sync/plugin/mod.rs`](../velda-sync/src/post_sync/plugin/mod.rs) and add your id string to [`canonical_phase_for_id`](../velda-sync/src/post_sync/plugin/mod.rs):
-
-```rust
-pub fn canonical_phase_for_id(id: &str) -> Option<&'static str> {
-    match id {
-        "ip_filter" | "resource_limit" | "waf_lite" => Some("pre_route"),
-        "jwt_auth" | "rate_limit" | "header_mutation" => Some("pre_upstream"),
-        "security_headers" | "cors" => Some("post_response"),
-        "health_probe" | "prometheus_exporter" | "std_log_shipper" => Some("background"),
-        _ => None,
-    }
-}
-
-```
-
-> [!TIP]
-> Notice that you **do not** touch [`instantiate_plugin`](src/factory.rs) or [`build_route_plugin_plan`](src/factory.rs). The factory is open for extension but closed for modification.
+   // Inside instantiate(config):
+   "api_key" => Ok(Arc::new(ApiKeyPlugin::from_config(config)?)),
+   ```
+2. **Register Canonical Phase Mapping** in [`crates/velda-plugin/src/validation.rs`](src/validation.rs) (`canonical_phase_for_id`):
+   ```rust
+   pub fn canonical_phase_for_id(id: &str) -> Option<&'static str> {
+       match id {
+           "ip_filter" | "waf_lite" | "api_key" => Some("pre_route"),
+           // ...
+       }
+   }
+   ```
+   You do **not** need to modify [`factory.rs`](src/factory.rs) or [`velda-edge/src/runtime/plugin.rs`](../velda-edge/src/runtime/plugin.rs) — [`LoadedPlugin`](src/factory.rs) automatically discovers `pbww()` and `run_background()` across all phases.
 
 ---
 
 ## 6. Step 5: Write Unit & Integration Tests
 
-Always include tests covering:
-1. Valid request handling (`Action::Continue`).
-2. Rejection handling (`Action::Respond`).
-3. Configuration deserialization (`from_config`).
-
-Example test block in `api_key.rs`:
+Every plugin should include tests covering:
+1. Valid traffic execution (`Action::Continue` / response header mutations).
+2. Rejection / bypass header behavior (`Action::Reject`).
+3. Invalid configuration rejection (`from_config` / validator errors).
+4. If `pbww() > 0`: verify `pbww()` returns `0` when disabled and `1..=100` when enabled, and verify `run_background(shutdown)` exits cleanly when `shutdown_tx.send(true)` fires.
 
 ```rust
 #[cfg(test)]
 mod tests {
     use super::*;
-    use http::Method;
+    use http::{HeaderValue, Method};
     use serde_json::json;
 
     #[test]
-    fn test_api_key_auth_flow() {
-        let plugin = ApiKeyAuthPlugin::new(
-            "auth-1",
-            HeaderName::from_static("x-api-key"),
-            vec!["secret-key-123"],
-        );
-
-        // 1. Missing header -> 401
-        let mut req = L7Request::new(Method::GET, "/api/data");
-        match plugin.on_request(&mut req) {
-            Action::Respond(resp) => assert_eq!(resp.status, StatusCode::UNAUTHORIZED),
-            _ => panic!("Expected 401 response"),
-        }
-
-        // 2. Invalid header -> 401
-        req.headers.insert("x-api-key", "wrong-key".parse().unwrap());
-        match plugin.on_request(&mut req) {
-            Action::Respond(resp) => assert_eq!(resp.status, StatusCode::UNAUTHORIZED),
-            _ => panic!("Expected 401 response"),
-        }
-
-        // 3. Valid key -> Continue
-        req.headers.insert("x-api-key", "secret-key-123".parse().unwrap());
-        assert_eq!(plugin.on_request(&mut req), Action::Continue);
-    }
-
-    #[test]
-    fn test_api_key_from_config() {
-        let config = PluginConfig {
+    fn test_api_key_flow() {
+        let cfg = PluginConfig {
             id: "api_key".into(),
             phase: "pre_route".into(),
             config: json!({
-                "header_name": "x-custom-key",
-                "keys": ["key-alpha", "key-beta"]
+                "header_name": "x-api-key",
+                "keys": ["secret-key-123"]
             }),
         };
 
-        let plugin = ApiKeyAuthPlugin::from_config(&config).expect("valid config");
-        assert_eq!(plugin.id, "api_key");
-        assert_eq!(plugin.header_name, HeaderName::from_static("x-custom-key"));
-        assert!(plugin.valid_keys.contains("key-alpha"));
+        let plugin = ApiKeyPlugin::from_config(&cfg).expect("valid config");
+        assert_eq!(plugin.pbww(), 0);
+
+        let mut req = L7Request::new(Method::GET, "/api/data");
+        assert_eq!(plugin.on_request(&mut req), Action::Reject(RejectReason::Unauthorized));
+
+        req.headers.insert("x-api-key", HeaderValue::from_static("secret-key-123"));
+        assert_eq!(plugin.on_request(&mut req), Action::Continue);
     }
 }
 ```
 
 ---
 
-## 7. Step 6: Verification Pipeline
-
-Before submitting your code, verify the full quality suite:
+## 7. Step 6: Verification Commands
 
 ```bash
-# 1. Format check
-rtk cargo fmt --check
+# 1. Check formatting
+cargo fmt --check
 
-# 2. Strict clippy linting (zero warnings permitted)
-rtk cargo clippy --all-targets --all-features -- -D warnings
+# 2. Strict linting across plugin & edge crates (zero warnings)
+cargo clippy -p velda-plugin -p velda-edge -p velda-sync --all-targets -- -D warnings
 
-# 3. Unit test verification
-rtk cargo test -p velda-plugin
+# 3. Run velda-plugin unit & integration tests
+cargo test -p velda-plugin
 
-# 4. Monorepo workspace test suite
-rtk cargo test --workspace
+# 4. Run velda-edge scheduler & runtime tests
+cargo test -p velda-edge --lib
 ```

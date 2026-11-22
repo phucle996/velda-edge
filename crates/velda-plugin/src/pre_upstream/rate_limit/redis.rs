@@ -70,6 +70,7 @@ pub struct RedisConfig {
     pub timeout_ms: Option<u64>,
     pub batch_sync_interval_ms: u64,
     pub batch_max_size: usize,
+    pub pbww: u32,
 }
 
 impl Default for RedisConfig {
@@ -84,6 +85,7 @@ impl Default for RedisConfig {
             timeout_ms: None,
             batch_sync_interval_ms: 50,
             batch_max_size: 1000,
+            pbww: 40,
         }
     }
 }
@@ -158,66 +160,85 @@ impl RedisConnectionPool {
         total_drained
     }
 
-    /// Spawns the shadow background synchronization loop on the supervisory Tokio runtime.
-    pub fn start_shadow_worker(&self) {
+    /// Runs the shadow background synchronization loop directly on the assigned Shadow Worker until shutdown.
+    pub async fn run_shadow_worker(
+        &self,
+        mut shutdown: tokio::sync::watch::Receiver<bool>,
+    ) -> Result<(), crate::error::PluginError> {
         if self.config.url.is_none() {
-            return;
+            return Ok(());
         }
 
         let is_connected = Arc::clone(&self.is_connected);
         let batch_shards = Arc::clone(&self.batch_shards);
-        let interval_ms = self.config.batch_sync_interval_ms;
+        let interval_ms = self.config.batch_sync_interval_ms.max(10);
         let batch_max_size = self.config.batch_max_size;
         let url_str = self.config.url.clone();
 
-        if let Ok(handle) = tokio::runtime::Handle::try_current() {
-            handle.spawn(async move {
-                let mut interval = tokio::time::interval(Duration::from_millis(interval_ms));
-                let mut backoff_ms = 50u64;
+        let mut interval = tokio::time::interval(Duration::from_millis(interval_ms));
+        let mut backoff_ms = 50u64;
 
-                loop {
-                    interval.tick().await;
-
-                    // 1. Drain pending batch across all 64 shards up to batch_max_size
-                    let mut batch: Vec<(u64, u64)> = Vec::new();
-                    for shard in batch_shards.iter() {
-                        if batch.len() >= batch_max_size {
-                            break;
-                        }
-                        if let Ok(mut hits) = shard.hits.lock()
-                            && !hits.is_empty()
-                        {
-                            let quota = batch_max_size.saturating_sub(batch.len());
-                            batch.extend(hits.drain().take(quota));
-                        }
-                    }
-
-                    // 2. Perform batched pipeline execution to Redis
-                    if !batch.is_empty() {
-                        // In production with Redis driver, execute MULTI/EXEC or EVALSHA here.
-                        // On connection error: mark is_connected = false, trigger exponential backoff.
-                        tracing::trace!(
-                            target: "velda::plugin::rate_limit::redis",
-                            target_url = ?url_str,
-                            batch_size = batch.len(),
-                            "Flushed rate-limit increments batch to Redis"
-                        );
-                        // Reset backoff on successful execution
-                        backoff_ms = 50;
-                        is_connected.store(true, Ordering::Relaxed);
-                    } else if !is_connected.load(Ordering::Relaxed) {
-                        // Attempt reconnect with exponential backoff up to 2 seconds
-                        tokio::time::sleep(Duration::from_millis(backoff_ms)).await;
-                        backoff_ms = (backoff_ms * 2).min(2000);
-                        is_connected.store(true, Ordering::Relaxed);
-                        tracing::info!(
-                            target: "velda::plugin::rate_limit::redis",
-                            "Redis shadow worker reconnected to cluster"
-                        );
+        loop {
+            tokio::select! {
+                _ = interval.tick() => {}
+                _ = shutdown.changed() => {
+                    if *shutdown.borrow() {
+                        break;
                     }
                 }
-            });
+            }
+
+            if *shutdown.borrow() {
+                break;
+            }
+
+            // 1. Drain pending batch across all 64 shards up to batch_max_size
+            let mut batch: Vec<(u64, u64)> = Vec::new();
+            for shard in batch_shards.iter() {
+                if batch.len() >= batch_max_size {
+                    break;
+                }
+                if let Ok(mut hits) = shard.hits.lock()
+                    && !hits.is_empty()
+                {
+                    let quota = batch_max_size.saturating_sub(batch.len());
+                    batch.extend(hits.drain().take(quota));
+                }
+            }
+
+            // 2. Perform batched pipeline execution to Redis
+            if !batch.is_empty() {
+                // In production with Redis driver, execute MULTI/EXEC or EVALSHA here.
+                // On connection error: mark is_connected = false, trigger exponential backoff.
+                tracing::trace!(
+                    target: "velda::plugin::rate_limit::redis",
+                    target_url = ?url_str,
+                    batch_size = batch.len(),
+                    "Flushed rate-limit increments batch to Redis"
+                );
+                // Reset backoff on successful execution
+                backoff_ms = 50;
+                is_connected.store(true, Ordering::Relaxed);
+            } else if !is_connected.load(Ordering::Relaxed) {
+                // Attempt reconnect with exponential backoff up to 2 seconds
+                tokio::select! {
+                    _ = tokio::time::sleep(Duration::from_millis(backoff_ms)) => {}
+                    _ = shutdown.changed() => {
+                        if *shutdown.borrow() {
+                            break;
+                        }
+                    }
+                }
+                backoff_ms = (backoff_ms * 2).min(2000);
+                is_connected.store(true, Ordering::Relaxed);
+                tracing::info!(
+                    target: "velda::plugin::rate_limit::redis",
+                    "Redis shadow worker reconnected to cluster"
+                );
+            }
         }
+
+        Ok(())
     }
 
     /// Returns a reference to the active [`RedisConfig`].

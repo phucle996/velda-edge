@@ -84,7 +84,7 @@ async fn trace_exporter_e2e() {
             .expect("Exporter created"),
     );
 
-    assert_eq!(exporter.weight(), 50);
+    assert_eq!(exporter.pbww(), 50);
 
     let (stop_tx, stop_rx) = watch::channel(false);
     let exp_clone = Arc::clone(&exporter);

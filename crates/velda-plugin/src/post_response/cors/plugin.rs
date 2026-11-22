@@ -300,6 +300,11 @@ impl PostResponsePlugin for CorsResponsePlugin {
         &self.id
     }
 
+    #[inline(always)]
+    fn pbww(&self) -> u32 {
+        0
+    }
+
     fn on_response(&self, req_headers: &velda_core::HeaderWorkspace, resp: &mut L7Response) {
         // 1. Resolve Origin: strictly inspect downstream client request Origin header (RFC 6454)
         let Some(origin_val) = req_headers.get(ORIGIN) else {

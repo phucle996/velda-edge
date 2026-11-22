@@ -161,6 +161,11 @@ impl PostResponsePlugin for SecurityHeadersPlugin {
         &self.id
     }
 
+    #[inline(always)]
+    fn pbww(&self) -> u32 {
+        0
+    }
+
     /// Injects pre-computed browser security headers on outgoing response.
     ///
     /// # Performance Contract

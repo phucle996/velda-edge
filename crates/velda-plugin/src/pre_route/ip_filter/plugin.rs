@@ -175,6 +175,11 @@ impl PreRoutePlugin for IpFilterPlugin {
         &self.id
     }
 
+    #[inline(always)]
+    fn pbww(&self) -> u32 {
+        0
+    }
+
     /// Evaluates downstream request client IP chain against configured CIDR rules on the fly.
     ///
     /// Delegates directly to the streaming evaluator for zero-allocation, register-only matching.

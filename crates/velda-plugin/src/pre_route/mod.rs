@@ -46,6 +46,18 @@ pub trait PreRoutePlugin: Send + Sync {
     fn direction(&self) -> Direction {
         Direction::Request
     }
+
+    /// Plugin Background Workload Weight (`0` = hot-path only, `1..=100` = shadow daemon weight).
+    fn pbww(&self) -> u32;
+
+    /// Starts optional background workload daemon on the assigned Shadow Worker (`pbww() > 0`).
+    #[inline]
+    fn run_background(
+        self: Arc<Self>,
+        _shutdown: tokio::sync::watch::Receiver<bool>,
+    ) -> Option<crate::BackgroundTaskFuture> {
+        None
+    }
 }
 
 /// Executes a linear chain of pre-route plugins.

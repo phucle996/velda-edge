@@ -208,6 +208,11 @@ impl PreUpstreamPlugin for RequestMirrorPlugin {
         &self.id
     }
 
+    #[inline(always)]
+    fn pbww(&self) -> u32 {
+        0
+    }
+
     fn on_upstream_request(&self, req: &mut L7Request, _target_upstream: &mut u16) -> Action {
         if self.should_mirror(req) {
             // 1. Prepare shadow headers with hardcoded mandatory X-Velda-Mirror: true

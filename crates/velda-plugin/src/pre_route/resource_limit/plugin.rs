@@ -80,6 +80,11 @@ impl PreRoutePlugin for ResourceLimitPlugin {
         &self.id
     }
 
+    #[inline(always)]
+    fn pbww(&self) -> u32 {
+        0
+    }
+
     fn on_request(&self, req: &mut L7Request) -> Action {
         // 1. Inspect Full URI Length: Authority + Path + Query String
         // Fully evaluates absolute-form URIs (RFC 9112 §3.2.2) to prevent authority smuggling

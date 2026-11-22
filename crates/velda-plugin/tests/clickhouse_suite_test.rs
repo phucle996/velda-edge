@@ -273,7 +273,7 @@ fn test_clickhouse_factory() {
     assert!(matches!(loaded, LoadedPlugin::Background(_)));
 
     if let LoadedPlugin::Background(bg) = loaded {
-        assert_eq!(bg.weight(), 75);
+        assert_eq!(bg.pbww(), 75);
     }
 }
 

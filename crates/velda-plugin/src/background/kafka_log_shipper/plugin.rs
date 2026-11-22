@@ -75,7 +75,8 @@ impl BackgroundPlugin for KafkaLogShipperPlugin {
         &self.id
     }
 
-    fn weight(&self) -> u32 {
+    #[inline(always)]
+    fn pbww(&self) -> u32 {
         75
     }
 

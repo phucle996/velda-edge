@@ -79,7 +79,8 @@ impl BackgroundPlugin for ClickHouseLogShipperPlugin {
         &self.id
     }
 
-    fn weight(&self) -> u32 {
+    #[inline(always)]
+    fn pbww(&self) -> u32 {
         75
     }
 

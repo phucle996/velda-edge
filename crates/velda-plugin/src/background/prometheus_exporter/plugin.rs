@@ -60,7 +60,7 @@ impl BackgroundPlugin for PrometheusExporter {
     }
 
     #[inline(always)]
-    fn weight(&self) -> u32 {
+    fn pbww(&self) -> u32 {
         30
     }
 

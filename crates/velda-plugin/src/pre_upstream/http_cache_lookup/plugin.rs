@@ -145,6 +145,11 @@ impl PreUpstreamPlugin for HttpCacheLookupPlugin {
         &self.id
     }
 
+    #[inline(always)]
+    fn pbww(&self) -> u32 {
+        0
+    }
+
     fn on_upstream_request(&self, req: &mut L7Request, _target_upstream: &mut u16) -> Action {
         // 1. Method check: only cacheable methods (GET, HEAD) are evaluated
         if !self.config.cacheable_methods.contains(&req.method) {

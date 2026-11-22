@@ -344,6 +344,11 @@ impl PreUpstreamPlugin for HeaderMutationPlugin {
         &self.id
     }
 
+    #[inline(always)]
+    fn pbww(&self) -> u32 {
+        0
+    }
+
     fn on_upstream_request(&self, req: &mut L7Request, _target_upstream: &mut u16) -> Action {
         // Step 1: Strip RFC Hop-by-hop headers if configured
         if self.config.strip_hop_by_hop {

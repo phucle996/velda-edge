@@ -241,6 +241,11 @@ impl PreUpstreamPlugin for HmacAuthPlugin {
         &self.id
     }
 
+    #[inline(always)]
+    fn pbww(&self) -> u32 {
+        0
+    }
+
     fn on_upstream_request(&self, req: &mut L7Request, _target_upstream: &mut u16) -> Action {
         // Use authoritative pre-sampled ingress timestamp (0ns, zero redundant clock reads)
         let now = req.ingress_time_sec();

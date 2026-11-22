@@ -428,6 +428,11 @@ impl PreUpstreamPlugin for CanaryPlugin {
         &self.id
     }
 
+    #[inline(always)]
+    fn pbww(&self) -> u32 {
+        0
+    }
+
     fn on_upstream_request(&self, req: &mut L7Request, target_upstream: &mut u16) -> Action {
         if self.should_route_to_canary(req) {
             // 1. Inject informational marker header for backend telemetry/sandbox (if configured)

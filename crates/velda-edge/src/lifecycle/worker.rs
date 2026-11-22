@@ -12,7 +12,6 @@
 //!   channel. Plugins and background services register tasks directly into this Hook
 //!   without arbitrary detached background task spawning.
 
-use std::sync::Arc;
 use tokio::sync::{mpsc, watch};
 use tokio::task::JoinSet;
 use velda_core::hardware::set_current_thread_idle_priority;
@@ -473,22 +472,35 @@ pub fn spawn_shadow_worker(
         .expect("Failed to spawn shadow worker thread")
 }
 
-/// Helper registering declared background plugins into a task [`JoinSet`].
+/// Helper registering declared plugin background workloads (`pbww() > 0`) into a task [`JoinSet`].
 fn register_background_plugins(
     tasks: &mut JoinSet<()>,
-    plugins: &[Arc<dyn velda_plugin::BackgroundPlugin>],
+    plugins: &[velda_plugin::LoadedPlugin],
     shutdown: watch::Receiver<bool>,
 ) {
     for plugin in plugins {
-        let p = Arc::clone(plugin);
+        let p = plugin.clone();
         let s = shutdown.clone();
         tasks.spawn(async move {
             let id = p.id().to_string();
-            tracing::info!(plugin_id = %id, "Background plugin starting on Shadow Worker");
-            if let Err(e) = p.run(s).await {
-                tracing::error!(plugin_id = %id, error = %e, "Background plugin exited with error");
+            let pbww = p.pbww();
+            let Some(fut) = p.run_background(s) else {
+                tracing::warn!(
+                    plugin_id = %id,
+                    pbww,
+                    "Plugin declared pbww > 0 but provided no background task"
+                );
+                return;
+            };
+            tracing::info!(
+                plugin_id = %id,
+                pbww,
+                "Background workload starting on Shadow Worker"
+            );
+            if let Err(e) = fut.await {
+                tracing::error!(plugin_id = %id, error = %e, "Background workload exited with error");
             } else {
-                tracing::info!(plugin_id = %id, "Background plugin stopped cleanly");
+                tracing::info!(plugin_id = %id, "Background workload stopped cleanly");
             }
         });
     }

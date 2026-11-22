@@ -143,6 +143,11 @@ impl PostResponsePlugin for ResponseHeaderMutationPlugin {
         &self.id
     }
 
+    #[inline(always)]
+    fn pbww(&self) -> u32 {
+        0
+    }
+
     fn on_response(&self, req_headers: &HeaderWorkspace, resp: &mut L7Response) {
         // Step 1: Remove explicitly requested headers
         if (self.op_mask & OP_REMOVE) != 0 && !resp.headers.is_empty() {

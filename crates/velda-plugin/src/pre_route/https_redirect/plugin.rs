@@ -191,6 +191,11 @@ impl PreRoutePlugin for HttpsRedirectPlugin {
         &self.id
     }
 
+    #[inline(always)]
+    fn pbww(&self) -> u32 {
+        0
+    }
+
     #[inline]
     fn on_request(&self, req: &mut L7Request) -> Action {
         // Fast path: already HTTPS -> zero stack frame, immediate Continue.

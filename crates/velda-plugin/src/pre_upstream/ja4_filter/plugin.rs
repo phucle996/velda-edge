@@ -82,6 +82,11 @@ impl PreUpstreamPlugin for Ja4FilterPlugin {
         &self.id
     }
 
+    #[inline(always)]
+    fn pbww(&self) -> u32 {
+        0
+    }
+
     #[inline]
     fn on_upstream_request(&self, req: &mut L7Request, _target_upstream: &mut u16) -> Action {
         let ja4 = req.state.ja4;

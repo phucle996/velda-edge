@@ -221,6 +221,11 @@ impl PreUpstreamPlugin for RequestTerminationPlugin {
         &self.id
     }
 
+    #[inline(always)]
+    fn pbww(&self) -> u32 {
+        0
+    }
+
     /// Short-circuits the request pipeline immediately with the synthetic response.
     ///
     /// # Zero-Copy Hot Path

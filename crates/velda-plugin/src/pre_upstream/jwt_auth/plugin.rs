@@ -251,6 +251,11 @@ impl PreUpstreamPlugin for JwtAuthPlugin {
         &self.id
     }
 
+    #[inline(always)]
+    fn pbww(&self) -> u32 {
+        0
+    }
+
     fn on_upstream_request(&self, req: &mut L7Request, _target_upstream: &mut u16) -> Action {
         let token_str = match self.extract_token(req) {
             Some(t) => t,

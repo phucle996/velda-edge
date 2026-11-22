@@ -72,7 +72,7 @@ pub fn canonical_phase_for_id(id: &str) -> Option<&'static str> {
         "http_cache_store" => Some("post_response"),
         "response_header_mutation" => Some("post_response"),
         "response_compression" => Some("post_response"),
-        "ai_token_metering" => Some("post_response"),
+        "openai_token_quota" => Some("post_response"),
         "prometheus_exporter" => Some("background"),
         "health_probe" => Some("background"),
         "otlp_metrics_exporter" => Some("background"),
@@ -104,7 +104,7 @@ pub fn canonical_protocol_family_for_id(id: &str) -> Option<&'static str> {
         "response_header_mutation" => Some("http"),
         "response_compression" => Some("http"),
         "request_termination" => Some("http"),
-        "ai_token_metering" => Some("http"),
+        "openai_token_quota" => Some("http"),
         _ => None,
     }
 }
@@ -442,6 +442,20 @@ pub fn validate_plugin_config(plugin: &mut PluginConfig) -> Result<(), PluginErr
                 )));
             }
             let normalized = crate::post_response::security_headers::validation::validate_security_headers_config(&plugin.id, &plugin.config)?;
+            plugin.config =
+                serde_json::to_value(normalized).map_err(|e| PluginError::Config(e.to_string()))?;
+        }
+        "openai_token_quota" => {
+            if plugin.phase != "post_response" {
+                return Err(PluginError::Config(format!(
+                    "Plugin '{}' must specify phase 'post_response'",
+                    plugin.id
+                )));
+            }
+            let normalized = crate::post_response::openai_token_quota::validation::validate_openai_token_quota_config(
+                &plugin.id,
+                &plugin.config,
+            )?;
             plugin.config =
                 serde_json::to_value(normalized).map_err(|e| PluginError::Config(e.to_string()))?;
         }

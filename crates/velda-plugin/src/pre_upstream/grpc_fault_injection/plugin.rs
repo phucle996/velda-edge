@@ -260,6 +260,11 @@ impl PreUpstreamPlugin for GrpcFaultInjectionPlugin {
         &self.id
     }
 
+    #[inline(always)]
+    fn pbww(&self) -> u32 {
+        0
+    }
+
     /// Evaluates the gRPC request against fault injection rules.
     ///
     /// # Ultimate Flat Hardware-Accelerated Workflow

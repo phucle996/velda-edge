@@ -84,7 +84,8 @@ impl BackgroundPlugin for ElasticsearchLogShipperPlugin {
         SupportedProtocols::empty()
     }
 
-    fn weight(&self) -> u32 {
+    #[inline(always)]
+    fn pbww(&self) -> u32 {
         60
     }
 

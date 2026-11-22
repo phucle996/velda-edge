@@ -195,6 +195,11 @@ impl PostResponsePlugin for HttpCacheStorePlugin {
         &self.id
     }
 
+    #[inline(always)]
+    fn pbww(&self) -> u32 {
+        0
+    }
+
     fn on_response(&self, req_headers: &velda_core::HeaderWorkspace, resp: &mut L7Response) {
         // 1. If already served from cache (HIT), skip storing
         if let Some(val) = resp.headers.get(&X_CACHE)

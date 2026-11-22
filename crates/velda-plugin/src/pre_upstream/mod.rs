@@ -95,6 +95,18 @@ pub trait PreUpstreamPlugin: Send + Sync {
         Direction::Request
     }
 
+    /// Plugin Background Workload Weight (`0` = hot-path only, `1..=100` = shadow daemon weight).
+    fn pbww(&self) -> u32;
+
+    /// Starts optional background workload daemon on the assigned Shadow Worker (`pbww() > 0`).
+    #[inline]
+    fn run_background(
+        self: Arc<Self>,
+        _shutdown: tokio::sync::watch::Receiver<bool>,
+    ) -> Option<crate::BackgroundTaskFuture> {
+        None
+    }
+
     /// Returns the shared JWKS key store if this plugin manages in-memory verification keys (e.g. `jwt_auth`).
     #[inline(always)]
     fn shared_jwks_store(

@@ -242,6 +242,11 @@ impl PreUpstreamPlugin for Oauth2IntrospectionPlugin {
         &self.id
     }
 
+    #[inline(always)]
+    fn pbww(&self) -> u32 {
+        0
+    }
+
     fn on_upstream_request(&self, req: &mut L7Request, _target_upstream: &mut u16) -> Action {
         let (token, matched_header) = match self.extract_token(req) {
             Some(res) => res,

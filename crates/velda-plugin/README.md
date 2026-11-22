@@ -1,170 +1,156 @@
-# velda-plugin
+# `velda-plugin`
 
-High-performance, protocol-bound, phase-differentiated Plugin Engine for the **Velda Edge Data Plane**.
+High-performance, protocol-bound, phase-differentiated Plugin Engine and **PBWW (Plugin Background Workload Weight)** scheduling contracts for the **Velda Edge Data Plane**.
 
 > [!NOTE]
-> For a step-by-step tutorial on authoring, registering, and testing custom plugins, see the [Plugin Authoring Guide](AUTHORING_PLUGINS.md).
+> For a step-by-step developer guide on authoring, scheduling (`pbww`), registering, and testing custom plugins, see [AUTHORING_PLUGINS.md](AUTHORING_PLUGINS.md).
 
 ---
 
 ## 1. Architectural Philosophy & Invariants
 
-Legacy API gateways (Kong, APISIX, Spring Cloud Gateway) rely on generic, dynamic plugin models where plugins accept untyped maps (`HashMap<String, Box<dyn Any>>`) or generic request abstractions. In high-performance edge computing, that pattern introduces severe operational risks:
+Traditional API gateways rely on untyped property bags (`HashMap<String, Box<dyn Any>>`), runtime type downcasting, per-request JSON parsing, and ad-hoc background threads. In high-throughput edge systems, those patterns cause unpredictable tail latency, allocator contention, and leaked connections on config reload.
 
-1. **Runtime Type-Casting Panics**: When an HTTP REST plugin is attached to a gRPC or raw TCP pipeline, runtime downcasting panics or corrupts framing.
-2. **Leaky Protocol Abstractions**: Attempting to force gRPC through HTTP semantics destroys gRPC status codes (`grpc-status` trailers), binary framing (5-byte Length-Prefixed Messages), and duplex streaming.
-3. **Hot-Path Virtual Indirection**: Dynamic JSON parsing, schema validation, and reflection on every request violate the Zero-IO hot-path invariant.
+`velda-plugin` enforces strict compile-time and runtime invariants:
 
-### The Velda Invariants
-
-- **Protocol-Bound Plugins**: Plugins explicitly declare supported protocols via bitflags ([`SupportedProtocols`](src/capability.rs)). Mismatches fail fast at sync/compilation time, never in runtime traffic serving.
-- **Reverse Permission Granting ([`PluginCapability`](src/capability.rs))**: Plugins declare their exact authority level ([`AccessLevel`](src/capability.rs)) separately for Headers and Payloads (`None < Read < Write`).
-- **Orthogonal Streaming Pipe Decoupling**: Plugins requiring body write/buffering cannot be attached to streaming pipelines (`streaming.client` or `streaming.server`), preventing deadlocks and memory bloat.
-- **Deterministic Declaration Order**: Execution order within each phase is resolved strictly by declaration order in the route's `plugins` array (FIFO: first declared, first executed).
-- **Zero-IO in Serving**: All plugins are instantiated and compiled ahead of time into a static execution plan ([`RoutePluginPlan`](src/plan.rs)). Zero allocations, zero JSON parsing, and zero lock contention on the serving hot path.
+1. **Protocol-Bound Plugins ([`SupportedProtocols`](src/capability.rs))**: Plugins declare supported protocols via compile-time bitflags (`HTTP1`, `HTTP2`, `HTTP3`, `GRPC`, `TCP`, `UDP`). Mismatches fail fast during config compilation, never on the hot path.
+2. **Reverse Permission Granting ([`PluginCapability`](src/capability.rs))**: Plugins explicitly declare read/write access levels separately for headers and payloads (`None < Read < Write`).
+3. **Orthogonal Streaming Pipe Decoupling**: Any plugin requesting payload `Write` access is rejected at compile time if attached to a client- or server-streaming route (`PluginError::StreamingConflict`).
+4. **Zero-IO Hot Path**: `from_config(&PluginConfig)` compiles all state, regexes, CIDRs, and contiguous arenas into RAM ahead of time. `on_request`, `on_upstream_request`, and `on_response` perform zero JSON parsing, zero disk I/O, and zero blocking network calls.
+5. **No Rogue Threads or Hidden Spawns**: Plugins **MUST NOT** spawn raw OS threads (`std::thread::spawn`) or detached tasks (`tokio::spawn`) inside `from_config`. All persistent background loops are scheduled deterministically by Velda's **PBWW** scheduler onto dedicated `SCHED_IDLE` Shadow Workers.
 
 ---
 
-## 2. Phase-Separated Hook Architecture
+## 2. Execution Phases vs Background Scheduling (PBWW Model)
 
-Plugins execute across four strictly isolated lifecycle phases:
+Velda separates **when a plugin intercepts traffic** (its pipeline phase) from **how much background work it performs** (its **PBWW**):
 
-```
-[ Ingress Protocol Decoder ]
-             │
-             ▼
-┌─────────────────────────┐
-│ Phase 1: Pre-Route      │ ── Evaluated before route matching & body streaming.
-│ (PreRoutePlugin)        │    Fail-fast authentication (JWT), IP filtering, WAF header checks.
-└────────────┬────────────┘
-             │
-             ▼
-[ Route Table Matching & Upstream Selection ]
-             │
-             ▼
-┌─────────────────────────┐
-│ Phase 2: Pre-Upstream   │ ── Evaluated after route & backend target are resolved.
-│ (PreUpstreamPlugin)     │    Rate limiting, token injection, header mutation.
-└────────────┬────────────┘
-             │
-             ▼
-[ Upstream Backend Execution ]
-             │
-             ▼
-┌─────────────────────────┐
-│ Phase 3: Post-Response  │ ── Evaluated on response before downstream encoding.
-│ (PostResponsePlugin)    │    Security headers (HSTS, CSP), CORS headers, compression.
-└────────────┬────────────┘
-             │
-             ▼
-[ Egress Protocol Encoder ]
-
-┌─────────────────────────┐
-│ Phase 4: Background     │ ── Runs exclusively on Shadow Workers under SCHED_IDLE.
-│ (BackgroundPlugin)      │    Prometheus exporter, health check probes. Zero traffic worker impact.
-└─────────────────────────┘
+```text
+  REQUEST PIPELINE (Frontline Workers: velda-worker-{i}, SCHED_OTHER)
+  ─────────────────────────────────────────────────────────────────────────────
+  Ingress ─► [1. PreRoute] ─► Router ─► [2. PreUpstream] ─► Upstream ─► [3. PostResponse] ─► Egress
+                 │                            │                                │
+                 │  (Optional sporadic per-request offload via thread-local)   │
+                 └───────────────► try_dispatch_shadow() ──────────────────────┤
+                                                                               ▼
+  BACKGROUND LOGISTICS (Shadow Workers: velda-shadow-{i}, SCHED_IDLE)
+  ─────────────────────────────────────────────────────────────────────────────
+  Every LoadedPlugin (regardless of phase) declares `pbww() -> u32` (0..=100):
+    ├── pbww == 0 ──► Hot-path only (no background task scheduled)
+    └── pbww > 0  ──► Greedy LPT Bin-Packing partitions tasks across `velda-shadow-{0..N-1}`
+                        └─► Assigned Shadow Worker runs `run_background(shutdown)`
+                            (Opens outbound Redis/OTLP/TLS connections directly on its runtime;
+                             shuts down cleanly & restarts on RuntimeSnapshot hot-reload)
 ```
 
-### Phase Contracts
+### Phase Traits
 
-| Phase | Trait | Primary Hook | Authority Contract |
+| Phase | Trait | Hot-Path Hook | Authority / Mutation |
 | :--- | :--- | :--- | :--- |
-| **`pre_route`** | [`PreRoutePlugin`](src/pre_route/mod.rs) | `on_request(&self, req: &mut L7Request) -> Action` | `Action::Continue`, `Action::Respond`, `Action::Reject(RejectReason)`, `Action::Delay` |
-| **`pre_upstream`** | [`PreUpstreamPlugin`](src/pre_upstream/mod.rs) | `on_upstream_request(&self, req: &mut L7Request) -> Action` | `Action::Continue`, `Action::Respond`, `Action::Reject(RejectReason)`, `Action::Delay` |
-| **`post_response`** | [`PostResponsePlugin`](src/post_response/mod.rs) | `on_response(&self, resp: &mut L7Response)` | In-place header & status mutation |
-| **`background`** | [`BackgroundPlugin`](src/background/mod.rs) | `run(self, shutdown) -> Future<Output = Result<(), PluginError>>` | Shadow background execution loop |
+| **`pre_route`** | [`PreRoutePlugin`](src/pre_route/mod.rs) | `on_request(&self, req: &mut L7Request) -> Action` | `Continue`, `Respond`, `Reject(RejectReason)`, `Delay` |
+| **`pre_upstream`** | [`PreUpstreamPlugin`](src/pre_upstream/mod.rs) | `on_upstream_request(&self, req: &mut L7Request, target: &mut u16) -> Action` | Same + dynamic upstream rerouting (`canary`) |
+| **`post_response`** | [`PostResponsePlugin`](src/post_response/mod.rs) | `on_response(&self, req_headers: &HeaderWorkspace, resp: &mut L7Response)` | Zero-copy/register header & status mutation |
+| **`background`** | [`BackgroundPlugin`](src/background/mod.rs) | *(None — background only)* | Runs daemon loop (`run(self, shutdown)`) |
 
-### Canonical Rejections & Virtual 3-Column Header Model
-To achieve protocol-agnostic short-circuiting and eliminate header leakage:
-1. **Semantic Rejection ([`RejectReason`])**: Plugins emit `Action::Reject(RejectReason::Forbidden)` or `Action::Reject(RejectReason::TooManyRequests)` instead of synthesizing raw HTTP responses. The underlying protocol driver (HTTP/1, HTTP/2, HTTP/3, gRPC) formats the error natively.
-2. **Virtual 3-Column Header Tagging**:
-   - Headers default to Bit 0 (internal/upstream only). When a request is rejected, all Bit 0 headers are dropped to eliminate information disclosure and header reflection risks.
-   - **Pre-loaded Slot 0 (`x-request-id`)**: Every request has `(x-request-id, <id>)` pre-loaded in Slot 0 with Bit 1 upon workspace allocation (`bypass_len = 1`). Normal `insert()` calls do not sniff or compare strings, running at native `HeaderMap` speed ($0$ ns overhead).
-   - Rejection-critical headers (e.g., `Retry-After`, `x-ratelimit-*`, `WWW-Authenticate`) are tagged with Bit 1 via `req.headers.insert_bypass(name, value)` up to `MAX_BYPASS_HEADERS = 8` sidecar slots and forwarded safely in the short-circuit response.
+### Universal PBWW (`Plugin Background Workload Weight`) Contract
 
----
+Every plugin across **all four traits** must explicitly implement `fn pbww(&self) -> u32` (`0..=100`, no default):
 
-## 3. Reverse Permission Granting & Streaming Decoupling
+- **`pbww() == 0`**: Pure hot-path plugin (e.g., `ip_filter`, `cors`, `waf_lite`, `header_mutation`), or a hybrid plugin operating in `local` mode (e.g., `openai_token_quota` with `mode: "local"`). Ignored by the background scheduler with zero runtime cost.
+- **`pbww() ∈ 1..=100`**: Plugin has a persistent background daemon (e.g., Redis quota lease sync, log shipping, telemetry export, certificate rotation).
+  - Pure `BackgroundPlugin` implementations simply represent plugins with no hot-path hook and non-zero PBWW (`1..=100`).
+  - Traffic-phase plugins with optional background loops (`openai_token_quota`, `consumer_quota`, `api_metering`, `rate_limit`) implement `run_background(self: Arc<Self>, shutdown: watch::Receiver<bool>) -> Option<BackgroundTaskFuture>`.
+- **Static Multi-Core Greedy LPT Balancing**: In `velda-edge` ([`partition_background_plugins`](../velda-edge/src/runtime/plugin.rs)), all plugins with `pbww() > 0` across all phases are pooled together, sorted descending by PBWW, and placed greedily onto the least-loaded Shadow Worker (`velda-shadow-{i}`).
+- **Lazy Connection Ownership**: Because `from_config` never opens sockets, outbound connections (Redis, ClickHouse, OTLP, etc.) are opened lazily inside `run_background()` directly by the assigned Shadow Worker thread on its own `SCHED_IDLE` Tokio runtime.
 
-Velda Edge plugins must declare their exact access requirements:
+### Two Distinct Shadow Mechanisms (Do Not Conflate)
 
-```rust
-use velda_plugin::capability::{AccessLevel, PluginCapability, SupportedProtocols};
-
-impl PreRoutePlugin for MyCustomAuthPlugin {
-    // 1. Declare exact permission boundaries: Read headers only, zero payload access
-    fn capability(&self) -> PluginCapability {
-        PluginCapability::header_only(AccessLevel::Read)
-    }
-
-    // 2. Declare supported protocols via bitflags
-    fn supported_protocols(&self) -> SupportedProtocols {
-        SupportedProtocols::HTTP1 | SupportedProtocols::HTTP2 | SupportedProtocols::HTTP3
-    }
-    
-    // ...
-}
-```
-
-### Orthogonal Pipe Validation Matrix
-
-| Plugin Payload Authority | `streaming.client == false` (Buffered) | `streaming.client == true` (Stream Upload) |
-| :--- | :---: | :---: |
-| `payload_access: None` | **Compatible** | **Compatible** |
-| `payload_access: Read` | **Compatible** | **Compatible** |
-| `payload_access: Write` | **Compatible** | **Rejected at Sync ([`PluginError::StreamingConflict`](src/error.rs))** |
-
-> [!IMPORTANT]
-> A plugin requiring body write/buffering attached to a streaming pipe will be rejected **fail-fast at configuration compile time**. It will never enter the Data Plane hot path.
+| Pattern | Mechanism | Target Plugins |
+| :--- | :--- | :--- |
+| **Long-Running Daemon** | **`pbww() > 0` + `run_background(shutdown)`** | `openai_token_quota`, `consumer_quota`, `api_metering`, `rate_limit`, all 14 `background/*` plugins |
+| **Per-Request One-Shot Offload** | **[`try_dispatch_shadow`](src/hook.rs)** (`LOCAL_SHADOW_SENDER`) | `request_mirror`, `oauth2_introspection` (non-blocking core-local fire-and-forget from `velda-worker-{i}` to `velda-shadow-{i}`) |
 
 ---
 
-## 4. Phase Sub-Dispatchers & Open-Closed Factory
+## 3. Canonical Rejections & Virtual 3-Column Header Model
 
-To prevent [`factory.rs`](src/factory.rs) from becoming a monolithic "God Factory" as the number of plugins grows:
+To allow protocol-independent short-circuiting without leaking internal headers:
 
-1. **Plugin-Owned Deserialization**: Every plugin implements `from_config(&PluginConfig) -> Result<Self, PluginError>` in its own module.
-2. **Phase Sub-Dispatchers**: Each phase module (`pre_route/mod.rs`, `pre_upstream/mod.rs`, `post_response/mod.rs`, `background/mod.rs`) defines a local `instantiate(config)` function.
-3. **Razor-Thin Factory**: [`factory::instantiate_plugin`](src/factory.rs) only validates `canonical_phase_for_id` and delegates to the appropriate phase sub-dispatcher.
+1. **Semantic Rejection (`Action::Reject(RejectReason)`)**: Plugins return semantic reasons (`Unauthorized`, `Forbidden`, `TooManyRequests`, etc.). Each ingress protocol driver (`HTTP/1.1`, `HTTP/2`, `HTTP/3`, `gRPC`) renders the protocol-native status code and body.
+2. **Bit-1 Bypass Sidecar Tagging**:
+   - Normal `req.headers.insert(...)` writes Bit-0 headers intended only for upstream backends; all Bit-0 headers are stripped on `Action::Reject`.
+   - `x-request-id` is pre-loaded in Bypass Slot 0.
+   - Headers meant to reach rejected clients (`Retry-After`, `WWW-Authenticate`, `x-ratelimit-*`) are written via `req.headers.insert_bypass(...)` / `insert_bypass_u64(...)` (up to `MAX_BYPASS_HEADERS = 8` sidecar slots).
 
 ---
 
-## 5. Built-in Production Plugins
+## 4. Built-in Plugins Inventory
 
-| Plugin Name | Phase | Default Protocols | Description |
+### `pre_route`
+| Plugin | Default Protocols | PBWW | Description |
 | :--- | :---: | :---: | :--- |
-| [`cors_preflight`](src/pre_route/cors_preflight/) | `pre_route` | HTTP/1.1, HTTP/2, HTTP/3 | Short-circuits browser CORS `OPTIONS` preflight requests directly at the edge with 204 No Content. |
-| [`resource_limit`](src/pre_route/resource_limit/) | `pre_route` | HTTP/1.1, HTTP/2, HTTP/3 | Ingress boundary protection against URI overflow, header bombing, and Slowloris DoS (414/431). |
-| [`waf_lite`](src/pre_route/waf_lite/) | `pre_route` | HTTP/1.1, HTTP/2, HTTP/3 | Ultra-low latency L7 WAF scanning for SQLi, XSS, Path Traversal, and scanners before routing. |
-| [`jwt_auth`](src/pre_upstream/jwt_auth/) | `pre_upstream` | HTTP/1.1, HTTP/2, HTTP/3 | Route-scoped JWT validation, dual caching, flexible claim extraction. |
-| [`api_key_auth`](src/pre_upstream/api_key_auth/) | `pre_upstream` | HTTP/1.1, HTTP/2, HTTP/3 | Fast L7 API key verification, dual positive/negative caching, and consumer header injection. |
-| [`ip_filter`](src/pre_route/ip_filter/) | `pre_route` | All Protocols (L4/L7) | Client IP allowlist / denylist filtering with `X-Forwarded-For` support. |
-| [`rate_limit`](src/pre_upstream/rate_limit/) | `pre_upstream` | All Protocols | In-memory token bucket rate limiting with `Retry-After` header generation. |
-| [`header_mutation`](src/pre_upstream/header_mutation.rs) | `pre_upstream` | All L7 | Sets or strips HTTP headers before upstream backend forwarding. |
-| [`security_headers`](src/post_response/security_headers/) | `post_response` | All L7 | Injects browser security headers (`HSTS`, `X-Frame-Options`, `X-Content-Type-Options`). |
-| [`cors`](src/post_response/cors/) | `post_response` | All L7 | Injects CORS headers (`Access-Control-Allow-Origin`, `Access-Control-Allow-Credentials`). |
-| [`std_log_shipper`](src/background/std_log_shipper/) | `background` | All Protocols | Lock-free standard stream log exporter (`stdout`, `stderr`, file) across all protocols. |
-| [`otlp_log_shipper`](src/background/otlp_log_shipper/) | `background` | All Protocols | OpenTelemetry Access Log shipper over persistent HTTP/1.1 or HTTP/2 gRPC. |
-| [`loki_log_shipper`](src/background/loki_log_shipper/) | `background` | All Protocols | Grafana Loki multi-stream access log shipper with zero hot-path contention. |
-| [`clickhouse_log_shipper`](src/background/clickhouse_log_shipper/) | `background` | All Protocols | High-throughput access log shipper to ClickHouse MergeTree tables over HTTP RowBinary/JSON. |
-| [`kafka_log_shipper`](src/background/kafka_log_shipper/) | `background` | All Protocols | Native Kafka RecordBatch v2 shipper with zstd compression and dynamic node partition routing. |
-| [`prometheus_exporter`](src/background/prometheus_exporter/) | `background` | Management (:9090) | High-performance lock-free OpenMetrics telemetry exporter running on Shadow Worker. |
-| [`otlp_metrics_exporter`](src/background/otlp_metrics_exporter/) | `background` | Management | OpenTelemetry Metrics exporter pushing atomic snapshots to OTLP collector. |
-| [`health_probe`](src/background/health_probe/) | `background` | Management (:9091) | Kubernetes liveness and readiness probe HTTP endpoint. |
+| [`cors_preflight`](src/pre_route/cors_preflight/) | HTTP | `0` | Fast-path browser CORS `OPTIONS` preflight handler (204 No Content). |
+| [`https_redirect`](src/pre_route/https_redirect/) | HTTP | `0` | Permanent/temporary redirect from plaintext HTTP to HTTPS. |
+| [`ip_filter`](src/pre_route/ip_filter/) | All L7 | `0` | Lock-free SIMD/radix CIDR allowlist & denylist IP filtering. |
+| [`method_filter`](src/pre_route/method_filter/) | HTTP | `0` | Bitmask HTTP method enforcement (405 Method Not Allowed). |
+| [`resource_limit`](src/pre_route/resource_limit/) | HTTP | `0` | Ingress URI length, header count, and header byte-size protection. |
+| [`waf_lite`](src/pre_route/waf_lite/) | HTTP | `0` | Multi-pattern Aho-Corasick/SIMD WAF inspection (SQLi, XSS, path traversal). |
+
+### `pre_upstream`
+| Plugin | Default Protocols | PBWW | Description |
+| :--- | :---: | :---: | :--- |
+| [`api_key_auth`](src/pre_upstream/api_key_auth/) | HTTP | `0` | Constant-time API key verification and consumer metadata injection. |
+| [`api_metering`](src/pre_upstream/api_metering/) | All L7 | `0` / `1..=100` | Tiered micro-credit billing & optional distributed Redis delta sync. |
+| [`canary`](src/pre_upstream/canary/) | HTTP / gRPC | `0` | Deterministic hash/header/weight-based canary upstream rerouting. |
+| [`consumer_quota`](src/pre_upstream/consumer_quota/) | All L7 | `0` / `1..=100` | Multi-window fair-use quotas & optional distributed Redis sync. |
+| [`csrf`](src/pre_upstream/csrf/) | HTTP | `0` | Double-submit cookie / origin-verified CSRF token enforcement. |
+| [`grpc_fault_injection`](src/pre_upstream/grpc_fault_injection/) | gRPC | `0` | Deterministic gRPC status abort & latency fault injection. |
+| [`header_mutation`](src/pre_upstream/header_mutation/) | All L7 | `0` | Request header insertion, dynamic variable substitution, and stripping. |
+| [`hmac_auth`](src/pre_upstream/hmac_auth/) | HTTP | `0` | HMAC-SHA256 request signature and replay-window verification. |
+| [`http_cache_lookup`](src/pre_upstream/http_cache_lookup/) | HTTP | `0` | Lock-free shared-memory HTTP response cache lookup (short-circuits on HIT). |
+| [`http_fault_injection`](src/pre_upstream/http_fault_injection/) | HTTP | `0` | Scoped HTTP status abort & non-blocking delay fault injection. |
+| [`ja4_filter`](src/pre_upstream/ja4_filter/) | TLS L7 | `0` | TLS JA4 client fingerprint filtering directly against `req.state.ja4`. |
+| [`jwt_auth`](src/pre_upstream/jwt_auth/) | HTTP | `0` | Zero-alloc JWT verification (HS/RS/ES/EdDSA) wired to `jwks_rotator`. |
+| [`oauth2_introspection`](src/pre_upstream/oauth2_introspection/) | HTTP | `0` | RFC 7662 token introspection cache with core-local shadow revalidation (`try_dispatch_shadow`). |
+| [`rate_limit`](src/pre_upstream/rate_limit/) | All L7 | `0` / `1..=100` | Lock-striped token/sliding-window limiter & optional Redis batch sync. |
+| [`request_mirror`](src/pre_upstream/request_mirror/) | HTTP | `0` | Sampled traffic mirroring offloaded via `try_dispatch_shadow`. |
+| [`request_termination`](src/pre_upstream/request_termination/) | HTTP | `0` | Static edge synthetic response termination. |
+| [`url_rewrite`](src/pre_upstream/url_rewrite/) | HTTP | `0` | Zero-alloc path prefix replacement and regex-free URL rewriting. |
+
+### `post_response`
+| Plugin | Default Protocols | PBWW | Description |
+| :--- | :---: | :---: | :--- |
+| [`cors`](src/post_response/cors/) | HTTP | `0` | Dynamic origin-matched CORS response headers. |
+| [`http_cache_store`](src/post_response/http_cache_store/) | HTTP | `0` | Captures eligible upstream responses into the shared cache engine. |
+| [`openai_token_quota`](src/post_response/openai_token_quota/) | HTTP | `0` / `1..=100` | Zero-alloc OpenAI SSE/JSON token counter, 128B shared arena, and batch Lua Redis micro-quota leasing. |
+| [`response_compression`](src/post_response/response_compression/) | HTTP | `0` | Adaptive zstd/gzip/brotli response body compression. |
+| [`response_header_mutation`](src/post_response/response_header_mutation/) | All L7 | `0` | SIMD-accelerated response header insertion and removal. |
+| [`security_headers`](src/post_response/security_headers/) | HTTP | `0` | High-speed OWASP browser hardening headers (`HSTS`, `CSP`, `X-Frame-Options`). |
+
+### `background`
+| Plugin | PBWW | Description |
+| :--- | :---: | :--- |
+| [`acme_cert_rotator`](src/background/acme_cert_rotator/) | `10` | Automated ACME HTTP-01 TLS certificate issuance & SNI hot-swap. |
+| [`clickhouse_log_shipper`](src/background/clickhouse_log_shipper/) | `75` | Native ClickHouse HTTP RowBinary/JSON access log exporter. |
+| [`elasticsearch_log_shipper`](src/background/elasticsearch_log_shipper/) | `60` | Elasticsearch NDJSON bulk access log shipper. |
+| [`health_probe`](src/background/health_probe/) | `1` | Sequential inline `/livez` and `/readyz` Kubernetes probe listener. |
+| [`jwks_rotator`](src/background/jwks_rotator/) | `5` | Background JWKS keyset fetcher wiring into `jwt_auth`'s shared store. |
+| [`kafka_log_shipper`](src/background/kafka_log_shipper/) | `75` | Kafka RecordBatch v2 zstd access log producer. |
+| [`loki_log_shipper`](src/background/loki_log_shipper/) | `80` | Grafana Loki multi-stream protobuf/JSON log exporter. |
+| [`otlp_log_shipper`](src/background/otlp_log_shipper/) | `70` | OpenTelemetry access log exporter over HTTP/gRPC. |
+| [`otlp_metrics_exporter`](src/background/otlp_metrics_exporter/) | `40` | OpenTelemetry atomic metrics snapshot exporter. |
+| [`otlp_trace_exporter`](src/background/otlp_trace_exporter/) | `50` | OpenTelemetry distributed span batch exporter. |
+| [`prometheus_exporter`](src/background/prometheus_exporter/) | `30` | Lock-free OpenMetrics `/metrics` endpoint on Shadow Worker. |
+| [`s3_log_shipper`](src/background/s3_log_shipper/) | `65` | SigV4 + zstd batched access log uploader to S3-compatible storage. |
+| [`statsd_exporter`](src/background/statsd_exporter/) | `20` | MTU-chunked StatsD / DogStatsD UDP metrics pusher (`sendmmsg`). |
+| [`std_log_shipper`](src/background/std_log_shipper/) | `15` | Buffered `stdout` / `stderr` / file access log writer. |
 
 ---
 
-## 6. Verification & Test Suite
-
-Run unit and integration tests across the plugin crate:
+## 5. Verification
 
 ```bash
-# Check formatting
-rtk cargo fmt --check -p velda-plugin
-
-# Strict clippy linting
-rtk cargo clippy -p velda-plugin --all-targets --all-features -- -D warnings
-
-# Execute test suite
-rtk cargo test -p velda-plugin
+cargo fmt --check -p velda-plugin
+cargo clippy -p velda-plugin --all-targets --all-features -- -D warnings
+cargo test -p velda-plugin
 ```

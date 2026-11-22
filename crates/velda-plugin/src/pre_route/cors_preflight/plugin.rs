@@ -198,6 +198,11 @@ impl PreRoutePlugin for CorsPreflightPlugin {
         &self.id
     }
 
+    #[inline(always)]
+    fn pbww(&self) -> u32 {
+        0
+    }
+
     fn on_request(&self, req: &mut L7Request) -> Action {
         // 1. Fast path: Must be HTTP OPTIONS method
         if req.method != Method::OPTIONS {

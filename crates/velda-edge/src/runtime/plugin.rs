@@ -1,8 +1,24 @@
-//! In-memory Route Plugin Plan table and compilation dispatcher.
+//! In-memory Route Plugin Plan Table and PBWW Background Scheduler (`runtime::plugin`).
+//!
+//! ```text
+//!   PluginConfig[]
+//!        │
+//!        ▼
+//!   instantiate_plugin() + wire_plugin_dependencies()
+//!        │
+//!        ├──► route.plugins ─► RoutePluginPlan (O(1) hot-path dispatch per route_id)
+//!        │
+//!        └──► loaded.pbww() (0..=100, phase-agnostic)
+//!               ├─ == 0 ─► Hot-path only (no shadow daemon spawned)
+//!               └─ > 0  ─► Greedy LPT Bin-Packing ─► shadow_shards[0..worker_count-1]
+//!                                                       │
+//!                                                       ▼
+//!                                               velda-shadow-{i} (SCHED_IDLE)
+//! ```
 //!
 //! Pre-compiles declarative [`PluginConfig`] definitions into typed [`LoadedPlugin`] instances,
-//! and compiles route-specific [`RoutePluginPlan`] plans in RAM ahead of time.
-//! Provides O(1) lock-free plan lookup on the request hot path with total bypass when empty.
+//! builds O(1) lock-free [`RoutePluginPlan`] lookup tables, and partitions all background
+//! workloads across Shadow Workers purely by PBWW without distinguishing plugin phases.
 
 use std::sync::Arc;
 
@@ -23,11 +39,11 @@ use crate::error::EdgeError;
 pub struct PluginTable {
     /// O(1) integer lookup table: u16 -> RoutePluginPlan.
     pub routes: FxHashMap<u16, Arc<RoutePluginPlan>>,
-    /// Active background plugins running on Shadow Worker.
-    pub background_plugins: Vec<Arc<dyn velda_plugin::BackgroundPlugin>>,
-    /// Pre-computed background plugins partitioned across shadow workers:
-    /// Index = worker_id (0..N-1) -> List of plugins running on that shadow worker.
-    pub shadow_shards: Vec<Vec<Arc<dyn velda_plugin::BackgroundPlugin>>>,
+    /// Active plugins across all phases with non-zero Plugin Background Workload Weight (`pbww() > 0`).
+    pub background_plugins: Vec<LoadedPlugin>,
+    /// Pre-computed background workloads partitioned across shadow workers by PBWW:
+    /// Index = worker_id (0..N-1) -> List of plugins executing background workloads on that shadow worker.
+    pub shadow_shards: Vec<Vec<LoadedPlugin>>,
     /// Canonical empty plan singleton used for routes without any declared plugins.
     pub empty_plan: Arc<RoutePluginPlan>,
 }
@@ -61,14 +77,11 @@ impl PluginTable {
         self.routes.get(&route_id).unwrap_or(&self.empty_plan)
     }
 
-    /// Returns the assigned background plugins for the specified shadow worker lane.
+    /// Returns the assigned plugins with background workloads for the specified shadow worker lane.
     ///
     /// If the worker lane index exceeds the partitioned shards, returns an empty slice.
     #[inline(always)]
-    pub fn get_shadow_plugins(
-        &self,
-        worker_id: usize,
-    ) -> &[Arc<dyn velda_plugin::BackgroundPlugin>] {
+    pub fn get_shadow_plugins(&self, worker_id: usize) -> &[LoadedPlugin] {
         self.shadow_shards
             .get(worker_id)
             .map(|v| v.as_slice())
@@ -95,8 +108,17 @@ pub fn build_plugin_table(
         let loaded = instantiate_plugin(plugin_cfg).map_err(|e| EdgeError::InvalidConfig {
             detail: format!("Failed to instantiate plugin '{}': {e}", plugin_cfg.id),
         })?;
-        if let LoadedPlugin::Background(ref bg) = loaded {
-            background_plugins.push(Arc::clone(bg));
+        let pbww = loaded.pbww();
+        if pbww > 100 {
+            return Err(EdgeError::InvalidConfig {
+                detail: format!(
+                    "Plugin '{}' declared invalid PBWW ({pbww}); valid range is 0..=100",
+                    plugin_cfg.id
+                ),
+            });
+        }
+        if pbww > 0 {
+            background_plugins.push(loaded.clone());
         }
         available_plugins.insert(plugin_cfg.id.clone(), loaded);
     }
@@ -176,45 +198,49 @@ pub fn build_plugin_table(
     })
 }
 
-/// Partitions background plugins across `worker_count` shadow worker threads using
-/// a deterministic, pure Greedy LPT (Longest Processing Time First) bin-packing algorithm.
+/// Partitions plugins across `worker_count` shadow worker threads by PBWW
+/// (Plugin Background Workload Weight, `0..=100`) using deterministic Greedy LPT.
 ///
-/// Plugins are sorted descending by physical workload `weight` (1..100) and assigned
-/// greedily to the shadow worker core with the minimum current accumulated load.
+/// Plugins with `pbww() == 0` (hot-path only) are ignored. All plugins with `pbww() > 0`
+/// regardless of phase are sorted descending by PBWW and assigned greedily to the shadow
+/// worker core with the minimum accumulated load.
 pub fn partition_background_plugins(
-    plugins: &[Arc<dyn velda_plugin::BackgroundPlugin>],
+    plugins: &[LoadedPlugin],
     worker_count: usize,
-) -> Vec<Vec<Arc<dyn velda_plugin::BackgroundPlugin>>> {
+) -> Vec<Vec<LoadedPlugin>> {
     let worker_count = worker_count.max(1);
-    let mut shards: Vec<Vec<Arc<dyn velda_plugin::BackgroundPlugin>>> =
-        (0..worker_count).map(|_| Vec::new()).collect();
+    let mut shards: Vec<Vec<LoadedPlugin>> = (0..worker_count).map(|_| Vec::new()).collect();
 
-    if plugins.is_empty() {
+    let mut active_plugins: Vec<(u32, LoadedPlugin)> = plugins
+        .iter()
+        .filter_map(|p| {
+            let w = p.pbww();
+            if w > 0 { Some((w, p.clone())) } else { None }
+        })
+        .collect();
+
+    if active_plugins.is_empty() {
         return shards;
     }
 
     if worker_count == 1 {
-        shards[0] = plugins.to_vec();
+        shards[0] = active_plugins.into_iter().map(|(_, p)| p).collect();
         return shards;
     }
 
-    // Sort all plugins descending by weight (LPT: heaviest first)
-    let mut sorted_plugins: Vec<(u32, Arc<dyn velda_plugin::BackgroundPlugin>)> = plugins
-        .iter()
-        .map(|p| (p.weight(), Arc::clone(p)))
-        .collect();
-    sorted_plugins.sort_by_key(|a| std::cmp::Reverse(a.0));
+    // Sort all plugins descending by PBWW (LPT: heaviest first)
+    active_plugins.sort_by_key(|a| std::cmp::Reverse(a.0));
 
     let mut core_loads = vec![0u32; worker_count];
 
     // Greedily place each plugin into the core with the smallest current accumulated load.
-    for (weight, plugin) in sorted_plugins {
+    for (pbww, plugin) in active_plugins {
         let min_core = (0..worker_count)
             .min_by_key(|&c| core_loads[c])
             .unwrap_or(0);
 
         shards[min_core].push(plugin);
-        core_loads[min_core] += weight;
+        core_loads[min_core] += pbww;
     }
 
     shards
@@ -236,7 +262,7 @@ mod tests {
 
     struct MockBackgroundPlugin {
         id: String,
-        weight: u32,
+        pbww: u32,
     }
 
     impl velda_plugin::BackgroundPlugin for MockBackgroundPlugin {
@@ -244,83 +270,120 @@ mod tests {
             &self.id
         }
 
-        fn weight(&self) -> u32 {
-            self.weight
+        fn pbww(&self) -> u32 {
+            self.pbww
         }
 
         fn run(
             self: Arc<Self>,
             _shutdown: tokio::sync::watch::Receiver<bool>,
-        ) -> std::pin::Pin<
-            Box<dyn std::future::Future<Output = Result<(), velda_plugin::PluginError>> + Send>,
-        > {
+        ) -> velda_plugin::BackgroundTaskFuture {
             Box::pin(async { Ok(()) })
+        }
+    }
+
+    struct MockHotPathPostPlugin {
+        id: String,
+        pbww: u32,
+    }
+
+    impl velda_plugin::post_response::PostResponsePlugin for MockHotPathPostPlugin {
+        fn id(&self) -> &str {
+            &self.id
+        }
+
+        fn pbww(&self) -> u32 {
+            self.pbww
+        }
+
+        fn on_response(
+            &self,
+            _req: &velda_core::HeaderWorkspace,
+            _resp: &mut velda_core::L7Response,
+        ) {
+        }
+
+        fn capability(&self) -> velda_plugin::PluginCapability {
+            velda_plugin::PluginCapability::default()
+        }
+
+        fn supported_protocols(&self) -> velda_plugin::SupportedProtocols {
+            velda_plugin::SupportedProtocols::ALL_HTTP
         }
     }
 
     #[test]
     fn test_partition_background_plugins_single_core() {
-        let plugins: Vec<Arc<dyn velda_plugin::BackgroundPlugin>> = vec![
-            Arc::new(MockBackgroundPlugin {
+        let plugins: Vec<LoadedPlugin> = vec![
+            LoadedPlugin::Background(Arc::new(MockBackgroundPlugin {
                 id: "health_probe".into(),
-                weight: 1,
-            }),
-            Arc::new(MockBackgroundPlugin {
+                pbww: 1,
+            })),
+            LoadedPlugin::Background(Arc::new(MockBackgroundPlugin {
                 id: "loki_log_shipper".into(),
-                weight: 80,
-            }),
+                pbww: 80,
+            })),
+            LoadedPlugin::PostResponse(Arc::new(MockHotPathPostPlugin {
+                id: "cors".into(),
+                pbww: 0,
+            })),
         ];
         let shards = partition_background_plugins(&plugins, 1);
         assert_eq!(shards.len(), 1);
+        // cors (pbww == 0) must be filtered out
         assert_eq!(shards[0].len(), 2);
     }
 
     #[test]
     fn test_partition_background_plugins_pure_greedy_lpt() {
-        let plugins: Vec<Arc<dyn velda_plugin::BackgroundPlugin>> = vec![
-            Arc::new(MockBackgroundPlugin {
+        let plugins: Vec<LoadedPlugin> = vec![
+            LoadedPlugin::Background(Arc::new(MockBackgroundPlugin {
                 id: "health_probe".into(),
-                weight: 1,
-            }),
-            Arc::new(MockBackgroundPlugin {
+                pbww: 1,
+            })),
+            LoadedPlugin::Background(Arc::new(MockBackgroundPlugin {
                 id: "jwks_rotator".into(),
-                weight: 5,
-            }),
-            Arc::new(MockBackgroundPlugin {
+                pbww: 5,
+            })),
+            LoadedPlugin::Background(Arc::new(MockBackgroundPlugin {
                 id: "acme_cert_rotator".into(),
-                weight: 10,
-            }),
-            Arc::new(MockBackgroundPlugin {
+                pbww: 10,
+            })),
+            LoadedPlugin::Background(Arc::new(MockBackgroundPlugin {
                 id: "std_log_shipper".into(),
-                weight: 15,
-            }),
-            Arc::new(MockBackgroundPlugin {
+                pbww: 15,
+            })),
+            LoadedPlugin::Background(Arc::new(MockBackgroundPlugin {
                 id: "statsd_exporter".into(),
-                weight: 20,
-            }),
-            Arc::new(MockBackgroundPlugin {
-                id: "prometheus_exporter".into(),
-                weight: 30,
-            }),
-            Arc::new(MockBackgroundPlugin {
+                pbww: 20,
+            })),
+            LoadedPlugin::PostResponse(Arc::new(MockHotPathPostPlugin {
+                id: "openai_token_quota".into(),
+                pbww: 30,
+            })),
+            LoadedPlugin::Background(Arc::new(MockBackgroundPlugin {
                 id: "otlp_metrics_exporter".into(),
-                weight: 40,
-            }),
-            Arc::new(MockBackgroundPlugin {
+                pbww: 40,
+            })),
+            LoadedPlugin::Background(Arc::new(MockBackgroundPlugin {
                 id: "otlp_log_shipper".into(),
-                weight: 70,
-            }),
-            Arc::new(MockBackgroundPlugin {
+                pbww: 70,
+            })),
+            LoadedPlugin::Background(Arc::new(MockBackgroundPlugin {
                 id: "loki_log_shipper".into(),
-                weight: 80,
-            }),
+                pbww: 80,
+            })),
+            LoadedPlugin::PostResponse(Arc::new(MockHotPathPostPlugin {
+                id: "hotpath_only_headers".into(),
+                pbww: 0,
+            })),
         ];
 
-        // 4 Cores: pure greedy LPT bin-packing across all 4 cores with zero hard affinity
+        // 4 Cores: pure greedy LPT bin-packing across all phases with pbww > 0
         let shards = partition_background_plugins(&plugins, 4);
         assert_eq!(shards.len(), 4);
 
-        // All 9 plugins must be allocated across the 4 shards
+        // 9 active plugins with pbww > 0 must be allocated (pbww == 0 excluded)
         let total_allocated: usize = shards.iter().map(|s| s.len()).sum();
         assert_eq!(total_allocated, 9);
 
@@ -329,7 +392,7 @@ mod tests {
             assert!(!shard.is_empty(), "Core {i} must have at least one plugin");
         }
 
-        // Two heaviest shippers (loki: 80, otlp_log: 70) must naturally be separated on different cores
+        // Two heaviest workloads (loki: 80, otlp_log: 70) must naturally be separated on different cores
         let mut loki_core = None;
         let mut otlp_log_core = None;
         for (core, shard) in shards.iter().enumerate() {
@@ -347,10 +410,10 @@ mod tests {
             "Loki and OTLP log shipper must naturally be on different cores"
         );
 
-        // Compute total weight per core and verify tight load balance
+        // Compute total PBWW per core and verify tight load balance
         let core_loads: Vec<u32> = shards
             .iter()
-            .map(|shard| shard.iter().map(|p| p.weight()).sum())
+            .map(|shard| shard.iter().map(|p| p.pbww()).sum())
             .collect();
 
         let max_load = *core_loads.iter().max().unwrap();

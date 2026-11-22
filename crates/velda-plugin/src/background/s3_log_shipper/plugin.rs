@@ -79,7 +79,8 @@ impl BackgroundPlugin for S3LogShipperPlugin {
         SupportedProtocols::empty()
     }
 
-    fn weight(&self) -> u32 {
+    #[inline(always)]
+    fn pbww(&self) -> u32 {
         65
     }
 

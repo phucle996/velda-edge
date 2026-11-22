@@ -264,7 +264,7 @@ impl BackgroundPlugin for HealthProbePlugin {
     }
 
     #[inline(always)]
-    fn weight(&self) -> u32 {
+    fn pbww(&self) -> u32 {
         1
     }
 

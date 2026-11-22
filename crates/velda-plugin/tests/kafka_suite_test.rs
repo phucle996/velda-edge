@@ -236,7 +236,7 @@ fn test_kafka_factory_registration() {
     match loaded {
         LoadedPlugin::Background(bg) => {
             assert_eq!(bg.id(), "kafka_log_shipper");
-            assert_eq!(bg.weight(), 75);
+            assert_eq!(bg.pbww(), 75);
         }
         _ => panic!("Expected LoadedPlugin::Background"),
     }

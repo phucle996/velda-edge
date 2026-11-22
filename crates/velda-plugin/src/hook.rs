@@ -1,58 +1,40 @@
-//! Generic Asynchronous Task Hook for Shadow Logistics Workers (`velda-plugin::hook`).
+//! Core-Local Per-Request Shadow Dispatch Hook (`velda-plugin::hook`).
 //!
-//! Provides core-local and global dispatch hooks enabling plugins to offload asynchronous,
-//! non-critical, or background operations to dedicated low-priority (`SCHED_IDLE`) Shadow Workers
-//! without contending with hot-path traffic processing.
+//! ```text
+//!   velda-worker-{i} (SCHED_OTHER Hot Path)
+//!     └─► try_dispatch_shadow(task)  [non-blocking try_send into thread-local channel]
+//!           │
+//!           ├─ Ok(())  ──► mpsc(1024) ──► velda-shadow-{i} (SCHED_IDLE on same CPU core)
+//!           └─ Err(task) ─► Channel full or uninitialized (drops cleanly without blocking)
+//! ```
+//!
+//! Strictly reserved for sporadic per-request fire-and-forget offloads (`request_mirror`,
+//! `oauth2_introspection`). Long-running background daemons are scheduled statically across
+//! cores via PBWW (`pbww() > 0` + `run_background()`), not via this hook.
 
 use std::future::Future;
 use std::pin::Pin;
-use std::sync::RwLock;
 use tokio::sync::mpsc;
 
-/// Boxed thread-safe future representation of an asynchronous task executed on a Shadow Worker.
+/// Boxed thread-safe future representation of a sporadic task offloaded to the local Shadow Worker.
 pub type ShadowTask = Pin<Box<dyn Future<Output = ()> + Send + 'static>>;
 
 thread_local! {
     static LOCAL_SHADOW_SENDER: std::cell::RefCell<Option<mpsc::Sender<ShadowTask>>> = const { std::cell::RefCell::new(None) };
 }
 
-static GLOBAL_SHADOW_SENDER: RwLock<Option<mpsc::Sender<ShadowTask>>> = RwLock::new(None);
-
-/// Sets the core-local Shadow Worker task hook sender for the calling thread.
+/// Sets the core-local Shadow Worker task hook sender for the calling Traffic Worker thread.
 pub fn set_core_shadow_sender(tx: mpsc::Sender<ShadowTask>) {
     LOCAL_SHADOW_SENDER.with(|cell| {
         *cell.borrow_mut() = Some(tx);
     });
 }
 
-/// Sets the fallback global Shadow Worker task hook sender (used in testing or supervisor runtimes).
-pub fn set_global_shadow_sender(tx: mpsc::Sender<ShadowTask>) {
-    if let Ok(mut lock) = GLOBAL_SHADOW_SENDER.write() {
-        *lock = Some(tx);
-    }
-}
-
-/// Returns `true` if a Shadow Worker hook is currently registered (either core-local or global).
-pub fn has_shadow_hook() -> bool {
-    LOCAL_SHADOW_SENDER.with(|c| c.borrow().is_some())
-        || GLOBAL_SHADOW_SENDER
-            .read()
-            .map(|g| g.is_some())
-            .unwrap_or(false)
-}
-
-/// Attempts to dispatch a task to the Shadow Worker via non-blocking try_send.
+/// Attempts to dispatch a one-shot task to this core's paired Shadow Worker via non-blocking `try_send`.
 ///
-/// Priority is given to the core-local sender (zero cross-core contention).
-/// If core-local is not set, falls back to the global sender.
-/// Returns `Ok(())` on success, or `Err(task)` if queues are full or uninitialized.
+/// Returns `Ok(())` on success, or `Err(task)` if the core-local channel is full or uninitialized.
 pub fn try_dispatch_shadow(task: ShadowTask) -> Result<(), ShadowTask> {
     if let Some(tx) = LOCAL_SHADOW_SENDER.with(|c| c.borrow().clone()) {
-        return tx.try_send(task).map_err(|e| match e {
-            mpsc::error::TrySendError::Full(t) | mpsc::error::TrySendError::Closed(t) => t,
-        });
-    }
-    if let Some(tx) = GLOBAL_SHADOW_SENDER.read().ok().and_then(|g| g.clone()) {
         return tx.try_send(task).map_err(|e| match e {
             mpsc::error::TrySendError::Full(t) | mpsc::error::TrySendError::Closed(t) => t,
         });

@@ -14,6 +14,8 @@ pub struct DistributedSyncConfig {
     pub sync_interval_ms: u64,
     /// Namespace prefix applied to Redis keys (default: "velda").
     pub key_prefix: String,
+    /// Plugin Background Workload Weight (`0` when disabled, `1..=100` when enabled; default: `35`).
+    pub pbww: u32,
 }
 
 impl Default for DistributedSyncConfig {
@@ -23,6 +25,7 @@ impl Default for DistributedSyncConfig {
             redis_addr: SocketAddr::from(([127, 0, 0, 1], 6379)),
             sync_interval_ms: 1000,
             key_prefix: "velda".to_string(),
+            pbww: 0,
         }
     }
 }
@@ -57,11 +60,22 @@ impl DistributedSyncConfig {
             .unwrap_or("velda")
             .to_string();
 
+        let pbww = if enabled {
+            val.get("pbww")
+                .or_else(|| val.get("shadow_weight"))
+                .and_then(|v| v.as_u64())
+                .map(|w| (w as u32).clamp(1, 100))
+                .unwrap_or(35)
+        } else {
+            0
+        };
+
         Self {
             enabled,
             redis_addr,
             sync_interval_ms,
             key_prefix,
+            pbww,
         }
     }
 }

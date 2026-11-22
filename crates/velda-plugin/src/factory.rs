@@ -55,6 +55,29 @@ impl LoadedPlugin {
             Self::Background(p) => p.supported_protocols(),
         }
     }
+
+    /// Returns the Plugin Background Workload Weight (`0` = hot-path only, `1..=100` = shadow daemon).
+    pub fn pbww(&self) -> u32 {
+        match self {
+            Self::PreRoute(p) => p.pbww(),
+            Self::PreUpstream(p) => p.pbww(),
+            Self::PostResponse(p) => p.pbww(),
+            Self::Background(p) => p.pbww(),
+        }
+    }
+
+    /// Starts the background workload future for this plugin on its assigned Shadow Worker (`pbww() > 0`).
+    pub fn run_background(
+        &self,
+        shutdown: tokio::sync::watch::Receiver<bool>,
+    ) -> Option<crate::BackgroundTaskFuture> {
+        match self {
+            Self::PreRoute(p) => Arc::clone(p).run_background(shutdown),
+            Self::PreUpstream(p) => Arc::clone(p).run_background(shutdown),
+            Self::PostResponse(p) => Arc::clone(p).run_background(shutdown),
+            Self::Background(p) => Some(Arc::clone(p).run(shutdown)),
+        }
+    }
 }
 
 /// Returns the expected canonical execution phase for a known plugin identifier.

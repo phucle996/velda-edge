@@ -47,16 +47,16 @@ pub use s3_log_shipper::{S3LogShipperConfig, S3LogShipperPlugin};
 pub use statsd_exporter::{StatsdExporterConfig, StatsdExporterPlugin};
 pub use std_log_shipper::{StdLogShipperConfig, StdLogShipperPlugin};
 
+/// Boxed future returned by any plugin's background workload loop (`pbww() > 0`).
+pub type BackgroundTaskFuture = Pin<Box<dyn Future<Output = Result<(), PluginError>> + Send>>;
+
 /// Contract for plugins operating as background logistics services.
 pub trait BackgroundPlugin: Send + Sync {
     /// Unique identifier of this background plugin instance.
     fn id(&self) -> &str;
 
     /// Runs the background service loop until shutdown is signaled.
-    fn run(
-        self: Arc<Self>,
-        shutdown: watch::Receiver<bool>,
-    ) -> Pin<Box<dyn Future<Output = Result<(), PluginError>> + Send>>;
+    fn run(self: Arc<Self>, shutdown: watch::Receiver<bool>) -> BackgroundTaskFuture;
 
     /// Declares the reverse-permission capabilities (always default None for background services).
     #[inline(always)]
@@ -82,12 +82,9 @@ pub trait BackgroundPlugin: Send + Sync {
         None
     }
 
-    /// Workload weight (1..100) representing compute intensity, memory footprint,
-    /// and cadence for static multi-core shadow logistics bin-packing.
-    #[inline(always)]
-    fn weight(&self) -> u32 {
-        50
-    }
+    /// Plugin Background Workload Weight (`0..=100`, where `0` = none, `1..=100` = shadow daemon weight)
+    /// representing compute intensity, memory footprint, and cadence for static multi-core LPT bin-packing.
+    fn pbww(&self) -> u32;
 
     /// Attaches the shared pre-allocated [`crate::pre_upstream::jwt_auth::table::SharedJwksStore`] from the target `jwt_auth` plugin.
     #[inline(always)]
@@ -97,33 +94,6 @@ pub trait BackgroundPlugin: Send + Sync {
     ) -> Result<(), PluginError> {
         Ok(())
     }
-}
-
-/// Spawns all declared background plugins onto isolated Tokio tasks.
-///
-/// Each task is configured with idle scheduling priority (`set_current_thread_idle_priority`)
-/// to guarantee zero CPU contention with traffic worker threads.
-pub fn spawn_background_plugins(
-    plugins: &[Arc<dyn BackgroundPlugin>],
-    shutdown: watch::Receiver<bool>,
-) -> Vec<tokio::task::JoinHandle<()>> {
-    let mut handles = Vec::with_capacity(plugins.len());
-    for plugin in plugins {
-        let p = Arc::clone(plugin);
-        let shutdown_rx = shutdown.clone();
-        let handle = tokio::spawn(async move {
-            velda_core::hardware::set_current_thread_idle_priority();
-            let id = p.id().to_string();
-            tracing::info!(plugin_id = %id, "Background plugin starting");
-            if let Err(e) = p.run(shutdown_rx).await {
-                tracing::error!(plugin_id = %id, error = %e, "Background plugin exited with error");
-            } else {
-                tracing::info!(plugin_id = %id, "Background plugin stopped cleanly");
-            }
-        });
-        handles.push(handle);
-    }
-    handles
 }
 
 /// Sub-dispatcher: instantiates background plugin descriptors.

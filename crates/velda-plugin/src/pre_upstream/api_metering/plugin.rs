@@ -130,7 +130,6 @@ impl ApiMeteringPlugin {
     /// Constructs a new API metering plugin instance with an explicit configuration.
     pub fn new(id: impl Into<String>, config: ApiMeteringConfig) -> Self {
         let state = Arc::new(ShardedMeteringState::new());
-        maybe_spawn_shadow_metering_sync(state.clone(), &config);
         Self {
             id: id.into(),
             config,
@@ -144,7 +143,6 @@ impl ApiMeteringPlugin {
         config: ApiMeteringConfig,
         state: Arc<ShardedMeteringState>,
     ) -> Self {
-        maybe_spawn_shadow_metering_sync(state.clone(), &config);
         Self {
             id: id.into(),
             config,
@@ -299,6 +297,32 @@ impl PreUpstreamPlugin for ApiMeteringPlugin {
         &self.id
     }
 
+    #[inline(always)]
+    fn pbww(&self) -> u32 {
+        match &self.config.distributed {
+            Some(d) if d.enabled => d.pbww.clamp(1, 100),
+            _ => 0,
+        }
+    }
+
+    fn run_background(
+        self: Arc<Self>,
+        shutdown: tokio::sync::watch::Receiver<bool>,
+    ) -> Option<crate::BackgroundTaskFuture> {
+        let dist = match &self.config.distributed {
+            Some(d) if d.enabled => d.clone(),
+            _ => return None,
+        };
+        let state = Arc::clone(&self.state);
+        let initial_balance = self.config.initial_balance_micro_credits;
+        Some(Box::pin(run_shadow_metering_sync(
+            state,
+            dist,
+            initial_balance,
+            shutdown,
+        )))
+    }
+
     fn capability(&self) -> PluginCapability {
         PluginCapability::header_only(AccessLevel::Read)
     }
@@ -426,79 +450,66 @@ impl PreUpstreamPlugin for ApiMeteringPlugin {
     }
 }
 
-/// Spawns an autonomous background Shadow Logistics Worker loop reconciling local credit deltas with distributed Redis.
-fn maybe_spawn_shadow_metering_sync(state: Arc<ShardedMeteringState>, config: &ApiMeteringConfig) {
-    let dist = match &config.distributed {
-        Some(d) if d.enabled => d,
-        _ => return,
-    };
+/// Asynchronous background Shadow Logistics Worker loop reconciling local credit deltas with distributed Redis.
+async fn run_shadow_metering_sync(
+    state: Arc<ShardedMeteringState>,
+    dist_cfg: DistributedSyncConfig,
+    initial_balance: i64,
+    mut shutdown: tokio::sync::watch::Receiver<bool>,
+) -> Result<(), PluginError> {
+    let mut client = RedisClient::new(dist_cfg.redis_addr);
+    let mut interval = tokio::time::interval(std::time::Duration::from_millis(
+        dist_cfg.sync_interval_ms.max(10),
+    ));
 
-    let dist_cfg = dist.clone();
-    let initial_balance = config.initial_balance_micro_credits;
-    let weak_state = Arc::downgrade(&state);
-
-    let _ = std::thread::Builder::new()
-        .name("velda-metering-sync".to_string())
-        .spawn(move || {
-            velda_core::hardware::set_current_thread_idle_priority();
-            let rt = match tokio::runtime::Builder::new_current_thread()
-                .enable_all()
-                .build()
-            {
-                Ok(r) => r,
-                Err(e) => {
-                    tracing::error!(error = %e, "Failed to build tokio runtime for shadow metering sync");
-                    return;
+    loop {
+        tokio::select! {
+            _ = interval.tick() => {}
+            _ = shutdown.changed() => {
+                if *shutdown.borrow() {
+                    break;
                 }
-            };
+            }
+        }
 
-            rt.block_on(async move {
-                let mut client = RedisClient::new(dist_cfg.redis_addr);
-                let mut interval =
-                    tokio::time::interval(std::time::Duration::from_millis(dist_cfg.sync_interval_ms));
+        if *shutdown.borrow() {
+            break;
+        }
 
-                loop {
-                    interval.tick().await;
+        let deltas = state.collect_deltas();
+        if deltas.is_empty() {
+            continue;
+        }
 
-                    let state = match weak_state.upgrade() {
-                        Some(s) => s,
-                        None => break,
-                    };
+        // Format HINCRBY {prefix}:metering:consumed {acc_hash} {delta}
+        let mut cmd_strings = Vec::with_capacity(deltas.len());
+        for &(acc_hash, delta) in &deltas {
+            let key = format!("{}:metering:consumed", dist_cfg.key_prefix);
+            let field = acc_hash.to_string();
+            // Track positive accumulated consumption
+            cmd_strings.push((key, field, delta, acc_hash));
+        }
 
-                    let deltas = state.collect_deltas();
-                    if deltas.is_empty() {
-                        continue;
-                    }
+        let cmd_refs: Vec<(&str, &str, i64)> = cmd_strings
+            .iter()
+            .map(|(k, f, d, _)| (k.as_str(), f.as_str(), *d))
+            .collect();
 
-                    // Format HINCRBY {prefix}:metering:consumed {acc_hash} {delta}
-                    let mut cmd_strings = Vec::with_capacity(deltas.len());
-                    for &(acc_hash, delta) in &deltas {
-                        let key = format!("{}:metering:consumed", dist_cfg.key_prefix);
-                        let field = acc_hash.to_string();
-                        // Track positive accumulated consumption
-                        cmd_strings.push((key, field, delta, acc_hash));
-                    }
-
-                    let cmd_refs: Vec<(&str, &str, i64)> = cmd_strings
-                        .iter()
-                        .map(|(k, f, d, _)| (k.as_str(), f.as_str(), *d))
-                        .collect();
-
-                    match client.pipelined_hincrby(&cmd_refs).await {
-                        Ok(results) => {
-                            let mut updates = Vec::with_capacity(results.len());
-                            for (idx, &res) in results.iter().enumerate() {
-                                let (_, _, _, acc_hash) = cmd_strings[idx];
-                                let remaining_balance = initial_balance - res;
-                                updates.push((acc_hash, remaining_balance));
-                            }
-                            state.reconcile_balances(&updates);
-                        }
-                        Err(e) => {
-                            tracing::warn!(error = %e, "Shadow logistics failed to flush metering deltas to Redis");
-                        }
-                    }
+        match client.pipelined_hincrby(&cmd_refs).await {
+            Ok(results) => {
+                let mut updates = Vec::with_capacity(results.len());
+                for (idx, &res) in results.iter().enumerate() {
+                    let (_, _, _, acc_hash) = cmd_strings[idx];
+                    let remaining_balance = initial_balance - res;
+                    updates.push((acc_hash, remaining_balance));
                 }
-            });
-        });
+                state.reconcile_balances(&updates);
+            }
+            Err(e) => {
+                tracing::warn!(error = %e, "Shadow logistics failed to flush metering deltas to Redis");
+            }
+        }
+    }
+
+    Ok(())
 }

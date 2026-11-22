@@ -12,18 +12,18 @@ use velda_core::L7Response;
 
 use crate::capability::{Direction, PluginCapability, SupportedProtocols};
 
-pub mod ai_token_metering;
 pub mod cors;
 pub mod http_cache_store;
+pub mod openai_token_quota;
 pub mod response_compression;
 pub mod response_header_mutation;
 pub mod security_headers;
 
-pub use ai_token_metering::{
-    AiTokenMeteringConfig, AiTokenMeteringPlugin, ModelPricing, TokenUsage,
-};
 pub use cors::{CorsConfig, CorsResponsePlugin};
 pub use http_cache_store::{HttpCacheStoreConfig, HttpCacheStorePlugin};
+pub use openai_token_quota::{
+    OpenAiTokenQuotaConfig, OpenAiTokenQuotaPlugin, SharedUsageArena, TokenUsage,
+};
 pub use response_compression::{
     CompressionAlgorithm, ResponseCompressionConfig, ResponseCompressionPlugin,
 };
@@ -54,6 +54,18 @@ pub trait PostResponsePlugin: Send + Sync {
     #[inline(always)]
     fn direction(&self) -> Direction {
         Direction::Response
+    }
+
+    /// Plugin Background Workload Weight (`0` = hot-path only, `1..=100` = shadow daemon weight).
+    fn pbww(&self) -> u32;
+
+    /// Starts optional background workload daemon on the assigned Shadow Worker (`pbww() > 0`).
+    #[inline]
+    fn run_background(
+        self: Arc<Self>,
+        _shutdown: tokio::sync::watch::Receiver<bool>,
+    ) -> Option<crate::BackgroundTaskFuture> {
+        None
     }
 }
 
@@ -87,7 +99,7 @@ pub fn instantiate(
             Ok(Arc::new(ResponseHeaderMutationPlugin::from_config(config)?))
         }
         "response_compression" => Ok(Arc::new(ResponseCompressionPlugin::from_config(config)?)),
-        "ai_token_metering" => Ok(Arc::new(AiTokenMeteringPlugin::from_config(config)?)),
+        "openai_token_quota" => Ok(Arc::new(OpenAiTokenQuotaPlugin::from_config(config)?)),
         other => Err(crate::error::PluginError::Config(format!(
             "Unsupported post_response plugin '{other}' for plugin '{}'",
             config.id

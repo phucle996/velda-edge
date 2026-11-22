@@ -79,6 +79,11 @@ impl PreRoutePlugin for WafLitePlugin {
         &self.id
     }
 
+    #[inline(always)]
+    fn pbww(&self) -> u32 {
+        0
+    }
+
     fn on_request(&self, req: &mut L7Request) -> Action {
         if self.matcher.is_empty() {
             return Action::Continue;
