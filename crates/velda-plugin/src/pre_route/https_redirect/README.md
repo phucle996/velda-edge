@@ -37,7 +37,6 @@
 ```json
 {
   "id": "https_redirect",
-  "phase": "pre_route",
   "config": {
     "status_code": 308,
     "https_port": 443

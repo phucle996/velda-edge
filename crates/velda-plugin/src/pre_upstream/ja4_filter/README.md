@@ -43,7 +43,6 @@ Attach `ja4_filter` to sensitive routes (e.g., `/login`, `/checkout`) while leav
 ```json
 {
   "id": "ja4_filter",
-  "phase": "pre_upstream",
   "config": {
     "deny": [
       "t13d1516h2_8daaf6152771_e5627efa2ab1",

@@ -2,28 +2,15 @@
 
 ## 1. End-to-End Zero-Allocation Data Flow
 
-```text
-+-----------------------------------------------------------------------------------+
-| 1. [velda-edge] DownstreamMeta::peek_tcp_ja4(&connection.stream)                  |
-|    - Non-destructive kernel peek (TcpStream::peek up to 2048B on stack)           |
-|    - Does NOT consume bytes from rustls handshake stream                          |
-|                                                                                   |
-| 2. [velda-tls] compute_ja4_u64(&buf[..n], false)                                  |
-|    - Parses TLS Record (0x16) -> Handshake (0x01 ClientHello)                     |
-|    - Filters RFC 8701 GREASE values (0x0a0a, 0x1a1a, ..., 0xfafa)                 |
-|    - Sorts ciphers & extensions in fixed stack arrays ([u16; 128])                |
-|    - Streams into Sha256 -> formats 36B [u8; 36] on stack                         |
-|    - Hashes [u8; 36] -> u64 via FNV-1a 64-bit (non-zero; 0 = sentinel)            |
-|                                                                                   |
-| 3. [velda-core] RequestState (64 Bytes = 1 L1d Cache Line)                        |
-|    - Compile-time invariant: assert!(size_of::<RequestState>() <= 64)             |
-|    - ja4: u64 sits directly beside ingress_time_nanos inside the same cache line  |
-|                                                                                   |
-| 4. [velda-plugin] Ja4FilterPlugin::on_upstream_request()                          |
-|    - ja4 == 0 -> immediate Continue                                               |
-|    - len <= 16 -> unrolled linear scan                                            |
-|    - len > 16  -> branchless binary search (O(log N))                             |
-+-----------------------------------------------------------------------------------+
+```mermaid
+flowchart TD
+    A["1. velda-edge: DownstreamMeta::peek_tcp_ja4 (Non-destructive TcpStream::peek up to 2048B)"] --> B["2. velda-tls: compute_ja4_u64 (Filter GREASE, sort ciphers & exts on stack [u16; 128], SHA-256 -> [u8; 36] -> FNV-1a u64)"]
+    B --> C["3. velda-core: RequestState.ja4 (64B single L1d cache line invariant)"]
+    C --> D{"4. velda-plugin: Ja4FilterPlugin::on_upstream_request"}
+    D -->|"ja4 == 0 (Plaintext)"| E["Action::Continue"]
+    D -->|"len <= 16: Unrolled linear scan / len > 16: Branchless binary search"| F{"Match denied_ids?"}
+    F -->|"Yes"| G["Action::Reject (RejectReason::Forbidden / 403)"]
+    F -->|"No"| E
 ```
 
 ---

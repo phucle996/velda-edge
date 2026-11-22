@@ -33,7 +33,6 @@ Each entry in `deny` accepts either format:
   ```json
   {
     "id": "ja4_filter",
-    "phase": "pre_upstream",
     "config": {
       "deny": [
         "t13d190900_9dc949149365_97f8aa674fd9",
