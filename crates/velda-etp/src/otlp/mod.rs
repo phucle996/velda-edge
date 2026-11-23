@@ -4,10 +4,10 @@
 //!   EtpEntryConfig ──► OtlpEtpConfig::from_entry() ──► OtlpEtp::new()
 //!         │
 //!         ▼
-//!   warm() / acquire() / try_acquire() ──► EtpPageArena<EtpStream> (TZCNT Slot[idx])
+//!   warm() / acquire() / try_acquire() ──► EtpPageArena<OtlpConn> (TZCNT Slot[idx])
 //!         │
 //!         ▼
-//!   OtlpLease ──► Deref/DerefMut(&mut EtpStream) | reconnect() | recreate_in_background()
+//!   OtlpLease ──► Deref/DerefMut(&mut OtlpConn) | reconnect() | recreate_in_background()
 //!
 //!   Module & Memory Ownership:
 //!   ┌────────────────────────────────────────────────────────────────────────────┐
@@ -22,4 +22,4 @@ pub mod pool;
 
 pub use config::{OtlpEtpConfig, OtlpProtocol};
 pub use lease::OtlpLease;
-pub use pool::OtlpEtp;
+pub use pool::{OtlpConn, OtlpEtp};

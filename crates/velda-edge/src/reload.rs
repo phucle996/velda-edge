@@ -642,9 +642,12 @@ mod tests {
         assert_ne!(mutated_ptr_1, mutated_ptr_2);
 
         // In-flight lease from rt1 finishes I/O cleanly without interruption
-        inflight_lease.write_all(b"inflight").await.unwrap();
+        let velda_etp::loki::LokiConn::Http(ref mut inflight_stream) = *inflight_lease else {
+            panic!("expected HTTP LokiConn");
+        };
+        inflight_stream.write_all(b"inflight").await.unwrap();
         let mut buf = [0u8; 8];
-        inflight_lease.read_exact(&mut buf).await.unwrap();
+        inflight_stream.read_exact(&mut buf).await.unwrap();
         assert_eq!(&buf, b"inflight");
         drop(inflight_lease);
 
@@ -655,8 +658,11 @@ mod tests {
             panic!("expected Loki backend");
         };
         let mut new_lease = loki_v2.acquire().await.unwrap();
-        new_lease.write_all(b"reloaded").await.unwrap();
-        new_lease.read_exact(&mut buf).await.unwrap();
+        let velda_etp::loki::LokiConn::Http(ref mut new_stream) = *new_lease else {
+            panic!("expected HTTP LokiConn");
+        };
+        new_stream.write_all(b"reloaded").await.unwrap();
+        new_stream.read_exact(&mut buf).await.unwrap();
         assert_eq!(&buf, b"reloaded");
 
         h_unchanged.abort();

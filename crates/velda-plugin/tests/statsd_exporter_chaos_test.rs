@@ -46,7 +46,7 @@ fn test_chaos_slots_dogstatsd() {
         StatsdDialect::DogStatsd,
         &mut packet_buf,
         1432,
-        |pkt| {
+        &mut |pkt| {
             collected.extend_from_slice(pkt);
         },
     );
@@ -115,7 +115,7 @@ fn test_chaos_slots_standard() {
         StatsdDialect::Standard,
         &mut packet_buf,
         1432,
-        |pkt| {
+        &mut |pkt| {
             collected.extend_from_slice(pkt);
         },
     );
@@ -179,7 +179,7 @@ fn test_chaos_mtu_boundaries() {
                 dialect,
                 &mut packet_buf,
                 mtu,
-                |pkt| {
+                &mut |pkt| {
                     packets_received += 1;
                     // Invariant 1: Packet length must never exceed MTU bound
                     assert!(
@@ -314,7 +314,7 @@ fn test_chaos_extreme_boundary_values() {
         StatsdDialect::DogStatsd,
         &mut buf,
         4096,
-        |pkt| collected.extend_from_slice(pkt),
+        &mut |pkt| collected.extend_from_slice(pkt),
     );
     let dog_str = String::from_utf8(collected).unwrap();
 
@@ -338,7 +338,7 @@ fn test_chaos_extreme_boundary_values() {
         StatsdDialect::Standard,
         &mut buf,
         4096,
-        |pkt| std_collected.extend_from_slice(pkt),
+        &mut |pkt| std_collected.extend_from_slice(pkt),
     );
     let std_str = String::from_utf8(std_collected).unwrap();
 

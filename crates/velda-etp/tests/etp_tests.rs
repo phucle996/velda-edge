@@ -7,7 +7,7 @@ use tokio::net::{TcpListener, UdpSocket};
 use velda_etp::arena::{ArenaControlLine, ArenaSlot, PAGE_SIZE};
 use velda_etp::connect::{ColdTargetAddr, EtpStream, sha256_u64x4};
 use velda_etp::kafka::KafkaEtp;
-use velda_etp::otlp::OtlpEtp;
+use velda_etp::otlp::{OtlpConn, OtlpEtp};
 use velda_etp::registry::{build_registry, reconcile, warm_all, warm_instance};
 use velda_etp::{
     EtpBackend, EtpEntryConfig, EtpError, EtpKind, EtpPoolSettings, EtpRegistry, EtpTlsConfig,
@@ -442,9 +442,12 @@ async fn test_make_before_break_reconciliation_preserves_unchanged_and_inflight_
         Arc::as_ptr(reg2.entries.get("loki-logs").unwrap())
     );
 
-    inflight_loki_lease.write_all(b"old-ok").await.unwrap();
+    let velda_etp::loki::LokiConn::Http(ref mut inflight_stream) = *inflight_loki_lease else {
+        panic!("expected HTTP LokiConn");
+    };
+    inflight_stream.write_all(b"old-ok").await.unwrap();
     let mut buf = [0u8; 6];
-    inflight_loki_lease.read_exact(&mut buf).await.unwrap();
+    inflight_stream.read_exact(&mut buf).await.unwrap();
     assert_eq!(&buf, b"old-ok");
     drop(inflight_loki_lease);
 
@@ -452,8 +455,11 @@ async fn test_make_before_break_reconciliation_preserves_unchanged_and_inflight_
         panic!("expected Loki backend");
     };
     let mut new_lease = loki2.acquire().await.unwrap();
-    new_lease.write_all(b"new-ok").await.unwrap();
-    new_lease.read_exact(&mut buf).await.unwrap();
+    let velda_etp::loki::LokiConn::Http(ref mut new_stream) = *new_lease else {
+        panic!("expected HTTP LokiConn");
+    };
+    new_stream.write_all(b"new-ok").await.unwrap();
+    new_stream.read_exact(&mut buf).await.unwrap();
     assert_eq!(&buf, b"new-ok");
 
     let s3_inst = reg2.entries.get("s3-archive").unwrap();
@@ -591,14 +597,20 @@ async fn test_page_arena_alignment_isolation_pointer_stability_and_burst_spillov
     let ptr_first = {
         let lease = otlp1.acquire().await.unwrap();
         assert_eq!(lease.slot_idx, 0);
-        let p = (&*lease) as *const EtpStream as usize;
+        let OtlpConn::Http(ref s) = *lease else {
+            panic!("expected HTTP OtlpConn");
+        };
+        let p = s as *const EtpStream as usize;
         assert!(p >= r1_start && p < r1_end);
         p
     };
     let ptr_second = {
         let lease = otlp1.acquire().await.unwrap();
         assert_eq!(lease.slot_idx, 0);
-        (&*lease) as *const EtpStream as usize
+        let OtlpConn::Http(ref s) = *lease else {
+            panic!("expected HTTP OtlpConn");
+        };
+        s as *const EtpStream as usize
     };
     assert_eq!(
         ptr_first, ptr_second,
@@ -615,12 +627,15 @@ async fn test_page_arena_alignment_isolation_pointer_stability_and_burst_spillov
         burst.slot_idx >= otlp1.arena.baseline_slots,
         "Burst lease must spill over into the +4096B spare page"
     );
-    let burst_ptr = (&*burst) as *const EtpStream as usize;
+    let OtlpConn::Http(ref mut burst_stream) = *burst else {
+        panic!("expected HTTP OtlpConn");
+    };
+    let burst_ptr = burst_stream as *mut EtpStream as usize;
     assert!(burst_ptr >= r1_start && burst_ptr < r1_end);
 
-    burst.write_all(b"burst").await.unwrap();
+    burst_stream.write_all(b"burst").await.unwrap();
     let mut reply = [0u8; 5];
-    burst.read_exact(&mut reply).await.unwrap();
+    burst_stream.read_exact(&mut reply).await.unwrap();
     assert_eq!(&reply, b"burst");
 
     let burst_idx = burst.slot_idx;
@@ -748,11 +763,21 @@ async fn test_tls_versions_12_13_and_session_resumption_across_pool() {
         let pool = Arc::new(OtlpEtp::from_entry(&entry).unwrap());
         let mut l1 = pool.acquire().await.unwrap();
         let mut buf = [0u8; 2];
-        l1.read_exact(&mut buf).await.unwrap();
+        {
+            let OtlpConn::Http(ref mut s) = *l1 else {
+                panic!("expected HTTP OtlpConn");
+            };
+            s.read_exact(&mut buf).await.unwrap();
+        }
         assert_eq!(&buf, expected_tag);
 
         l1.reconnect().await.unwrap();
-        l1.read_exact(&mut buf).await.unwrap();
+        {
+            let OtlpConn::Http(ref mut s) = *l1 else {
+                panic!("expected HTTP OtlpConn");
+            };
+            s.read_exact(&mut buf).await.unwrap();
+        }
         assert_eq!(&buf, expected_tag);
     }
 
@@ -830,10 +855,13 @@ async fn test_loki_es_otlp_and_kafka_direct_lease_lifecycle() {
     assert_eq!(loki.config.tenant_id.as_deref(), Some("velda-tenant"));
     assert_eq!(loki.config.bearer_token.as_deref(), Some("tok-123"));
     let mut loki_lease = loki.acquire().await.unwrap();
-    loki_lease.write_all(b"loki-ping").await.unwrap();
-    loki_lease.flush().await.unwrap();
+    let velda_etp::loki::LokiConn::Http(ref mut loki_stream) = *loki_lease else {
+        panic!("expected HTTP LokiConn");
+    };
+    loki_stream.write_all(b"loki-ping").await.unwrap();
+    loki_stream.flush().await.unwrap();
     let mut reply = [0u8; 9];
-    loki_lease.read_exact(&mut reply).await.unwrap();
+    loki_stream.read_exact(&mut reply).await.unwrap();
     assert_eq!(&reply, b"loki-ping");
 
     let EtpBackend::Elasticsearch(es) = &registry.entries.get("es-fast").unwrap().backend else {
@@ -853,9 +881,12 @@ async fn test_loki_es_otlp_and_kafka_direct_lease_lifecycle() {
     };
     assert_eq!(otlp.config.headers.len(), 1);
     let mut otlp_lease = otlp.acquire().await.unwrap();
-    otlp_lease.write_all(b"otlp-ok").await.unwrap();
-    otlp_lease.flush().await.unwrap();
-    otlp_lease.read_exact(&mut reply7).await.unwrap();
+    let OtlpConn::Http(ref mut otlp_stream) = *otlp_lease else {
+        panic!("expected HTTP OtlpConn");
+    };
+    otlp_stream.write_all(b"otlp-ok").await.unwrap();
+    otlp_stream.flush().await.unwrap();
+    otlp_stream.read_exact(&mut reply7).await.unwrap();
     assert_eq!(&reply7, b"otlp-ok");
 
     assert_eq!(captured.lock().await.len(), 3);

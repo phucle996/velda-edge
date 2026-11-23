@@ -1,37 +1,18 @@
-//! OpenTelemetry Log Shipper Schema & Validation.
+//! OpenTelemetry Log Shipper Schema & Validation (`otlp_log_shipper::validation`).
 //!
-//! Validates configuration for [`OtlpLogShipperPlugin`], which drains reference-counted
-//! 64-byte [`velda_observability::TelemetryRecord`] batches across all protocols and ships them
-//! to OpenTelemetry Collectors over persistent HTTP/1.1 or HTTP/2 gRPC connections.
-
-use serde::{Deserialize, Serialize};
-use std::collections::HashMap;
+//! ```text
+//!   serde_json::Value ──► Deserialize OtlpLogShipperConfig
+//!         │
+//!         ├─► etp_id.trim().is_empty()               ──► Err(PluginError::Config)
+//!         ├─► service_name.trim().is_empty()         ──► Err(PluginError::Config)
+//!         ├─► flush_interval_ms outside 100..=60000  ──► Err(PluginError::Config)
+//!         ├─► max_batch_size outside 1..=10000       ──► Err(PluginError::Config)
+//!         └─► request_timeout_ms outside 100..=60000 ──► Err(PluginError::Config)
+//! ```
 
 use crate::error::PluginError;
 
-/// Declarative configuration for the OpenTelemetry Log Shipper background plugin (`otlp_log_shipper`).
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct OtlpLogShipperConfig {
-    /// OTLP transport protocol (`"http"` or `"grpc"`).
-    pub protocol: String,
-    /// OTLP collector endpoint URL (e.g. `http://127.0.0.1:4318/v1/logs` or `grpc://127.0.0.1:4317`).
-    pub endpoint: String,
-    /// Logical service name reported in OpenTelemetry Resource attributes.
-    pub service_name: String,
-    /// Periodic batch flush interval in milliseconds (100 to 60,000 ms).
-    pub flush_interval_ms: u64,
-    /// Maximum records grouped in a single OTLP export payload (1 to 10,000).
-    pub max_batch_size: usize,
-    /// TCP and TLS connection establishment timeout in milliseconds (100 to 60,000 ms).
-    pub connect_timeout_ms: u64,
-    /// Request export completion timeout in milliseconds (100 to 60,000 ms).
-    pub request_timeout_ms: u64,
-    /// Optional HTTP/gRPC custom headers (use `{}` if no custom headers are required).
-    pub headers: HashMap<String, String>,
-    /// Outbound TLS settings for connecting to HTTPS/gRPCs OTLP log endpoints.
-    #[serde(default)]
-    pub tls: crate::config::OutboundTlsConfig,
-}
+pub use super::config::OtlpLogShipperConfig;
 
 /// Validates [`OtlpLogShipperConfig`] at configuration compilation time.
 pub fn validate_otlp_log_shipper_config(
@@ -44,20 +25,9 @@ pub fn validate_otlp_log_shipper_config(
         ))
     })?;
 
-    let protocol = cfg.protocol.trim().to_ascii_lowercase();
-    if protocol != "http" && protocol != "grpc" {
+    if cfg.etp_id.trim().is_empty() {
         return Err(PluginError::Config(format!(
-            "Plugin '{plugin_id}': protocol must be explicitly set to 'http' or 'grpc', found '{protocol}'"
-        )));
-    }
-
-    let endpoint = cfg.endpoint.trim();
-    if !endpoint.starts_with("http://")
-        && !endpoint.starts_with("https://")
-        && !endpoint.starts_with("grpc://")
-    {
-        return Err(PluginError::Config(format!(
-            "Plugin '{plugin_id}': endpoint '{endpoint}' must start with 'http://', 'https://', or 'grpc://'"
+            "Plugin '{plugin_id}': 'etp_id' cannot be empty"
         )));
     }
 
@@ -81,13 +51,6 @@ pub fn validate_otlp_log_shipper_config(
         )));
     }
 
-    if !(100..=60_000).contains(&cfg.connect_timeout_ms) {
-        return Err(PluginError::Config(format!(
-            "Plugin '{plugin_id}': connect_timeout_ms ({}) must be between 100 and 60,000 ms",
-            cfg.connect_timeout_ms
-        )));
-    }
-
     if !(100..=60_000).contains(&cfg.request_timeout_ms) {
         return Err(PluginError::Config(format!(
             "Plugin '{plugin_id}': request_timeout_ms ({}) must be between 100 and 60,000 ms",
@@ -106,19 +69,55 @@ mod tests {
     #[test]
     fn test_valid_otlp_log_shipper_config() {
         let raw = json!({
-            "protocol": "http",
-            "endpoint": "http://127.0.0.1:4318/v1/logs",
+            "etp_id": "otlp-main",
             "service_name": "velda-edge",
             "flush_interval_ms": 500,
             "max_batch_size": 256,
-            "connect_timeout_ms": 2000,
-            "request_timeout_ms": 5000,
-            "headers": {
-                "x-api-key": "secret"
-            }
+            "request_timeout_ms": 5000
         });
         let cfg = validate_otlp_log_shipper_config("otlp_sink", &raw).unwrap();
-        assert_eq!(cfg.protocol, "http");
+        assert_eq!(cfg.etp_id, "otlp-main");
         assert_eq!(cfg.service_name, "velda-edge");
+
+        let minimal =
+            validate_otlp_log_shipper_config("otlp_min", &json!({ "etp_id": "otlp-main" }))
+                .unwrap();
+        assert_eq!(minimal.service_name, "velda-edge");
+        assert_eq!(minimal.flush_interval_ms, 1000);
+        assert_eq!(minimal.max_batch_size, 1000);
+    }
+
+    #[test]
+    fn test_invalid_otlp_log_shipper_config() {
+        assert!(validate_otlp_log_shipper_config("otlp", &json!({})).is_err());
+        assert!(validate_otlp_log_shipper_config("otlp", &json!({ "etp_id": "  " })).is_err());
+        assert!(
+            validate_otlp_log_shipper_config(
+                "otlp",
+                &json!({ "etp_id": "otlp-main", "service_name": "" })
+            )
+            .is_err()
+        );
+        assert!(
+            validate_otlp_log_shipper_config(
+                "otlp",
+                &json!({ "etp_id": "otlp-main", "flush_interval_ms": 10 })
+            )
+            .is_err()
+        );
+        assert!(
+            validate_otlp_log_shipper_config(
+                "otlp",
+                &json!({ "etp_id": "otlp-main", "max_batch_size": 0 })
+            )
+            .is_err()
+        );
+        assert!(
+            validate_otlp_log_shipper_config(
+                "otlp",
+                &json!({ "etp_id": "otlp-main", "request_timeout_ms": 100_000 })
+            )
+            .is_err()
+        );
     }
 }

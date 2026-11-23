@@ -661,3 +661,112 @@ async fn test_clickhouse_etp_registry_wiring_and_reconnect_recovery() {
         assert!(wire_plugin_etps(&missing_map, &empty_registry).is_err());
     }
 }
+
+#[tokio::test]
+async fn test_prebaked_headers_auth_database_override_and_chunked_drain() {
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let port = listener.local_addr().unwrap().port();
+    let captured = Arc::new(tokio::sync::Mutex::new(Vec::<String>::new()));
+    let captured_c = Arc::clone(&captured);
+
+    let server = tokio::spawn(async move {
+        let (mut sock, _) = listener.accept().await.unwrap();
+        let mut buf = vec![0u8; 8192];
+        // 1. DDL request
+        let n1 = sock.read(&mut buf).await.unwrap();
+        captured_c
+            .lock()
+            .await
+            .push(String::from_utf8_lossy(&buf[..n1]).into_owned());
+        sock.write_all(
+            b"HTTP/1.1 200 OK\r\nTransfer-Encoding: chunked\r\nConnection: keep-alive\r\n\r\n2\r\nok\r\n0\r\n\r\n",
+        )
+        .await
+        .unwrap();
+        sock.flush().await.unwrap();
+
+        // 2. Batch INSERT request over same kept-alive socket
+        let n2 = sock.read(&mut buf).await.unwrap();
+        captured_c
+            .lock()
+            .await
+            .push(String::from_utf8_lossy(&buf[..n2]).into_owned());
+        sock.write_all(
+            b"HTTP/1.1 200 OK\r\nContent-Length: 4\r\nConnection: keep-alive\r\n\r\ndone",
+        )
+        .await
+        .unwrap();
+        sock.flush().await.unwrap();
+    });
+
+    let entry = EtpEntryConfig {
+        id: "ch-auth".into(),
+        kind: EtpKind::ClickHouse,
+        pool: EtpPoolSettings {
+            pool_size: 1,
+            connect_timeout_ms: 2000,
+            idle_timeout_ms: 60_000,
+        },
+        tls: None,
+        settings: serde_json::json!({
+            "host": "127.0.0.1",
+            "port": port,
+            "database": "etp_default_db",
+            "user": "test_user",
+            "password": "test_pass"
+        }),
+    };
+    let etp = Arc::new(ClickHouseEtp::from_entry(&entry).unwrap());
+    let store = Arc::new(TelemetryStore::with_cores_and_capacity(1, 128));
+
+    let cfg = ClickHouseLogShipperConfig {
+        etp_id: "ch-auth".into(),
+        database: "override_db".into(),
+        format: "json_each_row".into(),
+        flush_interval_ms: 100,
+        max_batch_size: 100,
+        request_timeout_ms: 2000,
+    };
+    let plugin = Arc::new(
+        ClickHouseLogShipperPlugin::with_etp("ch_unit", cfg, etp, Arc::clone(&store)).unwrap(),
+    );
+
+    let (shutdown_tx, shutdown_rx) = watch::channel(false);
+    let p = Arc::clone(&plugin);
+    let runner = tokio::spawn(async move { p.run(shutdown_rx).await });
+
+    while store.active_subscriber_count.load(Ordering::Acquire) == 0 {
+        tokio::time::sleep(Duration::from_millis(5)).await;
+    }
+
+    store.emit_on_core(0, &make_sample_record(42, 1_732_000_000));
+    store.flush_all_lanes(64);
+
+    for _ in 0..50 {
+        if plugin.shipped_records.load(Ordering::Relaxed) >= 1 {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(15)).await;
+    }
+    assert_eq!(plugin.shipped_records.load(Ordering::Relaxed), 1);
+    assert_eq!(plugin.failed_pushes.load(Ordering::Relaxed), 0);
+
+    let _ = shutdown_tx.send(true);
+    runner.await.unwrap().unwrap();
+    server.await.unwrap();
+
+    let reqs = captured.lock().await;
+    assert_eq!(reqs.len(), 2);
+    assert!(reqs[0].starts_with("POST / HTTP/1.1\r\n"));
+    assert!(reqs[0].contains("CREATE TABLE IF NOT EXISTS override_db.velda_access_logs"));
+    assert!(reqs[0].contains("X-ClickHouse-User: test_user\r\n"));
+    assert!(reqs[0].contains("X-ClickHouse-Key: test_pass\r\n"));
+
+    assert!(reqs[1].starts_with(
+        "POST /?query=INSERT%20INTO%20override_db.velda_access_logs%20FORMAT%20JSONEachRow HTTP/1.1\r\n"
+    ));
+    assert!(reqs[1].contains(&format!("Host: 127.0.0.1:{port}\r\n")));
+    assert!(reqs[1].contains("Content-Type: application/x-ndjson\r\n"));
+    assert!(reqs[1].contains("X-ClickHouse-User: test_user\r\n"));
+    assert!(reqs[1].contains("X-ClickHouse-Key: test_pass\r\n"));
+}

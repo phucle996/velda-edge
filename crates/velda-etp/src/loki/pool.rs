@@ -1,20 +1,22 @@
-//! Lock-free Loki ETP connection pool (`LokiEtp`) backed by [`EtpPageArena<EtpStream>`]
-//! and 64B-aligned [`ColdConnectBlueprint`].
+//! Lock-free Loki ETP connection pool (`LokiEtp`) backed by [`EtpPageArena<LokiConn>`]
+//! and 64B-aligned [`ColdConnectBlueprint`], supporting HTTP/1.1 (`EtpStream`) and
+//! HTTP/2 gRPC (`h2::client::SendRequest<bytes::Bytes>`).
 //!
 //! ```text
-//!   LokiEtp::new() ──► ColdConnectBlueprint + (N+1)*4096B EtpPageArena<EtpStream>
+//!   LokiEtp::new() ──► ColdConnectBlueprint (ALPN "h2" if Grpc) + (N+1)*4096B EtpPageArena<LokiConn>
 //!         │
 //!         ▼
 //!   warm() / acquire() / try_acquire()
 //!         ├─► Ready hit (TZCNT) ──► borrow Slot[idx] in-place ──► LokiLease(idx)
-//!         └─► Miss / Burst      ──► claim_empty_slot(true) -> blueprint.connect_stream()
-//!                                   -> write_leased_slot(idx) -> LokiLease(idx)
+//!         └─► Miss / Burst      ──► claim_empty_slot(true) -> connect_fresh() -> LokiLease(idx)
+//!                                     ├─ Http -> LokiConn::Http(EtpStream)
+//!                                     └─ Grpc -> h2::handshake -> spawn driver -> LokiConn::Grpc(SendRequest)
 //!
 //!   Cold Blueprint & Page Arena Layout:
 //!   ┌────────────────────────────────────────────────────────────────────────────┐
 //!   │ ColdConnectBlueprint (64B aligned, isolated): id | ColdTargetAddr | TLS    │
 //!   ├────────────────────────────────────────────────────────────────────────────┤
-//!   │ Arena: Cache Line 0 (64B) | Slot[idx] at (idx << 6) + 64 | +4096B Spare    │
+//!   │ Arena: Cache Line 0 (64B) | Slot[idx]: ArenaSlot<LokiConn> (64B) | +4096B  │
 //!   └────────────────────────────────────────────────────────────────────────────┘
 //! ```
 
@@ -24,18 +26,29 @@ use std::time::Duration;
 
 use tokio::sync::Semaphore;
 
-use crate::arena::{EtpPageArena, ReadyAcquire};
+use crate::arena::{ArenaSlot, EtpPageArena, ReadyAcquire};
 use crate::config::EtpEntryConfig;
-use crate::connect::{ColdConnectBlueprint, EtpStream, build_tls_target};
+use crate::connect::{
+    ColdConnectBlueprint, EtpStream, build_tls_target, build_tls_target_with_alpn,
+};
 use crate::error::EtpError;
-use crate::loki::config::LokiEtpConfig;
+use crate::loki::config::{LokiEtpConfig, LokiProtocol};
 use crate::loki::lease::LokiLease;
 
-/// Lock-free bounded pool of TCP/TLS connections to Grafana Loki.
+/// Protocol-specialized connection stored in-place inside `ArenaSlot<LokiConn>`.
+#[derive(Debug)]
+pub enum LokiConn {
+    Http(EtpStream),
+    Grpc(h2::client::SendRequest<bytes::Bytes>),
+}
+
+const _: () = assert!(std::mem::size_of::<ArenaSlot<LokiConn>>() == 64);
+
+/// Lock-free bounded pool of HTTP/1.1 or HTTP/2 gRPC connections to Grafana Loki.
 pub struct LokiEtp {
     pub config: LokiEtpConfig,
     pub blueprint: ColdConnectBlueprint,
-    pub arena: EtpPageArena<EtpStream>,
+    pub arena: EtpPageArena<LokiConn>,
     pub semaphore: Semaphore,
     pub connect_timeout: Duration,
     pub idle_timeout_secs: u64,
@@ -45,6 +58,7 @@ impl fmt::Debug for LokiEtp {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.debug_struct("LokiEtp")
             .field("id", &self.config.id)
+            .field("protocol", &self.config.protocol)
             .field("endpoint", &self.config.endpoint)
             .field("baseline_slots", &self.arena.baseline_slots)
             .field("total_slots", &self.arena.total_slots)
@@ -62,7 +76,12 @@ impl LokiEtp {
 
     /// Creates a new `LokiEtp` pool from a parsed [`LokiEtpConfig`].
     pub fn new(config: LokiEtpConfig) -> Result<Self, EtpError> {
-        let tls_target = build_tls_target(&config.id, &config.host, config.tls.as_ref())?;
+        let tls_target = match config.protocol {
+            LokiProtocol::Http => build_tls_target(&config.id, &config.host, config.tls.as_ref())?,
+            LokiProtocol::Grpc => {
+                build_tls_target_with_alpn(&config.id, &config.host, config.tls.as_ref(), &[b"h2"])?
+            }
+        };
         let connect_timeout = Duration::from_millis(config.pool.connect_timeout_ms.max(1));
         let idle_timeout_secs = config.pool.idle_timeout_ms.div_ceil(1000);
 
@@ -87,8 +106,44 @@ impl LokiEtp {
         })
     }
 
-    pub(crate) async fn connect_fresh(&self) -> Result<EtpStream, EtpError> {
-        self.blueprint.connect_stream().await
+    pub(crate) async fn connect_fresh(&self) -> Result<LokiConn, EtpError> {
+        let stream = self.blueprint.connect_stream().await?;
+        match self.config.protocol {
+            LokiProtocol::Http => Ok(LokiConn::Http(stream)),
+            LokiProtocol::Grpc => {
+                let timeout_ms =
+                    u64::try_from(self.connect_timeout.as_millis()).unwrap_or(u64::MAX);
+                let (send_request, connection) =
+                    tokio::time::timeout(self.connect_timeout, h2::client::handshake(stream))
+                        .await
+                        .map_err(|_| EtpError::Timeout {
+                            id: self.config.id.clone(),
+                            timeout_ms,
+                        })?
+                        .map_err(|err| {
+                            EtpError::Io(std::io::Error::other(format!(
+                                "Loki ETP '{}' HTTP/2 handshake failed: {err}",
+                                self.config.id
+                            )))
+                        })?;
+
+                let etp_id = self.config.id.clone();
+                tokio::spawn(async move {
+                    if let Err(err) = connection.await {
+                        tracing::debug!(id = %etp_id, error = %err, "Loki ETP H2 driver exited");
+                    }
+                });
+
+                let send_request = send_request.ready().await.map_err(|err| {
+                    EtpError::Io(std::io::Error::other(format!(
+                        "Loki ETP '{}' HTTP/2 session not ready: {err}",
+                        self.config.id
+                    )))
+                })?;
+
+                Ok(LokiConn::Grpc(send_request))
+            }
+        }
     }
 
     /// Pre-warms up to `baseline_slots` connections to Loki.
@@ -116,8 +171,8 @@ impl LokiEtp {
                 break;
             };
             match self.connect_fresh().await {
-                Ok(stream) => {
-                    guard.commit_warm(stream);
+                Ok(conn) => {
+                    guard.commit_warm(conn);
                 }
                 Err(err) => {
                     drop(guard);
@@ -177,8 +232,8 @@ impl LokiEtp {
             });
         };
 
-        let stream = self.connect_fresh().await?;
-        let slot_idx = guard.commit_leased(stream);
+        let conn = self.connect_fresh().await?;
+        let slot_idx = guard.commit_leased(conn);
         permit.forget();
         Ok(LokiLease::new(Arc::clone(self), slot_idx))
     }
@@ -212,14 +267,18 @@ impl LokiEtp {
                         break;
                     };
                     match pool.connect_fresh().await {
-                        Ok(stream) => {
-                            guard.commit_warm(stream);
+                        Ok(conn) => {
+                            guard.commit_warm(conn);
                             drop(permit);
                         }
                         Err(err) => {
                             drop(guard);
                             drop(permit);
-                            tracing::warn!(id = %pool.config.id, error = %err, "Loki ETP background replenishment failed");
+                            tracing::warn!(
+                                id = %pool.config.id,
+                                error = %err,
+                                "Loki ETP background replenishment failed"
+                            );
                             pool.arena.abort_replenish();
                             return;
                         }

@@ -3,14 +3,22 @@
 use std::net::SocketAddr;
 use std::sync::Arc;
 use std::time::Duration;
+
+use rustc_hash::FxHashMap;
 use tokio::net::UdpSocket;
 use tokio::sync::watch;
 
 use velda_core::PipeKind;
+use velda_etp::registry::build_registry;
+use velda_etp::statsd::StatsdEtp;
+use velda_etp::{EtpEntryConfig, EtpKind, EtpPoolSettings};
 use velda_observability::{MetricsStore, StreamCompletion};
 use velda_plugin::background::BackgroundPlugin;
 use velda_plugin::background::statsd_exporter::dialect::{StatsdDialect, format_statsd_snapshot};
+use velda_plugin::background::statsd_exporter::wire;
 use velda_plugin::background::statsd_exporter::{StatsdExporterConfig, StatsdExporterPlugin};
+use velda_plugin::config::PluginConfig;
+use velda_plugin::factory::{instantiate_plugin, wire_plugin_etps};
 
 #[test]
 fn test_dogstatsd_formatting_and_tags() {
@@ -33,7 +41,7 @@ fn test_dogstatsd_formatting_and_tags() {
         StatsdDialect::DogStatsd,
         &mut packet_buf,
         1432,
-        |pkt| {
+        &mut |pkt| {
             collected_packets.push(String::from_utf8(pkt.to_vec()).unwrap());
         },
     );
@@ -86,7 +94,7 @@ fn test_standard_statsd_format() {
         StatsdDialect::Standard,
         &mut packet_buf,
         1432,
-        |pkt| {
+        &mut |pkt| {
             collected_packets.push(String::from_utf8(pkt.to_vec()).unwrap());
         },
     );
@@ -117,7 +125,7 @@ fn test_mtu_safe_packet_chunking() {
         StatsdDialect::DogStatsd,
         &mut packet_buf,
         max_packet_size,
-        |pkt| {
+        &mut |pkt| {
             assert!(
                 pkt.len() <= max_packet_size,
                 "Packet size {} exceeded max_packet_size {}",
@@ -153,17 +161,37 @@ async fn test_statsd_udp_push_e2e() {
         StreamCompletion::new(200, 4096, 8192, 5_000_000, 0),
     );
 
-    // 3. Configure and instantiate plugin
+    // 3. Configure ETP + plugin and attach in-place
+    let etp = Arc::new(
+        StatsdEtp::from_entry(&EtpEntryConfig {
+            id: "statsd-e2e".into(),
+            kind: EtpKind::Statsd,
+            pool: EtpPoolSettings {
+                pool_size: 2,
+                connect_timeout_ms: 2000,
+                idle_timeout_ms: 60_000,
+            },
+            tls: None,
+            settings: serde_json::json!({
+                "endpoint": receiver_addr.to_string(),
+                "flavor": "dogstatsd",
+                "prefix": "velda_test"
+            }),
+        })
+        .unwrap(),
+    );
+
     let config = StatsdExporterConfig {
-        endpoint: receiver_addr.to_string(),
-        interval_secs: 1, // Push every 1 second
+        etp_id: "statsd-e2e".into(),
+        interval_secs: 1,
         prefix: "velda_test".into(),
-        dialect: "dogstatsd".into(),
+        dialect: Some("dogstatsd".into()),
         max_packet_size: 1432,
     };
 
-    let plugin =
-        Arc::new(StatsdExporterPlugin::new("test_statsd_exporter", config, store.clone()).unwrap());
+    let plugin = Arc::new(
+        StatsdExporterPlugin::with_etp("test_statsd_exporter", config, etp, store.clone()).unwrap(),
+    );
 
     let (shutdown_tx, shutdown_rx) = watch::channel(false);
 
@@ -204,20 +232,32 @@ async fn test_statsd_udp_push_e2e() {
 
 #[tokio::test]
 async fn test_sendmmsg_batch_tx() {
-    use velda_plugin::background::statsd_exporter::transport::StatsdTransport;
-
     // 1. Mock UDP Receiver
     let receiver = UdpSocket::bind("127.0.0.1:0").await.unwrap();
     let receiver_addr = receiver.local_addr().unwrap();
 
-    // 2. Establish Transport
-    let transport = StatsdTransport::connect(&receiver_addr.to_string(), "test_batch_transport")
-        .await
-        .unwrap();
+    // 2. Establish ETP + borrow StatsdLease
+    let etp = Arc::new(
+        StatsdEtp::from_entry(&EtpEntryConfig {
+            id: "statsd-batch".into(),
+            kind: EtpKind::Statsd,
+            pool: EtpPoolSettings {
+                pool_size: 2,
+                connect_timeout_ms: 2000,
+                idle_timeout_ms: 60_000,
+            },
+            tls: None,
+            settings: serde_json::json!({
+                "endpoint": receiver_addr.to_string(),
+            }),
+        })
+        .unwrap(),
+    );
+    let mut lease = etp.acquire().await.unwrap();
 
     // 3. Test empty batch
     let empty: Vec<Vec<u8>> = Vec::new();
-    let sent_empty = transport.send_batch(&empty).await.unwrap();
+    let sent_empty = wire::send_batch(&mut lease, &empty).await.unwrap();
     assert_eq!(sent_empty, 0);
 
     // 4. Test 20-packet batch (typical StatsD snapshot) via sendmmsg
@@ -227,7 +267,7 @@ async fn test_sendmmsg_batch_tx() {
         packets.push(format!("velda.test.batch.metric_{i}:{i}|c\n").into_bytes());
     }
 
-    let sent_count = transport.send_batch(&packets).await.unwrap();
+    let sent_count = wire::send_batch(&mut lease, &packets).await.unwrap();
     assert_eq!(sent_count, BATCH_SIZE);
 
     // 5. Receive all 20 packets and verify content
@@ -257,7 +297,7 @@ async fn test_sendmmsg_batch_tx() {
         large_packets.push(format!("velda.test.large.chunk_{i}:{i}|g\n").into_bytes());
     }
 
-    let sent_large = transport.send_batch(&large_packets).await.unwrap();
+    let sent_large = wire::send_batch(&mut lease, &large_packets).await.unwrap();
     assert_eq!(sent_large, LARGE_BATCH);
 
     for _ in 0..LARGE_BATCH {
@@ -267,4 +307,167 @@ async fn test_sendmmsg_batch_tx() {
             .unwrap();
         assert!(n > 0);
     }
+}
+
+#[tokio::test]
+async fn test_statsd_delta_no_idle_inflation() {
+    let rx_sock = UdpSocket::bind("127.0.0.1:0").await.unwrap();
+    let rx_addr = rx_sock.local_addr().unwrap();
+
+    let store = Arc::new(MetricsStore::new());
+    store.record_stream_start(PipeKind::BufferedH1H1);
+    store.record_stream_completion(
+        PipeKind::BufferedH1H1,
+        StreamCompletion::new(200, 128, 256, 2_000_000, 0),
+    );
+
+    let etp = Arc::new(
+        StatsdEtp::from_entry(&EtpEntryConfig {
+            id: "statsd-delta".into(),
+            kind: EtpKind::Statsd,
+            pool: EtpPoolSettings {
+                pool_size: 1,
+                connect_timeout_ms: 2000,
+                idle_timeout_ms: 60_000,
+            },
+            tls: None,
+            settings: serde_json::json!({
+                "endpoint": rx_addr.to_string(),
+                "flavor": "dogstatsd",
+                "prefix": "velda_delta"
+            }),
+        })
+        .unwrap(),
+    );
+
+    let config = StatsdExporterConfig {
+        etp_id: "statsd-delta".into(),
+        interval_secs: 1,
+        prefix: "velda_delta".into(),
+        dialect: Some("dogstatsd".into()),
+        max_packet_size: 4096,
+    };
+    let plugin =
+        Arc::new(StatsdExporterPlugin::with_etp("delta_test", config, etp, store.clone()).unwrap());
+    let (tx, rx) = watch::channel(false);
+    let handle = tokio::spawn(async move { plugin.run_service(rx).await });
+
+    // Wait for Tick 1 (emits immediate first tick)
+    let mut tick1 = String::new();
+    let mut buf = [0u8; 8192];
+    let (n, _) = tokio::time::timeout(Duration::from_secs(2), rx_sock.recv_from(&mut buf))
+        .await
+        .unwrap()
+        .unwrap();
+    tick1.push_str(&String::from_utf8_lossy(&buf[..n]));
+    while let Ok(Ok((extra, _))) =
+        tokio::time::timeout(Duration::from_millis(120), rx_sock.recv_from(&mut buf)).await
+    {
+        tick1.push_str(&String::from_utf8_lossy(&buf[..extra]));
+    }
+    assert!(
+        tick1.contains("velda_delta.requests.total:1|c|#downstream:http/1.1,upstream:http/1.1,pipe:buffered,status:2xx\n"),
+        "Tick 1 must emit delta 1, got: {tick1}"
+    );
+
+    // Wait for Tick 2 (idle — zero new traffic, so counter delta MUST be 0|c)
+    let (n2, _) = tokio::time::timeout(Duration::from_secs(2), rx_sock.recv_from(&mut buf))
+        .await
+        .unwrap()
+        .unwrap();
+    let mut tick2 = String::from_utf8_lossy(&buf[..n2]).to_string();
+    while let Ok(Ok((extra, _))) =
+        tokio::time::timeout(Duration::from_millis(120), rx_sock.recv_from(&mut buf)).await
+    {
+        tick2.push_str(&String::from_utf8_lossy(&buf[..extra]));
+    }
+    assert!(
+        tick2.contains("velda_delta.requests.total:0|c|#downstream:http/1.1,upstream:http/1.1,pipe:buffered,status:2xx\n"),
+        "Tick 2 at idle must emit delta 0 (not 1), got: {tick2}"
+    );
+
+    let _ = tx.send(true);
+    let _ = handle.await;
+}
+
+#[tokio::test]
+async fn test_statsd_etp_registry_wiring_and_prefix_flavor_fallback() {
+    let rx_sock = UdpSocket::bind("127.0.0.1:0").await.unwrap();
+    let rx_addr = rx_sock.local_addr().unwrap();
+
+    let registry = build_registry(&[EtpEntryConfig {
+        id: "statsd-wired".into(),
+        kind: EtpKind::Statsd,
+        pool: EtpPoolSettings {
+            pool_size: 1,
+            connect_timeout_ms: 2000,
+            idle_timeout_ms: 60_000,
+        },
+        tls: None,
+        settings: serde_json::json!({
+            "endpoint": rx_addr.to_string(),
+            "dialect": "dogstatsd",
+            "prefix": "etp_ns"
+        }),
+    }])
+    .unwrap();
+
+    // Omit prefix and dialect in plugin config to verify fallback derivation from StatsdEtpConfig.
+    let plugin_cfg = PluginConfig {
+        id: "statsd_exporter".into(),
+        config: serde_json::json!({
+            "etp_id": "statsd-wired",
+            "interval_secs": 1,
+            "max_packet_size": 1432
+        }),
+    };
+    let loaded = instantiate_plugin(&plugin_cfg).unwrap();
+    let mut available = FxHashMap::default();
+    available.insert(loaded.id().to_string(), loaded.clone());
+    wire_plugin_etps(&available, &registry).unwrap();
+
+    let (shutdown_tx, shutdown_rx) = watch::channel(false);
+    let runner = tokio::spawn(loaded.run_background(shutdown_rx).unwrap());
+
+    let mut recv_buf = [0u8; 4096];
+    let mut collected = String::new();
+    let (n, _) = tokio::time::timeout(Duration::from_secs(3), rx_sock.recv_from(&mut recv_buf))
+        .await
+        .unwrap()
+        .unwrap();
+    collected.push_str(&String::from_utf8_lossy(&recv_buf[..n]));
+    while let Ok(Ok((extra, _))) =
+        tokio::time::timeout(Duration::from_millis(120), rx_sock.recv_from(&mut recv_buf)).await
+    {
+        collected.push_str(&String::from_utf8_lossy(&recv_buf[..extra]));
+    }
+    assert!(
+        collected.contains("etp_ns.connections.total:")
+            && collected.contains("etp_ns.requests.total:")
+            && collected.contains("|#downstream:"),
+        "Expected ETP-derived prefix 'etp_ns' and dogstatsd tags, got: {collected}"
+    );
+
+    let _ = shutdown_tx.send(true);
+    runner.await.unwrap().unwrap();
+
+    // Missing ETP produces an explicit error
+    let err_plugin = instantiate_plugin(&plugin_cfg).unwrap();
+    let mut missing_map = FxHashMap::default();
+    missing_map.insert(err_plugin.id().to_string(), err_plugin);
+    assert!(wire_plugin_etps(&missing_map, &velda_etp::EtpRegistry::default()).is_err());
+
+    // Wrong-kind ETP produces an explicit error
+    let wrong_registry = build_registry(&[EtpEntryConfig {
+        id: "statsd-wired".into(),
+        kind: EtpKind::S3,
+        pool: EtpPoolSettings::default(),
+        tls: None,
+        settings: serde_json::json!({ "endpoint": "http://127.0.0.1:9000" }),
+    }])
+    .unwrap();
+    let wrong_plugin = instantiate_plugin(&plugin_cfg).unwrap();
+    let mut wrong_map = FxHashMap::default();
+    wrong_map.insert(wrong_plugin.id().to_string(), wrong_plugin);
+    assert!(wire_plugin_etps(&wrong_map, &wrong_registry).is_err());
 }

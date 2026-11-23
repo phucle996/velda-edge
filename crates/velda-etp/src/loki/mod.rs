@@ -4,14 +4,14 @@
 //!   EtpEntryConfig ──► LokiEtpConfig::from_entry() ──► LokiEtp::new()
 //!         │
 //!         ▼
-//!   warm() / acquire() / try_acquire() ──► EtpPageArena<EtpStream> (TZCNT Slot[idx])
+//!   warm() / acquire() / try_acquire() ──► EtpPageArena<LokiConn> (TZCNT Slot[idx])
 //!         │
 //!         ▼
-//!   LokiLease ──► Deref/DerefMut(&mut EtpStream) | reconnect() | recreate_in_background()
+//!   LokiLease ──► Deref/DerefMut(&mut LokiConn) | reconnect() | recreate_in_background()
 //!
 //!   Module & Memory Ownership:
 //!   ┌────────────────────────────────────────────────────────────────────────────┐
-//!   │ config.rs (LokiEtpConfig) | pool.rs (Blueprint + PageArena)                │
+//!   │ config.rs (LokiEtpConfig, LokiProtocol) | pool.rs (Blueprint + PageArena)  │
 //!   │ lease.rs  (LokiLease borrowing Slot[idx] in-place inside LokiEtp arena)    │
 //!   └────────────────────────────────────────────────────────────────────────────┘
 //! ```
@@ -20,6 +20,6 @@ pub mod config;
 pub mod lease;
 pub mod pool;
 
-pub use config::LokiEtpConfig;
+pub use config::{LokiEtpConfig, LokiProtocol};
 pub use lease::LokiLease;
-pub use pool::LokiEtp;
+pub use pool::{LokiConn, LokiEtp};

@@ -1,42 +1,31 @@
-//! Grafana Loki Log Shipper Schema & Semantic Validation.
+//! Grafana Loki Log Shipper Schema & Semantic Validation (`loki_log_shipper::validation`).
 //!
-//! Validates configuration for the background Loki exporter (`loki_log_shipper`), which drains
-//! reference-counted 64-byte [`velda_observability::TelemetryRecord`] batches and ships them to
-//! `/loki/api/v1/push` partitioned by protocol family stream labels.
-
-use serde::{Deserialize, Serialize};
-use std::collections::HashMap;
+//! ```text
+//!   serde_json::Value ──► Deserialize LokiLogShipperConfig
+//!         │
+//!         ├─► etp_id.trim().is_empty()               ──► Err(PluginError::Config)
+//!         ├─► service_name.trim().is_empty()         ──► Err(PluginError::Config)
+//!         ├─► flush_interval_ms outside 100..=60000  ──► Err(PluginError::Config)
+//!         ├─► max_batch_size outside 1..=10000       ──► Err(PluginError::Config)
+//!         ├─► request_timeout_ms outside 100..=60000 ──► Err(PluginError::Config)
+//!         └─► labels key not [a-zA-Z_][a-zA-Z0-9_]*  ──► Err(PluginError::Config)
+//! ```
 
 use crate::error::PluginError;
 
-/// Declarative configuration for the Grafana Loki Log Shipper background plugin (`loki_log_shipper`).
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct LokiLogShipperConfig {
-    /// Loki transport protocol (`"http"` or `"grpc"`).
-    pub protocol: String,
-    /// Target Loki push URL (e.g. `http://127.0.0.1:3100/loki/api/v1/push` or `grpc://127.0.0.1:9096`).
-    pub endpoint: String,
-    /// Multi-tenant Loki identifier sent via `X-Scope-OrgID` header (use `""` for single-tenant).
-    pub tenant_id: String,
-    /// Logical service identifier attached to the `service` stream label.
-    pub service_name: String,
-    /// Periodic batch flush interval in milliseconds (100 to 60,000 ms).
-    pub flush_interval_ms: u64,
-    /// Maximum records grouped into a single Loki HTTP/gRPC push payload (1 to 10,000).
-    pub max_batch_size: usize,
-    /// TCP connection establishment timeout in milliseconds (100 to 60,000 ms).
-    pub connect_timeout_ms: u64,
-    /// HTTP/gRPC push request completion timeout in milliseconds (100 to 60,000 ms).
-    pub request_timeout_ms: u64,
-    /// Additional static stream labels merged into every Loki stream descriptor.
-    pub labels: HashMap<String, String>,
-    /// Outbound TLS settings for connecting to HTTPS/gRPCs Loki push endpoints.
-    #[serde(default)]
-    pub tls: crate::config::OutboundTlsConfig,
+pub use super::config::LokiLogShipperConfig;
+
+#[inline]
+fn is_valid_prometheus_label_name(key: &str) -> bool {
+    let mut bytes = key.bytes();
+    let Some(first) = bytes.next() else {
+        return false;
+    };
+    (first.is_ascii_alphabetic() || first == b'_')
+        && bytes.all(|b| b.is_ascii_alphanumeric() || b == b'_')
 }
 
-/// Validates [`LokiLogShipperConfig`] at configuration compilation time so invalid endpoints,
-/// out-of-range timeouts, or malformed Loki label keys fail fast before reaching the Data Plane.
+/// Parses and validates [`LokiLogShipperConfig`] at configuration compilation time.
 pub fn validate_loki_log_shipper_config(
     plugin_id: &str,
     config_val: &serde_json::Value,
@@ -47,21 +36,9 @@ pub fn validate_loki_log_shipper_config(
         ))
     })?;
 
-    let protocol = cfg.protocol.trim().to_ascii_lowercase();
-    if protocol != "http" && protocol != "grpc" {
+    if cfg.etp_id.trim().is_empty() {
         return Err(PluginError::Config(format!(
-            "Plugin '{plugin_id}': protocol must be explicitly set to 'http' or 'grpc', found '{protocol}'"
-        )));
-    }
-
-    let endpoint = cfg.endpoint.trim();
-    if !endpoint.starts_with("http://")
-        && !endpoint.starts_with("https://")
-        && !endpoint.starts_with("grpc://")
-        && !endpoint.starts_with("grpcs://")
-    {
-        return Err(PluginError::Config(format!(
-            "Plugin '{plugin_id}': endpoint '{endpoint}' must start with 'http://', 'https://', 'grpc://', or 'grpcs://'"
+            "Plugin '{plugin_id}': etp_id cannot be empty"
         )));
     }
 
@@ -85,13 +62,6 @@ pub fn validate_loki_log_shipper_config(
         )));
     }
 
-    if !(100..=60_000).contains(&cfg.connect_timeout_ms) {
-        return Err(PluginError::Config(format!(
-            "Plugin '{plugin_id}': connect_timeout_ms ({}) must be between 100 and 60,000 ms",
-            cfg.connect_timeout_ms
-        )));
-    }
-
     if !(100..=60_000).contains(&cfg.request_timeout_ms) {
         return Err(PluginError::Config(format!(
             "Plugin '{plugin_id}': request_timeout_ms ({}) must be between 100 and 60,000 ms",
@@ -100,9 +70,14 @@ pub fn validate_loki_log_shipper_config(
     }
 
     for (k, v) in &cfg.labels {
-        if k.trim().is_empty() || v.trim().is_empty() {
+        if !is_valid_prometheus_label_name(k) {
             return Err(PluginError::Config(format!(
-                "Plugin '{plugin_id}': Loki label keys and values cannot be empty"
+                "Plugin '{plugin_id}': Loki label key '{k}' must match Prometheus identifier [a-zA-Z_][a-zA-Z0-9_]*"
+            )));
+        }
+        if v.trim().is_empty() {
+            return Err(PluginError::Config(format!(
+                "Plugin '{plugin_id}': Loki label '{k}' value cannot be empty"
             )));
         }
     }
@@ -118,67 +93,78 @@ mod tests {
     #[test]
     fn test_valid_loki_log_shipper_config() {
         let raw = json!({
-            "protocol": "http",
-            "endpoint": "http://127.0.0.1:3100/loki/api/v1/push",
-            "tenant_id": "velda-prod",
+            "etp_id": "loki-primary",
             "service_name": "velda-edge",
             "flush_interval_ms": 500,
             "max_batch_size": 512,
-            "connect_timeout_ms": 2000,
             "request_timeout_ms": 5000,
             "labels": {
-                "env": "production"
+                "env": "production",
+                "_cluster_01": "us_east"
             }
         });
         let cfg = validate_loki_log_shipper_config("loki_shipper", &raw).unwrap();
-        assert_eq!(cfg.protocol, "http");
+        assert_eq!(cfg.etp_id, "loki-primary");
         assert_eq!(cfg.service_name, "velda-edge");
         assert_eq!(cfg.max_batch_size, 512);
 
-        let grpc_raw = json!({
-            "protocol": "grpc",
-            "endpoint": "grpc://127.0.0.1:9096",
-            "tenant_id": "",
-            "service_name": "velda-edge",
-            "flush_interval_ms": 500,
-            "max_batch_size": 512,
-            "connect_timeout_ms": 2000,
-            "request_timeout_ms": 5000,
-            "labels": {}
-        });
-        let grpc_cfg = validate_loki_log_shipper_config("loki_shipper_grpc", &grpc_raw).unwrap();
-        assert_eq!(grpc_cfg.protocol, "grpc");
+        let minimal = json!({ "etp_id": "loki-grpc" });
+        let min_cfg = validate_loki_log_shipper_config("loki_min", &minimal).unwrap();
+        assert_eq!(min_cfg.etp_id, "loki-grpc");
+        assert_eq!(min_cfg.service_name, "velda-edge");
+        assert_eq!(min_cfg.flush_interval_ms, 1000);
+        assert_eq!(min_cfg.max_batch_size, 1000);
+        assert_eq!(min_cfg.request_timeout_ms, 5000);
     }
 
     #[test]
-    fn test_invalid_loki_log_shipper_protocol() {
-        let raw = json!({
-            "protocol": "websocket",
-            "endpoint": "http://127.0.0.1:3100/loki/api/v1/push",
-            "tenant_id": "",
-            "service_name": "velda-edge",
-            "flush_interval_ms": 500,
-            "max_batch_size": 512,
-            "connect_timeout_ms": 2000,
-            "request_timeout_ms": 5000,
-            "labels": {}
-        });
-        assert!(validate_loki_log_shipper_config("loki_shipper", &raw).is_err());
-    }
+    fn test_invalid_loki_log_shipper_config() {
+        assert!(validate_loki_log_shipper_config("loki", &json!({ "etp_id": "   " })).is_err());
+        assert!(
+            validate_loki_log_shipper_config(
+                "loki",
+                &json!({ "etp_id": "loki-1", "service_name": "" })
+            )
+            .is_err()
+        );
+        assert!(
+            validate_loki_log_shipper_config(
+                "loki",
+                &json!({ "etp_id": "loki-1", "flush_interval_ms": 50 })
+            )
+            .is_err()
+        );
+        assert!(
+            validate_loki_log_shipper_config(
+                "loki",
+                &json!({ "etp_id": "loki-1", "max_batch_size": 0 })
+            )
+            .is_err()
+        );
+        assert!(
+            validate_loki_log_shipper_config(
+                "loki",
+                &json!({ "etp_id": "loki-1", "request_timeout_ms": 99 })
+            )
+            .is_err()
+        );
 
-    #[test]
-    fn test_invalid_loki_log_shipper_endpoint() {
-        let raw = json!({
-            "protocol": "http",
-            "endpoint": "ftp://127.0.0.1:3100",
-            "tenant_id": "",
-            "service_name": "velda-edge",
-            "flush_interval_ms": 500,
-            "max_batch_size": 512,
-            "connect_timeout_ms": 2000,
-            "request_timeout_ms": 5000,
-            "labels": {}
-        });
-        assert!(validate_loki_log_shipper_config("loki_shipper", &raw).is_err());
+        for bad_label in ["", "1env", "bad-label", "bad label", "a:b"] {
+            assert!(
+                validate_loki_log_shipper_config(
+                    "loki",
+                    &json!({ "etp_id": "loki-1", "labels": { bad_label: "val" } })
+                )
+                .is_err(),
+                "expected invalid Prometheus label key '{bad_label}' to fail"
+            );
+        }
+        assert!(
+            validate_loki_log_shipper_config(
+                "loki",
+                &json!({ "etp_id": "loki-1", "labels": { "env": "   " } })
+            )
+            .is_err()
+        );
     }
 }

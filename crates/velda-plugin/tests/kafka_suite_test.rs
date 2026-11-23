@@ -1,26 +1,32 @@
 //! Integration Test Suite for Kafka Log Shipper (`kafka_log_shipper`).
 //!
 //! Validates:
-//! 1. Declarative configuration schema, strict parsing, and semantic validation rules.
-//! 2. Compile-time factory instantiation (`LoadedPlugin::Background`).
-//! 3. End-to-end Kafka RecordBatch v2 produce over TCP with zstd compression to mock broker.
-//! 4. SASL/PLAIN handshake and authentication wire exchange.
-//! 5. Partition leader failover handling (`NOT_LEADER_OR_FOLLOWER`).
-//! 6. Auto-generated per-node dynamic `client_id` isolation.
+//! 1. Declarative ETP-backed schema parsing, semantic validation, and strict alias rejection.
+//! 2. Compile-time factory instantiation (`LoadedPlugin::Background` with `etp_id`).
+//! 3. End-to-end Kafka RecordBatch v2 produce over `KafkaEtp` + zstd compression to mock broker.
+//! 4. `KafkaEtp` connect-time SASL/PLAIN `SaslHandshake` (17) + `SaslAuthenticate` (36) exchange.
+//! 5. Partition leader failover metadata refresh (`NOT_LEADER_OR_FOLLOWER`, error code 6).
+//! 6. ETP registry wiring (`wire_plugin_etps`), in-place `lease.reconnect().await` recovery, and error paths.
 
 use std::sync::Arc;
 use std::sync::atomic::Ordering;
 use std::time::Duration;
 
+use rustc_hash::FxHashMap;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::{TcpListener, TcpStream};
 use tokio::sync::watch;
 use velda_core::{CompletionReason, GrpcStatus, HttpMethod, PipeKind, UaFamily, UaOs};
+use velda_etp::kafka::KafkaEtp;
+use velda_etp::registry::build_registry;
+use velda_etp::{EtpEntryConfig, EtpKind, EtpPoolSettings};
 use velda_observability::{TelemetryRecord, TelemetryStore};
 use velda_plugin::background::BackgroundPlugin;
-use velda_plugin::background::kafka_log_shipper::{client, config, plugin, protocol, validation};
-use velda_plugin::factory::{LoadedPlugin, instantiate_plugin};
+use velda_plugin::background::kafka_log_shipper::{config, plugin, protocol, validation, wire};
+use velda_plugin::factory::{LoadedPlugin, instantiate_plugin, wire_plugin_etps};
 use velda_plugin::{PluginConfig, is_known_plugin_id, validate_plugin_config};
+
+static GLOBAL_STORE_TEST_LOCK: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
 
 fn make_sample_record(id: u64, ts: u32) -> TelemetryRecord {
     let mut rec = TelemetryRecord::zeroed();
@@ -122,10 +128,9 @@ async fn read_framed_request(socket: &mut TcpStream) -> Option<Vec<u8>> {
 #[test]
 fn test_kafka_config_validation_success() {
     let json = serde_json::json!({
-        "brokers": ["127.0.0.1:9092", "kafka.internal:9093"],
+        "etp_id": "kafka-main",
         "topic": "access_logs_v1",
         "format": "json",
-        "transport_security": "plain",
         "compression": "zstd",
         "acks": "leader",
         "partitioner": "round_robin",
@@ -136,13 +141,13 @@ fn test_kafka_config_validation_success() {
     let cfg = validation::validate_kafka_log_shipper_config("kafka_log_shipper", &json)
         .expect("Valid configuration must succeed");
 
-    assert_eq!(cfg.brokers.len(), 2);
+    assert_eq!(cfg.etp_id, "kafka-main");
     assert_eq!(cfg.topic, "access_logs_v1");
-    assert_eq!(
-        cfg.parsed_transport_security().unwrap(),
-        config::KafkaTransportSecurity::Plain
-    );
     assert_eq!(cfg.parsed_acks().unwrap(), config::KafkaAckMode::Leader);
+    assert_eq!(
+        cfg.parsed_partitioner().unwrap(),
+        config::PartitionStrategy::RoundRobin
+    );
 }
 
 #[test]
@@ -151,60 +156,30 @@ fn test_kafka_config_validation_rules() {
         validation::validate_kafka_log_shipper_config("kafka_log_shipper", &v)
     };
 
-    // 1. Empty brokers
-    assert!(validate(serde_json::json!({ "brokers": [], "topic": "test" })).is_err());
+    // 1. Empty / whitespace etp_id
+    assert!(validate(serde_json::json!({ "etp_id": "", "topic": "test" })).is_err());
+    assert!(validate(serde_json::json!({ "etp_id": "   ", "topic": "test" })).is_err());
 
     // 2. Invalid topics
     for bad_topic in ["", "invalid topic with space", "invalid/slash", ".", ".."] {
         assert!(
-            validate(serde_json::json!({ "brokers": ["127.0.0.1:9092"], "topic": bad_topic }))
-                .is_err()
+            validate(serde_json::json!({ "etp_id": "kafka-main", "topic": bad_topic })).is_err()
         );
     }
 
-    // 3. Plain with TLS certificates rejected
-    assert!(
-        validate(serde_json::json!({
-            "brokers": ["127.0.0.1:9092"], "topic": "t",
-            "transport_security": "plain",
-            "tls": { "client_cert_pem": "cert" }
-        }))
-        .is_err()
-    );
-
-    // 4. mTLS missing private key rejected
-    assert!(
-        validate(serde_json::json!({
-            "brokers": ["127.0.0.1:9093"], "topic": "t",
-            "transport_security": "mtls",
-            "tls": { "client_cert_pem": "cert" }
-        }))
-        .is_err()
-    );
-
-    // 5. SASL credentials missing
-    assert!(
-        validate(serde_json::json!({
-            "brokers": ["127.0.0.1:9092"], "topic": "t",
-            "sasl_mechanism": "plain", "sasl_username": "", "sasl_password": ""
-        }))
-        .is_err()
-    );
-
-    // 6. Strict parsing: Reject backward-compatibility / loose aliases
+    // 3. Strict parsing: Reject loose aliases
     for (key, val) in [
-        ("transport_security", "plaintext"),
-        ("transport_security", "ssl"),
         ("compression", "uncompressed"),
         ("compression", "zstandard"),
         ("partitioner", "rr"),
         ("partitioner", "roundrobin"),
         ("format", "clf"),
-        ("sasl_mechanism", "scram-sha-256"),
     ] {
         assert!(
             validate(serde_json::json!({
-                "brokers": ["127.0.0.1:9092"], "topic": "t", key: val
+                "etp_id": "kafka-main",
+                "topic": "t",
+                key: val
             }))
             .is_err(),
             "Expected failure for loose alias '{key}: {val}'"
@@ -212,7 +187,7 @@ fn test_kafka_config_validation_rules() {
     }
 }
 
-// ── 2. Factory Registration & Process ID Isolation ───────────────────────────
+// ── 2. Factory Registration & Route Rejection ────────────────────────────────
 
 #[test]
 fn test_kafka_factory_registration() {
@@ -222,7 +197,7 @@ fn test_kafka_factory_registration() {
     let mut plugin_cfg = PluginConfig {
         id: "kafka_log_shipper".to_string(),
         config: serde_json::json!({
-            "brokers": ["127.0.0.1:9092"],
+            "etp_id": "kafka-main",
             "topic": "velda_logs"
         }),
     };
@@ -234,6 +209,7 @@ fn test_kafka_factory_registration() {
         LoadedPlugin::Background(bg) => {
             assert_eq!(bg.id(), "kafka_log_shipper");
             assert_eq!(bg.pbww(), 75);
+            assert_eq!(bg.etp_id(), Some("kafka-main"));
         }
         _ => panic!("Expected LoadedPlugin::Background"),
     }
@@ -244,12 +220,12 @@ fn test_kafka_attached_to_route_rejected() {
     let plugin_cfg = PluginConfig {
         id: "kafka_log_shipper".to_string(),
         config: serde_json::json!({
-            "brokers": ["127.0.0.1:9092"],
+            "etp_id": "kafka-main",
             "topic": "velda_logs"
         }),
     };
     let loaded = instantiate_plugin(&plugin_cfg).expect("instantiation should succeed");
-    let mut available = rustc_hash::FxHashMap::default();
+    let mut available = FxHashMap::default();
     available.insert("kafka_log_shipper".to_string(), loaded);
 
     let res = velda_plugin::build_route_plugin_plan(
@@ -265,18 +241,7 @@ fn test_kafka_attached_to_route_rejected() {
     ));
 }
 
-#[test]
-fn test_dynamic_client_id_generation() {
-    let id1 = config::generate_client_id();
-    let id2 = config::generate_client_id();
-    assert!(id1.starts_with("velda-edge-"));
-    assert_eq!(
-        id1, id2,
-        "Process client_id should remain stable across invocations within the same process"
-    );
-}
-
-// ── 3. End-to-End Mock Kafka Server Produce (TCP + Zstd + Acks=Leader) ────────
+// ── 3. End-to-End Mock Kafka Server Produce (KafkaEtp + Zstd + Acks=Leader) ─
 
 #[tokio::test]
 async fn test_kafka_shipper_e2e_produce_success() {
@@ -297,6 +262,8 @@ async fn test_kafka_shipper_e2e_produce_success() {
                 let api_key = protocol::read_i16(&mut cur).unwrap();
                 let _api_ver = protocol::read_i16(&mut cur).unwrap();
                 let cid = protocol::read_i32(&mut cur).unwrap();
+                let client_id = protocol::read_string(&mut cur).unwrap();
+                assert_eq!(client_id, "velda-edge-e2e");
 
                 match api_key {
                     protocol::API_KEY_METADATA => {
@@ -315,28 +282,41 @@ async fn test_kafka_shipper_e2e_produce_success() {
         }
     });
 
+    let etp = Arc::new(
+        KafkaEtp::from_entry(&EtpEntryConfig {
+            id: "kafka-e2e".into(),
+            kind: EtpKind::Kafka,
+            pool: EtpPoolSettings {
+                pool_size: 1,
+                connect_timeout_ms: 2000,
+                idle_timeout_ms: 60_000,
+            },
+            tls: None,
+            settings: serde_json::json!({
+                "brokers": [format!("127.0.0.1:{port}")],
+                "client_id": "velda-edge-e2e",
+                "sasl_mechanism": "none"
+            }),
+        })
+        .unwrap(),
+    );
+
     let store = Arc::new(TelemetryStore::with_cores_and_capacity(1, 1024));
     let cfg = config::KafkaLogShipperConfig {
-        brokers: vec![format!("127.0.0.1:{port}")],
+        etp_id: "kafka-e2e".into(),
         topic: "velda-access-logs".into(),
         format: "json".into(),
-        transport_security: "plain".into(),
-        tls: Default::default(),
-        sasl_mechanism: "none".into(),
-        sasl_username: "".into(),
-        sasl_password: "".into(),
         compression: "zstd".into(),
         acks: "leader".into(),
         partitioner: "round_robin".into(),
         flush_interval_ms: 100,
         max_batch_size: 1000,
-        connect_timeout_ms: 2000,
         request_timeout_ms: 2000,
-        metadata_refresh_ms: 300000,
+        metadata_refresh_ms: 300_000,
     };
 
     let plugin = Arc::new(
-        plugin::KafkaLogShipperPlugin::with_store("kafka_log_shipper", cfg, Arc::clone(&store))
+        plugin::KafkaLogShipperPlugin::with_etp("kafka_log_shipper", cfg, etp, Arc::clone(&store))
             .unwrap(),
     );
 
@@ -350,21 +330,21 @@ async fn test_kafka_shipper_e2e_produce_success() {
         tokio::time::sleep(Duration::from_millis(5)).await;
     }
 
-    // Push 3 records into store
     for i in 1..=3 {
         let rec = make_sample_record(i, 1732011000 + i as u32);
         store.emit_on_core(0, &rec);
     }
     store.flush_all_lanes(128);
 
-    // Wait until records are shipped
     let start = tokio::time::Instant::now();
-    while plugin.shipped_records() == 0 && start.elapsed() < Duration::from_secs(3) {
+    while plugin.shipped_records.load(Ordering::Relaxed) == 0
+        && start.elapsed() < Duration::from_secs(3)
+    {
         tokio::time::sleep(Duration::from_millis(50)).await;
     }
 
     assert!(
-        plugin.shipped_records() >= 3,
+        plugin.shipped_records.load(Ordering::Relaxed) >= 3,
         "Shipper must produce at least 3 records to Kafka broker"
     );
 
@@ -373,7 +353,7 @@ async fn test_kafka_shipper_e2e_produce_success() {
     let _ = server_task.await;
 }
 
-// ── 4. End-to-End Mock Kafka Server with SASL/PLAIN Authentication ───────────
+// ── 4. Connect-Time SASL/PLAIN Handshake in KafkaEtp + Metadata Wire ─────────
 
 #[tokio::test]
 async fn test_kafka_shipper_e2e_sasl_plain() {
@@ -389,9 +369,10 @@ async fn test_kafka_shipper_e2e_sasl_plain() {
         let api_key = protocol::read_i16(&mut cur).unwrap();
         let _ = protocol::read_i16(&mut cur).unwrap();
         let cid = protocol::read_i32(&mut cur).unwrap();
-        let _ = protocol::read_string(&mut cur).unwrap();
+        let client_id = protocol::read_string(&mut cur).unwrap();
         let mechanism = protocol::read_string(&mut cur).unwrap();
         assert_eq!(api_key, protocol::API_KEY_SASL_HANDSHAKE);
+        assert_eq!(client_id, "velda-edge-sasl");
         assert_eq!(mechanism, "PLAIN");
 
         let mut resp = Vec::new();
@@ -420,7 +401,7 @@ async fn test_kafka_shipper_e2e_sasl_plain() {
         auth_resp.extend_from_slice(&0i32.to_be_bytes()); // empty bytes
         write_framed_response(&mut socket, &auth_resp).await;
 
-        // 3. Handle Metadata
+        // 3. Handle Metadata over the same pre-authenticated socket
         let body = read_framed_request(&mut socket).await.unwrap();
         let mut cur = body.as_slice();
         let api_key = protocol::read_i16(&mut cur).unwrap();
@@ -432,33 +413,41 @@ async fn test_kafka_shipper_e2e_sasl_plain() {
         write_framed_response(&mut socket, &meta).await;
     });
 
+    let etp = Arc::new(
+        KafkaEtp::from_entry(&EtpEntryConfig {
+            id: "kafka-sasl".into(),
+            kind: EtpKind::Kafka,
+            pool: EtpPoolSettings {
+                pool_size: 1,
+                connect_timeout_ms: 2000,
+                idle_timeout_ms: 60_000,
+            },
+            tls: None,
+            settings: serde_json::json!({
+                "brokers": [format!("127.0.0.1:{port}")],
+                "client_id": "velda-edge-sasl",
+                "sasl_mechanism": "plain",
+                "sasl_username": "alice",
+                "sasl_password": "secret123"
+            }),
+        })
+        .unwrap(),
+    );
+    etp.warm().await.unwrap();
+
     let cfg = config::KafkaLogShipperConfig {
-        brokers: vec![format!("127.0.0.1:{port}")],
+        etp_id: "kafka-sasl".into(),
         topic: "sasl-logs".into(),
-        format: "json".into(),
-        transport_security: "plain".into(),
-        tls: Default::default(),
-        sasl_mechanism: "plain".into(),
-        sasl_username: "alice".into(),
-        sasl_password: "secret123".into(),
-        compression: "none".into(),
-        acks: "leader".into(),
-        partitioner: "round_robin".into(),
-        flush_interval_ms: 100,
-        max_batch_size: 100,
-        connect_timeout_ms: 2000,
-        request_timeout_ms: 2000,
-        metadata_refresh_ms: 300000,
+        ..Default::default()
     };
 
-    let mut client = client::KafkaClusterClient::new(&cfg).unwrap();
-    client
+    let mut wire_state = wire::KafkaWireState::new(etp, &cfg).unwrap();
+    wire_state
         .refresh_metadata()
         .await
         .expect("SASL/PLAIN connection and metadata refresh must succeed");
 
-    assert_eq!(client.brokers.len(), 1);
-    assert_eq!(client.partitions.len(), 1);
+    assert_eq!(wire_state.partitions, vec![0]);
 
     let _ = server_task.await;
 }
@@ -491,7 +480,7 @@ async fn test_kafka_shipper_leader_failover_recovery() {
         let fail = mock_produce_response(cid, "failover-logs", 6, -1);
         write_framed_response(&mut socket, &fail).await;
 
-        // 3. Metadata Refresh triggered automatically by client
+        // 3. Metadata Refresh triggered automatically by wire state
         let body = read_framed_request(&mut socket).await.unwrap();
         let mut cur = body.as_slice();
         let _ = protocol::read_i16(&mut cur).unwrap();
@@ -501,41 +490,151 @@ async fn test_kafka_shipper_leader_failover_recovery() {
         write_framed_response(&mut socket, &meta2).await;
     });
 
-    let cfg = config::KafkaLogShipperConfig {
-        brokers: vec![format!("127.0.0.1:{port}")],
-        topic: "failover-logs".into(),
-        format: "json".into(),
-        transport_security: "plain".into(),
-        tls: Default::default(),
-        sasl_mechanism: "none".into(),
-        sasl_username: "".into(),
-        sasl_password: "".into(),
-        compression: "none".into(),
-        acks: "leader".into(),
-        partitioner: "round_robin".into(),
-        flush_interval_ms: 100,
-        max_batch_size: 100,
-        connect_timeout_ms: 2000,
-        request_timeout_ms: 2000,
-        metadata_refresh_ms: 300000,
-    };
-
-    let mut client = client::KafkaClusterClient::new(&cfg).unwrap();
-    client.refresh_metadata().await.unwrap();
-
-    let rec = make_sample_record(999, 1732000000);
-    let _ = client.push_records(&[rec]).await;
-
-    // After failover trigger, client should have automatically refreshed metadata
-    assert_eq!(client.brokers.len(), 1);
-    assert_eq!(
-        client
-            .partitions
-            .iter()
-            .find(|p| p.partition_id == 0)
-            .map(|p| p.leader_node_id),
-        Some(0)
+    let etp = Arc::new(
+        KafkaEtp::from_entry(&EtpEntryConfig {
+            id: "kafka-failover".into(),
+            kind: EtpKind::Kafka,
+            pool: EtpPoolSettings {
+                pool_size: 1,
+                connect_timeout_ms: 2000,
+                idle_timeout_ms: 60_000,
+            },
+            tls: None,
+            settings: serde_json::json!({
+                "brokers": [format!("127.0.0.1:{port}")],
+            }),
+        })
+        .unwrap(),
     );
 
-    let _ = server_task.await;
+    let cfg = config::KafkaLogShipperConfig {
+        etp_id: "kafka-failover".into(),
+        topic: "failover-logs".into(),
+        compression: "none".into(),
+        ..Default::default()
+    };
+
+    let mut wire_state = wire::KafkaWireState::new(etp, &cfg).unwrap();
+    wire_state.refresh_metadata().await.unwrap();
+
+    let rec = make_sample_record(999, 1732000000);
+    assert!(wire_state.produce_records(&[rec]).await.is_err());
+
+    assert_eq!(wire_state.partitions, vec![0]);
+
+    server_task.await.unwrap();
+}
+
+// ── 6. Registry Wiring + In-Place lease.reconnect() Recovery ─────────────────
+
+#[tokio::test]
+async fn test_kafka_etp_registry_wiring_and_reconnect_recovery() {
+    let _global_guard = GLOBAL_STORE_TEST_LOCK.lock().await;
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let port = listener.local_addr().unwrap().port();
+
+    let server_task = tokio::spawn(async move {
+        // 1. Initial Metadata handshake succeeds and keeps the socket warm in KafkaEtp arena.
+        let (mut s1, _) = listener.accept().await.unwrap();
+        let meta_req = read_framed_request(&mut s1).await.unwrap();
+        let mut cur = meta_req.as_slice();
+        let api_key = protocol::read_i16(&mut cur).unwrap();
+        let _ = protocol::read_i16(&mut cur).unwrap();
+        let cid = protocol::read_i32(&mut cur).unwrap();
+        assert_eq!(api_key, protocol::API_KEY_METADATA);
+        write_framed_response(
+            &mut s1,
+            &mock_metadata_response(cid, port, "wired-logs", 0, 0),
+        )
+        .await;
+
+        // 2. When the first Produce arrives on stale `s1`, drop `s1` immediately so
+        //    KafkaWireState hits UnexpectedEof and triggers in-place `lease.reconnect().await`.
+        let _stale_produce = read_framed_request(&mut s1).await;
+        drop(s1);
+
+        // 3. Reconnected retry on the same slot delivers Produce and gets ACK 0.
+        let (mut s2, _) = listener.accept().await.unwrap();
+        let prod_req = read_framed_request(&mut s2).await.unwrap();
+        let mut cur = prod_req.as_slice();
+        let api_key = protocol::read_i16(&mut cur).unwrap();
+        let _ = protocol::read_i16(&mut cur).unwrap();
+        let cid = protocol::read_i32(&mut cur).unwrap();
+        let client_id = protocol::read_string(&mut cur).unwrap();
+        assert_eq!(api_key, protocol::API_KEY_PRODUCE);
+        assert_eq!(client_id, "velda-wired-client");
+        write_framed_response(&mut s2, &mock_produce_response(cid, "wired-logs", 0, 7)).await;
+    });
+
+    let registry = build_registry(&[EtpEntryConfig {
+        id: "kafka-wired".into(),
+        kind: EtpKind::Kafka,
+        pool: EtpPoolSettings {
+            pool_size: 1,
+            connect_timeout_ms: 2000,
+            idle_timeout_ms: 60_000,
+        },
+        tls: None,
+        settings: serde_json::json!({
+            "brokers": [format!("127.0.0.1:{port}")],
+            "client_id": "velda-wired-client",
+            "sasl_mechanism": "none"
+        }),
+    }])
+    .unwrap();
+
+    let plugin_cfg = PluginConfig {
+        id: "kafka_log_shipper".into(),
+        config: serde_json::json!({
+            "etp_id": "kafka-wired",
+            "topic": "wired-logs",
+            "compression": "none",
+            "flush_interval_ms": 100,
+            "request_timeout_ms": 2000
+        }),
+    };
+    let loaded = instantiate_plugin(&plugin_cfg).unwrap();
+    let mut available = FxHashMap::default();
+    available.insert(loaded.id().to_string(), loaded.clone());
+    wire_plugin_etps(&available, &registry).unwrap();
+
+    let store = velda_observability::global_telemetry_store();
+    let (shutdown_tx, shutdown_rx) = watch::channel(false);
+    let runner = tokio::spawn(loaded.run_background(shutdown_rx).unwrap());
+
+    while store.active_subscriber_count.load(Ordering::Acquire) == 0 {
+        tokio::time::sleep(Duration::from_millis(5)).await;
+    }
+
+    store.emit_on_core(0, &make_sample_record(501, 1_732_015_900));
+    store.flush_all_lanes(128);
+
+    tokio::time::timeout(Duration::from_secs(3), server_task)
+        .await
+        .unwrap()
+        .unwrap();
+    tokio::time::sleep(Duration::from_millis(40)).await;
+
+    let _ = shutdown_tx.send(true);
+    runner.await.unwrap().unwrap();
+
+    // Missing ETP produces an explicit error
+    let err_plugin = instantiate_plugin(&plugin_cfg).unwrap();
+    let mut missing_map = FxHashMap::default();
+    missing_map.insert(err_plugin.id().to_string(), err_plugin);
+    assert!(wire_plugin_etps(&missing_map, &velda_etp::EtpRegistry::default()).is_err());
+
+    // Wrong-kind ETP produces an explicit error
+    let wrong_registry = build_registry(&[EtpEntryConfig {
+        id: "kafka-wired".into(),
+        kind: EtpKind::Statsd,
+        pool: EtpPoolSettings::default(),
+        tls: None,
+        settings: serde_json::json!({ "endpoint": "127.0.0.1:8125" }),
+    }])
+    .unwrap();
+    let wrong_plugin = instantiate_plugin(&plugin_cfg).unwrap();
+    let mut wrong_map = FxHashMap::default();
+    wrong_map.insert(wrong_plugin.id().to_string(), wrong_plugin);
+    assert!(wire_plugin_etps(&wrong_map, &wrong_registry).is_err());
 }

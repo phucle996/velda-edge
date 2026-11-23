@@ -159,13 +159,17 @@ thread_local! {
 }
 
 /// Serializes all metrics from a [`MetricsSnapshot`] and emits them in MTU-safe packets.
-pub fn format_statsd_snapshot<F: FnMut(&[u8])>(
+///
+/// Marked `#[inline(never)]` with `&mut dyn FnMut(&[u8])` so callers across modules/CGUs share
+/// one compiled formatter body instead of monomorphizing ~32k instructions per closure type.
+#[inline(never)]
+pub fn format_statsd_snapshot(
     snapshot: &MetricsSnapshot,
     prefix: &str,
     dialect: StatsdDialect,
     packet_buf: &mut Vec<u8>,
     max_packet_size: usize,
-    mut on_packet: F,
+    on_packet: &mut dyn FnMut(&[u8]),
 ) -> (usize, usize) {
     match dialect {
         StatsdDialect::DogStatsd => DOGSTATSD_CACHE.with(|cell| {
@@ -178,7 +182,7 @@ pub fn format_statsd_snapshot<F: FnMut(&[u8])>(
                 *borrowed = Some((prefix.to_string(), DogStatsdTemplate::new(prefix)));
             }
             let (_, template) = borrowed.as_ref().unwrap();
-            let mut writer = StatsdBatchWriter::new(packet_buf, max_packet_size, &mut on_packet);
+            let mut writer = StatsdBatchWriter::new(packet_buf, max_packet_size, on_packet);
             template.format_with_writer(snapshot, &mut writer);
             writer.flush();
             (writer.packets_emitted(), writer.metrics_emitted())
@@ -193,7 +197,7 @@ pub fn format_statsd_snapshot<F: FnMut(&[u8])>(
                 *borrowed = Some((prefix.to_string(), StandardTemplate::new(prefix)));
             }
             let (_, template) = borrowed.as_ref().unwrap();
-            let mut writer = StatsdBatchWriter::new(packet_buf, max_packet_size, &mut on_packet);
+            let mut writer = StatsdBatchWriter::new(packet_buf, max_packet_size, on_packet);
             template.format_with_writer(snapshot, &mut writer);
             writer.flush();
             (writer.packets_emitted(), writer.metrics_emitted())

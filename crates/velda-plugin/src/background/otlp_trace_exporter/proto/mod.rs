@@ -1,7 +1,9 @@
-//! OpenTelemetry Protobuf Trace Wire Encoding & gRPC Transport (`otlp_trace_exporter::proto`).
+//! OTLP Trace Protobuf Wire Serialization Subsystem (`otlp_trace_exporter::proto`).
+//!
+//! ```text
+//!   &[TelemetryBatch] ──► OtlpTraceProtoEnvelope::format_spans_wire ──► Protobuf bytes buffer
+//! ```
 
-pub mod client;
 pub mod template;
 
-pub use client::OtlpTracesGrpcClient;
-pub use template::OtlpTraceProtoEnvelope;
+pub use template::{OtlpTraceProtoEnvelope, varint_len, write_varint};

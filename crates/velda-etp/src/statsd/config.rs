@@ -82,7 +82,11 @@ impl StatsdEtpConfig {
             .map(ToString::to_string)
             .unwrap_or_else(|| format!("{host}:{port}"));
 
-        let flavor = match obj.get("flavor").and_then(|v| v.as_str()) {
+        let flavor = match obj
+            .get("flavor")
+            .or_else(|| obj.get("dialect"))
+            .and_then(|v| v.as_str())
+        {
             Some(raw) => StatsdFlavor::parse(raw)?,
             None => StatsdFlavor::Standard,
         };
@@ -103,5 +107,45 @@ impl StatsdEtpConfig {
             prefix,
             pool: entry.pool.clone(),
         })
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::config::EtpPoolSettings;
+
+    #[test]
+    fn test_statsd_etp_parses_flavor_and_dialect_aliases() {
+        let with_flavor = StatsdEtpConfig::from_entry(&EtpEntryConfig {
+            id: "sd-flavor".into(),
+            kind: EtpKind::Statsd,
+            pool: EtpPoolSettings::default(),
+            tls: None,
+            settings: serde_json::json!({
+                "endpoint": "127.0.0.1:8125",
+                "flavor": "dogstatsd",
+                "prefix": "velda"
+            }),
+        })
+        .unwrap();
+        assert_eq!(with_flavor.flavor, StatsdFlavor::DogStatsd);
+        assert_eq!(with_flavor.prefix.as_deref(), Some("velda"));
+
+        let with_dialect = StatsdEtpConfig::from_entry(&EtpEntryConfig {
+            id: "sd-dialect".into(),
+            kind: EtpKind::Statsd,
+            pool: EtpPoolSettings::default(),
+            tls: None,
+            settings: serde_json::json!({
+                "host": "127.0.0.1",
+                "port": 9125,
+                "dialect": "dogstatsd"
+            }),
+        })
+        .unwrap();
+        assert_eq!(with_dialect.flavor, StatsdFlavor::DogStatsd);
+        assert_eq!(with_dialect.port, 9125);
+        assert_eq!(with_dialect.prefix, None);
     }
 }

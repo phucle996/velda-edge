@@ -38,30 +38,30 @@ flowchart TD
         RING -.->|"Lock-free batch transfer"| DRAIN
         DRAIN --> MODE
 
-        subgraph GrpcEngine["OTLP / gRPC Path"]
+        subgraph GrpcEngine["OTLP / gRPC & HTTP Protobuf Path"]
             PROTO_SKELETON["Pre-Baked Wire Skeletons (INFO/WARN/ERR)"]
             RAW_STAMP["Raw Pointer Arithmetic Stamping"]
-            H2_CLIENT["OtlpLogsGrpcClient (Persistent H2)"]
-            MODE -->|"grpc"| PROTO_SKELETON
+            WIRE_TX["wire::push_logs (OtlpEtp / OtlpLease)"]
+            MODE -->|"grpc | http/protobuf"| PROTO_SKELETON
             PROTO_SKELETON --> RAW_STAMP
-            RAW_STAMP --> H2_CLIENT
+            RAW_STAMP --> WIRE_TX
         end
 
-        subgraph HttpEngine["OTLP / HTTP Path"]
+        subgraph HttpEngine["OTLP / HTTP JSON Path"]
             JSON_ENV["OtlpJsonEnvelope (Pre-Baked Framing)"]
             LUT["SIMD PSHUFB Hex + 2-Digit LUT"]
-            HTTP_CLIENT["OtlpLogClient (HTTP/1.1 Keep-Alive)"]
-            MODE -->|"http"| JSON_ENV
+            WIRE_HTTP["wire::push_logs (OtlpEtp / OtlpLease)"]
+            MODE -->|"http/json"| JSON_ENV
             JSON_ENV --> LUT
-            LUT --> HTTP_CLIENT
+            LUT --> WIRE_HTTP
         end
     end
 
     subgraph Collector["Telemetry Ingestion"]
         OTEL_GRPC["OpenTelemetry Collector (:4317 gRPC)"]
         OTEL_HTTP["OpenTelemetry Collector (:4318 HTTP)"]
-        H2_CLIENT -->|"5-Byte Prefixed Protobuf"| OTEL_GRPC
-        HTTP_CLIENT -->|"JSON POST /v1/logs"| OTEL_HTTP
+        WIRE_TX -->|"5-Byte LPM gRPC or HTTP x-protobuf"| OTEL_GRPC
+        WIRE_HTTP -->|"JSON POST /v1/logs"| OTEL_HTTP
     end
 ```
 
@@ -96,10 +96,10 @@ flowchart TD
 ### Invariant 6: 128-Bit TraceID & RequestID SSSE3 SIMD Hex Stamping
 * Trace IDs and Request IDs are converted from 128-bit binary integers into 32 lowercase hex characters using the SSSE3 `_mm_shuffle_epi8` (`PSHUFB`) vector instruction, eliminating 32 scalar loop iterations.
 
-### Invariant 7: Persistent Transport Reuse
-* **gRPC**: Manages persistent HTTP/2 connection pooling with multiplexed stream reset handling (`OtlpLogsGrpcClient`) over port 4317.
-* **HTTP**: Manages persistent HTTP/1.1 Keep-Alive socket leasing with transparent reconnection on drop (`OtlpLogClient`) over port 4318.
-* Sockets remain open across flush ticks, eliminating TCP 3-way handshakes and TLS renegotiation on every interval.
+### Invariant 7: Shared `velda-etp` Persistent Transport Reuse
+* **gRPC (`OtlpConn::Grpc`)**: Leases persistent `h2::client::SendRequest` handles from `velda_etp::otlp::OtlpEtp` with in-place `lease.reconnect().await` recovery and background driver supervision.
+* **HTTP (`OtlpConn::Http`)**: Leases persistent HTTP/1.1 Keep-Alive `EtpStream` sockets from `OtlpEtp` with pre-baked headers (`wire::bake_wire_template`) and checked response draining.
+* Sockets remain open inside page-aligned `EtpPageArena` slots across flush ticks, eliminating TCP 3-way handshakes and TLS renegotiation on every interval.
 
 ### Invariant 8: Fail-Open Autonomy
 * If the remote OpenTelemetry Collector hangs, crashes, or returns HTTP 4xx/5xx or non-zero gRPC status codes, the shipper logs warnings and backs off.

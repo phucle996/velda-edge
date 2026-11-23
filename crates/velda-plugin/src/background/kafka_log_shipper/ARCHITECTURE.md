@@ -31,22 +31,24 @@ flowchart TD
             PART["Partitioner (RoundRobin / RouteId / PeerIp)"]
             ENC["RecordBatch v2 Encoder (ZigZag Varints + CRC32-C)"]
             COMP["Zstd / Gzip Compressor"]
-            ROUTER["Kafka Cluster Client (Partition Leader Dispatch)"]
+            WIRE["KafkaWireState (Prebaked Produce v7 / Metadata v4)"]
+            ETP["KafkaEtp::acquire() -> KafkaLease (Slot[idx])"]
 
             TICKER --> DRAIN
             SPSC -.->|"Bulk Drain"| DRAIN
             DRAIN --> PART
             PART --> ENC
             ENC --> COMP
-            COMP --> ROUTER
+            COMP --> WIRE
+            WIRE --> ETP
         end
     end
 
     subgraph KafkaCluster["Kafka Broker Cluster"]
-        B0["Broker 0 (Leader: Part 0)"]
-        B1["Broker 1 (Leader: Part 1)"]
-        ROUTER -->|"Produce v7 (TCP/TLS Keep-Alive)"| B0
-        ROUTER -->|"Produce v7 (TCP/TLS Keep-Alive)"| B1
+        B0["Broker 0 (TCP / TLS / SASL Authenticated)"]
+        B1["Broker 1 (TCP / TLS / SASL Authenticated)"]
+        ETP -->|"Produce v7 (In-Place KafkaLease)"| B0
+        ETP -->|"Produce v7 (In-Place KafkaLease)"| B1
     end
 ```
 
@@ -94,5 +96,5 @@ Every produce batch targeting a partition is serialized according to Kafka's Mag
 
 When the Kafka cluster triggers a partition leader election or rebalance:
 1. The broker returns `error_code: 6` (`NOT_LEADER_OR_FOLLOWER`) or `3` (`UNKNOWN_TOPIC_OR_PARTITION`).
-2. `KafkaClusterClient` catches this status, flags `need_metadata_refresh = true`, and queries the cluster for the newest topic metadata.
+2. `KafkaWireState::produce_records` detects this error code, triggers `refresh_metadata().await`, and queries the broker pool for updated partition topology.
 3. Subsequent produce batches are immediately routed to the new leader broker without downtime.

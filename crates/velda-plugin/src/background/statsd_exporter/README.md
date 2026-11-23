@@ -23,8 +23,8 @@ The `statsd_exporter` is an autonomous background logistics plugin designed to p
 * **Lock-Free Atomic Extraction**: Reads point-in-time snapshots from `velda-observability` via `MetricsStore::snapshot()` using relaxed atomic loads, completely avoiding locks, mutexes, or synchronization channels on the hot path.
 * **Zero-Allocation Serialization**: Employs a pre-allocated reusable packet arena and a 200-byte 2-digit ASCII lookup table (`DIGIT_PAIRS`), completely eliminating `format!`, `String`, or dynamic vector allocations during metric encoding.
 * **Strict MTU Safety Bounding**: Enforces `max_packet_size` (recommended: $\le 1432$ bytes) to guarantee datagrams fit within standard Ethernet MTU without triggering kernel IP fragmentation. Metric lines are never split across datagram boundaries.
-* **Kernel Fast-Path `connect()` & Vectorized `sendmmsg`**: Uses a pre-connected non-blocking UDP socket to bypass per-packet kernel routing table lookups, and dispatches up to 64 datagrams per flush cycle in a single kernel transition via `libc::sendmmsg`.
-* **Central Core Socket Ownership**: UDP sockets are authoritatively acquired through `velda_core::global_socket_manager().acquire_shadow_udp()`, preventing accidental port collisions with active traffic listeners.
+* **Kernel Fast-Path `connect()` & Vectorized `sendmmsg`**: Uses pre-connected non-blocking UDP sockets leased in-place from `velda_etp::statsd::StatsdEtp` (`StatsdLease` inside page-aligned `EtpPageArena`) to bypass per-packet kernel routing table lookups, and dispatches up to 64 datagrams per flush cycle in a single kernel transition via `libc::sendmmsg` (`wire.rs`).
+* **Shared `velda-etp` UDP Pool Lifecycle**: Socket creation, `connect()`, and connection pool warm/replenish lifecycle are owned by the referenced `statsd` entry in `etp.json` / `EtpRegistry`.
 
 ```text
 ╔══════════════════════════════════════════════════════════════════════════════════════════════════╗
@@ -59,12 +59,12 @@ The `statsd_exporter` is an autonomous background logistics plugin designed to p
                                    └──────────────────────────┬──────────────────────────┘
                                                               │
                                                               ▼
-                                                   ┌─────────────────────┐
-                                                   │    transport.rs     │
-                                                   │ acquire_shadow_udp  │
-                                                   │ kernel connect()    │
-                                                   │ libc::sendmmsg(64)  │
-                                                   └──────────┬──────────┘
+                                                   ┌─────────────────────────┐
+                                                   │         wire.rs         │
+                                                   │ StatsdEtp::acquire()    │
+                                                   │ StatsdLease (UdpSocket) │
+                                                   │ libc::sendmmsg(64)      │
+                                                   └──────────┬──────────────┘
                                                               │
                                                               ▼ UDP Datagrams (MTU <= 1432 B)
                                                    ┌─────────────────────────────────────┐
@@ -93,31 +93,45 @@ Under the Velda Edge Workload Distribution Model, background logistics plugins a
 
 ---
 
-## 4. 100% Explicit Configuration Contract
+## 4. Configuration Contract (`plugins.json` + `etp.json`)
 
 > [!IMPORTANT]
-> **Strict Configuration Invariant**: Every configuration parameter must be explicitly declared in `plugins.json`. No silent fallbacks or implicit defaults exist. Execution stage is fixed at compile time (`BackgroundPlugin`).
+> **ETP Isolation Invariant**: Destination UDP `endpoint`, `flavor` / `dialect`, default `prefix`, and socket pool settings live in the referenced `kind: "statsd"` entry in `etp.json` (`StatsdEtp`). `plugins.json` holds `etp_id` plus optional overrides and MTU/cadence settings.
 
-| Field | Type | Required | Constraints / Allowed Values | Recommended Value | Description |
+| Field | Type | Required | Constraints / Allowed Values | Recommended / Default | Description |
 | :--- | :---: | :---: | :--- | :--- | :--- |
-| `endpoint` | String | **Yes** | Valid `IP:PORT` or `HOST:PORT` | `"127.0.0.1:8125"` | Target UDP socket address of StatsD, DogStatsD, or Telegraf daemon. |
-| `interval_secs` | Integer (u64) | **Yes** | `1 ..= 3600` | `2` | Periodic telemetry flush interval in seconds. |
-| `prefix` | String | **Yes** | Non-empty, ASCII alphanumerics, `_`, `-`, `.` | `"velda"` | Global metric name prefix prepended to all exported metrics. |
-| `dialect` | String | **Yes** | `"dogstatsd"` or `"standard"` | `"dogstatsd"` | Metric line protocol: `"dogstatsd"` (with `#k:v` tags) or `"standard"` (hierarchical dot notation). |
-| `max_packet_size` | Integer (usize) | **Yes** | `256 ..= 65507` bytes | `1432` | Maximum UDP packet payload size before flushing to prevent kernel IP fragmentation. |
+| `etp_id` | String | **Yes** | Non-empty `statsd` ID in `etp.json` | `"statsd-main"` | Identifier of the `velda_etp::statsd::StatsdEtp` pool in `EtpRegistry`. |
+| `interval_secs` | Integer (u64) | No | `1 ..= 3600` | `2` | Periodic telemetry flush interval in seconds. |
+| `prefix` | String | No | Empty (uses `etp.config.prefix` or `"velda"`), or `[a-zA-Z0-9_.-]` | `"velda"` | Global metric name prefix prepended to all exported metrics. |
+| `dialect` | Option\<String\> | No | `"dogstatsd"` or `"standard"` (falls back to `etp.config.flavor`) | `"dogstatsd"` | Metric line protocol override (`"dogstatsd"` tags or `"standard"` dot notation). |
+| `max_packet_size` | Integer (usize) | No | `256 ..= 65507` bytes | `1432` | Maximum UDP packet payload size before flushing to prevent kernel IP fragmentation. |
 
 ---
 
 ## 5. Production Configuration Manifest Examples
 
-### Profile 1: Kubernetes DogStatsD DaemonSet (`plugins.json`)
+### Profile 1: Kubernetes DogStatsD DaemonSet (`etp.json` + `plugins.json`)
 *Recommended for Datadog Agent, Vector, or Telegraf setups running as a node daemon or sidecar.*
 
 ```json
+// etp.json
+{
+  "id": "statsd-main",
+  "kind": "statsd",
+  "settings": {
+    "endpoint": "127.0.0.1:8125",
+    "flavor": "dogstatsd",
+    "prefix": "velda"
+  }
+}
+```
+
+```json
+// plugins.json
 {
   "id": "statsd_exporter",
   "config": {
-    "endpoint": "127.0.0.1:8125",
+    "etp_id": "statsd-main",
     "interval_secs": 2,
     "prefix": "velda",
     "dialect": "dogstatsd",
@@ -133,7 +147,7 @@ Under the Velda Edge Workload Distribution Model, background logistics plugins a
 {
   "id": "statsd_exporter",
   "config": {
-    "endpoint": "10.0.1.50:8125",
+    "etp_id": "statsd-telegraf",
     "interval_secs": 5,
     "prefix": "edge_gateway",
     "dialect": "standard",
@@ -149,7 +163,7 @@ Under the Velda Edge Workload Distribution Model, background logistics plugins a
 {
   "id": "statsd_exporter",
   "config": {
-    "endpoint": "198.51.100.25:8125",
+    "etp_id": "statsd-wan",
     "interval_secs": 10,
     "prefix": "edge_wan",
     "dialect": "dogstatsd",
@@ -168,8 +182,8 @@ Under the Velda Edge Workload Distribution Model, background logistics plugins a
 nc -l -u -p 8125
 ```
 
-### Step 2: Declare in `plugins.json`
-Include the plugin block in `plugins.json`:
+### Step 2: Declare in `etp.json` and `plugins.json`
+Include the ETP and plugin blocks:
 
 ```json
 {
@@ -178,7 +192,7 @@ Include the plugin block in `plugins.json`:
     {
       "id": "statsd_exporter",
       "config": {
-        "endpoint": "127.0.0.1:8125",
+        "etp_id": "statsd-main",
         "interval_secs": 2,
         "prefix": "velda",
         "dialect": "dogstatsd",

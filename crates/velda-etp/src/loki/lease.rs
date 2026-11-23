@@ -1,9 +1,9 @@
 //! Loki connection lease (`LokiLease`) borrowing `Slot[idx]` in-place inside [`EtpPageArena`]
-//! with direct `Deref`/`DerefMut` to [`EtpStream`], in-place `reconnect()`, and
+//! with direct `Deref`/`DerefMut` to [`LokiConn`], in-place `reconnect()`, and
 //! `recreate_in_background()`.
 //!
 //! ```text
-//!   Plugin uses LokiLease (Deref / DerefMut -> &mut EtpStream at Slot[idx])
+//!   Plugin uses LokiLease (Deref / DerefMut -> &mut LokiConn at Slot[idx])
 //!         │
 //!         ├─► reconnect().await ──► connect_fresh -> replace_leased_slot(Slot[idx])
 //!         ├─► recreate_in_background() ──► sets broken = true
@@ -16,7 +16,7 @@
 //!   In-Place Lease Memory Handle (24 Bytes):
 //!   ┌────────────────────────────────────────────────────────────────────────────┐
 //!   │ LokiLease { pool: Arc<LokiEtp>, slot_idx: usize, broken: bool }            │
-//!   │   ──► &(pool.arena + (slot_idx << 6) + 64) : EtpStream (zero pointer jump) │
+//!   │   ──► &(pool.arena + (slot_idx << 6) + 64) : LokiConn (zero pointer jump)  │
 //!   └────────────────────────────────────────────────────────────────────────────┘
 //! ```
 
@@ -24,11 +24,10 @@ use std::fmt;
 use std::ops::{Deref, DerefMut};
 use std::sync::Arc;
 
-use crate::connect::EtpStream;
 use crate::error::EtpError;
-use crate::loki::pool::LokiEtp;
+use crate::loki::pool::{LokiConn, LokiEtp};
 
-/// Exclusive RAII lease borrowing a Loki [`EtpStream`] in-place at `Slot[idx]`.
+/// Exclusive RAII lease borrowing a [`LokiConn`] in-place at `Slot[idx]`.
 pub struct LokiLease {
     pub pool: Arc<LokiEtp>,
     pub slot_idx: usize,
@@ -48,7 +47,7 @@ impl fmt::Debug for LokiLease {
 }
 
 impl Deref for LokiLease {
-    type Target = EtpStream;
+    type Target = LokiConn;
 
     #[inline(always)]
     fn deref(&self) -> &Self::Target {

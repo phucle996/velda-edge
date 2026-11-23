@@ -8,6 +8,7 @@ pub mod config;
 pub mod format;
 pub mod plugin;
 pub mod validation;
+pub mod wire;
 
 pub use config::{ClickHouseLogShipperConfig, VELDA_ACCESS_LOGS_TABLE};
 pub use format::ClickHouseFormat;

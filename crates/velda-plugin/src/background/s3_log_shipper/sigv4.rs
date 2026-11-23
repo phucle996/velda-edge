@@ -1,5 +1,20 @@
 //! AWS Signature Version 4 Signer (`ring::digest::SHA256` + `ring::hmac::HMAC_SHA256`).
 //!
+//! ```text
+//!   SigV4Signer::new(access_key, secret_key, region, host_header)
+//!         │
+//!         ├─► daily key cache hit (YYYYMMDD == cached_date) ──► reuse kSigning
+//!         ├─► daily key cache miss ──► HMAC_SHA256 chain (AWS4secret -> date -> region -> s3 -> aws4_request)
+//!         └─► CanonicalRequest -> SHA256 -> StringToSign -> HMAC_SHA256 -> HTTP/1.1 PUT headers into out_head
+//!
+//!   Cache & Header Layout:
+//!   ┌────────────────────────────────────────────────────────────────────────────┐
+//!   │ SigV4Signer { cached_date: [u8; 8], cached_signing_key: Option<hmac::Key> } │
+//!   │ Output Head: PUT {uri} HTTP/1.1 | Host | x-amz-date | x-amz-content-sha256 │
+//!   │              [x-amz-security-token] | Authorization | Content-Length (LUT) │
+//!   └────────────────────────────────────────────────────────────────────────────┘
+//! ```
+//!
 //! Precomputes `AWS4{secret}` prefix and caches the daily `kSigning` key (`YYYYMMDD`)
 //! so same-day S3 `PUT` uploads execute only a single `HMAC_SHA256(StringToSign)`.
 
@@ -34,8 +49,10 @@ pub fn encode_s3_canonical_uri(path: &str) -> String {
 #[inline]
 pub fn write_hex_lower(bytes: &[u8], out: &mut [u8]) {
     for (i, &b) in bytes.iter().enumerate() {
-        out[i * 2] = HEX[(b >> 4) as usize];
-        out[i * 2 + 1] = HEX[(b & 0x0f) as usize];
+        if let Some(dst) = out.get_mut(i * 2..i * 2 + 2) {
+            dst[0] = HEX[(b >> 4) as usize];
+            dst[1] = HEX[(b & 0x0f) as usize];
+        }
     }
 }
 
@@ -147,21 +164,16 @@ impl SigV4Signer {
         out_head: &mut Vec<u8>,
     ) {
         let (amz_date, date_short) = format_amz_date(unix_secs);
-        let amz_date_str = std::str::from_utf8(&amz_date).unwrap();
-        let date_short_str = std::str::from_utf8(&date_short).unwrap();
-        let payload_hash_str = std::str::from_utf8(payload_sha256_hex).unwrap();
+        let amz_date_str = std::str::from_utf8(&amz_date).unwrap_or("");
+        let date_short_str = std::str::from_utf8(&date_short).unwrap_or("");
+        let payload_hash_str = std::str::from_utf8(payload_sha256_hex).unwrap_or("");
 
-        let (signed_headers, token_canon, token_hdr) = match session_token {
+        let (signed_headers, token_canon) = match session_token {
             Some(tok) => (
                 "host;x-amz-content-sha256;x-amz-date;x-amz-security-token",
                 format!("x-amz-security-token:{tok}\n"),
-                format!("x-amz-security-token: {tok}\r\n"),
             ),
-            None => (
-                "host;x-amz-content-sha256;x-amz-date",
-                String::new(),
-                String::new(),
-            ),
+            None => ("host;x-amz-content-sha256;x-amz-date", String::new()),
         };
 
         let encoded_uri = encode_s3_canonical_uri(canonical_uri);
@@ -173,7 +185,7 @@ impl SigV4Signer {
         let canon_digest = digest::digest(&digest::SHA256, canonical_request.as_bytes());
         let mut canon_hex = [0u8; 64];
         write_hex_lower(canon_digest.as_ref(), &mut canon_hex);
-        let canon_hex_str = std::str::from_utf8(&canon_hex).unwrap();
+        let canon_hex_str = std::str::from_utf8(&canon_hex).unwrap_or("");
 
         let scope = format!("{date_short_str}/{}/s3/aws4_request", self.region);
         let string_to_sign = format!("AWS4-HMAC-SHA256\n{amz_date_str}\n{scope}\n{canon_hex_str}");
@@ -182,23 +194,35 @@ impl SigV4Signer {
         let sig = hmac::sign(key, string_to_sign.as_bytes());
         let mut sig_hex = [0u8; 64];
         write_hex_lower(sig.as_ref(), &mut sig_hex);
-        let sig_hex_str = std::str::from_utf8(&sig_hex).unwrap();
 
         out_head.clear();
-        use std::io::Write;
-        let _ = write!(
-            out_head,
-            "PUT {canonical_uri} HTTP/1.1\r\n\
-             Host: {host}\r\n\
-             x-amz-date: {amz_date_str}\r\n\
-             x-amz-content-sha256: {payload_hash_str}\r\n\
-             {token_hdr}\
-             Authorization: AWS4-HMAC-SHA256 Credential={ak}/{scope}, SignedHeaders={signed_headers}, Signature={sig_hex_str}\r\n\
-             Content-Length: {payload_len}\r\n\
-             Connection: keep-alive\r\n\r\n",
-            host = self.host_header,
-            ak = self.access_key_id,
-        );
+        out_head.extend_from_slice(b"PUT ");
+        out_head.extend_from_slice(canonical_uri.as_bytes());
+        out_head.extend_from_slice(b" HTTP/1.1\r\nHost: ");
+        out_head.extend_from_slice(self.host_header.as_bytes());
+        out_head.extend_from_slice(b"\r\nx-amz-date: ");
+        out_head.extend_from_slice(&amz_date);
+        out_head.extend_from_slice(b"\r\nx-amz-content-sha256: ");
+        out_head.extend_from_slice(payload_sha256_hex);
+        out_head.extend_from_slice(b"\r\n");
+        if let Some(tok) = session_token {
+            out_head.extend_from_slice(b"x-amz-security-token: ");
+            out_head.extend_from_slice(tok.as_bytes());
+            out_head.extend_from_slice(b"\r\n");
+        }
+        out_head.extend_from_slice(b"Authorization: AWS4-HMAC-SHA256 Credential=");
+        out_head.extend_from_slice(self.access_key_id.as_bytes());
+        out_head.push(b'/');
+        out_head.extend_from_slice(&date_short);
+        out_head.push(b'/');
+        out_head.extend_from_slice(self.region.as_bytes());
+        out_head.extend_from_slice(b"/s3/aws4_request, SignedHeaders=");
+        out_head.extend_from_slice(signed_headers.as_bytes());
+        out_head.extend_from_slice(b", Signature=");
+        out_head.extend_from_slice(&sig_hex);
+        out_head.extend_from_slice(b"\r\nContent-Length: ");
+        velda_core::lut::decimal::fast_write_u64(out_head, payload_len as u64);
+        out_head.extend_from_slice(b"\r\nConnection: keep-alive\r\n\r\n");
     }
 }
 
@@ -251,5 +275,6 @@ mod tests {
         assert_eq!(h1, h2);
         let text = std::str::from_utf8(&h1).unwrap();
         assert!(text.contains("Authorization: AWS4-HMAC-SHA256 Credential=AKIAIOSFODNN7EXAMPLE/20241119/us-east-1/s3/aws4_request"));
+        assert!(text.contains("Content-Length: 5\r\n"));
     }
 }

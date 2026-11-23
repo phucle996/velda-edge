@@ -17,6 +17,62 @@
         "user": "default",
         "password": ""
       }
+    },
+    {
+      "id": "loki-logs",
+      "kind": "loki",
+      "pool": {
+        "pool_size": 2,
+        "connect_timeout_ms": 2000,
+        "idle_timeout_ms": 60000
+      },
+      "settings": {
+        "protocol": "http",
+        "endpoint": "http://loki.internal:3100",
+        "tenant_id": "velda-prod"
+      }
+    },
+    {
+      "id": "statsd-main",
+      "kind": "statsd",
+      "pool": {
+        "pool_size": 2,
+        "connect_timeout_ms": 2000,
+        "idle_timeout_ms": 60000
+      },
+      "settings": {
+        "endpoint": "127.0.0.1:8125",
+        "flavor": "dogstatsd",
+        "prefix": "velda"
+      }
+    },
+    {
+      "id": "kafka-main",
+      "kind": "kafka",
+      "pool": {
+        "pool_size": 2,
+        "connect_timeout_ms": 2000,
+        "idle_timeout_ms": 60000
+      },
+      "settings": {
+        "brokers": ["127.0.0.1:9092"],
+        "client_id": "velda-edge-prod",
+        "sasl_mechanism": "none"
+      }
+    },
+    {
+      "id": "otlp-main",
+      "kind": "otlp",
+      "pool": {
+        "pool_size": 2,
+        "connect_timeout_ms": 2000,
+        "idle_timeout_ms": 60000
+      },
+      "settings": {
+        "protocol": "http",
+        "endpoint": "http://otel-collector.internal:4318",
+        "headers": {}
+      }
     }
   ]
 }

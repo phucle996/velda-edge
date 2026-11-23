@@ -455,6 +455,15 @@ impl EtpTlsConfig {
     /// Compiles this TLS configuration into a `rustls::ClientConfig` with in-memory
     /// session resumption (TLS 1.3 PSK tickets and TLS 1.2 Session IDs).
     pub fn build_client_config(&self) -> Result<Arc<ClientConfig>, EtpError> {
+        self.build_client_config_with_alpn(&[])
+    }
+
+    /// Compiles this TLS configuration into a `rustls::ClientConfig` with optional
+    /// ALPN protocol offers and in-memory session resumption.
+    pub fn build_client_config_with_alpn(
+        &self,
+        alpn_protocols: &[&[u8]],
+    ) -> Result<Arc<ClientConfig>, EtpError> {
         let versions: &[&'static rustls::SupportedProtocolVersion] = match self.tls_version {
             EtpTlsVersion::Auto => &[&rustls::version::TLS13, &rustls::version::TLS12],
             EtpTlsVersion::Tls12 => &[&rustls::version::TLS12],
@@ -512,6 +521,9 @@ impl EtpTlsConfig {
             }
         };
 
+        if !alpn_protocols.is_empty() {
+            client_config.alpn_protocols = alpn_protocols.iter().map(|p| p.to_vec()).collect();
+        }
         client_config.resumption = rustls::client::Resumption::in_memory_sessions(64);
         Ok(Arc::new(client_config))
     }
@@ -523,10 +535,20 @@ pub(crate) fn build_tls_target(
     host: &str,
     tls_opt: Option<&EtpTlsConfig>,
 ) -> Result<Option<(Arc<ClientConfig>, ServerName<'static>)>, EtpError> {
+    build_tls_target_with_alpn(id, host, tls_opt, &[])
+}
+
+/// Compiles optional TLS settings, ALPN offers, and SNI server name for an ETP pool blueprint.
+pub(crate) fn build_tls_target_with_alpn(
+    id: &str,
+    host: &str,
+    tls_opt: Option<&EtpTlsConfig>,
+    alpn_protocols: &[&[u8]],
+) -> Result<Option<(Arc<ClientConfig>, ServerName<'static>)>, EtpError> {
     let Some(tls_cfg) = tls_opt else {
         return Ok(None);
     };
-    let client_config = tls_cfg.build_client_config()?;
+    let client_config = tls_cfg.build_client_config_with_alpn(alpn_protocols)?;
     let server_name_raw = tls_cfg
         .server_name
         .as_deref()

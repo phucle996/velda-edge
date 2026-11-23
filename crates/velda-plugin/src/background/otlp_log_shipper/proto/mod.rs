@@ -1,13 +1,12 @@
-//! OTLP gRPC Protobuf Transport & Serialization Subsystem (`otlp_log_shipper::proto`).
+//! OTLP Protobuf Wire Serialization Subsystem (`otlp_log_shipper::proto`).
 //!
-//! Owns persistent HTTP/2 gRPC stream delivery (`/opentelemetry.proto.collector.logs.v1.LogsService/Export`)
-//! and direct Protobuf wire serialization with zero AST allocation and SIMD timestamp stamping.
+//! ```text
+//!   &[TelemetryBatch] ──► OtlpProtoWireEnvelope / Prost ExportLogsServiceRequest ──► Protobuf bytes
+//! ```
 
-pub mod client;
 pub mod model;
 pub mod template;
 
-pub use client::{OtlpLogsGrpcClient, OtlpLogsGrpcEndpoint};
 pub use model::{
     AnyValue, ExportLogsServiceRequest, InstrumentationScope, KeyValue, LogRecord, Resource,
     ResourceLogs, ScopeLogs, any_value, format_otlp_records_proto,

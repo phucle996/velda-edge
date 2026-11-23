@@ -25,15 +25,15 @@ flowchart TD
     end
 
     subgraph ShadowWorker["Shadow Logistics Worker (SCHED_IDLE, Assigned Core i)"]
-        SM["velda_core::global_socket_manager()"]
-        UDP_SOCK["acquire_shadow_udp('statsd_exporter')"]
-        SM --> UDP_SOCK
+        ETP["velda_etp::statsd::StatsdEtp (EtpPageArena)"]
+        UDP_SOCK["StatsdEtp::acquire() -> StatsdLease (Slot[idx])"]
+        ETP --> UDP_SOCK
 
         LOOP["Periodic Ticker (interval_secs: 2s)"]
         SNAP["store.snapshot() (Atomic Vector Sum)"]
         DELTA["snapshot.delta_since(&prev_snapshot)"]
         FMT["StatsdBatchWriter (2-Digit LUT, Zero-Alloc)"]
-        POOL["Recycled Packet Arena (64 x 1688B)"]
+        POOL["Packed Contiguous Batch Buffer + Slices"]
 
         UDP_SOCK --> LOOP
         MS -.->|"Pure RAM read"| SNAP
@@ -62,12 +62,11 @@ flowchart TD
 
 ## 3. Core Architectural Invariants
 
-### Invariant 1: Central Core Socket Ownership & Anti-Conflict
-Under Section 2.8 and 2.9 of the Velda Edge Engineering Rules:
-* The exporter **never** invokes raw socket binding syscalls directly.
-* All sockets are authoritatively requested from `velda_core::global_socket_manager().acquire_shadow_udp()`.
-* The Core Socket Manager guarantees that shadow ports never collide with active Data Plane Traffic ports (`:80`, `:443`, `:8080`, `:8443`).
-* Upon graceful shutdown or configuration reload, `release_shadow_udp()` cleanly unregisters the claim and returns the socket descriptor to the operating system.
+### Invariant 1: Shared `velda-etp` UDP Pool Lifecycle Ownership
+Under the `velda-etp` / `velda-plugin` boundary:
+* `statsd_exporter` **never** invokes raw socket creation or binding syscalls directly.
+* All pre-connected `tokio::net::UdpSocket` handles live inside `velda_etp::statsd::StatsdEtp` (`EtpPageArena<UdpSocket>`), configured via `etp.json` and wired into `OnceLock<Arc<StatsdEtp>>` via `wire_plugin_etps`.
+* `wire::flush_snapshot` borrows an in-place 24-byte `StatsdLease` (`etp.acquire().await`), executes `wire::send_batch`, and invokes `lease.reconnect().await` on initial send error or `lease.recreate_in_background()` on persistent socket failure.
 
 ### Invariant 2: Zero Write Contention on Frontline Workers
 * The exporter executes strictly on background companion worker threads (`velda-shadow-{id}`) under Linux `SCHED_IDLE`.
@@ -87,13 +86,13 @@ Under Section 2.8 and 2.9 of the Velda Edge Engineering Rules:
 
 ### Invariant 5: Kernel Fast-Path `connect()`
 * Standard UDP requires kernel routing lookups and ARP cache validation on every `sendto(dest)` call.
-* `StatsdTransport` executes `socket.connect(destination).await` once at startup.
-* In Linux, connecting a UDP socket stores the 4-tuple directly in the kernel socket control block (`struct sock`), enabling subsequent `send()` syscalls to skip routing table lookups.
+* `StatsdEtp` executes `socket.connect(destination).await` when opening pooled UDP sockets.
+* In Linux, connecting a UDP socket stores the 4-tuple directly in the kernel socket control block (`struct sock`), enabling subsequent `send()` / `sendmmsg()` syscalls to skip routing table lookups.
 
 ### Invariant 6: Vectorized `sendmmsg` Batched Transmission
-* Instead of issuing individual `send()` syscalls for each 1432-byte datagram, `StatsdTransport::send_batch` leverages Linux `libc::sendmmsg`.
-* All datagrams comprising an entire snapshot are submitted in a single kernel transition (Ring 3 -> Ring 0), minimizing OS context switches.
-* Stack-allocated `[libc::mmsghdr; 64]` and `[libc::iovec; 64]` arrays guarantee zero heap allocations during packet batching.
+* Instead of issuing individual `send()` syscalls for each 1432-byte datagram, `wire::send_batch` leverages Linux `libc::sendmmsg` directly on the borrowed `StatsdLease` (`AsRawFd`).
+* Up to 64 datagrams are submitted per kernel transition (Ring 3 -> Ring 0), minimizing OS context switches.
+* Stack-allocated `[libc::mmsghdr; 64]` and `[libc::iovec; 64]` arrays guarantee zero heap allocations during vectorized syscall setup.
 
 ### Invariant 7: Cumulative vs Delta Accounting
 * Metrics emitted as StatsD counters (`|c`) represent interval deltas.
@@ -205,7 +204,7 @@ The following operational trade-offs reflect physical hardware, network, and ker
 ### 7.2 Vectorized `sendmmsg` Socket Buffer Saturation
 * **Physical Reality**: The Linux kernel allocates fixed-size UDP socket buffers (`wmem_default` / `wmem_max`).
 * **Failure Boundary**: If telemetry flushes occur faster than the network card can serialize packets, `sendmmsg` may return `EWOULDBLOCK` or `ENOBUFS`.
-* **Mitigation**: `StatsdTransport::send_batch_linux` checks the return value, waits for writability via `socket.writable().await`, and yields cooperative task execution before retrying.
+* **Mitigation**: `wire::send_batch_linux` checks the return value, waits for writability via `lease.writable().await`, and yields cooperative task execution before retrying.
 
 ### 7.3 Point-in-Time Metric Consistency Skew
 * **Physical Reality**: `MetricsStore::snapshot()` reads per-core pipeline slots using `Ordering::Relaxed` atomics.

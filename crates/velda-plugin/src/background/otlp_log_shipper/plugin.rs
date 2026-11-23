@@ -1,111 +1,96 @@
-//! OpenTelemetry Log Shipper Background Plugin (`otlp_log_shipper::plugin`).
+//! OpenTelemetry Log Shipper Background Coordinator (`otlp_log_shipper::plugin`).
 //!
 //! ```text
-//! ┌────────────────────────────────────────────────────────────────────────────────────────┐
-//! │                        VELDA EDGE DATA PLANE ARCHITECTURE                              │
-//! │                                                                                        │
-//! │   FRONTLINE TRAFFIC WORKERS (Cores 0..N-1, SCHED_OTHER)                                │
-//! │   ┌────────────────────────────────────────────────────────────────────────────────┐   │
-//! │   │ Client Ingress -> Route Matching -> Upstream Proxying -> Client Response       │   │
-//! │   │                                                                                │   │
-//! │   │ [Hot-Path Telemetry Hook]                                                      │   │
-//! │   │ 64-byte TelemetryRecord ──► Core-Local SPSC Ring (Zero-lock push)             │   │
-//! │   └───────────────────────────────────────┬────────────────────────────────────────┘   │
-//! │                                           │ Atomic In-Memory Hand-off                  │
-//! │                                           ▼                                            │
-//! │   SHADOW LOGISTICS WORKER (velda-shadow-{i}, SCHED_IDLE, Assigned Core i)              │
-//! │   ┌────────────────────────────────────────────────────────────────────────────────┐   │
-//! │   │ TelemetryStore::flush_all_lanes() ──► Batched Arc<[TelemetryRecord]> Slices          │   │
-//! │   │                                                                                │   │
-//! │   │ OtlpLogShipperPlugin::run()                                                    │   │
-//! │   │  ├── is_grpc?                                                                  │   │
-//! │   │  │    ├── YES ──► proto::OtlpProtoWireEnvelope + proto::OtlpLogsGrpcClient     │   │
-//! │   │  │    └── NO  ──► json::OtlpJsonEnvelope       + json::OtlpLogClient           │   │
-//! │   │  └── Batch Drop: Atomic reference decrement (Zero lock contention)            │   │
-//! │   └────────────────────────────────────────────────────────────────────────────────┘   │
-//! └────────────────────────────────────────────────────────────────────────────────────────┘
+//!   Startup wiring (wire_plugin_etps / with_etp) attaches Arc<OtlpEtp> into OnceLock
+//!         │
+//!         ▼
+//!   run(shutdown) ──► wire::bake_wire_template(&etp.config)
+//!         │
+//!         └─► Interval / shutdown select loop:
+//!               ├─ in 30s cooldown? ──► drain & discard batches (RAM guard)
+//!               └─ drain_batches(64) -> encode (OtlpJsonEnvelope | OtlpProtoWireEnvelope)
+//!                     └─► wire::push_logs(&etp, &template, &mut head_buf, &payload, ...)
+//!                           ├─ Ok(())  ──► ++shipped_records, reset failures
+//!                           └─ Err(e)  ──► ++failed_records, backoff (..2000ms) -> 30s cooldown (>10)
+//!
+//!   Coordinator Struct Layout:
+//!   ┌────────────────────────────────────────────────────────────────────────────┐
+//!   │ OtlpLogShipperPlugin                                                       │
+//!   │   id: String | config: OtlpLogShipperConfig (etp_id, service_name)         │
+//!   │   etp: OnceLock<Arc<OtlpEtp>> | telemetry_store: Arc<TelemetryStore>       │
+//!   │   shipped_records: Arc<AtomicU64> | failed_records: Arc<AtomicU64>         │
+//!   └────────────────────────────────────────────────────────────────────────────┘
 //! ```
 
 use std::future::Future;
 use std::pin::Pin;
-use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::{Arc, OnceLock};
 use std::time::Duration;
 
-use crate::config::PluginConfig;
-use http::HeaderMap;
 use tokio::sync::watch;
+use velda_etp::otlp::{OtlpEtp, OtlpProtocol};
+use velda_etp::{EtpBackend, EtpInstance};
 use velda_observability::{TelemetryStore, global_telemetry_store};
 
-pub use super::config::OtlpLogShipperConfig;
-use super::json::{OtlpJsonEnvelope, OtlpLogClient, format_otlp_records_json};
-use super::proto::{OtlpLogsGrpcClient, OtlpProtoWireEnvelope};
+use super::config::OtlpLogShipperConfig;
+use super::json::{OtlpJsonEnvelope, format_otlp_records_json};
+use super::proto::OtlpProtoWireEnvelope;
+use super::wire;
 use crate::background::BackgroundPlugin;
 use crate::capability::{Direction, PluginCapability, SupportedProtocols};
+use crate::config::PluginConfig;
 use crate::error::PluginError;
 
 /// Background OpenTelemetry Log Shipper Plugin.
 pub struct OtlpLogShipperPlugin {
     pub id: String,
     pub config: OtlpLogShipperConfig,
-    telemetry_store: Arc<TelemetryStore>,
-    custom_headers: HeaderMap,
-    json_envelope: OtlpJsonEnvelope,
-    shipped_records: Arc<AtomicU64>,
-    failed_records: Arc<AtomicU64>,
+    pub etp: OnceLock<Arc<OtlpEtp>>,
+    pub telemetry_store: Arc<TelemetryStore>,
+    pub shipped_records: Arc<AtomicU64>,
+    pub failed_records: Arc<AtomicU64>,
 }
 
 impl OtlpLogShipperPlugin {
-    /// Constructs a new OTLP log shipper using the global singleton log store.
+    /// Constructs a new OTLP log shipper using the global singleton telemetry store.
     pub fn new(id: impl Into<String>, config: OtlpLogShipperConfig) -> Result<Self, PluginError> {
         Self::with_store(id, config, Arc::clone(global_telemetry_store()))
     }
 
-    /// Constructs a new shipper bound to an explicit [`TelemetryStore`] (useful for isolated unit testing).
+    /// Constructs a new shipper bound to an explicit [`TelemetryStore`].
     pub fn with_store(
         id: impl Into<String>,
         config: OtlpLogShipperConfig,
         telemetry_store: Arc<TelemetryStore>,
     ) -> Result<Self, PluginError> {
-        let mut custom_headers = HeaderMap::new();
-        for (k, v) in &config.headers {
-            let header_name = http::header::HeaderName::from_bytes(k.as_bytes())
-                .map_err(|e| PluginError::Config(format!("Invalid header name '{k}': {e}")))?;
-            let header_value = http::header::HeaderValue::from_str(v)
-                .map_err(|e| PluginError::Config(format!("Invalid header value '{v}': {e}")))?;
-            custom_headers.insert(header_name, header_value);
-        }
-
-        let json_envelope = OtlpJsonEnvelope::new(&config.service_name);
-
         Ok(Self {
             id: id.into(),
             config,
+            etp: OnceLock::new(),
             telemetry_store,
-            custom_headers,
-            json_envelope,
             shipped_records: Arc::new(AtomicU64::new(0)),
             failed_records: Arc::new(AtomicU64::new(0)),
         })
     }
 
+    /// Constructs a new shipper pre-attached to an explicit [`OtlpEtp`] and [`TelemetryStore`].
+    pub fn with_etp(
+        id: impl Into<String>,
+        config: OtlpLogShipperConfig,
+        etp: Arc<OtlpEtp>,
+        telemetry_store: Arc<TelemetryStore>,
+    ) -> Result<Self, PluginError> {
+        let plugin = Self::with_store(id, config, telemetry_store)?;
+        let _ = plugin.etp.set(etp);
+        Ok(plugin)
+    }
+
     /// Instantiates and validates this plugin from declarative [`PluginConfig`].
     pub fn from_config(config: &PluginConfig) -> Result<Self, PluginError> {
         let validated =
-            super::validation::validate_otlp_log_shipper_config(&config.id, &config.config)
-                .map_err(|e| PluginError::Config(e.to_string()))?;
-
+            super::validation::validate_otlp_log_shipper_config(&config.id, &config.config)?;
         Self::with_store(&config.id, validated, Arc::clone(global_telemetry_store()))
-    }
-
-    /// Returns cumulative total of successfully shipped log records.
-    pub fn shipped_records(&self) -> u64 {
-        self.shipped_records.load(Ordering::Relaxed)
-    }
-
-    /// Returns cumulative total of log records that failed to ship due to network or collector errors.
-    pub fn failed_records(&self) -> u64 {
-        self.failed_records.load(Ordering::Relaxed)
     }
 }
 
@@ -117,293 +102,6 @@ impl BackgroundPlugin for OtlpLogShipperPlugin {
     #[inline(always)]
     fn pbww(&self) -> u32 {
         70
-    }
-
-    fn run(
-        self: Arc<Self>,
-        mut shutdown: watch::Receiver<bool>,
-    ) -> Pin<Box<dyn Future<Output = Result<(), PluginError>> + Send>> {
-        Box::pin(async move {
-            let is_grpc = self.config.protocol.eq_ignore_ascii_case("grpc")
-                || self.config.endpoint.starts_with("grpc://")
-                || self.config.endpoint.starts_with("grpcs://");
-
-            let subscriber = self.telemetry_store.subscribe(256);
-            let mut interval =
-                tokio::time::interval(Duration::from_millis(self.config.flush_interval_ms.max(50)));
-            interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
-
-            let connect_timeout = Duration::from_millis(self.config.connect_timeout_ms);
-            let request_timeout = Duration::from_millis(self.config.request_timeout_ms);
-
-            tracing::info!(
-                plugin_id = %self.id,
-                endpoint = %self.config.endpoint,
-                is_grpc = is_grpc,
-                flush_interval_ms = self.config.flush_interval_ms,
-                "Starting OpenTelemetry Log Shipper background loop"
-            );
-
-            if is_grpc {
-                // gRPC HTTP/2 Protobuf Wire path
-                let mut grpc_client = Some(OtlpLogsGrpcClient::new(
-                    &self.config.endpoint,
-                    connect_timeout,
-                    request_timeout,
-                    &self.config.tls,
-                )?);
-                let mut proto_buf = Vec::with_capacity(32 * 1024);
-                let mut records_buf = Vec::with_capacity(32 * 1024);
-                let proto_wire_envelope = OtlpProtoWireEnvelope::new(&self.config.service_name);
-                let mut consecutive_failures: u32 = 0;
-                let mut cooldown_until: Option<tokio::time::Instant> = None;
-
-                loop {
-                    let is_shutting_down = tokio::select! {
-                        _ = interval.tick() => false,
-                        _ = shutdown.changed() => true,
-                    };
-
-                    if cooldown_until.is_some_and(|until| tokio::time::Instant::now() < until) {
-                        let _ = subscriber.drain_batches(64);
-                        tracing::debug!(
-                            plugin_id = %self.id,
-                            "OTLP gRPC log shipper in cool-down; discarded batches to free RAM"
-                        );
-                        if is_shutting_down {
-                            break;
-                        }
-                        continue;
-                    }
-
-                    if cooldown_until.is_some() {
-                        cooldown_until = None;
-                        grpc_client = Some(OtlpLogsGrpcClient::new(
-                            &self.config.endpoint,
-                            connect_timeout,
-                            request_timeout,
-                            &self.config.tls,
-                        )?);
-                        consecutive_failures = 0;
-                    }
-
-                    let batches = subscriber.drain_batches(64);
-
-                    if !batches.is_empty() {
-                        let record_count = proto_wire_envelope.format_records_wire(
-                            &batches,
-                            &mut records_buf,
-                            &mut proto_buf,
-                        );
-                        drop(batches);
-
-                        if record_count > 0 {
-                            if grpc_client.is_none() {
-                                grpc_client = Some(OtlpLogsGrpcClient::new(
-                                    &self.config.endpoint,
-                                    connect_timeout,
-                                    request_timeout,
-                                    &self.config.tls,
-                                )?);
-                            }
-
-                            let client = grpc_client.as_mut().unwrap();
-                            match client.send_logs(&proto_buf, &self.custom_headers).await {
-                                Ok(()) => {
-                                    consecutive_failures = 0;
-                                    self.shipped_records
-                                        .fetch_add(record_count as u64, Ordering::Relaxed);
-                                    tracing::debug!(
-                                        plugin_id = %self.id,
-                                        records = record_count,
-                                        "Exported OTLP logs batch via gRPC"
-                                    );
-                                }
-                                Err(e) => {
-                                    consecutive_failures += 1;
-                                    self.failed_records
-                                        .fetch_add(record_count as u64, Ordering::Relaxed);
-                                    tracing::warn!(
-                                        plugin_id = %self.id,
-                                        error = %e,
-                                        "Failed to send OTLP logs payload via gRPC"
-                                    );
-
-                                    if consecutive_failures <= 10 {
-                                        let backoff_ms = (100u64.saturating_mul(
-                                            1u64 << (consecutive_failures - 1).min(31),
-                                        ))
-                                        .min(2000);
-                                        tokio::time::sleep(Duration::from_millis(backoff_ms)).await;
-                                    } else {
-                                        tracing::warn!(
-                                            plugin_id = %self.id,
-                                            "Shipper failed 10 consecutive times; tearing down connection and entering 30s cool-down"
-                                        );
-                                        grpc_client = None;
-                                        cooldown_until = Some(
-                                            tokio::time::Instant::now() + Duration::from_secs(30),
-                                        );
-                                        consecutive_failures = 0;
-                                    }
-                                }
-                            }
-                        }
-                    }
-
-                    if is_shutting_down {
-                        tracing::info!(
-                            plugin_id = %self.id,
-                            "OTLP log shipper shutting down (gRPC)"
-                        );
-                        break;
-                    }
-                }
-            } else {
-                // HTTP/1.1 JSON Keep-Alive path
-                let mut http_client = Some(OtlpLogClient::new(
-                    &self.config.endpoint,
-                    connect_timeout,
-                    request_timeout,
-                    &self.config.tls,
-                )?);
-                let mut json_buf = Vec::with_capacity(32 * 1024);
-                let mut consecutive_failures: u32 = 0;
-                let mut cooldown_until: Option<tokio::time::Instant> = None;
-
-                loop {
-                    let is_shutting_down = tokio::select! {
-                        _ = interval.tick() => false,
-                        _ = shutdown.changed() => true,
-                    };
-
-                    if cooldown_until.is_some_and(|until| tokio::time::Instant::now() < until) {
-                        let _ = subscriber.drain_batches(64);
-                        tracing::debug!(
-                            plugin_id = %self.id,
-                            "OTLP HTTP log shipper in cool-down; discarded batches to free RAM"
-                        );
-                        if is_shutting_down {
-                            break;
-                        }
-                        continue;
-                    }
-
-                    if cooldown_until.is_some() {
-                        cooldown_until = None;
-                        http_client = Some(OtlpLogClient::new(
-                            &self.config.endpoint,
-                            connect_timeout,
-                            request_timeout,
-                            &self.config.tls,
-                        )?);
-                        consecutive_failures = 0;
-                    }
-
-                    let batches = subscriber.drain_batches(64);
-
-                    if !batches.is_empty() {
-                        let record_count =
-                            format_otlp_records_json(&batches, &self.json_envelope, &mut json_buf);
-                        drop(batches);
-
-                        if record_count > 0 {
-                            if http_client.is_none() {
-                                http_client = Some(OtlpLogClient::new(
-                                    &self.config.endpoint,
-                                    connect_timeout,
-                                    request_timeout,
-                                    &self.config.tls,
-                                )?);
-                            }
-
-                            let client = http_client.as_mut().unwrap();
-                            let send_result =
-                                client.send_logs(&json_buf, &self.custom_headers).await;
-                            match send_result {
-                                Ok(status) if (200..300).contains(&status) => {
-                                    consecutive_failures = 0;
-                                    self.shipped_records
-                                        .fetch_add(record_count as u64, Ordering::Relaxed);
-                                    tracing::debug!(
-                                        plugin_id = %self.id,
-                                        records = record_count,
-                                        status = status,
-                                        "Exported OTLP logs batch via HTTP"
-                                    );
-                                }
-                                Ok(status) => {
-                                    consecutive_failures += 1;
-                                    self.failed_records
-                                        .fetch_add(record_count as u64, Ordering::Relaxed);
-                                    tracing::warn!(
-                                        plugin_id = %self.id,
-                                        status = status,
-                                        "OTLP logs collector rejected HTTP payload"
-                                    );
-
-                                    if consecutive_failures <= 10 {
-                                        let backoff_ms = (100u64.saturating_mul(
-                                            1u64 << (consecutive_failures - 1).min(31),
-                                        ))
-                                        .min(2000);
-                                        tokio::time::sleep(Duration::from_millis(backoff_ms)).await;
-                                    } else {
-                                        tracing::warn!(
-                                            plugin_id = %self.id,
-                                            "Shipper failed 10 consecutive times; tearing down connection and entering 30s cool-down"
-                                        );
-                                        http_client = None;
-                                        cooldown_until = Some(
-                                            tokio::time::Instant::now() + Duration::from_secs(30),
-                                        );
-                                        consecutive_failures = 0;
-                                    }
-                                }
-                                Err(e) => {
-                                    consecutive_failures += 1;
-                                    self.failed_records
-                                        .fetch_add(record_count as u64, Ordering::Relaxed);
-                                    tracing::warn!(
-                                        plugin_id = %self.id,
-                                        error = %e,
-                                        "Failed to send OTLP logs payload via HTTP"
-                                    );
-
-                                    if consecutive_failures <= 10 {
-                                        let backoff_ms = (100u64.saturating_mul(
-                                            1u64 << (consecutive_failures - 1).min(31),
-                                        ))
-                                        .min(2000);
-                                        tokio::time::sleep(Duration::from_millis(backoff_ms)).await;
-                                    } else {
-                                        tracing::warn!(
-                                            plugin_id = %self.id,
-                                            "Shipper failed 10 consecutive times; tearing down connection and entering 30s cool-down"
-                                        );
-                                        http_client = None;
-                                        cooldown_until = Some(
-                                            tokio::time::Instant::now() + Duration::from_secs(30),
-                                        );
-                                        consecutive_failures = 0;
-                                    }
-                                }
-                            }
-                        }
-                    }
-
-                    if is_shutting_down {
-                        tracing::info!(
-                            plugin_id = %self.id,
-                            "OTLP log shipper shutting down (HTTP)"
-                        );
-                        break;
-                    }
-                }
-            }
-
-            Ok(())
-        })
     }
 
     #[inline(always)]
@@ -420,52 +118,162 @@ impl BackgroundPlugin for OtlpLogShipperPlugin {
     fn direction(&self) -> Direction {
         Direction::Background
     }
-}
 
-#[cfg(test)]
-mod tests {
-    use super::*;
-    use std::collections::HashMap;
+    #[inline(always)]
+    fn etp_id(&self) -> Option<&str> {
+        Some(&self.config.etp_id)
+    }
 
-    #[test]
-    fn test_exponential_backoff_progression() {
-        for failures in 1..=10 {
-            let backoff_ms = (100u64.saturating_mul(1u64 << (failures - 1).min(31))).min(2000);
-            match failures {
-                1 => assert_eq!(backoff_ms, 100),
-                2 => assert_eq!(backoff_ms, 200),
-                3 => assert_eq!(backoff_ms, 400),
-                4 => assert_eq!(backoff_ms, 800),
-                5 => assert_eq!(backoff_ms, 1600),
-                6..=10 => assert_eq!(backoff_ms, 2000),
-                _ => unreachable!(),
+    fn attach_etp(&self, instance: &EtpInstance) -> Result<(), PluginError> {
+        match &instance.backend {
+            EtpBackend::Otlp(pool) => {
+                let _ = self.etp.set(Arc::clone(pool));
+                Ok(())
             }
+            _ => Err(PluginError::Config(format!(
+                "OTLP Logs plugin '{}' requires an 'otlp' ETP for etp_id '{}', got '{}'",
+                self.id, self.config.etp_id, instance.kind
+            ))),
         }
     }
 
-    #[tokio::test]
-    async fn test_otlp_log_shipper_shutdown() {
-        let store = Arc::new(TelemetryStore::new());
-        let config = OtlpLogShipperConfig {
-            protocol: "http".to_string(),
-            endpoint: "http://127.0.0.1:4318/v1/logs".to_string(),
-            service_name: "test-service".to_string(),
-            flush_interval_ms: 50,
-            max_batch_size: 100,
-            connect_timeout_ms: 1000,
-            request_timeout_ms: 1000,
-            headers: HashMap::new(),
-            tls: Default::default(),
-        };
+    fn run(
+        self: Arc<Self>,
+        mut shutdown: watch::Receiver<bool>,
+    ) -> Pin<Box<dyn Future<Output = Result<(), PluginError>> + Send>> {
+        Box::pin(async move {
+            let etp = self.etp.get().ok_or_else(|| {
+                PluginError::Config(format!(
+                    "OTLP Logs plugin '{}' has no attached OtlpEtp for etp_id '{}'",
+                    self.id, self.config.etp_id
+                ))
+            })?;
 
-        let plugin =
-            Arc::new(OtlpLogShipperPlugin::with_store("otlp_log_test", config, store).unwrap());
-        let (tx, rx) = watch::channel(false);
+            let wire_template = wire::bake_wire_template(&etp.config)?;
+            let use_json = matches!(etp.config.protocol, OtlpProtocol::HttpJson);
+            let json_envelope = use_json.then(|| OtlpJsonEnvelope::new(&self.config.service_name));
+            let proto_envelope =
+                (!use_json).then(|| OtlpProtoWireEnvelope::new(&self.config.service_name));
 
-        let handle = tokio::spawn(async move { plugin.run(rx).await });
+            let request_timeout = Duration::from_millis(self.config.request_timeout_ms);
+            let subscriber = self.telemetry_store.subscribe(256);
+            let mut interval =
+                tokio::time::interval(Duration::from_millis(self.config.flush_interval_ms.max(50)));
+            interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
 
-        tx.send(true).unwrap();
-        let res = handle.await.unwrap();
-        assert!(res.is_ok());
+            tracing::info!(
+                plugin_id = %self.id,
+                etp_id = %etp.config.id,
+                endpoint = %etp.config.endpoint,
+                protocol = ?etp.config.protocol,
+                flush_interval_ms = self.config.flush_interval_ms,
+                "Starting OpenTelemetry Log Shipper via OtlpEtp pool"
+            );
+
+            let mut head_buf = Vec::with_capacity(512);
+            let mut payload_buf = Vec::with_capacity(32 * 1024);
+            let mut proto_records_buf = Vec::with_capacity(32 * 1024);
+            let mut resp_buf = Vec::with_capacity(1024);
+            let mut consecutive_failures: u32 = 0;
+            let mut cooldown_until: Option<tokio::time::Instant> = None;
+
+            loop {
+                let is_shutting_down = tokio::select! {
+                    _ = interval.tick() => false,
+                    _ = shutdown.changed() => true,
+                };
+
+                if cooldown_until.is_some_and(|until| tokio::time::Instant::now() < until) {
+                    let _ = subscriber.drain_batches(64);
+                    tracing::debug!(
+                        plugin_id = %self.id,
+                        "OTLP log shipper in 30s cool-down; discarded batches to free RAM"
+                    );
+                } else {
+                    if cooldown_until.is_some() {
+                        cooldown_until = None;
+                        consecutive_failures = 0;
+                        tracing::info!(
+                            plugin_id = %self.id,
+                            "OTLP log shipper cool-down ended; resuming exports"
+                        );
+                    }
+
+                    let batches = subscriber.drain_batches(64);
+                    if !batches.is_empty() {
+                        let record_count = if let Some(ref env) = json_envelope {
+                            format_otlp_records_json(&batches, env, &mut payload_buf)
+                        } else if let Some(ref env) = proto_envelope {
+                            env.format_records_wire(
+                                &batches,
+                                &mut proto_records_buf,
+                                &mut payload_buf,
+                            )
+                        } else {
+                            0
+                        };
+                        drop(batches);
+
+                        if record_count > 0 {
+                            match wire::push_logs(
+                                etp,
+                                &wire_template,
+                                &mut head_buf,
+                                &payload_buf,
+                                &mut resp_buf,
+                                request_timeout,
+                            )
+                            .await
+                            {
+                                Ok(()) => {
+                                    consecutive_failures = 0;
+                                    self.shipped_records
+                                        .fetch_add(record_count as u64, Ordering::Relaxed);
+                                }
+                                Err(e) => {
+                                    consecutive_failures += 1;
+                                    self.failed_records
+                                        .fetch_add(record_count as u64, Ordering::Relaxed);
+                                    tracing::warn!(
+                                        plugin_id = %self.id,
+                                        etp_id = %etp.config.id,
+                                        error = %e,
+                                        records = record_count,
+                                        attempt = consecutive_failures,
+                                        "Failed to push OTLP logs payload"
+                                    );
+
+                                    if consecutive_failures <= 10 {
+                                        if !is_shutting_down {
+                                            let backoff_ms = (100u64.saturating_mul(
+                                                1u64 << (consecutive_failures - 1).min(31),
+                                            ))
+                                            .min(2000);
+                                            tokio::time::sleep(Duration::from_millis(backoff_ms))
+                                                .await;
+                                        }
+                                    } else {
+                                        tracing::warn!(
+                                            plugin_id = %self.id,
+                                            "OTLP log shipper failed 10 consecutive times; entering 30s cool-down"
+                                        );
+                                        cooldown_until = Some(
+                                            tokio::time::Instant::now() + Duration::from_secs(30),
+                                        );
+                                        consecutive_failures = 0;
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+
+                if is_shutting_down {
+                    break;
+                }
+            }
+
+            Ok(())
+        })
     }
 }

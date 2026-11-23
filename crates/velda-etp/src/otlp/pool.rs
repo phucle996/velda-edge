@@ -1,20 +1,20 @@
-//! Lock-free OTLP ETP connection pool (`OtlpEtp`) backed by [`EtpPageArena<EtpStream>`]
-//! and 64B-aligned [`ColdConnectBlueprint`].
+//! Lock-free OTLP ETP connection pool (`OtlpEtp`) backed by [`EtpPageArena<OtlpConn>`]
+//! and 64B-aligned [`ColdConnectBlueprint`] supporting HTTP/1.1 (`Http`) and HTTP/2 (`Grpc`).
 //!
 //! ```text
-//!   OtlpEtp::new() ──► ColdConnectBlueprint + (N+1)*4096B EtpPageArena<EtpStream>
-//!         │
+//!   OtlpEtp::new() ──► ColdConnectBlueprint + (N+1)*4096B EtpPageArena<OtlpConn>
+//!         │              └─ Grpc builds TLS target with ALPN ["h2"]
 //!         ▼
 //!   warm() / acquire() / try_acquire()
 //!         ├─► Ready hit (TZCNT) ──► borrow Slot[idx] in-place ──► OtlpLease(idx)
-//!         └─► Miss / Burst      ──► claim_empty_slot(true) -> blueprint.connect_stream()
-//!                                   -> write_leased_slot(idx) -> OtlpLease(idx)
+//!         └─► Miss / Burst      ──► connect_fresh():
+//!               ├─ HttpProtobuf | HttpJson ──► EtpStream ──► OtlpConn::Http(stream)
+//!               └─ Grpc ──► h2::client::handshake + spawn driver + ready() ──► OtlpConn::Grpc
 //!
-//!   Cold Blueprint & Page Arena Layout:
+//!   Cache-Line Slot Geometry:
 //!   ┌────────────────────────────────────────────────────────────────────────────┐
+//!   │ ArenaSlot<OtlpConn> == 64B (cache-line aligned; compile-time asserted)     │
 //!   │ ColdConnectBlueprint (64B aligned, isolated): id | ColdTargetAddr | TLS    │
-//!   ├────────────────────────────────────────────────────────────────────────────┤
-//!   │ Arena: Cache Line 0 (64B) | Slot[idx] at (idx << 6) + 64 | +4096B Spare    │
 //!   └────────────────────────────────────────────────────────────────────────────┘
 //! ```
 
@@ -24,18 +24,28 @@ use std::time::Duration;
 
 use tokio::sync::Semaphore;
 
-use crate::arena::{EtpPageArena, ReadyAcquire};
+use crate::arena::{ArenaSlot, EtpPageArena, ReadyAcquire};
 use crate::config::EtpEntryConfig;
-use crate::connect::{ColdConnectBlueprint, EtpStream, build_tls_target};
+use crate::connect::{
+    ColdConnectBlueprint, EtpStream, build_tls_target, build_tls_target_with_alpn,
+};
 use crate::error::EtpError;
-use crate::otlp::config::OtlpEtpConfig;
+use crate::otlp::config::{OtlpEtpConfig, OtlpProtocol};
 use crate::otlp::lease::OtlpLease;
+
+/// Pooled OTLP connection stored in-place inside [`ArenaSlot<OtlpConn>`].
+pub enum OtlpConn {
+    Http(EtpStream),
+    Grpc(h2::client::SendRequest<bytes::Bytes>),
+}
+
+const _: () = assert!(std::mem::size_of::<ArenaSlot<OtlpConn>>() == 64);
 
 /// Lock-free bounded pool of connections to an OpenTelemetry OTLP collector.
 pub struct OtlpEtp {
     pub config: OtlpEtpConfig,
     pub blueprint: ColdConnectBlueprint,
-    pub arena: EtpPageArena<EtpStream>,
+    pub arena: EtpPageArena<OtlpConn>,
     pub semaphore: Semaphore,
     pub connect_timeout: Duration,
     pub idle_timeout_secs: u64,
@@ -63,7 +73,14 @@ impl OtlpEtp {
 
     /// Creates a new `OtlpEtp` pool from a parsed [`OtlpEtpConfig`].
     pub fn new(config: OtlpEtpConfig) -> Result<Self, EtpError> {
-        let tls_target = build_tls_target(&config.id, &config.host, config.tls.as_ref())?;
+        let tls_target = match config.protocol {
+            OtlpProtocol::HttpProtobuf | OtlpProtocol::HttpJson => {
+                build_tls_target(&config.id, &config.host, config.tls.as_ref())?
+            }
+            OtlpProtocol::Grpc => {
+                build_tls_target_with_alpn(&config.id, &config.host, config.tls.as_ref(), &[b"h2"])?
+            }
+        };
         let connect_timeout = Duration::from_millis(config.pool.connect_timeout_ms.max(1));
         let idle_timeout_secs = config.pool.idle_timeout_ms.div_ceil(1000);
 
@@ -88,8 +105,47 @@ impl OtlpEtp {
         })
     }
 
-    pub(crate) async fn connect_fresh(&self) -> Result<EtpStream, EtpError> {
-        self.blueprint.connect_stream().await
+    pub(crate) async fn connect_fresh(&self) -> Result<OtlpConn, EtpError> {
+        let stream = self.blueprint.connect_stream().await?;
+        match self.config.protocol {
+            OtlpProtocol::HttpProtobuf | OtlpProtocol::HttpJson => Ok(OtlpConn::Http(stream)),
+            OtlpProtocol::Grpc => {
+                let (send_request, connection) =
+                    match tokio::time::timeout(self.connect_timeout, h2::client::handshake(stream))
+                        .await
+                    {
+                        Ok(Ok(pair)) => pair,
+                        Ok(Err(e)) => {
+                            return Err(EtpError::Tls(format!(
+                                "OTLP ETP '{}' HTTP/2 handshake failed: {e}",
+                                self.config.id
+                            )));
+                        }
+                        Err(_) => {
+                            return Err(EtpError::Timeout {
+                                id: self.config.id.clone(),
+                                timeout_ms: u64::try_from(self.connect_timeout.as_millis())
+                                    .unwrap_or(u64::MAX),
+                            });
+                        }
+                    };
+
+                tokio::spawn(async move {
+                    if let Err(err) = connection.await {
+                        tracing::debug!(error = %err, "OTLP H2 connection driver terminated");
+                    }
+                });
+
+                let ready_req = send_request.ready().await.map_err(|e| {
+                    EtpError::Io(std::io::Error::other(format!(
+                        "OTLP ETP '{}' HTTP/2 client not ready: {e}",
+                        self.config.id
+                    )))
+                })?;
+
+                Ok(OtlpConn::Grpc(ready_req))
+            }
+        }
     }
 
     /// Pre-warms up to `baseline_slots` connections to the OTLP collector.
@@ -117,8 +173,8 @@ impl OtlpEtp {
                 break;
             };
             match self.connect_fresh().await {
-                Ok(stream) => {
-                    guard.commit_warm(stream);
+                Ok(conn) => {
+                    guard.commit_warm(conn);
                 }
                 Err(err) => {
                     drop(guard);
@@ -178,8 +234,8 @@ impl OtlpEtp {
             });
         };
 
-        let stream = self.connect_fresh().await?;
-        let slot_idx = guard.commit_leased(stream);
+        let conn = self.connect_fresh().await?;
+        let slot_idx = guard.commit_leased(conn);
         permit.forget();
         Ok(OtlpLease::new(Arc::clone(self), slot_idx))
     }
@@ -213,8 +269,8 @@ impl OtlpEtp {
                         break;
                     };
                     match pool.connect_fresh().await {
-                        Ok(stream) => {
-                            guard.commit_warm(stream);
+                        Ok(conn) => {
+                            guard.commit_warm(conn);
                             drop(permit);
                         }
                         Err(err) => {

@@ -1,10 +1,11 @@
 //! OTLP connection lease (`OtlpLease`) borrowing `Slot[idx]` in-place inside [`EtpPageArena`]
-//! with direct `Deref`/`DerefMut` to [`EtpStream`], in-place `reconnect()`, and
+//! with direct `Deref`/`DerefMut` to [`OtlpConn`], in-place `reconnect()`, and
 //! `recreate_in_background()`.
 //!
 //! ```text
-//!   Plugin uses OtlpLease (Deref / DerefMut -> &mut EtpStream at Slot[idx])
+//!   Plugin uses OtlpLease (Deref / DerefMut -> &mut OtlpConn at Slot[idx])
 //!         │
+//!         ├─► OtlpConn::Http(EtpStream)  |  OtlpConn::Grpc(h2::client::SendRequest)
 //!         ├─► reconnect().await ──► connect_fresh -> replace_leased_slot(Slot[idx])
 //!         ├─► recreate_in_background() ──► sets broken = true
 //!         └─► Drop:
@@ -16,7 +17,7 @@
 //!   In-Place Lease Memory Handle (24 Bytes):
 //!   ┌────────────────────────────────────────────────────────────────────────────┐
 //!   │ OtlpLease { pool: Arc<OtlpEtp>, slot_idx: usize, broken: bool }            │
-//!   │   ──► &(pool.arena + (slot_idx << 6) + 64) : EtpStream (zero pointer jump) │
+//!   │   ──► &(pool.arena + (slot_idx << 6) + 64) : OtlpConn (zero pointer jump)  │
 //!   └────────────────────────────────────────────────────────────────────────────┘
 //! ```
 
@@ -24,11 +25,10 @@ use std::fmt;
 use std::ops::{Deref, DerefMut};
 use std::sync::Arc;
 
-use crate::connect::EtpStream;
 use crate::error::EtpError;
-use crate::otlp::pool::OtlpEtp;
+use crate::otlp::pool::{OtlpConn, OtlpEtp};
 
-/// Exclusive RAII lease borrowing an OTLP [`EtpStream`] in-place at `Slot[idx]`.
+/// Exclusive RAII lease borrowing an [`OtlpConn`] in-place at `Slot[idx]`.
 pub struct OtlpLease {
     pub pool: Arc<OtlpEtp>,
     pub slot_idx: usize,
@@ -48,7 +48,7 @@ impl fmt::Debug for OtlpLease {
 }
 
 impl Deref for OtlpLease {
-    type Target = EtpStream;
+    type Target = OtlpConn;
 
     #[inline(always)]
     fn deref(&self) -> &Self::Target {
@@ -72,8 +72,8 @@ impl OtlpLease {
         }
     }
 
-    /// Establishes a fresh OTLP connection and replaces `Slot[idx]` in-place
-    /// while retaining the semaphore permit.
+    /// Establishes a fresh OTLP HTTP/1.1 or HTTP/2 connection and replaces `Slot[idx]`
+    /// in-place while retaining the semaphore permit.
     pub async fn reconnect(&mut self) -> Result<(), EtpError> {
         self.broken = true;
         let fresh = self.pool.connect_fresh().await?;

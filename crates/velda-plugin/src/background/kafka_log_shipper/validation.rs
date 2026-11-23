@@ -1,11 +1,18 @@
-//! Kafka Log Shipper Schema & Semantic Validation.
+//! Kafka Log Shipper Schema & Semantic Validation (`kafka_log_shipper::validation`).
+//!
+//! ```text
+//!   serde_json::Value ──► Deserialize KafkaLogShipperConfig
+//!         │
+//!         ├─► etp_id.trim().is_empty()                    ──► Err(PluginError::Config)
+//!         ├─► topic invalid (1..=249, [a-zA-Z0-9._-])     ──► Err(PluginError::Config)
+//!         ├─► format | compression | acks | partitioner   ──► strict enum parse
+//!         └─► flush_interval | max_batch | timeout | meta ──► bounded range validation
+//! ```
 
-use super::config::{KafkaLogShipperConfig, KafkaTransportSecurity};
+use super::config::KafkaLogShipperConfig;
 use crate::error::PluginError;
 
-/// Validates topic name against Kafka's canonical naming rules:
-/// - Maximum length 249 characters
-/// - Contains only ASCII alphanumeric characters, periods (.), underscores (_), and hyphens (-)
+/// Validates topic name against Kafka's canonical naming rules.
 fn validate_kafka_topic_name(plugin_id: &str, topic: &str) -> Result<(), PluginError> {
     let t = topic.trim();
     if t.is_empty() {
@@ -36,54 +43,6 @@ fn validate_kafka_topic_name(plugin_id: &str, topic: &str) -> Result<(), PluginE
     Ok(())
 }
 
-/// Validates individual broker address formatted as `host:port` or `[ipv6]:port`.
-fn validate_broker_address(plugin_id: &str, broker: &str) -> Result<(), PluginError> {
-    let b = broker.trim();
-    if b.is_empty() {
-        return Err(PluginError::Config(format!(
-            "Plugin '{plugin_id}': broker address entry cannot be empty"
-        )));
-    }
-
-    let (host, port_str) = if b.starts_with('[') {
-        // Bracketed IPv6: [::1]:9092
-        let Some(close_bracket) = b.find(']') else {
-            return Err(PluginError::Config(format!(
-                "Plugin '{plugin_id}': invalid IPv6 broker address '{b}' (missing closing bracket)"
-            )));
-        };
-        let h = &b[1..close_bracket];
-        let rest = &b[close_bracket + 1..];
-        if !rest.starts_with(':') {
-            return Err(PluginError::Config(format!(
-                "Plugin '{plugin_id}': invalid IPv6 broker address '{b}' (missing port separator ':')"
-            )));
-        }
-        (h, &rest[1..])
-    } else {
-        // Hostname or IPv4: host:9092
-        let Some(colon_pos) = b.rfind(':') else {
-            return Err(PluginError::Config(format!(
-                "Plugin '{plugin_id}': invalid broker address '{b}': expected 'host:port'"
-            )));
-        };
-        (&b[..colon_pos], &b[colon_pos + 1..])
-    };
-
-    if host.trim().is_empty() {
-        return Err(PluginError::Config(format!(
-            "Plugin '{plugin_id}': broker host cannot be empty in '{b}'"
-        )));
-    }
-
-    match port_str.trim().parse::<u16>() {
-        Ok(port) if port > 0 => Ok(()),
-        _ => Err(PluginError::Config(format!(
-            "Plugin '{plugin_id}': invalid broker port in '{b}' (must be 1..=65535)"
-        ))),
-    }
-}
-
 /// Validates [`KafkaLogShipperConfig`] at configuration compilation time.
 pub fn validate_kafka_log_shipper_config(
     plugin_id: &str,
@@ -95,74 +54,13 @@ pub fn validate_kafka_log_shipper_config(
         ))
     })?;
 
-    if cfg.brokers.is_empty() {
+    if cfg.etp_id.trim().is_empty() {
         return Err(PluginError::Config(format!(
-            "Plugin '{plugin_id}': 'brokers' array cannot be empty (at least one seed broker required)"
+            "Plugin '{plugin_id}': 'etp_id' cannot be empty"
         )));
     }
 
-    for broker in &cfg.brokers {
-        validate_broker_address(plugin_id, broker)?;
-    }
-
     validate_kafka_topic_name(plugin_id, &cfg.topic)?;
-
-    let sec = cfg
-        .parsed_transport_security()
-        .map_err(|e| PluginError::Config(format!("Plugin '{plugin_id}': {e}")))?;
-
-    match sec {
-        KafkaTransportSecurity::Plain => {
-            if cfg.tls.client_cert_pem.is_some() || cfg.tls.client_key_pem.is_some() {
-                return Err(PluginError::Config(format!(
-                    "Plugin '{plugin_id}': transport_security is 'plain' but client certificates are configured in 'tls'."
-                )));
-            }
-        }
-        KafkaTransportSecurity::Tls => {
-            if cfg.tls.client_cert_pem.is_some() || cfg.tls.client_key_pem.is_some() {
-                return Err(PluginError::Config(format!(
-                    "Plugin '{plugin_id}': transport_security is 'tls' (server auth) but client certificates are provided in 'tls'. Use transport_security 'mtls' for mutual TLS."
-                )));
-            }
-            cfg.tls.build_client_config(&[]).map_err(|e| {
-                PluginError::Config(format!(
-                    "Plugin '{plugin_id}': invalid inline TLS configuration: {e}"
-                ))
-            })?;
-        }
-        KafkaTransportSecurity::Mtls => {
-            if cfg.tls.client_cert_pem.is_none() || cfg.tls.client_key_pem.is_none() {
-                return Err(PluginError::Config(format!(
-                    "Plugin '{plugin_id}': transport_security 'mtls' requires both 'client_cert_pem' and 'client_key_pem' in 'tls' config"
-                )));
-            }
-            cfg.tls.build_client_config(&[]).map_err(|e| {
-                PluginError::Config(format!(
-                    "Plugin '{plugin_id}': invalid inline mTLS configuration: {e}"
-                ))
-            })?;
-        }
-    }
-
-    let sasl = cfg
-        .parsed_sasl_mechanism()
-        .map_err(|e| PluginError::Config(format!("Plugin '{plugin_id}': {e}")))?;
-
-    if sasl.is_auth_required() {
-        if cfg.sasl_username.trim().is_empty() {
-            return Err(PluginError::Config(format!(
-                "Plugin '{plugin_id}': sasl_username cannot be empty when sasl_mechanism is '{}'",
-                sasl.as_str()
-            )));
-        }
-        if cfg.sasl_password.is_empty() {
-            return Err(PluginError::Config(format!(
-                "Plugin '{plugin_id}': sasl_password cannot be empty when sasl_mechanism is '{}'",
-                sasl.as_str()
-            )));
-        }
-    }
 
     cfg.parsed_compression()
         .map_err(|e| PluginError::Config(format!("Plugin '{plugin_id}': {e}")))?;
@@ -190,13 +88,6 @@ pub fn validate_kafka_log_shipper_config(
         )));
     }
 
-    if !(100..=60_000).contains(&cfg.connect_timeout_ms) {
-        return Err(PluginError::Config(format!(
-            "Plugin '{plugin_id}': connect_timeout_ms must be between 100 and 60,000 ms, found {}",
-            cfg.connect_timeout_ms
-        )));
-    }
-
     if !(100..=60_000).contains(&cfg.request_timeout_ms) {
         return Err(PluginError::Config(format!(
             "Plugin '{plugin_id}': request_timeout_ms must be between 100 and 60,000 ms, found {}",
@@ -212,4 +103,64 @@ pub fn validate_kafka_log_shipper_config(
     }
 
     Ok(cfg)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::background::kafka_log_shipper::config::{KafkaAckMode, PartitionStrategy};
+
+    #[test]
+    fn test_valid_kafka_log_shipper_config() {
+        let minimal = serde_json::json!({
+            "etp_id": "kafka-main",
+            "topic": "velda_logs"
+        });
+        let cfg = validate_kafka_log_shipper_config("kafka", &minimal).unwrap();
+        assert_eq!(cfg.etp_id, "kafka-main");
+        assert_eq!(cfg.topic, "velda_logs");
+        assert_eq!(cfg.parsed_acks().unwrap(), KafkaAckMode::Leader);
+        assert_eq!(
+            cfg.parsed_partitioner().unwrap(),
+            PartitionStrategy::RoundRobin
+        );
+    }
+
+    #[test]
+    fn test_invalid_kafka_log_shipper_config() {
+        assert!(
+            validate_kafka_log_shipper_config("kafka", &serde_json::json!({ "topic": "ok" }))
+                .is_err()
+        );
+        assert!(
+            validate_kafka_log_shipper_config(
+                "kafka",
+                &serde_json::json!({ "etp_id": "   ", "topic": "ok" })
+            )
+            .is_err()
+        );
+        for bad_topic in ["", "bad topic", "a/b", ".", ".."] {
+            assert!(
+                validate_kafka_log_shipper_config(
+                    "kafka",
+                    &serde_json::json!({ "etp_id": "kafka-main", "topic": bad_topic })
+                )
+                .is_err()
+            );
+        }
+        assert!(
+            validate_kafka_log_shipper_config(
+                "kafka",
+                &serde_json::json!({ "etp_id": "k", "topic": "t", "max_batch_size": 0 })
+            )
+            .is_err()
+        );
+        assert!(
+            validate_kafka_log_shipper_config(
+                "kafka",
+                &serde_json::json!({ "etp_id": "k", "topic": "t", "flush_interval_ms": 50 })
+            )
+            .is_err()
+        );
+    }
 }

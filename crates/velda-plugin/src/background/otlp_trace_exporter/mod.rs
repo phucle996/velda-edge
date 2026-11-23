@@ -1,24 +1,24 @@
-//! OpenTelemetry Trace Exporter Background Plugin Module (`otlp_trace_exporter`).
+//! OpenTelemetry Trace Exporter Background Plugin (`otlp_trace_exporter`).
 //!
 //! ```text
-//!    TelemetryStore (Unified Observability Core)
-//!          │
-//!          ▼
-//!   subscribe(32) ──► TelemetrySubscriber (Shared leases refcount on rotating TelemetryBatchPool)
-//!                           │
-//!                           ▼
-//!              OtlpTraceExporterPlugin (Shadow Worker, weight: 50)
-//!              ├── gRPC (HTTP/2 Protobuf: ExportTraceServiceRequest)
-//!              └── HTTP (HTTP/1.1 JSON: /v1/traces)
+//!   TelemetryStore ──► JSON / Protobuf Wire Encode ──► wire::push_traces(&etp, ...)
+//!                                                             │
+//!                                                             ▼
+//!                                               OtlpEtp::acquire() ──► OtlpLease
+//!
+//!   Module Boundaries:
+//!   ┌────────────────────────────────────────────────────────────────────────────┐
+//!   │ config.rs | validation.rs | json/ | proto/ | wire.rs | plugin.rs           │
+//!   └────────────────────────────────────────────────────────────────────────────┘
 //! ```
 
-mod config;
-mod json;
-mod plugin;
-mod proto;
-mod validation;
+pub mod config;
+pub mod json;
+pub mod plugin;
+pub mod proto;
+pub mod validation;
+pub mod wire;
 
-// Root exports only
 pub use config::OtlpTraceExporterConfig;
 pub use plugin::OtlpTraceExporterPlugin;
 pub use validation::validate_otlp_trace_exporter_config;

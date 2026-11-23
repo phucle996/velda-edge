@@ -5,13 +5,13 @@
 //!         │
 //!         ├─► resolve_endpoint() ──► (host, port) [default 9200]
 //!         ├─► format_host_header() + extract_endpoint_path() ──► host_header, base_path
-//!         ├─► extract index, api_key, basic_auth
+//!         ├─► extract index, api_key, basic_auth, bearer_token
 //!         └─► Ok(ElasticsearchEtpConfig)
 //!
 //!   Parsed Configuration Layout:
 //!   ┌────────────────────────────────────────────────────────────────────────────┐
 //!   │ id | endpoint | host | port | host_header | base_path                      │
-//!   │ index | api_key | basic_auth | pool | tls                                  │
+//!   │ index | api_key | basic_auth | bearer_token | pool | tls                   │
 //!   └────────────────────────────────────────────────────────────────────────────┘
 //! ```
 
@@ -35,6 +35,7 @@ pub struct ElasticsearchEtpConfig {
     pub index: Option<String>,
     pub api_key: Option<String>,
     pub basic_auth: Option<String>,
+    pub bearer_token: Option<String>,
     pub pool: EtpPoolSettings,
     pub tls: Option<EtpTlsConfig>,
 }
@@ -93,6 +94,24 @@ impl ElasticsearchEtpConfig {
             .and_then(|v| v.as_str())
             .map(str::trim)
             .filter(|s| !s.is_empty())
+            .map(ToString::to_string)
+            .or_else(|| {
+                let user = obj
+                    .get("username")
+                    .or_else(|| obj.get("user"))
+                    .and_then(|v| v.as_str())
+                    .map(str::trim)
+                    .filter(|s| !s.is_empty())?;
+                let pass = obj.get("password").and_then(|v| v.as_str())?;
+                Some(format!("{user}:{pass}"))
+            });
+
+        let bearer_token = obj
+            .get("bearer_token")
+            .or_else(|| obj.get("token"))
+            .and_then(|v| v.as_str())
+            .map(str::trim)
+            .filter(|s| !s.is_empty())
             .map(ToString::to_string);
 
         Ok(Self {
@@ -105,8 +124,59 @@ impl ElasticsearchEtpConfig {
             index,
             api_key,
             basic_auth,
+            bearer_token,
             pool: entry.pool.clone(),
             tls: entry.tls.clone(),
         })
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::config::EtpPoolSettings;
+
+    fn entry_with_settings(settings: serde_json::Value) -> EtpEntryConfig {
+        EtpEntryConfig {
+            id: "es-unit".into(),
+            kind: EtpKind::Elasticsearch,
+            pool: EtpPoolSettings::default(),
+            tls: None,
+            settings,
+        }
+    }
+
+    #[test]
+    fn test_es_etp_parses_bearer_token_and_basic_auth_variants() {
+        let cfg1 = ElasticsearchEtpConfig::from_entry(&entry_with_settings(serde_json::json!({
+            "endpoint": "http://127.0.0.1:9200/proxy",
+            "bearer_token": "tok-primary",
+            "username": "elastic",
+            "password": "changeme"
+        })))
+        .unwrap();
+        assert_eq!(cfg1.base_path, "/proxy");
+        assert_eq!(cfg1.bearer_token.as_deref(), Some("tok-primary"));
+        assert_eq!(cfg1.basic_auth.as_deref(), Some("elastic:changeme"));
+
+        let cfg2 = ElasticsearchEtpConfig::from_entry(&entry_with_settings(serde_json::json!({
+            "host": "127.0.0.1",
+            "port": 9200,
+            "token": "tok-alias",
+            "user": "reader",
+            "password": ""
+        })))
+        .unwrap();
+        assert_eq!(cfg2.bearer_token.as_deref(), Some("tok-alias"));
+        assert_eq!(cfg2.basic_auth.as_deref(), Some("reader:"));
+
+        let cfg3 = ElasticsearchEtpConfig::from_entry(&entry_with_settings(serde_json::json!({
+            "host": "127.0.0.1",
+            "port": 9200,
+            "basic_auth": "dXNlcjpwYXNz"
+        })))
+        .unwrap();
+        assert_eq!(cfg3.basic_auth.as_deref(), Some("dXNlcjpwYXNz"));
+        assert_eq!(cfg3.bearer_token, None);
     }
 }

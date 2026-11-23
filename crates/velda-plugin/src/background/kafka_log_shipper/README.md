@@ -1,25 +1,40 @@
 # Kafka Log Shipper (`kafka_log_shipper`)
 
-`kafka_log_shipper` is a native, pure-Rust, high-throughput background observability plugin for the **Velda Edge Data Plane**. It drains full access log records from core-local lock-free SPSC rings, encodes them into native **Kafka RecordBatch v2** wire frames (`magic = 2`), compresses them using **Zstandard** or **Gzip**, and produces them directly to partition leader brokers over persistent TCP or TLS connections.
+`kafka_log_shipper` is a native, pure-Rust background observability plugin for the **Velda Edge Data Plane**. It drains access log records from core-local SPSC rings, encodes them into **Kafka RecordBatch v2** wire frames (`magic = 2`), compresses batches with **Zstandard** or **Gzip**, and produces them over pooled connections borrowed from [`velda_etp::kafka::KafkaEtp`](../../../velda-etp/src/kafka/mod.rs).
 
 ---
 
 ## 1. Key Architectural Features
 
-- **Strict Frontline Isolation**: Executes exclusively on companion Shadow Logistics Workers (`velda-shadow-{id}`) pinned to the same CPU cores under Linux `SCHED_IDLE`. Frontline Traffic Workers never touch sockets, never format strings, and never block.
-- **Zero Extra C-Dependencies**: Pure Rust implementation of the Kafka wire protocol (Produce v7, Metadata v4, SaslHandshake v1, SaslAuthenticate v1, and Castagnoli CRC32-C). Eliminates crashes, memory leaks, and compilation hurdles associated with C libraries like `librdkafka`.
-- **Zero Rebalance Risk When Scaling Gateway Nodes**:
-  - `kafka_log_shipper` is strictly a **Kafka Producer**, not a Consumer!
-  - It does **not** join any consumer group and never sends `JoinGroup`, `SyncGroup`, or `Heartbeat` requests.
-  - Gateway nodes can be scaled horizontally from 2 to 100+ pods without causing any consumer rebalance storms or broker churn.
-- **Auto-Generated Per-Node `client_id`**: Dynamically derives `velda-edge-{hostname}-{pid}` upon process start. Ensures that each gateway container or VM is identifiable in Kafka broker connection logs and JMX metrics without requiring manual per-node configuration.
-- **Automatic Partition Leader Failover**: Detects Kafka cluster partition reassignments (`NOT_LEADER_OR_FOLLOWER` error code 6) and automatically triggers Metadata refreshes to route subsequent produce batches to the new leader broker without downtime.
-- **High-Performance RecordBatch v2 Framing**: Implements Kafka's batch layout with hardware-accelerated Castagnoli CRC32-C checksumming, LEB128 Zigzag varints, and optional block-level Zstandard (`zstd`) compression.
-- **30-Second Cool-Down Memory Shield**: If consecutive push operations fail repeatedly, the plugin activates a protective 30-second cool-down window, dropping incoming batches lock-free to strictly cap gateway RAM footprint.
+- **Strict Frontline Isolation**: Executes exclusively on companion Shadow Logistics Workers (`velda-shadow-{id}`) pinned under Linux `SCHED_IDLE`. Frontline Traffic Workers never touch sockets, never format strings, and never block.
+- **Shared `velda-etp` Connection Lifecycle**: Broker endpoints, `client_id`, TCP/TLS/mTLS handshakes, optional SASL authentication (`SaslHandshake` v1 + `SaslAuthenticate` v1 on connect), and lock-free `EtpPageArena` slot leasing (`KafkaLease`) live in `velda-etp::kafka`.
+- **Zero Extra C-Dependencies**: Pure Rust Kafka binary wire protocol (`Produce` v7, `Metadata` v4, `SaslHandshake` v1, `SaslAuthenticate` v1, Castagnoli CRC32-C).
+- **Zero Consumer Rebalance Risk**: Strictly produces batches (`ProduceRequest`, API key 0) without joining consumer groups (`JoinGroup`/`SyncGroup`/`Heartbeat`).
+- **Dynamic Leader Failover & In-Place Reconnect**: Automatically triggers `Metadata` refreshes on `NOT_LEADER_OR_FOLLOWER` (6) or `UNKNOWN_TOPIC_OR_PARTITION` (3), retries once via `lease.reconnect().await` on idle broker disconnects, and marks unhealthy slots for background recreation on timeouts or persistent errors.
+- **30-Second Cool-Down Memory Shield**: After >10 consecutive push failures, drops incoming batches during cool-down to cap memory footprint.
 
 ---
 
-## 2. Configuration Reference
+## 2. Configuration Reference (`etp.json` + `plugins.json`)
+
+Define the broker pool in `/etc/velda/config/etp.json`:
+
+```json
+{
+  "id": "kafka-main",
+  "kind": "kafka",
+  "pool": {
+    "pool_size": 4,
+    "connect_timeout_ms": 2000,
+    "idle_timeout_ms": 60000
+  },
+  "settings": {
+    "brokers": ["10.0.1.10:9092", "10.0.1.11:9092"],
+    "client_id": "velda-edge-prod",
+    "sasl_mechanism": "none"
+  }
+}
+```
 
 Declare the plugin in `/etc/velda/config/plugins.json`:
 
@@ -27,86 +42,56 @@ Declare the plugin in `/etc/velda/config/plugins.json`:
 {
   "id": "kafka_log_shipper",
   "config": {
-    "brokers": [
-      "10.0.1.10:9092",
-      "10.0.1.11:9092"
-    ],
+    "etp_id": "kafka-main",
     "topic": "velda-access-logs",
-    "transport_security": "plain",
-    "sasl_mechanism": "none",
-    "sasl_username": "",
-    "sasl_password": "",
+    "format": "json",
     "compression": "zstd",
     "acks": "leader",
     "partitioner": "round_robin",
     "flush_interval_ms": 1000,
     "max_batch_size": 8000,
-    "connect_timeout_ms": 2000,
     "request_timeout_ms": 5000,
     "metadata_refresh_ms": 300000
   }
 }
 ```
 
-> **Strict Configuration Invariant**: Every configuration parameter must be explicitly declared in `plugins.json`. Execution stage is fixed at compile time (`BackgroundPlugin`).
-
-### Configuration Parameters
+### Plugin Parameters
 
 | Field | Type | Default | Valid Range | Description |
 | :--- | :---: | :---: | :---: | :--- |
-| `brokers` | `Array<String>` | **Required** | Non-empty array | Seed Kafka broker addresses (e.g. `["kafka-1:9092", "kafka-2:9092"]`). |
-| `topic` | `String` | **Required** | `[a-zA-Z0-9._-]`, $\le 249$ chars | Target Kafka topic name (must pre-exist on Kafka cluster). |
-| `transport_security` | `String` | `"plain"` | `"plain"`, `"tls"`, `"mtls"` | Transport security mode. Plaintext TCP or TLS encrypted via `velda-tls`. |
-| `tls` | `Object` | `{}` | `OutboundTlsConfig` | Outbound TLS parameters (`ca_pem`, `client_cert_pem`, `client_key_pem`, `insecure_skip_verify`). |
-| `sasl_mechanism` | `String` | `"none"` | `"none"`, `"plain"`, `"scram_sha_256"` | SASL authentication mechanism. |
-| `sasl_username` | `String` | `""` | String | SASL username. Required if `sasl_mechanism != "none"`. |
-| `sasl_password` | `String` | `""` | String | SASL password. Required if `sasl_mechanism != "none"`. |
+| `etp_id` | `String` | **Required** | Non-empty `kafka` ETP ID | Reference to a `kind: "kafka"` entry in `etp.json`. |
+| `topic` | `String` | **Required** | `[a-zA-Z0-9._-]`, $\le 249$ chars | Target Kafka topic name. |
+| `format` | `String` | `"json"` | `"json"`, `"text"`, `"binary"` | Record payload encoding format. |
 | `compression` | `String` | `"zstd"` | `"none"`, `"gzip"`, `"zstd"` | Kafka RecordBatch v2 compression codec. |
 | `acks` | `String` | `"leader"` | `"none"` (0), `"leader"` (1), `"all"` (-1) | Produce acknowledgment durability level. |
 | `partitioner` | `String` | `"round_robin"` | `"round_robin"`, `"route_id"`, `"peer_ip"` | Partition distribution strategy for access log records. |
 | `flush_interval_ms` | `Integer` | `1000` | `100` – `60000` ms | Batch flush cadence on the Shadow Worker. |
-| `max_batch_size` | `Integer` | `8000` | `1` – `50000` records | Maximum number of records grouped into a single produce batch. |
-| `connect_timeout_ms`| `Integer` | `2000` | `100` – `60000` ms | TCP/TLS connection timeout. |
-| `request_timeout_ms`| `Integer` | `5000` | `100` – `60000` ms | Kafka request/response timeout for Produce and Metadata calls. |
-| `metadata_refresh_ms`| `Integer` | `300000` | `1000` – `3600000` ms | Periodic background metadata refresh interval (default: 5 minutes). |
+| `max_batch_size` | `Integer` | `8000` | `1` – `50000` records | Maximum records grouped into a produce cycle. |
+| `request_timeout_ms`| `Integer` | `5000` | `100` – `60000` ms | Kafka request/response timeout for Produce and Metadata RPCs. |
+| `metadata_refresh_ms`| `Integer` | `300000` | `1000` – `3600000` ms | Periodic background metadata refresh interval. |
 
 ---
 
-## 3. Transport Security Modes
+## 3. Transport Security & SASL Modes (`etp.json`)
 
-### Plaintext TCP (`transport_security: "plain"`)
-Typically used for internal Kubernetes cluster networks on port 9092:
+TLS certificates, mTLS client identities, and SASL/PLAIN credentials belong on the `kafka` ETP entry in `etp.json`:
+
 ```json
 {
-  "brokers": ["kafka.internal:9092"],
-  "transport_security": "plain"
-}
-```
-
-### One-Way TLS (`transport_security: "tls"`)
-Authenticates Kafka broker certificate authority (typically port 9093/9094):
-```json
-{
-  "brokers": ["kafka-prod.example.com:9093"],
-  "transport_security": "tls",
+  "id": "kafka-secure",
+  "kind": "kafka",
   "tls": {
-    "ca_pem": "-----BEGIN CERTIFICATE-----\n...\n-----END CERTIFICATE-----",
-    "insecure_skip_verify": false
-  }
-}
-```
-
-### Mutual TLS (`transport_security: "mtls"`)
-Authenticates both broker and gateway client identity via cryptographic certificates:
-```json
-{
-  "brokers": ["kafka-secure.example.com:9094"],
-  "transport_security": "mtls",
-  "tls": {
-    "ca_pem": "-----BEGIN CERTIFICATE-----\n...\n-----END CERTIFICATE-----",
+    "ca_cert_pem": "-----BEGIN CERTIFICATE-----\n...\n-----END CERTIFICATE-----",
     "client_cert_pem": "-----BEGIN CERTIFICATE-----\n...\n-----END CERTIFICATE-----",
-    "client_key_pem": "-----BEGIN PRIVATE KEY-----\n...\n-----END PRIVATE KEY-----",
-    "insecure_skip_verify": false
+    "client_key_pem": "-----BEGIN PRIVATE KEY-----\n...\n-----END PRIVATE KEY-----"
+  },
+  "settings": {
+    "brokers": ["kafka-secure.example.com:9094"],
+    "client_id": "velda-edge-prod",
+    "sasl_mechanism": "plain",
+    "sasl_username": "velda-producer",
+    "sasl_password": "..."
   }
 }
 ```

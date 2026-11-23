@@ -1,103 +1,152 @@
-//! StatsD / DogStatsD Metrics Exporter Schema & Semantic Validation.
-
-use serde::{Deserialize, Serialize};
+//! StatsD / DogStatsD Metrics Exporter Schema & Semantic Validation (`statsd_exporter::validation`).
+//!
+//! ```text
+//!   serde_json::Value ──► Deserialize StatsdExporterConfig
+//!         │
+//!         ├─► etp_id.trim().is_empty()                    ──► Err(PluginError::Config)
+//!         ├─► interval_secs outside 1..=3600              ──► Err(PluginError::Config)
+//!         ├─► non-empty prefix invalid [a-zA-Z0-9_.-]     ──► Err(PluginError::Config)
+//!         ├─► Some(dialect) not "standard" | "dogstatsd"  ──► Err(PluginError::Config)
+//!         └─► max_packet_size outside 256..=65507         ──► Err(PluginError::Config)
+//! ```
 
 use crate::error::PluginError;
 
-/// Declarative configuration for the StatsD / DogStatsD Metrics Exporter plugin.
-///
-/// # Strict Invariant: 100% Explicit Declaration
-/// Every parameter must be explicitly declared in the configuration JSON.
-/// Zero defaults are permitted. Missing fields fail fast at configuration sync time.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct StatsdExporterConfig {
-    /// Target StatsD daemon / DogStatsD / Telegraf UDP socket address (e.g. `"127.0.0.1:8125"`).
-    pub endpoint: String,
-    /// Periodic push interval in seconds (between 1 and 3600).
-    pub interval_secs: u64,
-    /// Metric name prefix (e.g. `"velda"`).
-    pub prefix: String,
-    /// Metric dialect format: explicitly declared as `"dogstatsd"` (with tags) or `"standard"` (dot notation).
-    pub dialect: String,
-    /// Maximum UDP packet payload size in bytes before flushing (256 to 65507, recommended: 1432).
-    pub max_packet_size: usize,
-}
+pub use super::config::StatsdExporterConfig;
 
-/// Validates StatsD Metrics Exporter configuration strictly according to production standards.
+/// Validates StatsD Metrics Exporter configuration against ETP & MTU bounds.
 pub fn validate_statsd_exporter_config(
     plugin_id: &str,
     config_val: &serde_json::Value,
 ) -> Result<StatsdExporterConfig, PluginError> {
-    let cfg: StatsdExporterConfig = serde_json::from_value(config_val.clone()).map_err(|e| {
-        PluginError::Config(format!(
-            "Plugin '{plugin_id}' has malformed or incomplete statsd_exporter config: {e}"
-        ))
-    })?;
+    let mut cfg: StatsdExporterConfig =
+        serde_json::from_value(config_val.clone()).map_err(|e| {
+            PluginError::Config(format!(
+                "Plugin '{plugin_id}' has malformed or incomplete statsd_exporter config: {e}"
+            ))
+        })?;
 
-    // 1. Validate endpoint
-    let trimmed_endpoint = cfg.endpoint.trim();
-    if trimmed_endpoint.is_empty() {
+    cfg.etp_id = cfg.etp_id.trim().to_string();
+    if cfg.etp_id.is_empty() {
         return Err(PluginError::Config(format!(
-            "Plugin '{plugin_id}': endpoint must not be empty"
+            "Plugin '{plugin_id}': 'etp_id' must not be empty"
         )));
     }
 
-    if trimmed_endpoint.parse::<std::net::SocketAddr>().is_err() {
-        // Also check host:port format if hostname is provided
-        let parts: Vec<&str> = trimmed_endpoint.rsplitn(2, ':').collect();
-        if parts.len() != 2 || parts[0].parse::<u16>().is_err() || parts[1].is_empty() {
-            return Err(PluginError::Config(format!(
-                "Plugin '{plugin_id}': endpoint '{trimmed_endpoint}' must be a valid 'IP:PORT' or 'HOST:PORT' socket address"
-            )));
-        }
-    }
-
-    // 2. Validate interval_secs (1 to 3600 seconds)
-    if cfg.interval_secs == 0 || cfg.interval_secs > 3600 {
+    if !(1..=3600).contains(&cfg.interval_secs) {
         return Err(PluginError::Config(format!(
             "Plugin '{plugin_id}': interval_secs must be between 1 and 3600 seconds, found {}",
             cfg.interval_secs
         )));
     }
 
-    // 3. Validate prefix
-    let trimmed_prefix = cfg.prefix.trim();
-    if trimmed_prefix.is_empty() {
-        return Err(PluginError::Config(format!(
-            "Plugin '{plugin_id}': prefix must not be empty"
-        )));
-    }
-    if !trimmed_prefix
-        .chars()
-        .all(|c| c.is_ascii_alphanumeric() || c == '_' || c == '-' || c == '.')
+    cfg.prefix = cfg.prefix.trim().to_string();
+    if !cfg.prefix.is_empty()
+        && !cfg
+            .prefix
+            .chars()
+            .all(|c| c.is_ascii_alphanumeric() || c == '_' || c == '-' || c == '.')
     {
         return Err(PluginError::Config(format!(
-            "Plugin '{plugin_id}': prefix '{trimmed_prefix}' contains invalid characters (allowed: [a-zA-Z0-9_.-])"
+            "Plugin '{plugin_id}': prefix '{}' contains invalid characters (allowed: [a-zA-Z0-9_.-])",
+            cfg.prefix
         )));
     }
 
-    // 4. Validate dialect
-    let dialect = cfg.dialect.trim().to_ascii_lowercase();
-    if dialect != "dogstatsd" && dialect != "standard" {
-        return Err(PluginError::Config(format!(
-            "Plugin '{plugin_id}': dialect must be explicitly declared as 'dogstatsd' or 'standard', found '{}'",
-            cfg.dialect
-        )));
+    if let Some(ref raw_dialect) = cfg.dialect {
+        let normalized = raw_dialect.trim().to_ascii_lowercase();
+        if normalized != "dogstatsd" && normalized != "standard" {
+            return Err(PluginError::Config(format!(
+                "Plugin '{plugin_id}': dialect must be 'dogstatsd' or 'standard', found '{raw_dialect}'"
+            )));
+        }
+        cfg.dialect = Some(normalized);
     }
 
-    // 5. Validate max_packet_size (safe MTU bounds: 256 to 65507 bytes)
-    if cfg.max_packet_size < 256 || cfg.max_packet_size > 65507 {
+    if !(256..=65_507).contains(&cfg.max_packet_size) {
         return Err(PluginError::Config(format!(
             "Plugin '{plugin_id}': max_packet_size must be between 256 and 65507 bytes (recommended: 1432), found {}",
             cfg.max_packet_size
         )));
     }
 
-    Ok(StatsdExporterConfig {
-        endpoint: trimmed_endpoint.to_string(),
-        interval_secs: cfg.interval_secs,
-        prefix: trimmed_prefix.to_string(),
-        dialect,
-        max_packet_size: cfg.max_packet_size,
-    })
+    Ok(cfg)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_valid_statsd_exporter_config_and_defaults() {
+        let minimal = serde_json::json!({ "etp_id": "statsd-main" });
+        let cfg = validate_statsd_exporter_config("statsd_exporter", &minimal).unwrap();
+        assert_eq!(cfg.etp_id, "statsd-main");
+        assert_eq!(cfg.interval_secs, 2);
+        assert_eq!(cfg.prefix, "");
+        assert_eq!(cfg.dialect, None);
+        assert_eq!(cfg.max_packet_size, 1432);
+
+        let full = serde_json::json!({
+            "etp_id": "statsd-edge",
+            "interval_secs": 10,
+            "prefix": "velda_gw.v1",
+            "dialect": "DogStatsD",
+            "max_packet_size": 1024
+        });
+        let parsed = validate_statsd_exporter_config("statsd_exporter", &full).unwrap();
+        assert_eq!(parsed.prefix, "velda_gw.v1");
+        assert_eq!(parsed.dialect.as_deref(), Some("dogstatsd"));
+        assert_eq!(parsed.max_packet_size, 1024);
+    }
+
+    #[test]
+    fn test_invalid_statsd_exporter_config() {
+        assert!(validate_statsd_exporter_config("sd", &serde_json::json!({})).is_err());
+        assert!(
+            validate_statsd_exporter_config("sd", &serde_json::json!({ "etp_id": "  " })).is_err()
+        );
+        assert!(
+            validate_statsd_exporter_config(
+                "sd",
+                &serde_json::json!({ "etp_id": "ok", "interval_secs": 0 })
+            )
+            .is_err()
+        );
+        assert!(
+            validate_statsd_exporter_config(
+                "sd",
+                &serde_json::json!({ "etp_id": "ok", "interval_secs": 3601 })
+            )
+            .is_err()
+        );
+        assert!(
+            validate_statsd_exporter_config(
+                "sd",
+                &serde_json::json!({ "etp_id": "ok", "prefix": "bad prefix!" })
+            )
+            .is_err()
+        );
+        assert!(
+            validate_statsd_exporter_config(
+                "sd",
+                &serde_json::json!({ "etp_id": "ok", "dialect": "prometheus" })
+            )
+            .is_err()
+        );
+        assert!(
+            validate_statsd_exporter_config(
+                "sd",
+                &serde_json::json!({ "etp_id": "ok", "max_packet_size": 128 })
+            )
+            .is_err()
+        );
+        assert!(
+            validate_statsd_exporter_config(
+                "sd",
+                &serde_json::json!({ "etp_id": "ok", "max_packet_size": 70000 })
+            )
+            .is_err()
+        );
+    }
 }

@@ -1,7 +1,9 @@
-//! OpenTelemetry JSON Trace Formatting & HTTP Client (`otlp_trace_exporter::json`).
+//! OTLP Trace JSON Serialization Subsystem (`otlp_trace_exporter::json`).
+//!
+//! ```text
+//!   &[TelemetryBatch] ──► OtlpTraceJsonEnvelope::format_spans_json ──► JSON string buffer
+//! ```
 
-pub mod client;
 pub mod template;
 
-pub use client::OtlpTraceHttpClient;
 pub use template::OtlpTraceJsonEnvelope;

@@ -253,26 +253,20 @@
     {
       "id": "otlp_log_shipper",
       "config": {
-        "protocol": "http",
-        "endpoint": "http://otel-collector.internal:4318",
+        "etp_id": "otlp-main",
         "service_name": "velda-edge",
         "flush_interval_ms": 1000,
         "max_batch_size": 1000,
-        "connect_timeout_ms": 2000,
-        "request_timeout_ms": 5000,
-        "headers": {}
+        "request_timeout_ms": 5000
       }
     },
     {
       "id": "loki_log_shipper",
       "config": {
-        "protocol": "http",
-        "endpoint": "http://loki.internal:3100",
-        "tenant_id": "velda-prod",
+        "etp_id": "loki-logs",
         "service_name": "velda-edge",
         "flush_interval_ms": 1000,
         "max_batch_size": 1000,
-        "connect_timeout_ms": 2000,
         "request_timeout_ms": 5000,
         "labels": {
           "env": "prod",
@@ -283,19 +277,16 @@
     {
       "id": "otlp_metrics_exporter",
       "config": {
-        "protocol": "http",
-        "endpoint": "http://otel-collector.internal:4318",
+        "etp_id": "otlp-main",
         "interval_secs": 15,
-        "connect_timeout_ms": 2000,
         "request_timeout_ms": 5000,
-        "service_name": "velda-edge",
-        "headers": {}
+        "service_name": "velda-edge"
       }
     },
     {
       "id": "statsd_exporter",
       "config": {
-        "endpoint": "127.0.0.1:8125",
+        "etp_id": "statsd-main",
         "interval_secs": 10,
         "prefix": "velda",
         "dialect": "dogstatsd",
@@ -316,20 +307,14 @@
     {
       "id": "kafka_log_shipper",
       "config": {
-        "brokers": [
-          "127.0.0.1:9092"
-        ],
+        "etp_id": "kafka-main",
         "topic": "velda-access-logs",
-        "transport_security": "plain",
-        "sasl_mechanism": "none",
-        "sasl_username": "",
-        "sasl_password": "",
+        "format": "json",
         "compression": "zstd",
         "acks": "leader",
         "partitioner": "round_robin",
         "flush_interval_ms": 1000,
         "max_batch_size": 8000,
-        "connect_timeout_ms": 2000,
         "request_timeout_ms": 5000,
         "metadata_refresh_ms": 300000
       }

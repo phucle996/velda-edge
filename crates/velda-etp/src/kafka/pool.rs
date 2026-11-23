@@ -1,5 +1,5 @@
 //! Lock-free Kafka ETP broker connection pool (`KafkaEtp`) backed by [`EtpPageArena<EtpStream>`]
-//! and per-broker [`ColdConnectBlueprint`]s.
+//! and per-broker [`ColdConnectBlueprint`]s with optional SASL authentication on connect.
 //!
 //! ```text
 //!   warm() / acquire() / try_acquire()
@@ -8,19 +8,22 @@
 //!         │     └─► prefetch_l1_slot(Slot[idx]) -> borrow in-place -> KafkaLease(idx)
 //!         │
 //!         └─► Miss / Burst Spillover ──► connect_fresh():
-//!               1. start = broker_cursor.fetch_add(1) % blueprints.len()
-//!               2. Failover across blueprints[(start + offset) % len].connect_stream()
+//!               1. Failover across blueprints[(start + offset) % len].connect_stream()
+//!               2. If sasl_mechanism != None:
+//!                    SaslHandshake (API 17, v1) -> SaslAuthenticate (API 36, v1)
 //!               3. write_leased_slot(idx, stream) -> KafkaLease(idx)
 //!
 //!   Cold Blueprints & Page Arena Layout:
 //!   ┌────────────────────────────────────────────────────────────────────────────┐
 //!   │ blueprints: Vec<ColdConnectBlueprint> (integer SocketAddr per broker)      │
+//!   │ prebaked_sasl_handshake / prebaked_sasl_auth (Box<[u8]> if SASL/PLAIN)     │
 //!   ├────────────────────────────────────────────────────────────────────────────┤
 //!   │ Arena: Cache Line 0 (64B) | Slot[idx] at (idx << 6) + 64 | +4096B Spare    │
 //!   └────────────────────────────────────────────────────────────────────────────┘
 //! ```
 
 use std::fmt;
+use std::io::ErrorKind;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::time::Duration;
@@ -31,13 +34,20 @@ use crate::arena::{EtpPageArena, ReadyAcquire};
 use crate::config::EtpEntryConfig;
 use crate::connect::{ColdConnectBlueprint, EtpStream, build_tls_target};
 use crate::error::EtpError;
-use crate::kafka::config::KafkaEtpConfig;
+use crate::kafka::config::{KafkaEtpConfig, KafkaSaslMechanism};
 use crate::kafka::lease::KafkaLease;
 
-/// Lock-free bounded pool of connections to Apache Kafka brokers.
+const API_KEY_SASL_HANDSHAKE: i16 = 17;
+const API_VERSION_SASL_HANDSHAKE: i16 = 1;
+const API_KEY_SASL_AUTHENTICATE: i16 = 36;
+const API_VERSION_SASL_AUTHENTICATE: i16 = 1;
+
+/// Lock-free bounded pool of authenticated TCP/TLS connections to Apache Kafka brokers.
 pub struct KafkaEtp {
     pub config: KafkaEtpConfig,
     pub blueprints: Vec<ColdConnectBlueprint>,
+    prebaked_sasl_handshake: Option<Box<[u8]>>,
+    prebaked_sasl_auth: Option<Box<[u8]>>,
     pub arena: EtpPageArena<EtpStream>,
     pub semaphore: Semaphore,
     pub connect_timeout: Duration,
@@ -51,12 +61,72 @@ impl fmt::Debug for KafkaEtp {
             .field("id", &self.config.id)
             .field("brokers", &self.config.brokers)
             .field("client_id", &self.config.client_id)
+            .field("sasl_mechanism", &self.config.sasl_mechanism)
             .field("baseline_slots", &self.arena.baseline_slots)
             .field("total_slots", &self.arena.total_slots)
             .field("page_count", &self.arena.page_count)
             .field("idle_len", &self.arena.ready_count())
             .finish()
     }
+}
+
+fn encode_kafka_sasl_handshake_frame(client_id: &str, mechanism: &str) -> Box<[u8]> {
+    let body_len = 2 + 2 + 4 + 2 + client_id.len() + 2 + mechanism.len();
+    let mut frame = Vec::with_capacity(4 + body_len);
+    frame.extend_from_slice(&(body_len as i32).to_be_bytes());
+    frame.extend_from_slice(&API_KEY_SASL_HANDSHAKE.to_be_bytes());
+    frame.extend_from_slice(&API_VERSION_SASL_HANDSHAKE.to_be_bytes());
+    frame.extend_from_slice(&1i32.to_be_bytes());
+    frame.extend_from_slice(&(client_id.len() as i16).to_be_bytes());
+    frame.extend_from_slice(client_id.as_bytes());
+    frame.extend_from_slice(&(mechanism.len() as i16).to_be_bytes());
+    frame.extend_from_slice(mechanism.as_bytes());
+    frame.into_boxed_slice()
+}
+
+fn encode_kafka_sasl_plain_auth_frame(
+    client_id: &str,
+    username: &str,
+    password: &str,
+) -> Box<[u8]> {
+    let auth_len = 2 + username.len() + password.len();
+    let body_len = 2 + 2 + 4 + 2 + client_id.len() + 4 + auth_len;
+    let mut frame = Vec::with_capacity(4 + body_len);
+    frame.extend_from_slice(&(body_len as i32).to_be_bytes());
+    frame.extend_from_slice(&API_KEY_SASL_AUTHENTICATE.to_be_bytes());
+    frame.extend_from_slice(&API_VERSION_SASL_AUTHENTICATE.to_be_bytes());
+    frame.extend_from_slice(&2i32.to_be_bytes());
+    frame.extend_from_slice(&(client_id.len() as i16).to_be_bytes());
+    frame.extend_from_slice(client_id.as_bytes());
+    frame.extend_from_slice(&(auth_len as i32).to_be_bytes());
+    frame.push(0);
+    frame.extend_from_slice(username.as_bytes());
+    frame.push(0);
+    frame.extend_from_slice(password.as_bytes());
+    frame.into_boxed_slice()
+}
+
+async fn read_kafka_frame_error_code(stream: &mut EtpStream) -> Result<i16, EtpError> {
+    let mut len_buf = [0u8; 4];
+    stream.read_exact(&mut len_buf).await?;
+    let frame_len = i32::from_be_bytes(len_buf);
+    if !(6..=16 * 1024 * 1024).contains(&frame_len) {
+        return Err(std::io::Error::new(
+            ErrorKind::InvalidData,
+            format!("Invalid Kafka SASL response frame length: {frame_len}"),
+        )
+        .into());
+    }
+    let mut payload = vec![0u8; frame_len as usize];
+    stream.read_exact(&mut payload).await?;
+    let Some(code_bytes) = payload.get(4..6) else {
+        return Err(std::io::Error::new(
+            ErrorKind::UnexpectedEof,
+            "Truncated Kafka SASL response payload",
+        )
+        .into());
+    };
+    Ok(i16::from_be_bytes([code_bytes[0], code_bytes[1]]))
 }
 
 impl KafkaEtp {
@@ -89,18 +159,99 @@ impl KafkaEtp {
             ));
         }
 
+        let (prebaked_sasl_handshake, prebaked_sasl_auth) = match config.sasl_mechanism {
+            KafkaSaslMechanism::None => (None, None),
+            KafkaSaslMechanism::Plain => (
+                Some(encode_kafka_sasl_handshake_frame(
+                    &config.client_id,
+                    config.sasl_mechanism.as_str(),
+                )),
+                Some(encode_kafka_sasl_plain_auth_frame(
+                    &config.client_id,
+                    &config.sasl_username,
+                    &config.sasl_password,
+                )),
+            ),
+            KafkaSaslMechanism::ScramSha256 | KafkaSaslMechanism::ScramSha512 => (
+                Some(encode_kafka_sasl_handshake_frame(
+                    &config.client_id,
+                    config.sasl_mechanism.as_str(),
+                )),
+                None,
+            ),
+        };
+
         let arena = EtpPageArena::new(config.pool.pool_size);
         let semaphore = Semaphore::new(arena.total_slots);
 
         Ok(Self {
             config,
             blueprints,
+            prebaked_sasl_handshake,
+            prebaked_sasl_auth,
             arena,
             semaphore,
             connect_timeout,
             idle_timeout_secs,
             broker_cursor: AtomicUsize::new(0),
         })
+    }
+
+    async fn authenticate_sasl(&self, stream: &mut EtpStream) -> Result<(), EtpError> {
+        let Some(ref handshake_frame) = self.prebaked_sasl_handshake else {
+            return Ok(());
+        };
+
+        let auth_exchange = async {
+            stream.write_all(handshake_frame).await?;
+            stream.flush().await?;
+            let handshake_err = read_kafka_frame_error_code(stream).await?;
+            if handshake_err != 0 {
+                return Err(EtpError::Config(format!(
+                    "Kafka ETP '{}' SaslHandshake rejected mechanism '{}' with error code {handshake_err}",
+                    self.config.id,
+                    self.config.sasl_mechanism.as_str()
+                )));
+            }
+
+            match self.config.sasl_mechanism {
+                KafkaSaslMechanism::Plain => {
+                    let Some(ref auth_frame) = self.prebaked_sasl_auth else {
+                        return Err(EtpError::Config(format!(
+                            "Kafka ETP '{}' SASL/PLAIN frame not initialized",
+                            self.config.id
+                        )));
+                    };
+                    stream.write_all(auth_frame).await?;
+                    stream.flush().await?;
+                    let auth_err = read_kafka_frame_error_code(stream).await?;
+                    if auth_err != 0 {
+                        return Err(EtpError::Config(format!(
+                            "Kafka ETP '{}' SASL/PLAIN authentication failed for user '{}' with error code {auth_err}",
+                            self.config.id, self.config.sasl_username
+                        )));
+                    }
+                    Ok(())
+                }
+                KafkaSaslMechanism::ScramSha256 | KafkaSaslMechanism::ScramSha512 => {
+                    Err(EtpError::Config(format!(
+                        "Kafka ETP '{}': SASL mechanism '{}' requires SCRAM challenge-response (unsupported in connect handshake; use 'plain' or TLS client auth)",
+                        self.config.id,
+                        self.config.sasl_mechanism.as_str()
+                    )))
+                }
+                KafkaSaslMechanism::None => Ok(()),
+            }
+        };
+
+        let timeout_ms = u64::try_from(self.connect_timeout.as_millis()).unwrap_or(u64::MAX);
+        match tokio::time::timeout(self.connect_timeout, auth_exchange).await {
+            Ok(res) => res,
+            Err(_) => Err(EtpError::Timeout {
+                id: self.config.id.clone(),
+                timeout_ms,
+            }),
+        }
     }
 
     pub(crate) async fn connect_fresh(&self) -> Result<EtpStream, EtpError> {
@@ -113,7 +264,10 @@ impl KafkaEtp {
                 .connect_stream()
                 .await
             {
-                Ok(stream) => return Ok(stream),
+                Ok(mut stream) => match self.authenticate_sasl(&mut stream).await {
+                    Ok(()) => return Ok(stream),
+                    Err(err) => last_err = Some(err),
+                },
                 Err(err) => last_err = Some(err),
             }
         }
@@ -123,7 +277,7 @@ impl KafkaEtp {
         }))
     }
 
-    /// Pre-warms up to `baseline_slots` broker connections.
+    /// Pre-warms up to `baseline_slots` authenticated broker connections.
     pub async fn warm(&self) -> Result<(), EtpError> {
         let needed = self
             .arena

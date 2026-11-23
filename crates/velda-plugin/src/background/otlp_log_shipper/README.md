@@ -90,40 +90,34 @@ Under the Velda Edge Workload Distribution Model, background logistics plugins a
 
 ---
 
-## 4. 100% Explicit Configuration Contract
+## 4. Configuration Contract (`etp.json` + `plugins.json`)
 
 > [!IMPORTANT]
-> **Strict Configuration Invariant**: Every configuration parameter must be explicitly declared in `plugins.json`. No silent fallbacks or implicit defaults exist. Execution stage is fixed at compile time (`BackgroundPlugin`).
+> **ETP Isolation Invariant**: Collector endpoints, transport `protocol` (`grpc`, `http` / `http/protobuf`, `http/json`), custom `headers`, pool capacity, and TLS settings belong strictly to the referenced `kind: "otlp"` entry in `etp.json` (`OtlpEtp`).
 
 | Field | Type | Required | Constraints / Allowed Values | Recommended Value | Description |
 | :--- | :---: | :---: | :--- | :--- | :--- |
-| `protocol` | String | **Yes** | `"http"` or `"grpc"` | `"grpc"` | Transport protocol: `"grpc"` streams Protobuf over HTTP/2 (port 4317); `"http"` streams JSON over HTTP/1.1 (port 4318). |
-| `endpoint` | String | **Yes** | Valid URI (`http://`, `https://`, `grpc://`, `grpcs://`) | `"grpc://127.0.0.1:4317"` | Target OpenTelemetry Collector ingestion endpoint. |
-| `service_name` | String | **Yes** | Non-empty ASCII string (`^[a-zA-Z0-9_\-\.]+$`) | `"velda-edge-prod"` | Logical service identifier reported in OpenTelemetry Resource attributes (`service.name`). |
-| `flush_interval_ms` | Integer (u64) | **Yes** | `100 ..= 60000` | `100` | Periodic timer interval for waking up shadow worker to drain SPSC rings and ship buffered records. |
-| `max_batch_size` | Integer (usize) | **Yes** | `1 ..= 10000` | `1000` | Maximum number of log records grouped into a single exported payload. |
-| `connect_timeout_ms`| Integer (u64) | **Yes** | `100 ..= 60000` | `1000` | TCP and TLS connection establishment timeout before aborting and retrying. |
-| `request_timeout_ms`| Integer (u64) | **Yes** | `100 ..= 60000` | `1000` | Maximum round-trip time allowed for an HTTP/gRPC export request to complete. |
-| `headers` | Object | **Yes** | Key-value map of string pairs (`{}` if empty) | `{}` | Custom headers sent with every export request (e.g. Bearer auth, tenant IDs). |
+| `etp_id` | String | **Yes** | Non-empty `otlp` ETP ID in `etp.json` | `"otlp-main"` | Identifier of the shared `velda_etp::otlp::OtlpEtp` pool in `EtpRegistry`. |
+| `service_name` | String | No | Non-empty string (default: `"velda-edge"`) | `"velda-edge-prod"` | Logical service identifier reported in OpenTelemetry Resource attributes (`service.name`). |
+| `flush_interval_ms` | Integer (u64) | No | `100 ..= 60000` (default: `1000`) | `100` | Periodic timer interval for waking up shadow worker to drain SPSC rings and ship buffered records. |
+| `max_batch_size` | Integer (usize) | No | `1 ..= 10000` (default: `1000`) | `1000` | Maximum number of log records grouped into a single exported payload. |
+| `request_timeout_ms`| Integer (u64) | No | `100 ..= 60000` (default: `5000`) | `5000` | Maximum round-trip time allowed for an HTTP/gRPC export request to complete. |
 
 ---
 
 ## 5. Production Configuration Profiles
 
-### Profile 1: High-Throughput Production Profile (OTLP / gRPC Protobuf)
+### Profile 1: High-Throughput Production Profile (`etp.json` + `plugins.json`, OTLP / gRPC Protobuf)
 *Recommended for production clusters to minimize wire bandwidth and CPU usage via binary Protobuf framing.*
 
 ```json
+// etp.json
 {
-  "id": "otlp_log_shipper",
-  "config": {
+  "id": "otlp-main",
+  "kind": "otlp",
+  "settings": {
     "protocol": "grpc",
     "endpoint": "grpc://otel-collector.monitoring.svc.cluster.local:4317",
-    "service_name": "velda-edge-production",
-    "flush_interval_ms": 100,
-    "max_batch_size": 1000,
-    "connect_timeout_ms": 1000,
-    "request_timeout_ms": 1000,
     "headers": {
       "authorization": "Bearer sec-tok-98471982734"
     }
@@ -131,21 +125,32 @@ Under the Velda Edge Workload Distribution Model, background logistics plugins a
 }
 ```
 
+```json
+// plugins.json
+{
+  "id": "otlp_log_shipper",
+  "config": {
+    "etp_id": "otlp-main",
+    "service_name": "velda-edge-production",
+    "flush_interval_ms": 100,
+    "max_batch_size": 1000,
+    "request_timeout_ms": 1000
+  }
+}
+```
+
 ### Profile 2: Standard REST / JSON Profile (OTLP / HTTP Keep-Alive)
-*Recommended for environments utilizing HTTP/JSON-based OpenTelemetry log aggregation pipelines.*
+*Recommended for environments utilizing HTTP/JSON-based OpenTelemetry log aggregation pipelines (`"protocol": "http/json"` in `etp.json`).*
 
 ```json
 {
   "id": "otlp_log_shipper",
   "config": {
-    "protocol": "http",
-    "endpoint": "http://otel-collector.monitoring.svc.cluster.local:4318/v1/logs",
+    "etp_id": "otlp-http-json",
     "service_name": "velda-edge-production",
     "flush_interval_ms": 100,
     "max_batch_size": 1000,
-    "connect_timeout_ms": 1000,
-    "request_timeout_ms": 1000,
-    "headers": {}
+    "request_timeout_ms": 1000
   }
 }
 ```
