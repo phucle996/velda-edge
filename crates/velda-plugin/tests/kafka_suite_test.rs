@@ -96,9 +96,7 @@ fn mock_produce_response(cid: i32, topic: &str, error_code: i16, base_offset: i6
     resp.extend_from_slice(&error_code.to_be_bytes());
     resp.extend_from_slice(&base_offset.to_be_bytes());
     resp.extend_from_slice(&0i64.to_be_bytes()); // log_append_time
-    resp.extend_from_slice(&0i64.to_be_bytes()); // log_start_offset
-    resp.extend_from_slice(&0i32.to_be_bytes()); // record_errors
-    protocol::write_nullable_string(&mut resp, None);
+    resp.extend_from_slice(&0i64.to_be_bytes()); // log_start_offset (Produce v5..=7)
     resp.extend_from_slice(&0i32.to_be_bytes()); // throttle_time_ms
     resp
 }

@@ -3,8 +3,9 @@
 //! Provides pure-Rust encoding and decoding for:
 //! - Metadata API (API Key = 3, Version = 4)
 //! - SaslHandshake API (API Key = 17, Version = 1)
+//! - ApiVersions API (API Key = 18, Version = 0)
 //! - SaslAuthenticate API (API Key = 36, Version = 1)
-//! - Produce API (API Key = 0, Version = 7)
+//! - Produce API (API Key = 0, Version = 0..=8; default prebaked Version = 7)
 //!
 //! All frames conform to the Kafka wire specification with big-endian integer layout.
 
@@ -13,11 +14,13 @@ use crate::error::PluginError;
 pub const API_KEY_PRODUCE: i16 = 0;
 pub const API_KEY_METADATA: i16 = 3;
 pub const API_KEY_SASL_HANDSHAKE: i16 = 17;
+pub const API_KEY_API_VERSIONS: i16 = 18;
 pub const API_KEY_SASL_AUTHENTICATE: i16 = 36;
 
 pub const API_VERSION_PRODUCE: i16 = 7;
 pub const API_VERSION_METADATA: i16 = 4;
 pub const API_VERSION_SASL_HANDSHAKE: i16 = 1;
+pub const API_VERSION_API_VERSIONS: i16 = 0;
 pub const API_VERSION_SASL_AUTHENTICATE: i16 = 1;
 
 // ── Kafka Wire Primitives ─────────────────────────────────────────────────────
@@ -357,7 +360,11 @@ pub fn encode_produce_request(
 }
 
 /// Decodes Produce Response v7.
-pub fn decode_produce_response(mut buf: &[u8]) -> Result<ProduceResponse, PluginError> {
+/// Decodes Produce Response across API versions `0..=8` matching the prebaked request version.
+pub fn decode_produce_response(
+    mut buf: &[u8],
+    api_version: i16,
+) -> Result<ProduceResponse, PluginError> {
     // 1. Correlation ID
     let _correlation_id = read_i32(&mut buf)?;
 
@@ -373,18 +380,20 @@ pub fn decode_produce_response(mut buf: &[u8]) -> Result<ProduceResponse, Plugin
             let partition_id = read_i32(&mut buf)?;
             let error_code = read_i16(&mut buf)?;
             let base_offset = read_i64(&mut buf)?;
-            let _log_append_time = read_i64(&mut buf)?;
-            let _log_start_offset = read_i64(&mut buf)?;
-
-            // record_errors array
-            let rec_err_count = read_i32(&mut buf)?;
-            for _ in 0..rec_err_count {
-                let _batch_index = read_i32(&mut buf)?;
+            if api_version >= 2 {
+                let _log_append_time = read_i64(&mut buf)?;
+            }
+            if api_version >= 5 {
+                let _log_start_offset = read_i64(&mut buf)?;
+            }
+            if api_version >= 8 {
+                let rec_err_count = read_i32(&mut buf)?;
+                for _ in 0..rec_err_count {
+                    let _batch_index = read_i32(&mut buf)?;
+                    let _error_message = read_nullable_string(&mut buf)?;
+                }
                 let _error_message = read_nullable_string(&mut buf)?;
             }
-
-            // error_message
-            let _error_message = read_nullable_string(&mut buf)?;
 
             partitions.push(PartitionProduceResponse {
                 partition_id,
@@ -394,12 +403,55 @@ pub fn decode_produce_response(mut buf: &[u8]) -> Result<ProduceResponse, Plugin
         }
     }
 
-    let throttle_time_ms = read_i32(&mut buf).unwrap_or(0);
+    let throttle_time_ms = if api_version >= 1 {
+        read_i32(&mut buf).unwrap_or(0)
+    } else {
+        0
+    };
 
     Ok(ProduceResponse {
         partitions,
         throttle_time_ms,
     })
+}
+
+/// Supported API version range advertised by a Kafka broker for a single `api_key`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ApiVersionRange {
+    pub api_key: i16,
+    pub min_version: i16,
+    pub max_version: i16,
+}
+
+/// Encodes ApiVersions Request v0.
+pub fn encode_api_versions_request(correlation_id: i32, client_id: &str) -> Vec<u8> {
+    let mut body = Vec::with_capacity(24);
+    write_request_header(
+        &mut body,
+        API_KEY_API_VERSIONS,
+        API_VERSION_API_VERSIONS,
+        correlation_id,
+        client_id,
+    );
+    wrap_framed_request(body)
+}
+
+/// Decodes ApiVersions Response v0, returning `(error_code, ranges)`.
+pub fn decode_api_versions_response(
+    mut buf: &[u8],
+) -> Result<(i16, Vec<ApiVersionRange>), PluginError> {
+    let _correlation_id = read_i32(&mut buf)?;
+    let error_code = read_i16(&mut buf)?;
+    let count = read_i32(&mut buf)?.max(0) as usize;
+    let mut ranges = Vec::with_capacity(count.min(128));
+    for _ in 0..count {
+        ranges.push(ApiVersionRange {
+            api_key: read_i16(&mut buf)?,
+            min_version: read_i16(&mut buf)?,
+            max_version: read_i16(&mut buf)?,
+        });
+    }
+    Ok((error_code, ranges))
 }
 
 // ── SASL Handshake API (Key 17, Version 1) ────────────────────────────────────

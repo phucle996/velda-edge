@@ -56,6 +56,7 @@ pub struct KafkaWireState {
     pub last_metadata_refresh: tokio::time::Instant,
     pub correlation_id: AtomicI32,
     pub round_robin_counter: AtomicU64,
+    pub produce_version: i16,
     pub partitions: Vec<i32>,
     pub prebaked_produce_prefix: Vec<u8>,
     pub prebaked_metadata_frame: Vec<u8>,
@@ -106,6 +107,7 @@ impl KafkaWireState {
             last_metadata_refresh,
             correlation_id: AtomicI32::new(1),
             round_robin_counter: AtomicU64::new(0),
+            produce_version: protocol::API_VERSION_PRODUCE,
             partitions: Vec::new(),
             prebaked_produce_prefix,
             prebaked_metadata_frame,
@@ -253,7 +255,7 @@ impl KafkaWireState {
             return Ok(records.len());
         }
 
-        let resp = protocol::decode_produce_response(&self.resp_buf)?;
+        let resp = protocol::decode_produce_response(&self.resp_buf, self.produce_version)?;
         let mut total_shipped = 0usize;
         let mut need_metadata_refresh = false;
 

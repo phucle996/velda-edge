@@ -19,8 +19,8 @@ const HEX_DIGITS: &[u8; 16] = b"0123456789abcdef";
 
 const JSON_PREFIX: &[u8] = b"{\"@timestamp\":";
 const JSON_TS_NS: &[u8] = b",\"timestamp\":";
-const JSON_REQ_ID: &[u8] = b",\"request_id\":";
-const JSON_DURATION: &[u8] = b",\"duration_ns\":";
+const JSON_REQ_ID: &[u8] = b",\"request_id\":\"";
+const JSON_DURATION: &[u8] = b"\",\"duration_ns\":";
 const JSON_PEER_IP: &[u8] = b",\"peer_ip\":\"";
 const JSON_UPSTREAM_IP: &[u8] = b"\",\"upstream_ip\":\"";
 const JSON_NONE: &[u8] = b"none";
@@ -286,6 +286,7 @@ mod tests {
         );
         let doc: serde_json::Value = serde_json::from_str(lines.next().unwrap()).unwrap();
         assert_eq!(doc["@timestamp"], 1_732_011_000_123u64);
+        assert_eq!(doc["request_id"], "42");
         assert_eq!(doc["status_code"], 200);
         assert_eq!(doc["peer_ip"], "192.168.1.10");
         assert_eq!(doc["url"], "/v1/items?a=\"1\"");
