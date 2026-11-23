@@ -8,7 +8,7 @@ pub mod dictionary;
 pub mod engine;
 pub mod negotiation;
 pub mod plugin;
-pub mod simd;
+pub mod streaming_copy;
 
 pub use config::ResponseCompressionConfig;
 pub use dictionary::{BUILTIN_COMMON_JSON_REST_DICT, BuiltinDictionary, ZstdDictionaryConfig};
@@ -21,6 +21,6 @@ pub use negotiation::{
     parse_accept_encoding, parse_accept_encoding_stack,
 };
 pub use plugin::ResponseCompressionPlugin;
-pub use simd::{STREAMING_COPY, StreamingCopyFn, streaming_copy, streaming_to_bytes};
+pub use streaming_copy::{streaming_copy, streaming_to_bytes};
 
 pub mod validation;

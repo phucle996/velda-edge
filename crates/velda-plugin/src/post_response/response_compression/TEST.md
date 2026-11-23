@@ -28,8 +28,8 @@ The plugin test suite is distributed across bounded module files:
 
 | Test Name | Module | Target Component | Verifications & Invariants |
 | :--- | :--- | :--- | :--- |
-| `test_streaming_copy_correctness` | `simd.rs` | Hardware Streaming Copy | Tests arbitrary buffer lengths (0B to 64KB). Verifies output matches input byte-for-byte using AVX2, SSE2, and scalar copy routines. |
-| `test_scalar_fallback` | `simd.rs` | Scalar Fallback | Verifies non-SIMD fallback functions accurately when advanced vector extensions are disabled. |
+| `test_streaming_copy_correctness` | `streaming_copy.rs` | Hardware Streaming Copy | Tests arbitrary buffer lengths (0B to 64KB). Verifies output matches input byte-for-byte using AVX2, SSE2, and scalar copy routines. |
+| `test_scalar_fallback` | `streaming_copy.rs` | Scalar Fallback | Verifies non-SIMD fallback functions accurately when advanced vector extensions are disabled. |
 | `test_builtin_dictionary_integrity` | `dictionary.rs` | Built-in Dictionary | Verifies `BUILTIN_COMMON_JSON_REST_DICT` is exactly 16,384 bytes and resolves from `"common_json_rest"`, `"default"`, or `"built-in:common_json_rest"`. |
 | `test_dictionary_config_parsing` | `dictionary.rs` | Dictionary Config | Validates `ZstdDictionaryConfig` parsing from `None`, empty string, `"null"`, built-in tokens, and Base64-encoded strings. |
 | `test_algorithm_parsing` | `negotiation.rs` | Token Matching | Validates canonical algorithm token matching (`gzip`, `x-gzip`, `deflate`, `br`, `brotli`, `zstd`). |
@@ -41,19 +41,25 @@ The plugin test suite is distributed across bounded module files:
 | `test_roundtrip_brotli` | `engine.rs` | Brotli Codec | Validates RFC 7932 Brotli compression and decompression integrity. |
 | `test_roundtrip_zstd` | `engine.rs` | Zstandard Codec | Validates RFC 8878 Zstandard compression and decompression integrity. |
 | `test_roundtrip_zstd_with_dict` | `engine.rs` | Dictionary Compression | Tests compression and decompression using pre-trained dictionary buffer. |
-| `test_compression_gzip_application_json` | `plugin.rs` | PostResponse Hook | Tests end-to-end plugin execution on JSON response: verifies `content-encoding: gzip`, `vary: Accept-Encoding`, and updated `content-length`. |
-| `test_compression_zstd_with_builtin_dict` | `plugin.rs` | Built-in Dict Integration | Tests end-to-end execution with `BuiltinDictionary::CommonJsonRest`: verifies roundtrip decompression using the built-in dictionary. |
-| `test_from_config_strict_validation` | `plugin.rs` | Configuration Parser | Tests schema deserialization from `PluginConfig`, default values, and semantic bounds. |
-| `test_guards_prevent_compression` | `plugin.rs` | Operational Guards | Verifies compression is skipped for: Status 204 No Content, already compressed payload (`Content-Encoding` present), and non-matching MIME types (`image/png`). |
+| `test_compression_gzip_application_json` | `tests/response_compression_test.rs` | PostResponse Hook | Tests end-to-end plugin execution on JSON response: verifies `content-encoding: gzip`, `vary: Accept-Encoding`, and updated `content-length`. |
+| `test_compression_zstd_with_builtin_dict` | `tests/response_compression_test.rs` | Built-in Dict Integration | Tests end-to-end execution with `BuiltinDictionary::CommonJsonRest`: verifies roundtrip decompression using the built-in dictionary. |
+| `test_from_config_strict_validation` | `tests/response_compression_test.rs` | Configuration Parser | Tests schema deserialization from `PluginConfig`, default values, and semantic bounds. |
+| `test_guards_and_stack_vary_merge` | `tests/response_compression_test.rs` | Operational Guards & Vary | Verifies guards (204, already-compressed, non-matching MIME) and zero-alloc stack `Vary` merging (`Origin, Accept-Encoding`). |
+| `test_zstd_level_switching_rebuilds_thread_local_compressor` | `tests/response_compression_test.rs` | Zstd Context Cache | Verifies thread-local `ZSTD_COMPRESSOR` updates cleanly when `zstd_level` changes across routes/reloads. |
 
 ---
 
-## 3. Running Automated Tests
+## 3. Running Automated Tests & Verified Results
 
 ### 3.1 Run Dedicated Plugin Tests
 ```bash
 cargo test -p velda-plugin --lib post_response::response_compression
+cargo test -p velda-plugin --test response_compression_test
 ```
+
+**Observed Results**:
+- `post_response::response_compression` (unit tests): **17 passed; 0 failed**
+- `response_compression_test` (integration tests): **5 passed; 0 failed**
 
 ### 3.2 Run Full Plugin Subsystem Tests
 ```bash

@@ -1,4 +1,13 @@
-//! Dynamic Response Variables and Value Specifications for `response_header_mutation`.
+//! Dynamic Response Variables and Value Specifications (`response_header_mutation::var`).
+//!
+//! ```text
+//!   Config string ──► ResponseHeaderValueSpec::parse()
+//!         ├─► "$$"                        ──► Static("$")
+//!         ├─► "$request_id"               ──► Variable(RequestId)
+//!         ├─► "$status"                   ──► Variable(Status)
+//!         ├─► "$timestamp_epoch"          ──► Variable(TimestampEpoch)
+//!         └─► literal text                ──► Static(HeaderValue)
+//! ```
 //!
 //! Dynamic variables (`$request_id`, `$status`, `$timestamp_epoch`) are written directly
 //! as raw arithmetic values (`u128`, `u16`, `u64`) into [`velda_core::HeaderWorkspace`],

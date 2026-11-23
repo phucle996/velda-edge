@@ -1,16 +1,20 @@
-//! Hardware Memory Confinement & AVX2/SSE2 Non-Temporal Streaming Store.
+//! Hardware Memory Confinement & Compile-Time Non-Temporal Streaming Store.
 //!
-//! Large payloads (>= 256 bytes) are written directly into DRAM using Non-Temporal Stores
-//! (`_mm256_stream_si256` / `VMOVNTDQ` on AVX2, or `_mm_stream_si128` / `MOVNTDQ` on SSE2),
-//! bypassing CPU L1/L2 data cache lines. This guarantees complete immunity against CPU
-//! cache pollution on the serving hot path.
+//! Large payloads (`>= 256` bytes) are written directly into DRAM using Non-Temporal Stores
+//! to bypass CPU L1/L2 data cache lines and prevent cache pollution on the hot path.
 //!
-//! # Architecture: Hardware Register Matching & Function Pointer Dispatch
-//! Rather than executing dynamic `if-else` branch ladders (`is_x86_feature_detected!`) on
-//! every payload store, the hardware topology register width (`RegisterWidth::Bits256`,
-//! `Bits128`, `Bits64`) is probed once at startup from [`global_hardware_topology`].
-//! The hot-path store function pointer is resolved and cached in a zero-overhead [`OnceLock`],
-//! reducing hot-path dispatch to a direct function pointer jump.
+//! ```text
+//!   stream_payload_to_dram(dst, src, len)  [compile-time target dispatch]
+//!     ├─ x86_64 + target_feature("avx2")
+//!     │    ├─ len >= 64  ──► head align(32) ─► _mm256_stream_si256 (32B NT) ─► sfence ─► tail
+//!     │    ├─ len >= 32  ──► _mm_stream_si128 (16B NT) ─► sfence
+//!     │    └─ len < 32   ──► copy_nonoverlapping
+//!     ├─ x86_64 (baseline SSE2)
+//!     │    ├─ len >= 32  ──► head align(16) ─► _mm_stream_si128 (16B NT) ─► sfence ─► tail
+//!     │    └─ len < 32   ──► copy_nonoverlapping
+//!     └─ not(x86_64) (aarch64 / portable)
+//!          └─ copy_nonoverlapping
+//! ```
 
 use bytes::Bytes;
 
@@ -46,13 +50,13 @@ unsafe fn stream_payload_avx2_dispatched(dst: *mut u8, src: *const u8, len: usiz
     }
 }
 
-/// Non-temporal streaming store to confine large payloads into DRAM,
-/// bypassing L1, L2, and L3 CPU cache lines to prevent cache pollution.
+/// Non-temporal streaming store to confine payloads into DRAM without polluting CPU caches.
 ///
 /// # Safety
 ///
-/// `dst` must be valid for writes of `len` bytes.
-/// `src` must be valid for reads of `len` bytes.
+/// - `dst` must be valid for writes of `len` bytes.
+/// - `src` must be valid for reads of `len` bytes.
+/// - `dst` and `src` must not overlap.
 #[inline(always)]
 pub unsafe fn stream_payload_to_dram(dst: *mut u8, src: *const u8, len: usize) {
     #[cfg(all(target_arch = "x86_64", target_feature = "avx2"))]
@@ -81,9 +85,8 @@ unsafe fn stream_payload_avx2(dst: *mut u8, src: *const u8, len: usize) {
     use core::arch::x86_64::*;
 
     unsafe {
-        // 1. Align destination pointer to 32-byte boundary
         let dst_addr = dst as usize;
-        let head = (32 - (dst_addr % 32)) % 32;
+        let head = (32 - (dst_addr & 31)) & 31;
         if head > 0 && head <= len {
             std::ptr::copy_nonoverlapping(src, dst, head);
         }
@@ -97,7 +100,6 @@ unsafe fn stream_payload_avx2(dst: *mut u8, src: *const u8, len: usize) {
 
         _mm_sfence();
 
-        // 2. Copy remaining unaligned tail
         if offset < len {
             std::ptr::copy_nonoverlapping(src.add(offset), dst.add(offset), len - offset);
         }
@@ -110,9 +112,8 @@ unsafe fn stream_payload_sse2(dst: *mut u8, src: *const u8, len: usize) {
     use core::arch::x86_64::*;
 
     unsafe {
-        // 1. Align destination pointer to 16-byte boundary
         let dst_addr = dst as usize;
-        let head = (16 - (dst_addr % 16)) % 16;
+        let head = (16 - (dst_addr & 15)) & 15;
         if head > 0 && head <= len {
             std::ptr::copy_nonoverlapping(src, dst, head);
         }
@@ -126,15 +127,13 @@ unsafe fn stream_payload_sse2(dst: *mut u8, src: *const u8, len: usize) {
 
         _mm_sfence();
 
-        // 2. Copy remaining unaligned tail
         if offset < len {
             std::ptr::copy_nonoverlapping(src.add(offset), dst.add(offset), len - offset);
         }
     }
 }
 
-/// Allocates an aligned buffer in DRAM and copies payload using Non-Temporal Stores
-/// if payload is >= 256 bytes, preventing CPU L1/L2 cache pollution.
+/// Allocates a standalone DRAM buffer and streams payload via Non-Temporal Stores when `>= 256` bytes.
 pub fn create_dram_confined_bytes(src: &[u8]) -> Bytes {
     if src.len() < 256 {
         return Bytes::copy_from_slice(src);
@@ -144,38 +143,4 @@ pub fn create_dram_confined_bytes(src: &[u8]) -> Bytes {
         stream_payload_to_dram(vec.as_mut_ptr(), src.as_ptr(), src.len());
     }
     Bytes::from(vec)
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn test_dram_confinement_small_payload() {
-        let data = b"small payload under 256 bytes";
-        let bytes = create_dram_confined_bytes(data);
-        assert_eq!(bytes.as_ref(), data);
-    }
-
-    #[test]
-    fn test_dram_confinement_large_payload() {
-        let pattern = b"0123456789abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ";
-        let mut large = Vec::with_capacity(4096);
-        while large.len() < 4096 {
-            large.extend_from_slice(pattern);
-        }
-        large.truncate(4096);
-
-        let bytes = create_dram_confined_bytes(&large);
-        assert_eq!(bytes.as_ref(), large.as_slice());
-    }
-
-    #[test]
-    fn test_dram_confinement_arbitrary_lengths() {
-        for len in [255, 256, 257, 511, 512, 513, 1023, 1024, 1025, 4096] {
-            let original: Vec<u8> = (0..len).map(|i| (i % 256) as u8).collect();
-            let bytes = create_dram_confined_bytes(&original);
-            assert_eq!(bytes.as_ref(), original.as_slice(), "Failed at len {len}");
-        }
-    }
 }

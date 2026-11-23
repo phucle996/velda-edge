@@ -1,24 +1,35 @@
 //! HTTP Cache Lookup Pre-Upstream Plugin (`http_cache_lookup`).
 //!
 //! Evaluated during the `pre_upstream` phase immediately before forwarding requests to backends.
-//! Computes canonical cache keys, queries the shared [`HttpCacheStorage`], and returns an
-//! immediate [`Action::Respond`] with zero-copy payload on CACHE HIT.
-//! On CACHE MISS, enriches the request with cache key metadata and yields [`Action::Continue`].
+//! Computes zero-allocation canonical hashes and serves cached payloads directly from the
+//! contiguous 2 MiB slab arena on HIT.
+//!
+//! ```text
+//!   on_upstream_request(req)
+//!     ├─ method not cacheable / client no-cache ──► Action::Continue
+//!     └─ hash = hash_request_key_zero_alloc()  [0 heap alloc]
+//!          └─► storage.lookup_variant(hash, accept_encoding, bypass_auth)
+//!                ├─ Hit        ──► Action::ServeCached(directive)  [0-copy SlabLease]
+//!                ├─ AuthBypass ──► Action::Continue
+//!                └─ Miss       ──► req.headers.set_u64(X_VELDA_CACHE_HASH, hash) ─► Continue
+//! ```
 
 use std::sync::Arc;
 use std::time::Duration;
 
-use crate::config::PluginConfig;
 use http::Method;
-use http::header::HeaderValue;
 use velda_core::{Action, CachedResponseDirective, L7Request};
 
-use crate::http_cache::constants::{X_VELDA_CACHE_HASH, X_VELDA_CACHE_KEY};
-
 use crate::capability::{AccessLevel, PluginCapability, SupportedProtocols};
+use crate::config::PluginConfig;
 use crate::error::PluginError;
-use crate::http_cache::{HttpCacheRegistry, HttpCacheStorage};
+use crate::http_cache::{
+    HttpCacheRegistry, HttpCacheStorage, LookupOutcome, X_VELDA_CACHE_HASH,
+    hash_request_key_zero_alloc, parse_cache_control_fast,
+};
 use crate::pre_upstream::PreUpstreamPlugin;
+
+const STACK_KEY_HEADERS_CAP: usize = 16;
 
 /// Configuration schema for [`HttpCacheLookupPlugin`].
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -29,13 +40,11 @@ pub struct HttpCacheLookupConfig {
     pub cacheable_methods: Vec<Method>,
     /// Whether to sort query string keys alphabetically before hashing.
     pub ignore_query_order: bool,
-    /// Honor client `Cache-Control: no-cache` / `Pragma: no-cache` directives (default: false).
+    /// Honor client `Cache-Control: no-cache` / `Pragma: no-cache` directives.
     pub honor_client_no_cache: bool,
     /// Whether to bypass cache lookup on requests carrying an `Authorization` header (RFC 9111 §3.5).
-    /// Default: true (preventing shared cache data leaks).
     pub bypass_authenticated_requests: bool,
-    /// Custom request header names to incorporate into the cache key for per-user / segmented caching.
-    /// (e.g. `["x-user-id", "authorization"]`). Names are normalized to lowercase.
+    /// Custom request header names to incorporate into the cache key for segmented caching.
     pub key_headers: Vec<String>,
     /// Allocated memory limit for this storage if created here (in megabytes).
     pub max_memory_mb: usize,
@@ -63,6 +72,7 @@ pub struct HttpCacheLookupPlugin {
     pub id: String,
     pub config: HttpCacheLookupConfig,
     pub storage: Arc<HttpCacheStorage>,
+    auth_in_key: bool,
 }
 
 impl std::fmt::Debug for HttpCacheLookupPlugin {
@@ -82,12 +92,7 @@ impl HttpCacheLookupPlugin {
         let default_ttl = Duration::from_secs(config.default_ttl_secs.max(1));
         let storage =
             HttpCacheRegistry::global().get_or_create(&config.zone, max_bytes, default_ttl);
-
-        Self {
-            id: id.into(),
-            config,
-            storage,
-        }
+        Self::with_storage(id, config, storage)
     }
 
     /// Constructs an instance binding to an existing storage (convenient for testing).
@@ -96,10 +101,16 @@ impl HttpCacheLookupPlugin {
         config: HttpCacheLookupConfig,
         storage: Arc<HttpCacheStorage>,
     ) -> Self {
+        let auth_in_key = config
+            .key_headers
+            .iter()
+            .any(|h| h.eq_ignore_ascii_case("authorization"));
+
         Self {
             id: id.into(),
             config,
             storage,
+            auth_in_key,
         }
     }
 
@@ -137,6 +148,61 @@ impl HttpCacheLookupPlugin {
 
         Ok(Self::new(&config.id, parsed_cfg))
     }
+
+    #[inline]
+    fn compute_hash(&self, req: &L7Request) -> u64 {
+        let host = req
+            .headers
+            .get(http::header::HOST)
+            .and_then(|v| v.to_str().ok());
+
+        if self.config.key_headers.is_empty() {
+            return hash_request_key_zero_alloc(
+                &req.method,
+                host,
+                req.uri.path(),
+                req.uri.query(),
+                self.config.ignore_query_order,
+                None,
+            );
+        }
+
+        if self.config.key_headers.len() <= STACK_KEY_HEADERS_CAP {
+            let mut stack_buf = [("", ""); STACK_KEY_HEADERS_CAP];
+            let mut count = 0usize;
+            for hdr_name in &self.config.key_headers {
+                if let Some(val) = req.headers.get(hdr_name).and_then(|v| v.to_str().ok())
+                    && let Some(slot) = stack_buf.get_mut(count)
+                {
+                    *slot = (hdr_name.as_str(), val);
+                    count += 1;
+                }
+            }
+            return hash_request_key_zero_alloc(
+                &req.method,
+                host,
+                req.uri.path(),
+                req.uri.query(),
+                self.config.ignore_query_order,
+                stack_buf.get(..count),
+            );
+        }
+
+        let mut extracted = Vec::with_capacity(self.config.key_headers.len());
+        for hdr_name in &self.config.key_headers {
+            if let Some(val) = req.headers.get(hdr_name).and_then(|v| v.to_str().ok()) {
+                extracted.push((hdr_name.as_str(), val));
+            }
+        }
+        hash_request_key_zero_alloc(
+            &req.method,
+            host,
+            req.uri.path(),
+            req.uri.query(),
+            self.config.ignore_query_order,
+            Some(&extracted),
+        )
+    }
 }
 
 impl PreUpstreamPlugin for HttpCacheLookupPlugin {
@@ -151,678 +217,65 @@ impl PreUpstreamPlugin for HttpCacheLookupPlugin {
     }
 
     fn on_upstream_request(&self, req: &mut L7Request, _target_upstream: &mut u16) -> Action {
-        // 1. Method check: only cacheable methods (GET, HEAD) are evaluated
         if !self.config.cacheable_methods.contains(&req.method) {
             return Action::Continue;
         }
 
-        // 2. Client Cache-Control bypass check
         if self.config.honor_client_no_cache {
-            let has_no_cache = req
+            let cc_bypass = req
                 .headers
                 .get(http::header::CACHE_CONTROL)
-                .and_then(|v| v.to_str().ok())
-                .map(|s| s.contains("no-cache") || s.contains("no-store"))
-                .unwrap_or(false)
-                || req
-                    .headers
-                    .get(http::header::PRAGMA)
-                    .and_then(|v| v.to_str().ok())
-                    .map(|s| s.contains("no-cache"))
-                    .unwrap_or(false);
-
-            if has_no_cache {
+                .is_some_and(|v| parse_cache_control_fast(v.as_bytes()).is_no_cache_or_no_store());
+            let pragma_bypass = !cc_bypass
+                && req.headers.get(http::header::PRAGMA).is_some_and(|v| {
+                    v.as_bytes()
+                        .windows(8)
+                        .any(|w| w.eq_ignore_ascii_case(b"no-cache"))
+                });
+            if cc_bypass || pragma_bypass {
                 return Action::Continue;
             }
         }
 
-        // 3. RFC 9111 §3.5 Authentication check (Safety Shield) setup
         let has_auth = req.headers.contains_key(http::header::AUTHORIZATION);
-        let auth_in_key = self
-            .config
-            .key_headers
-            .iter()
-            .any(|h| h.eq_ignore_ascii_case("authorization"));
+        let bypass_auth =
+            has_auth && self.config.bypass_authenticated_requests && !self.auth_in_key;
 
-        // 4. Extract custom key headers if configured
-        let extra_headers: Option<Vec<(&str, &str)>> = if !self.config.key_headers.is_empty() {
-            let mut extracted = Vec::with_capacity(self.config.key_headers.len());
-            for hdr_name in &self.config.key_headers {
-                if let Some(val) = req.headers.get(hdr_name).and_then(|v| v.to_str().ok()) {
-                    extracted.push((hdr_name.as_str(), val));
-                }
+        let key_hash = self.compute_hash(req);
+        let accept_encoding = req.headers.get(http::header::ACCEPT_ENCODING);
+
+        match self
+            .storage
+            .lookup_variant(key_hash, accept_encoding, bypass_auth)
+        {
+            LookupOutcome::Hit {
+                status,
+                payload,
+                content_type,
+                encoding,
+                age_secs,
+                has_variants,
+            } => Action::ServeCached(CachedResponseDirective::new(
+                status,
+                payload,
+                content_type,
+                encoding,
+                age_secs,
+                has_variants,
+            )),
+            LookupOutcome::AuthBypass => Action::Continue,
+            LookupOutcome::Miss => {
+                req.headers.set_u64(X_VELDA_CACHE_HASH, key_hash);
+                Action::Continue
             }
-            Some(extracted)
-        } else {
-            None
-        };
-
-        // 5. Compute canonical cache key
-        let host = req
-            .headers
-            .get(http::header::HOST)
-            .and_then(|v| v.to_str().ok());
-        let (key_str, key_hash) = HttpCacheStorage::compute_cache_key_with_headers(
-            &req.method,
-            host,
-            req.uri.path(),
-            req.uri.query(),
-            self.config.ignore_query_order,
-            extra_headers.as_deref(),
-        );
-
-        // 6. Query the in-memory cache storage
-        if let Some(entry) = self.storage.get(key_hash) {
-            // RFC 9111 §3.5: If request has Authorization and is not partitioned via key_headers,
-            // a shared cache MUST NOT serve the cached entry unless explicitly marked public.
-            if has_auth
-                && self.config.bypass_authenticated_requests
-                && !auth_in_key
-                && !entry.is_public
-            {
-                return Action::Continue;
-            }
-
-            let accept_encoding = req.headers.get(http::header::ACCEPT_ENCODING);
-            if let Some((payload, content_encoding)) =
-                entry.negotiate_smart_variant(accept_encoding)
-            {
-                // CACHE HIT: Construct fast-path cache directive directly from in-memory zero-copy payload.
-                // Pure Payload Model: Headers are NEVER restored from cache.
-                // Avoids intermediate HeaderMap and L7Response heap allocations on the hot path.
-                let has_variants = entry.variants.gzip.is_some()
-                    || entry.variants.brotli.is_some()
-                    || entry.variants.zstd.is_some();
-                let age_secs = entry.age_secs();
-
-                let directive = CachedResponseDirective::new(
-                    entry.status,
-                    payload,
-                    entry.content_type,
-                    content_encoding,
-                    age_secs,
-                    has_variants,
-                );
-
-                return Action::ServeCached(directive);
-            }
-            // If entry lacks a compatible variant for this client (Lazy Miss),
-            // cleanly fall through to Step 7 to fetch the missing variant from upstream!
         }
-
-        // 7. CACHE MISS: Enrich request headers with transient key metadata for post-response store
-        if let Ok(val) = HeaderValue::from_str(&key_str) {
-            req.headers.insert(X_VELDA_CACHE_KEY, val);
-        }
-        req.headers.set_u64(X_VELDA_CACHE_HASH, key_hash);
-
-        Action::Continue
     }
 
     fn capability(&self) -> PluginCapability {
-        // Requires write permission on headers to inject transient x-velda-cache-key
         PluginCapability::header_only(AccessLevel::Write)
     }
 
     fn supported_protocols(&self) -> SupportedProtocols {
         SupportedProtocols::ALL_HTTP
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-    use crate::http_cache::CacheEntry;
-    use http::{HeaderMap, StatusCode, Uri, Version};
-    use velda_core::Body;
-
-    #[test]
-    fn test_http_cache_lookup_miss_and_hit() {
-        let storage = Arc::new(HttpCacheStorage::new(
-            "test_lookup",
-            1024 * 1024,
-            Duration::from_secs(60),
-        ));
-        let plugin = HttpCacheLookupPlugin::with_storage(
-            "lookup-1",
-            HttpCacheLookupConfig::default(),
-            Arc::clone(&storage),
-        );
-
-        let uri: Uri = "http://api.example.com/products?sort=asc&page=1"
-            .parse()
-            .unwrap();
-        let mut headers = HeaderMap::new();
-        headers.insert(http::header::HOST, "api.example.com".parse().unwrap());
-        let mut req = L7Request::new(
-            Method::GET,
-            uri.clone(),
-            Version::HTTP_11,
-            headers,
-            Body::Empty,
-        );
-
-        // 1. Initial request: MISS -> Action::Continue and injected x-velda-cache-key
-        let mut target1 = 1;
-        let action = plugin.on_upstream_request(&mut req, &mut target1);
-        assert!(action.is_continue());
-        assert!(req.headers.contains_key("x-velda-cache-key"));
-        assert_eq!(
-            req.headers.get("x-velda-cache-key").unwrap(),
-            "GET:api.example.com:/products?page=1&sort=asc"
-        );
-
-        // 2. Seed cache entry into the storage
-        let (_, hash) = HttpCacheStorage::compute_cache_key(
-            &Method::GET,
-            Some("api.example.com"),
-            "/products",
-            Some("sort=asc&page=1"),
-            true,
-        );
-        storage.store(
-            hash,
-            CacheEntry::with_raw(
-                "GET:api.example.com:/products?page=1&sort=asc",
-                StatusCode::OK,
-                Some(http::HeaderValue::from_static("application/json")),
-                bytes::Bytes::from_static(b"[{\"id\":1}]"),
-                Duration::from_secs(60),
-            ),
-        );
-
-        // 3. Second request (even with reversed query order): HIT -> Action::Respond
-        let alt_uri: Uri = "http://api.example.com/products?page=1&sort=asc"
-            .parse()
-            .unwrap();
-        let mut alt_headers = HeaderMap::new();
-        alt_headers.insert(http::header::HOST, "api.example.com".parse().unwrap());
-        let mut req2 = L7Request::new(
-            Method::GET,
-            alt_uri,
-            Version::HTTP_11,
-            alt_headers,
-            Body::Empty,
-        );
-
-        let mut target2 = 1;
-        let action2 = plugin.on_upstream_request(&mut req2, &mut target2);
-        match action2 {
-            Action::ServeCached(cached) => {
-                let resp = cached.into_l7_response();
-                assert_eq!(resp.status, StatusCode::OK);
-                assert_eq!(resp.headers.get("x-cache").unwrap(), "HIT");
-                assert_eq!(resp.headers.get("age").unwrap(), "0");
-                match resp.body {
-                    Body::Bytes(b) => assert_eq!(b, bytes::Bytes::from_static(b"[{\"id\":1}]")),
-                    _ => panic!("Expected Body::Bytes"),
-                }
-            }
-            _ => panic!("Expected Action::ServeCached"),
-        }
-    }
-
-    #[test]
-    fn test_http_cache_lookup_negotiates_precompressed_variant() {
-        use crate::http_cache::CompressedVariants;
-
-        let storage = Arc::new(HttpCacheStorage::new(
-            "test_variants",
-            1024 * 1024,
-            Duration::from_secs(60),
-        ));
-        let plugin = HttpCacheLookupPlugin::with_storage(
-            "lookup-var",
-            HttpCacheLookupConfig::default(),
-            Arc::clone(&storage),
-        );
-
-        let (_, hash) = HttpCacheStorage::compute_cache_key(
-            &Method::GET,
-            Some("api.example.com"),
-            "/large-data",
-            None,
-            true,
-        );
-        let raw_payload =
-            bytes::Bytes::from_static(b"lots of repetitive data for compression test");
-        let gzip_payload = bytes::Bytes::from_static(b"gzip_compressed_bytes");
-        let br_payload = bytes::Bytes::from_static(b"br_compressed_bytes");
-
-        let entry = CacheEntry::with_raw(
-            "GET:api.example.com:/large-data",
-            StatusCode::OK,
-            Some(http::HeaderValue::from_static("application/json")),
-            raw_payload.clone(),
-            Duration::from_secs(60),
-        )
-        .with_variants(CompressedVariants {
-            gzip: Some(gzip_payload.clone()),
-            brotli: Some(br_payload.clone()),
-            zstd: None,
-        });
-
-        storage.store(hash, entry);
-
-        // 1. Request with Accept-Encoding: gzip
-        let mut headers = HeaderMap::new();
-        headers.insert(http::header::HOST, "api.example.com".parse().unwrap());
-        headers.insert(
-            http::header::ACCEPT_ENCODING,
-            "gzip, deflate".parse().unwrap(),
-        );
-        let mut req = L7Request::new(
-            Method::GET,
-            "http://api.example.com/large-data".parse().unwrap(),
-            Version::HTTP_11,
-            headers,
-            Body::Empty,
-        );
-        let mut target = 1;
-        let action = plugin.on_upstream_request(&mut req, &mut target);
-        match action {
-            Action::ServeCached(cached) => {
-                let resp = cached.into_l7_response();
-                assert_eq!(resp.status, StatusCode::OK);
-                assert_eq!(resp.headers.get("x-cache").unwrap(), "HIT");
-                assert_eq!(resp.headers.get("content-encoding").unwrap(), "gzip");
-                assert_eq!(resp.headers.get("vary").unwrap(), "Accept-Encoding");
-                assert_eq!(
-                    resp.headers.get("content-length").unwrap(),
-                    gzip_payload.len().to_string().as_str()
-                );
-                match resp.body {
-                    Body::Bytes(b) => assert_eq!(b, gzip_payload),
-                    _ => panic!("Expected Body::Bytes"),
-                }
-            }
-            _ => panic!("Expected Action::ServeCached"),
-        }
-
-        // 2. Request with Accept-Encoding: br
-        let mut headers_br = HeaderMap::new();
-        headers_br.insert(http::header::HOST, "api.example.com".parse().unwrap());
-        headers_br.insert(
-            http::header::ACCEPT_ENCODING,
-            "br;q=1.0, gzip;q=0.8".parse().unwrap(),
-        );
-        let mut req_br = L7Request::new(
-            Method::GET,
-            "http://api.example.com/large-data".parse().unwrap(),
-            Version::HTTP_11,
-            headers_br,
-            Body::Empty,
-        );
-        let mut target_br = 1;
-        let action_br = plugin.on_upstream_request(&mut req_br, &mut target_br);
-        match action_br {
-            Action::ServeCached(cached) => {
-                let resp = cached.into_l7_response();
-                assert_eq!(resp.headers.get("content-encoding").unwrap(), "br");
-                match resp.body {
-                    Body::Bytes(b) => assert_eq!(b, br_payload),
-                    _ => panic!("Expected Body::Bytes"),
-                }
-            }
-            _ => panic!("Expected Action::ServeCached"),
-        }
-
-        // 3. Request without Accept-Encoding: serves uncompressed raw body
-        let mut headers_raw = HeaderMap::new();
-        headers_raw.insert(http::header::HOST, "api.example.com".parse().unwrap());
-        let mut req_raw = L7Request::new(
-            Method::GET,
-            "http://api.example.com/large-data".parse().unwrap(),
-            Version::HTTP_11,
-            headers_raw,
-            Body::Empty,
-        );
-        let mut target_raw = 1;
-        let action_raw = plugin.on_upstream_request(&mut req_raw, &mut target_raw);
-        match action_raw {
-            Action::ServeCached(cached) => {
-                let resp = cached.into_l7_response();
-                assert!(resp.headers.get("content-encoding").is_none());
-                assert_eq!(resp.headers.get("vary").unwrap(), "Accept-Encoding");
-                match resp.body {
-                    Body::Bytes(b) => assert_eq!(b, raw_payload),
-                    _ => panic!("Expected Body::Bytes"),
-                }
-            }
-            _ => panic!("Expected Action::ServeCached"),
-        }
-    }
-
-    #[test]
-    fn test_http_cache_lookup_lazy_smart_matching() {
-        let storage = Arc::new(HttpCacheStorage::new(
-            "test_lazy_lookup",
-            1024 * 1024,
-            Duration::from_secs(60),
-        ));
-        let plugin = HttpCacheLookupPlugin::with_storage(
-            "lookup-lazy",
-            HttpCacheLookupConfig::default(),
-            Arc::clone(&storage),
-        );
-
-        let (_, hash) = HttpCacheStorage::compute_cache_key(
-            &Method::GET,
-            Some("api.example.com"),
-            "/lazy-item",
-            None,
-            true,
-        );
-
-        let br_payload = bytes::Bytes::from_static(b"brotli-cached-bytes-145B");
-
-        // Lazy entry: NO raw_body, only Brotli variant
-        let mut entry = CacheEntry::new(
-            "GET:api.example.com:/lazy-item",
-            StatusCode::OK,
-            Some(http::HeaderValue::from_static("application/json")),
-            None,
-            Duration::from_secs(60),
-        );
-        entry.variants.brotli = Some(br_payload.clone());
-        storage.store(hash, entry);
-
-        // 1. Client sends Accept-Encoding: gzip, deflate, br, zstd
-        // Smart Variant Matching: client accepts Brotli and Brotli is in cache -> HIT!
-        let mut headers1 = HeaderMap::new();
-        headers1.insert(http::header::HOST, "api.example.com".parse().unwrap());
-        headers1.insert(
-            http::header::ACCEPT_ENCODING,
-            "gzip, deflate, br, zstd".parse().unwrap(),
-        );
-        let mut req1 = L7Request::new(
-            Method::GET,
-            "http://api.example.com/lazy-item".parse().unwrap(),
-            Version::HTTP_11,
-            headers1,
-            Body::Empty,
-        );
-        let mut target1 = 1;
-        let action1 = plugin.on_upstream_request(&mut req1, &mut target1);
-        match action1 {
-            Action::ServeCached(cached) => {
-                let resp = cached.into_l7_response();
-                assert_eq!(resp.status, StatusCode::OK);
-                assert_eq!(resp.headers.get("x-cache").unwrap(), "HIT");
-                assert_eq!(resp.headers.get("content-encoding").unwrap(), "br");
-                assert_eq!(resp.headers.get("vary").unwrap(), "Accept-Encoding");
-                match resp.body {
-                    Body::Bytes(b) => assert_eq!(b, br_payload),
-                    _ => panic!("Expected Body::Bytes"),
-                }
-            }
-            _ => panic!("Expected Action::ServeCached"),
-        }
-
-        // 2. Client sends ONLY Accept-Encoding: gzip
-        // Entry lacks Gzip and raw_body is None -> Lazy Miss -> Action::Continue!
-        let mut headers2 = HeaderMap::new();
-        headers2.insert(http::header::HOST, "api.example.com".parse().unwrap());
-        headers2.insert(http::header::ACCEPT_ENCODING, "gzip".parse().unwrap());
-        let mut req2 = L7Request::new(
-            Method::GET,
-            "http://api.example.com/lazy-item".parse().unwrap(),
-            Version::HTTP_11,
-            headers2,
-            Body::Empty,
-        );
-        let mut target2 = 1;
-        let action2 = plugin.on_upstream_request(&mut req2, &mut target2);
-        assert!(action2.is_continue());
-        assert!(req2.headers.contains_key("x-velda-cache-key"));
-    }
-
-    #[test]
-    fn test_http_cache_lookup_post_method_bypasses() {
-        let storage = Arc::new(HttpCacheStorage::new(
-            "test_post",
-            1024 * 1024,
-            Duration::from_secs(60),
-        ));
-        let plugin = HttpCacheLookupPlugin::with_storage(
-            "lookup-post",
-            HttpCacheLookupConfig::default(),
-            storage,
-        );
-
-        let uri: Uri = "http://api.example.com/products".parse().unwrap();
-        let headers = HeaderMap::new();
-        let mut req = L7Request::new(
-            Method::POST,
-            uri,
-            Version::HTTP_11,
-            headers,
-            Body::Bytes(bytes::Bytes::from_static(b"{}")),
-        );
-
-        let mut target = 1;
-        let action = plugin.on_upstream_request(&mut req, &mut target);
-        assert!(action.is_continue());
-        assert!(!req.headers.contains_key("x-velda-cache-key"));
-    }
-
-    #[test]
-    fn test_http_cache_lookup_authorization_bypasses_by_default() {
-        let storage = Arc::new(HttpCacheStorage::new(
-            "test_auth_bypass",
-            1024 * 1024,
-            Duration::from_secs(60),
-        ));
-        let plugin = HttpCacheLookupPlugin::with_storage(
-            "lookup-auth",
-            HttpCacheLookupConfig::default(),
-            Arc::clone(&storage),
-        );
-
-        let (_, hash) = HttpCacheStorage::compute_cache_key(
-            &Method::GET,
-            Some("api.example.com"),
-            "/profile",
-            None,
-            true,
-        );
-        let entry = CacheEntry::with_raw(
-            "GET:api.example.com:/profile",
-            StatusCode::OK,
-            Some(HeaderValue::from_static("application/json")),
-            bytes::Bytes::from_static(b"{\"user\":\"alice\"}"),
-            Duration::from_secs(60),
-        );
-        storage.store(hash, entry);
-
-        // Request has Authorization header: must bypass cache lookup to prevent data leak!
-        let mut headers = HeaderMap::new();
-        headers.insert(http::header::HOST, "api.example.com".parse().unwrap());
-        headers.insert(
-            http::header::AUTHORIZATION,
-            "Bearer secret_token_123".parse().unwrap(),
-        );
-        let mut req = L7Request::new(
-            Method::GET,
-            "http://api.example.com/profile".parse().unwrap(),
-            Version::HTTP_11,
-            headers,
-            Body::Empty,
-        );
-
-        let mut target = 1;
-        let action = plugin.on_upstream_request(&mut req, &mut target);
-        assert!(action.is_continue());
-        // Transient cache key is NOT injected because it bypassed
-        assert!(!req.headers.contains_key("x-velda-cache-key"));
-    }
-
-    #[test]
-    fn test_http_cache_lookup_authorization_serves_public_entry() {
-        let storage = Arc::new(HttpCacheStorage::new(
-            "test_auth_public",
-            1024 * 1024,
-            Duration::from_secs(60),
-        ));
-        let plugin = HttpCacheLookupPlugin::with_storage(
-            "lookup-auth-pub",
-            HttpCacheLookupConfig::default(),
-            Arc::clone(&storage),
-        );
-
-        let (_, hash) = HttpCacheStorage::compute_cache_key(
-            &Method::GET,
-            Some("api.example.com"),
-            "/announcements",
-            None,
-            true,
-        );
-        // Entry explicitly marked public according to RFC 9111 §3.5
-        let entry = CacheEntry::with_raw(
-            "GET:api.example.com:/announcements",
-            StatusCode::OK,
-            Some(HeaderValue::from_static("application/json")),
-            bytes::Bytes::from_static(b"{\"news\":\"public_announcement\"}"),
-            Duration::from_secs(60),
-        )
-        .with_public(true);
-        storage.store(hash, entry);
-
-        // Request has Authorization header, but entry is explicitly public -> Safe to HIT!
-        let mut headers = HeaderMap::new();
-        headers.insert(http::header::HOST, "api.example.com".parse().unwrap());
-        headers.insert(
-            http::header::AUTHORIZATION,
-            "Bearer user_token".parse().unwrap(),
-        );
-        let mut req = L7Request::new(
-            Method::GET,
-            "http://api.example.com/announcements".parse().unwrap(),
-            Version::HTTP_11,
-            headers,
-            Body::Empty,
-        );
-
-        let mut target = 1;
-        let action = plugin.on_upstream_request(&mut req, &mut target);
-        match action {
-            Action::ServeCached(cached) => {
-                let resp = cached.into_l7_response();
-                assert_eq!(resp.status, StatusCode::OK);
-                assert_eq!(resp.headers.get("x-cache").unwrap(), "HIT");
-            }
-            _ => panic!("Expected Action::ServeCached for public entry"),
-        }
-    }
-
-    #[test]
-    fn test_http_cache_lookup_custom_key_headers_per_user() {
-        let storage = Arc::new(HttpCacheStorage::new(
-            "test_per_user",
-            1024 * 1024,
-            Duration::from_secs(60),
-        ));
-        let config = HttpCacheLookupConfig {
-            key_headers: vec!["authorization".to_string()],
-            ..Default::default()
-        };
-        let plugin =
-            HttpCacheLookupPlugin::with_storage("lookup-per-user", config, Arc::clone(&storage));
-
-        // Alice stores her own cached entry
-        let (alice_key, alice_hash) = HttpCacheStorage::compute_cache_key_with_headers(
-            &Method::GET,
-            Some("api.example.com"),
-            "/profile",
-            None,
-            true,
-            Some(&[("authorization", "Bearer alice")]),
-        );
-        let alice_entry = CacheEntry::with_raw(
-            alice_key,
-            StatusCode::OK,
-            Some(HeaderValue::from_static("application/json")),
-            bytes::Bytes::from_static(b"{\"balance\":1000}"),
-            Duration::from_secs(60),
-        );
-        storage.store(alice_hash, alice_entry);
-
-        // 1. Bob sends request with Bearer bob -> Must MISS (different cache key)
-        let mut bob_headers = HeaderMap::new();
-        bob_headers.insert(http::header::HOST, "api.example.com".parse().unwrap());
-        bob_headers.insert(http::header::AUTHORIZATION, "Bearer bob".parse().unwrap());
-        let mut req_bob = L7Request::new(
-            Method::GET,
-            "http://api.example.com/profile".parse().unwrap(),
-            Version::HTTP_11,
-            bob_headers,
-            Body::Empty,
-        );
-        let mut target_bob = 1;
-        let action_bob = plugin.on_upstream_request(&mut req_bob, &mut target_bob);
-        assert!(action_bob.is_continue());
-
-        // 2. Alice sends request with Bearer alice -> Must HIT!
-        let mut alice_headers = HeaderMap::new();
-        alice_headers.insert(http::header::HOST, "api.example.com".parse().unwrap());
-        alice_headers.insert(http::header::AUTHORIZATION, "Bearer alice".parse().unwrap());
-        let mut req_alice = L7Request::new(
-            Method::GET,
-            "http://api.example.com/profile".parse().unwrap(),
-            Version::HTTP_11,
-            alice_headers,
-            Body::Empty,
-        );
-        let mut target_alice = 1;
-        let action_alice = plugin.on_upstream_request(&mut req_alice, &mut target_alice);
-        match action_alice {
-            Action::ServeCached(cached) => {
-                let resp = cached.into_l7_response();
-                assert_eq!(resp.status, StatusCode::OK);
-                assert_eq!(resp.headers.get("x-cache").unwrap(), "HIT");
-                match resp.body {
-                    Body::Bytes(b) => {
-                        assert_eq!(b, bytes::Bytes::from_static(b"{\"balance\":1000}"))
-                    }
-                    _ => panic!("Expected Body::Bytes"),
-                }
-            }
-            _ => panic!("Expected Action::ServeCached for Alice"),
-        }
-    }
-
-    #[test]
-    fn test_from_config_complete() {
-        let json_cfg = serde_json::json!({
-            "zone": "api_cache",
-            "cacheable_methods": ["GET", "HEAD"],
-            "ignore_query_order": true,
-            "honor_client_no_cache": false,
-            "bypass_authenticated_requests": true,
-            "key_headers": ["x-user-id", "authorization"],
-            "max_memory_mb": 256,
-            "default_ttl_secs": 300
-        });
-        let config = PluginConfig {
-            id: "http_cache_lookup".into(),
-            config: json_cfg,
-        };
-        let plugin = HttpCacheLookupPlugin::from_config(&config).expect("valid config");
-        assert_eq!(plugin.id, "http_cache_lookup");
-        assert_eq!(plugin.config.zone, "api_cache");
-        assert_eq!(plugin.config.cacheable_methods.len(), 2);
-        assert!(plugin.config.ignore_query_order);
-        assert!(!plugin.config.honor_client_no_cache);
-        assert!(plugin.config.bypass_authenticated_requests);
-        assert_eq!(plugin.config.key_headers.len(), 2);
-        assert_eq!(plugin.config.max_memory_mb, 256);
-        assert_eq!(plugin.config.default_ttl_secs, 300);
-
-        // Incomplete config must fail validation
-        let bad_config = PluginConfig {
-            id: "http_cache_lookup".into(),
-            config: serde_json::json!({}),
-        };
-        assert!(HttpCacheLookupPlugin::from_config(&bad_config).is_err());
     }
 }

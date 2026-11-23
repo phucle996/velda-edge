@@ -1,21 +1,32 @@
-//! Wire Encoding Engines & Payload Compression Dispatchers.
+//! Wire Encoding Engines & Payload Compression Dispatchers (`response_compression::engine`).
 //!
-//! Provides thread-local reusable compressor contexts, scratch buffers,
-//! and wire encoding for Gzip, Deflate, Brotli, and Zstandard (with optional dictionary).
+//! ```text
+//!   compress_payload_with_dict(data, algo, levels, zstd_dict)
+//!         │
+//!         ├─► Zstd    ──► thread_local ZSTD_COMPRESSOR (level-keyed) -> SCRATCH_BUF
+//!         ├─► Brotli  ──► brotli::CompressorWriter (quality 0..=11)  -> SCRATCH_BUF
+//!         ├─► Gzip    ──► flate2::GzEncoder (zlib-rs, level 1..=9)   -> SCRATCH_BUF
+//!         └─► Deflate ──► flate2::DeflateEncoder (level 1..=9)       -> SCRATCH_BUF
+//!                                                                          │
+//!                                                                          ▼
+//!                                                            streaming_to_bytes(&scratch)
+//!                                                            (non-temporal WC store -> Bytes)
+//! ```
 
 use bytes::Bytes;
 use std::cell::RefCell;
 use std::io::Write;
 
 use super::negotiation::CompressionAlgorithm;
-use super::simd::streaming_to_bytes;
+use super::streaming_copy::streaming_to_bytes;
 
 thread_local! {
     /// Reusable thread-local scratch buffer for in-place compression engines (pre-warmed to 64KB).
     static SCRATCH_BUF: RefCell<Vec<u8>> = RefCell::new(Vec::with_capacity(64 * 1024));
 
-    /// Reusable thread-local Zstandard bulk compressor (avoids 128KB+ context re-allocation per request).
-    static ZSTD_COMPRESSOR: RefCell<Option<zstd::bulk::Compressor<'static>>> = const { RefCell::new(None) };
+    /// Reusable thread-local `(level, Compressor)` pair so level changes across routes/reloads
+    /// never reuse a stale compression level.
+    static ZSTD_COMPRESSOR: RefCell<Option<(i32, zstd::bulk::Compressor<'static>)>> = const { RefCell::new(None) };
 }
 
 /// Compresses a buffer using Gzip (RFC 1952) at the specified compression level (1-9).
@@ -78,24 +89,28 @@ pub fn encode_brotli(data: &[u8], level: u32) -> std::io::Result<Bytes> {
 pub fn encode_zstd(data: &[u8], level: i32) -> std::io::Result<Bytes> {
     let level = level.clamp(1, 22);
 
-    // Fast-path: use thread-local reusable bulk compressor
+    // Fast-path: use thread-local reusable bulk compressor matched to `level`
     ZSTD_COMPRESSOR.with(|c_cell| {
         let mut c_opt = c_cell.borrow_mut();
-        if c_opt.is_none() {
-            *c_opt = zstd::bulk::Compressor::new(level).ok();
+        let needs_rebuild = !matches!(&*c_opt, Some((cached_lvl, _)) if *cached_lvl == level);
+        if needs_rebuild {
+            *c_opt = zstd::bulk::Compressor::new(level).ok().map(|c| (level, c));
         }
 
-        if let Some(compressor) = c_opt.as_mut() {
+        if let Some((_, compressor)) = c_opt.as_mut() {
             let max_dest_len = zstd::zstd_safe::compress_bound(data.len());
             SCRATCH_BUF.with(|buf| {
                 let mut scratch = buf.borrow_mut();
                 if scratch.len() < max_dest_len {
                     scratch.resize(max_dest_len, 0);
                 }
-                match compressor.compress_to_buffer(data, &mut scratch[..max_dest_len]) {
-                    Ok(written) => Ok(streaming_to_bytes(&scratch[..written])),
+                match compressor
+                    .compress_to_buffer(data, scratch.get_mut(..max_dest_len).unwrap_or_default())
+                {
+                    Ok(written) => Ok(streaming_to_bytes(
+                        scratch.get(..written).unwrap_or_default(),
+                    )),
                     Err(_) => {
-                        // Fallback to one-shot encode if bulk buffer had issue
                         let compressed = zstd::encode_all(data, level)?;
                         Ok(streaming_to_bytes(&compressed))
                     }

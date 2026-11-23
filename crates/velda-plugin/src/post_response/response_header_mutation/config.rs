@@ -1,5 +1,13 @@
 //! Configuration Types and Bitmask Operations for Response Header Mutation.
 //!
+//! ```text
+//!   op_mask: u8
+//!     ├── bit 0: OP_REMOVE               ├── bit 4: OP_DYNAMIC_SET
+//!     ├── bit 1: OP_STATIC_SET           ├── bit 5: OP_DYNAMIC_ADD
+//!     ├── bit 2: OP_STATIC_ADD           └── bit 6: OP_DYNAMIC_SET_IF_MISSING
+//!     └── bit 3: OP_STATIC_SET_IF_MISSING
+//! ```
+//!
 //! Provides single-instruction ALU bitmasks (`op_mask: u8`) and typed rule containers.
 
 use crate::config::PluginConfig;

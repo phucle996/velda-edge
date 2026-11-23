@@ -52,7 +52,7 @@ flowchart TD
 
 ## 2. Hardware-Conscious Design Invariants
 
-### 2.1 Non-Temporal Streaming Store Directly to RAM (`simd.rs`)
+### 2.1 Non-Temporal Streaming Store Directly to RAM (`streaming_copy.rs`)
 
 Traditional HTTP proxies compress response buffers in normal CPU cacheable memory. When compressing thousands of concurrent responses (e.g. 32 KB JSON payloads), writing compressed output through L1/L2/L3 caches evicts critical metadata:
 - Route lookup tables (`velda-router`)
@@ -87,31 +87,30 @@ Velda Edge utilizes hardware-level **Non-Temporal Store instructions** (`_mm256_
 
 ---
 
-### 2.2 Dynamic Function Pointer CPU Dispatch
+### 2.2 Compile-Time CPU Dispatch (`streaming_copy.rs`)
 
-Rather than evaluating CPU feature flags or branching on each request hot path, Velda Edge resolves the hardware capability **exactly once** during static initialization via a function pointer:
+Rather than evaluating CPU feature flags or branching via `LazyLock<fn(...)>` on each request hot path, Velda Edge dispatches directly at **compile time** using `#[cfg(all(target_arch = "x86_64", target_feature = "avx2"))]` with `#[inline(always)]`:
 
 ```rust
-pub type StreamingCopyFn = fn(src: &[u8], dst: &mut [u8]);
-
-pub static STREAMING_COPY: LazyLock<StreamingCopyFn> = LazyLock::new(detect_streaming_copy_fn);
-
-fn detect_streaming_copy_fn() -> StreamingCopyFn {
-    #[cfg(target_arch = "x86_64")]
+#[inline(always)]
+pub fn streaming_copy(src: &[u8], dst: &mut [u8]) {
+    #[cfg(all(target_arch = "x86_64", target_feature = "avx2"))]
     {
-        if is_x86_feature_detected!("avx2") {
-            return |src, dst| unsafe { avx2_streaming_copy_impl(src, dst) };
-        }
-        if is_x86_feature_detected!("sse2") {
-            return |src, dst| unsafe { sse2_streaming_copy_impl(src, dst) };
-        }
+        unsafe { avx2_streaming_copy_impl(src, dst) };
     }
-    scalar_streaming_copy
+    #[cfg(all(target_arch = "x86_64", not(target_feature = "avx2")))]
+    {
+        unsafe { sse2_streaming_copy_impl(src, dst) };
+    }
+    #[cfg(not(target_arch = "x86_64"))]
+    {
+        scalar_streaming_copy(src, dst);
+    }
 }
 ```
 
-- **Call Cost**: Direct indirect call through function pointer (`call [rax]`), costing < 2 ns.
-- **Portability**: Automatically falls back to SSE2 or scalar copy on older CPUs or non-x86 architectures (e.g. ARM64 Neoverse).
+- **Zero Indirect Call**: Eliminates `LazyLock` and function-pointer indirection; LLVM dead-code-eliminates non-matching branches at compile time.
+- **Portability**: Automatically compiles down to SSE2 on baseline x86-64 or portable scalar copy on non-x86 architectures (e.g. ARM64 Neoverse / Apple Silicon).
 
 ---
 

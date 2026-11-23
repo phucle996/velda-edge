@@ -1,7 +1,12 @@
-//! SIMD Vectorized Header Validation and Parallel Fingerprint Matching.
+//! SIMD Vectorized Header Validation and Parallel Fingerprint Matching (`response_header_mutation::fingerprint`).
 //!
-//! Provides hardware-accelerated RFC 9110 character validation and vector-probed
-//! header fingerprint filtering across AVX2 (256-bit), SSE2 (128-bit), and scalar fallback.
+//! ```text
+//!   HeaderName ──► compute_header_fingerprint() ──► 1B tag: (len * 37) ^ first ^ last
+//!         │
+//!         ▼
+//!   fingerprint_matches_simd(&[u8; 32], fp_len, target)
+//!         └─► fingerprints.get(..limit).is_some_and(|s| s.contains(&target)) (auto-vectorized)
+//! ```
 
 use http::header::HeaderName;
 
@@ -11,11 +16,9 @@ use http::header::HeaderName;
 #[inline(always)]
 pub fn compute_header_fingerprint(name: &HeaderName) -> u8 {
     let bytes = name.as_str().as_bytes();
-    if bytes.is_empty() {
-        0
-    } else {
-        let len = bytes.len() as u8;
-        len.wrapping_mul(37) ^ bytes[0] ^ bytes[bytes.len() - 1]
+    match (bytes.first(), bytes.last()) {
+        (Some(&first), Some(&last)) => (bytes.len() as u8).wrapping_mul(37) ^ first ^ last,
+        _ => 0,
     }
 }
 
@@ -38,7 +41,9 @@ pub fn validate_header_value_simd(val: &[u8]) -> bool {
 #[inline(always)]
 pub fn fingerprint_matches_simd(fingerprints: &[u8; 32], fp_len: usize, target: u8) -> bool {
     let limit = fp_len.min(32);
-    fingerprints[..limit].contains(&target)
+    fingerprints
+        .get(..limit)
+        .is_some_and(|slice| slice.contains(&target))
 }
 
 #[cfg(test)]

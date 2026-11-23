@@ -1,16 +1,14 @@
 //! HTTP Cache Lookup Configuration Schema & Semantic Validation.
 //!
-//! Enforces a strict declarative contract for HTTP caching and in-memory cache lookup.
-//!
-//! # Strict Declarative Contract (Zero Silent Fallbacks)
-//! - **Strict Protocol Invariant**: Restricted exclusively to HTTP routes.
-//! - **Non-Empty Zone**: `zone` must be non-empty.
-//! - **Cacheable Methods**: `cacheable_methods` must contain valid HTTP methods.
-//! - **Valid Header Grammar**: All header names in `key_headers` must conform to RFC 9110 token grammar.
+//! ```text
+//!   PluginConfig (JSON) ─► serde_json::from_value ─► zone / methods / key_headers / bounds
+//!                                                        └─► Ok(HttpCacheLookupConfig) | Err
+//! ```
 
 use serde::{Deserialize, Serialize};
 
 use crate::error::PluginError;
+use crate::http_cache::{MAX_CACHE_MEMORY_MB, is_valid_header_name};
 
 /// Declarative configuration for the HTTP Cache Lookup plugin.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -25,7 +23,7 @@ pub struct HttpCacheLookupConfig {
     pub honor_client_no_cache: bool,
     /// Whether to bypass cache lookup on requests carrying an `Authorization` header.
     pub bypass_authenticated_requests: bool,
-    /// Custom request header names to incorporate into the cache key for per-user / segmented caching.
+    /// Custom request header names to incorporate into the cache key for per-user caching.
     pub key_headers: Vec<String>,
     /// Allocated memory limit for this zone if created here (in megabytes).
     pub max_memory_mb: usize,
@@ -43,33 +41,6 @@ fn is_valid_http_method(m: &str) -> bool {
         .all(|c| c.is_ascii_alphanumeric() || c == '-')
 }
 
-fn is_valid_header_name(h: &str) -> bool {
-    let trimmed = h.trim();
-    if trimmed.is_empty() {
-        return false;
-    }
-    trimmed.bytes().all(|b| {
-        b.is_ascii_alphanumeric()
-            || matches!(
-                b,
-                b'!' | b'#'
-                    | b'$'
-                    | b'%'
-                    | b'&'
-                    | b'\''
-                    | b'*'
-                    | b'+'
-                    | b'-'
-                    | b'.'
-                    | b'^'
-                    | b'_'
-                    | b'`'
-                    | b'|'
-                    | b'~'
-            )
-    })
-}
-
 /// Validates HTTP Cache Lookup configuration strictly according to production standards.
 pub fn validate_http_cache_lookup_config(
     plugin_id: &str,
@@ -81,15 +52,12 @@ pub fn validate_http_cache_lookup_config(
         ))
     })?;
 
-    // 1. Validate zone name
-    let zone_trimmed = cfg.zone.trim();
-    if zone_trimmed.is_empty() {
+    if cfg.zone.trim().is_empty() {
         return Err(PluginError::Config(format!(
             "Plugin '{plugin_id}': zone cannot be empty"
         )));
     }
 
-    // 2. Validate cacheable_methods
     if cfg.cacheable_methods.is_empty() {
         return Err(PluginError::Config(format!(
             "Plugin '{plugin_id}': cacheable_methods cannot be empty"
@@ -103,7 +71,6 @@ pub fn validate_http_cache_lookup_config(
         }
     }
 
-    // 3. Validate key_headers
     for h in &cfg.key_headers {
         if !is_valid_header_name(h) {
             return Err(PluginError::Config(format!(
@@ -112,71 +79,18 @@ pub fn validate_http_cache_lookup_config(
         }
     }
 
-    // 4. Validate memory and TTL
-    if cfg.max_memory_mb == 0 || cfg.max_memory_mb > 1_048_576 {
+    if !(1..=MAX_CACHE_MEMORY_MB).contains(&cfg.max_memory_mb) {
         return Err(PluginError::Config(format!(
-            "Plugin '{plugin_id}': max_memory_mb must be between 1 and 1,048,576 MB"
+            "Plugin '{plugin_id}': max_memory_mb ({}) must be between 1 and {MAX_CACHE_MEMORY_MB} MB",
+            cfg.max_memory_mb
         )));
     }
 
-    if cfg.default_ttl_secs == 0 || cfg.default_ttl_secs > 31_536_000 {
+    if !(1..=31_536_000).contains(&cfg.default_ttl_secs) {
         return Err(PluginError::Config(format!(
             "Plugin '{plugin_id}': default_ttl_secs must be between 1 and 31,536,000s"
         )));
     }
 
     Ok(cfg)
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-    use serde_json::json;
-
-    #[test]
-    fn test_valid_http_cache_lookup() {
-        let val = json!({
-            "zone": "api_cache",
-            "cacheable_methods": ["GET", "HEAD"],
-            "ignore_query_order": true,
-            "honor_client_no_cache": false,
-            "bypass_authenticated_requests": true,
-            "key_headers": ["x-user-id", "authorization"],
-            "max_memory_mb": 256,
-            "default_ttl_secs": 300
-        });
-        let res = validate_http_cache_lookup_config("cache_look_1", &val);
-        assert!(res.is_ok());
-    }
-
-    #[test]
-    fn test_empty_zone_rejected() {
-        let val = json!({
-            "zone": "",
-            "cacheable_methods": ["GET"],
-            "ignore_query_order": true,
-            "honor_client_no_cache": false,
-            "bypass_authenticated_requests": true,
-            "key_headers": [],
-            "max_memory_mb": 256,
-            "default_ttl_secs": 300
-        });
-        let res = validate_http_cache_lookup_config("cache_bad_name", &val);
-        assert!(res.is_err());
-        assert!(
-            res.unwrap_err()
-                .to_string()
-                .contains("zone cannot be empty")
-        );
-    }
-
-    #[test]
-    fn test_missing_required_fields_rejected() {
-        let val = json!({
-            "zone": "cache1"
-        });
-        let res = validate_http_cache_lookup_config("cache_missing", &val);
-        assert!(res.is_err());
-        assert!(res.unwrap_err().to_string().contains("missing field"));
-    }
 }

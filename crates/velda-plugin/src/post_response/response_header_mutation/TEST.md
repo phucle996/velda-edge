@@ -47,15 +47,15 @@ flowchart TD
 
 | Test Function | Source Module | Purpose | Key Assertions |
 | :--- | :--- | :--- | :--- |
-| `test_remove_sensitive_headers` | `plugin.rs` | Sensitive header stripping | Removes `x-powered-by` and `server`; preserves unrelated response headers. |
-| `test_remove_with_simd_probe_optimization` | `plugin.rs` | SIMD fingerprint filter | Skips linear removal scan when zero response headers match fingerprint vector. |
-| `test_set_and_dynamic_variables` | `plugin.rs` | Static set and dynamic variable resolution | Resolves `$request_id`, `$status` (`"201"`), and `$timestamp_epoch`. |
-| `test_set_if_missing` | `plugin.rs` | Conditional insertion | Injects `x-content-type-options: nosniff` when missing; retains upstream value when present. |
-| `test_add_multi_value_headers` | `plugin.rs` | Multi-value header appending | Appends `vary: Accept-Encoding` without overwriting existing `vary` entries. |
-| `test_from_config_strict_validation` | `plugin.rs` | Configuration loading and partitioning | Pre-partitions static vs dynamic sets, adds, and set-if-missing rules. |
-| `test_status_blob_integrity` | `var.rs` | Compile-time status table | Verifies 1,500-byte buffer correctly resolves all standard status codes 100..=599. |
-| `test_validate_header_value_correctness` | `simd.rs` | RFC 9110 character validation | Validates acceptable chars; rejects CRLF, null, DEL, and control characters. |
-| `test_fingerprint_matching_all_backends` | `simd.rs` | SIMD fingerprint matching | Validates AVX2, SSE2, and scalar fingerprint matching correctness. |
+| `test_remove_sensitive_headers` | `tests/response_header_mutation_test.rs` | Sensitive header stripping | Removes `x-powered-by` and `server`; preserves unrelated response headers. |
+| `test_remove_with_simd_probe_optimization_and_over_32_fallback` | `tests/response_header_mutation_test.rs` | SIMD fingerprint filter & >32 fallback | Skips linear removal scan on 5..=32 removals; still removes 33rd+ header when `> 32`. |
+| `test_set_and_dynamic_variables` | `tests/response_header_mutation_test.rs` | Static set and dynamic variable resolution | Resolves `$request_id`, `$status` (`"201"`), and `$timestamp_epoch`. |
+| `test_set_if_missing` | `tests/response_header_mutation_test.rs` | Conditional insertion | Injects `x-content-type-options: nosniff` when missing; retains upstream value when present. |
+| `test_add_multi_value_headers` | `tests/response_header_mutation_test.rs` | Multi-value header appending | Appends `vary: Accept-Encoding` without overwriting existing `vary` entries. |
+| `test_from_config_strict_validation` | `tests/response_header_mutation_test.rs` | Configuration loading and partitioning | Pre-partitions static vs dynamic sets, adds, and set-if-missing rules. |
+| `test_status_blob_integrity` | `var.rs` | Compile-time status table | Verifies `resolve_u64_header_value` resolves standard status codes 100..=599. |
+| `test_validate_header_value_correctness` | `fingerprint.rs` | RFC 9110 character validation | Validates acceptable chars; rejects CRLF, null, DEL, and control characters. |
+| `test_fingerprint_matching_all_backends` | `fingerprint.rs` | SIMD fingerprint matching | Validates fingerprint matching across 32-byte array slices. |
 
 ### 2.2 Sync Validation Suite (`crates/velda-sync/src/post_sync/plugin/post_response/response_header_mutation.rs`)
 

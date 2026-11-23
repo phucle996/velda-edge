@@ -1,14 +1,17 @@
-//! Hardware-Optimized SIMD & Non-Temporal Streaming Memory Store.
+//! Hardware-Optimized SIMD & Non-Temporal Streaming Memory Store (`response_compression::streaming_copy`).
 //!
-//! Provides dynamic CPU feature detection (AVX2, SSE2, Scalar fallback) via function pointer,
-//! and flushes compressed payloads directly to RAM bypassing CPU cache lines to prevent
-//! cache thrashing on edge proxy hot paths.
+//! ```text
+//!   SCRATCH_BUF (&[u8]) ──► streaming_to_bytes() ──► Vec<u8> (RAM) ──► Bytes
+//!                                 │
+//!         ┌───────────────────────┼───────────────────────┐
+//!         ▼ x86_64 + avx2         ▼ x86_64 (sse2)         ▼ non-x86_64
+//!   _mm256_stream_si256     _mm_stream_si128        copy_from_slice
+//!   (32B WC + _mm_sfence)   (16B WC + _mm_sfence)   (portable ALU)
+//!         └───────────────────────┴───────────────────────┘
+//!            Bypasses L1/L2/L3 cache to prevent payload cache pollution
+//! ```
 
 use bytes::Bytes;
-use std::sync::LazyLock;
-
-/// Dynamic function pointer type for hardware streaming memory copy.
-pub type StreamingCopyFn = fn(src: &[u8], dst: &mut [u8]);
 
 /// Scalar fallback for non-temporal streaming copy when SIMD is unavailable.
 #[cfg(any(not(target_arch = "x86_64"), test))]
@@ -109,25 +112,7 @@ unsafe fn avx2_streaming_copy_impl(src: &[u8], dst: &mut [u8]) {
     }
 }
 
-/// Detects CPU architecture and hardware features at compile-time, returning the optimal function pointer.
-fn detect_streaming_copy_fn() -> StreamingCopyFn {
-    #[cfg(all(target_arch = "x86_64", target_feature = "avx2"))]
-    {
-        |src, dst| unsafe { avx2_streaming_copy_impl(src, dst) }
-    }
-    #[cfg(all(target_arch = "x86_64", not(target_feature = "avx2")))]
-    {
-        |src, dst| unsafe { sse2_streaming_copy_impl(src, dst) }
-    }
-    #[cfg(not(target_arch = "x86_64"))]
-    {
-        scalar_streaming_copy
-    }
-}
-
-/// Hardware-optimized non-temporal memory streaming copy.
-///
-/// Inlined direct execution eliminating indirect function pointer overhead.
+/// Hardware-optimized non-temporal memory streaming copy (compile-time dispatch).
 #[inline(always)]
 pub fn streaming_copy(src: &[u8], dst: &mut [u8]) {
     #[cfg(all(target_arch = "x86_64", target_feature = "avx2"))]
@@ -143,9 +128,6 @@ pub fn streaming_copy(src: &[u8], dst: &mut [u8]) {
         scalar_streaming_copy(src, dst);
     }
 }
-
-/// Globally bound, hardware-optimized non-temporal memory streaming copy function pointer.
-pub static STREAMING_COPY: LazyLock<StreamingCopyFn> = LazyLock::new(detect_streaming_copy_fn);
 
 /// Writes compressed bytes directly to RAM using hardware-vectorized non-temporal streaming routines.
 ///
@@ -173,7 +155,7 @@ mod tests {
         for &size in &test_sizes {
             let src: Vec<u8> = (0..size).map(|i| (i % 251) as u8).collect();
             let mut dst = vec![0u8; size];
-            (*STREAMING_COPY)(&src, &mut dst);
+            streaming_copy(&src, &mut dst);
             assert_eq!(src, dst, "Mismatch for size {size}");
 
             let bytes = streaming_to_bytes(&src);

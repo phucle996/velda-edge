@@ -1,10 +1,22 @@
 //! Security Headers Configuration Schema & Pre-baked State.
 //!
-//! Encapsulates declarative configuration structures, bitmask flags for single-instruction ALU
-//! dispatch, and compile-time header construction partitioned into:
-//! - **Inline Registers (`<= 16` bytes)**: Written directly into [`velda_core::HeaderWorkspace`]'s
-//!   128-bit hardware registers (`set_inline_ascii`).
-//! - **Standard Pointers (`> 16` bytes)**: Stored as zero-copy [`HeaderValue`] references to RAM.
+//! Encapsulates declarative configuration structures, bitmask flags, and compile-time
+//! header construction partitioned into dual representations:
+//!
+//! ```text
+//!   SecurityHeadersConfig (init / reload)
+//!     ├─► HSTS (max-age + includeSubDomains + preload)
+//!     ├─► X-Content-Type-Options: nosniff
+//!     └─► 9 optional policy directives (skip "none" except X-Permitted-Cross-Domain-Policies)
+//!           │
+//!           ▼ compile_header_entry(name, trimmed)
+//!     ┌──────────────────────────────────────────────────────────┐
+//!     │ bytes.len() <= 16                                        │
+//!     │   ──► CompiledHeader::InlineRegister { name, len, raw }  │
+//!     │ bytes.len() > 16                                         │
+//!     │   ──► CompiledHeader::StandardPointer { name, value }    │
+//!     └──────────────────────────────────────────────────────────┘
+//! ```
 
 use http::header::{
     HeaderName, HeaderValue, REFERRER_POLICY, STRICT_TRANSPORT_SECURITY, X_CONTENT_TYPE_OPTIONS,
@@ -93,8 +105,8 @@ impl CompiledHeader {
     pub fn to_header_value(&self) -> HeaderValue {
         match self {
             CompiledHeader::InlineRegister { len, raw, .. } => {
-                HeaderValue::from_bytes(&raw[..*len as usize])
-                    .unwrap_or_else(|_| HeaderValue::from_static(""))
+                let slice = raw.get(..*len as usize).unwrap_or(&[]);
+                HeaderValue::from_bytes(slice).unwrap_or_else(|_| HeaderValue::from_static(""))
             }
             CompiledHeader::StandardPointer { value, .. } => value.clone(),
         }
@@ -112,7 +124,9 @@ pub fn compile_header_entry(name: HeaderName, val_str: &str) -> Option<CompiledH
     let bytes = trimmed.as_bytes();
     if bytes.len() <= 16 {
         let mut raw = [0u8; 16];
-        raw[..bytes.len()].copy_from_slice(bytes);
+        if let Some(dst) = raw.get_mut(..bytes.len()) {
+            dst.copy_from_slice(bytes);
+        }
         Some(CompiledHeader::InlineRegister {
             name,
             len: bytes.len() as u8,
@@ -184,22 +198,16 @@ impl SecurityHeadersConfig {
     pub fn compile_headers(&self) -> (u16, u8, [CompiledHeader; MAX_SECURITY_HEADERS]) {
         let mut op_mask = 0u16;
         let mut count = 0usize;
+        let mut array: [CompiledHeader; MAX_SECURITY_HEADERS] =
+            std::array::from_fn(|_| CompiledHeader::default());
 
-        let dummy = CompiledHeader::default();
-        let mut array: [CompiledHeader; MAX_SECURITY_HEADERS] = [
-            dummy.clone(),
-            dummy.clone(),
-            dummy.clone(),
-            dummy.clone(),
-            dummy.clone(),
-            dummy.clone(),
-            dummy.clone(),
-            dummy.clone(),
-            dummy.clone(),
-            dummy.clone(),
-            dummy.clone(),
-            dummy,
-        ];
+        let mut push_entry = |entry: CompiledHeader, flag: u16| {
+            if let Some(slot) = array.get_mut(count) {
+                *slot = entry;
+                count += 1;
+                op_mask |= flag;
+            }
+        };
 
         // 1. Pre-compute HSTS header
         if self.hsts.enable {
@@ -212,9 +220,7 @@ impl SecurityHeadersConfig {
             }
 
             if let Some(entry) = compile_header_entry(STRICT_TRANSPORT_SECURITY, &hsts_str) {
-                array[count] = entry;
-                count += 1;
-                op_mask |= FLAG_HSTS;
+                push_entry(entry, FLAG_HSTS);
             }
         }
 
@@ -222,129 +228,72 @@ impl SecurityHeadersConfig {
         if self.content_type_nosniff
             && let Some(entry) = compile_header_entry(X_CONTENT_TYPE_OPTIONS, "nosniff")
         {
-            array[count] = entry;
-            count += 1;
-            op_mask |= FLAG_NOSNIFF;
+            push_entry(entry, FLAG_NOSNIFF);
         }
 
-        // 3. Pre-compute X-Frame-Options (DENY = 4 bytes, SAMEORIGIN = 10 bytes <= 16 -> InlineRegister)
-        if let Some(ref fo) = self.frame_options {
-            let fo_trimmed = fo.trim();
-            if !fo_trimmed.is_empty()
-                && !fo_trimmed.eq_ignore_ascii_case("none")
-                && let Some(entry) = compile_header_entry(X_FRAME_OPTIONS, fo_trimmed)
-            {
-                array[count] = entry;
-                count += 1;
-                op_mask |= FLAG_FRAME_OPTIONS;
+        // 3..11. Pre-compute optional string directives uniformly
+        let directives: [(&Option<String>, HeaderName, u16, bool); 9] = [
+            (
+                &self.frame_options,
+                X_FRAME_OPTIONS,
+                FLAG_FRAME_OPTIONS,
+                true,
+            ),
+            (
+                &self.referrer_policy,
+                REFERRER_POLICY,
+                FLAG_REFERRER_POLICY,
+                true,
+            ),
+            (&self.csp, CONTENT_SECURITY_POLICY.clone(), FLAG_CSP, true),
+            (
+                &self.permissions_policy,
+                PERMISSIONS_POLICY.clone(),
+                FLAG_PERMISSIONS_POLICY,
+                true,
+            ),
+            (
+                &self.cross_origin_opener_policy,
+                CROSS_ORIGIN_OPENER_POLICY.clone(),
+                FLAG_COOP,
+                true,
+            ),
+            (
+                &self.cross_origin_embedder_policy,
+                CROSS_ORIGIN_EMBEDDER_POLICY.clone(),
+                FLAG_COEP,
+                true,
+            ),
+            (
+                &self.cross_origin_resource_policy,
+                CROSS_ORIGIN_RESOURCE_POLICY.clone(),
+                FLAG_CORP,
+                true,
+            ),
+            (
+                &self.cross_domain_policies,
+                X_PERMITTED_CROSS_DOMAIN_POLICIES.clone(),
+                FLAG_CROSS_DOMAIN,
+                false,
+            ),
+            (
+                &self.xss_protection,
+                X_XSS_PROTECTION.clone(),
+                FLAG_XSS_PROTECTION,
+                true,
+            ),
+        ];
+
+        for (raw_val, header_name, flag, skip_none) in directives {
+            let Some(val) = raw_val.as_deref() else {
+                continue;
+            };
+            let trimmed = val.trim();
+            if trimmed.is_empty() || (skip_none && trimmed.eq_ignore_ascii_case("none")) {
+                continue;
             }
-        }
-
-        // 4. Pre-compute Referrer-Policy
-        if let Some(ref rp) = self.referrer_policy {
-            let rp_trimmed = rp.trim();
-            if !rp_trimmed.is_empty()
-                && !rp_trimmed.eq_ignore_ascii_case("none")
-                && let Some(entry) = compile_header_entry(REFERRER_POLICY, rp_trimmed)
-            {
-                array[count] = entry;
-                count += 1;
-                op_mask |= FLAG_REFERRER_POLICY;
-            }
-        }
-
-        // 5. Pre-compute Content-Security-Policy
-        if let Some(ref csp) = self.csp {
-            let csp_trimmed = csp.trim();
-            if !csp_trimmed.is_empty()
-                && !csp_trimmed.eq_ignore_ascii_case("none")
-                && let Some(entry) =
-                    compile_header_entry(CONTENT_SECURITY_POLICY.clone(), csp_trimmed)
-            {
-                array[count] = entry;
-                count += 1;
-                op_mask |= FLAG_CSP;
-            }
-        }
-
-        // 6. Pre-compute Permissions-Policy
-        if let Some(ref pp) = self.permissions_policy {
-            let pp_trimmed = pp.trim();
-            if !pp_trimmed.is_empty()
-                && !pp_trimmed.eq_ignore_ascii_case("none")
-                && let Some(entry) = compile_header_entry(PERMISSIONS_POLICY.clone(), pp_trimmed)
-            {
-                array[count] = entry;
-                count += 1;
-                op_mask |= FLAG_PERMISSIONS_POLICY;
-            }
-        }
-
-        // 7. Pre-compute Cross-Origin-Opener-Policy (COOP)
-        if let Some(ref coop) = self.cross_origin_opener_policy {
-            let coop_trimmed = coop.trim();
-            if !coop_trimmed.is_empty()
-                && !coop_trimmed.eq_ignore_ascii_case("none")
-                && let Some(entry) =
-                    compile_header_entry(CROSS_ORIGIN_OPENER_POLICY.clone(), coop_trimmed)
-            {
-                array[count] = entry;
-                count += 1;
-                op_mask |= FLAG_COOP;
-            }
-        }
-
-        // 8. Pre-compute Cross-Origin-Embedder-Policy (COEP)
-        if let Some(ref coep) = self.cross_origin_embedder_policy {
-            let coep_trimmed = coep.trim();
-            if !coep_trimmed.is_empty()
-                && !coep_trimmed.eq_ignore_ascii_case("none")
-                && let Some(entry) =
-                    compile_header_entry(CROSS_ORIGIN_EMBEDDER_POLICY.clone(), coep_trimmed)
-            {
-                array[count] = entry;
-                count += 1;
-                op_mask |= FLAG_COEP;
-            }
-        }
-
-        // 9. Pre-compute Cross-Origin-Resource-Policy (CORP)
-        if let Some(ref corp) = self.cross_origin_resource_policy {
-            let corp_trimmed = corp.trim();
-            if !corp_trimmed.is_empty()
-                && !corp_trimmed.eq_ignore_ascii_case("none")
-                && let Some(entry) =
-                    compile_header_entry(CROSS_ORIGIN_RESOURCE_POLICY.clone(), corp_trimmed)
-            {
-                array[count] = entry;
-                count += 1;
-                op_mask |= FLAG_CORP;
-            }
-        }
-
-        // 10. Pre-compute X-Permitted-Cross-Domain-Policies (none = 4 bytes <= 16 -> InlineRegister)
-        if let Some(ref xpd) = self.cross_domain_policies {
-            let xpd_trimmed = xpd.trim();
-            if !xpd_trimmed.is_empty()
-                && let Some(entry) =
-                    compile_header_entry(X_PERMITTED_CROSS_DOMAIN_POLICIES.clone(), xpd_trimmed)
-            {
-                array[count] = entry;
-                count += 1;
-                op_mask |= FLAG_CROSS_DOMAIN;
-            }
-        }
-
-        // 11. Pre-compute X-XSS-Protection (0 = 1 byte <= 16 -> InlineRegister)
-        if let Some(ref xxss) = self.xss_protection {
-            let xxss_trimmed = xxss.trim();
-            if !xxss_trimmed.is_empty()
-                && !xxss_trimmed.eq_ignore_ascii_case("none")
-                && let Some(entry) = compile_header_entry(X_XSS_PROTECTION.clone(), xxss_trimmed)
-            {
-                array[count] = entry;
-                count += 1;
-                op_mask |= FLAG_XSS_PROTECTION;
+            if let Some(entry) = compile_header_entry(header_name, trimmed) {
+                push_entry(entry, flag);
             }
         }
 
