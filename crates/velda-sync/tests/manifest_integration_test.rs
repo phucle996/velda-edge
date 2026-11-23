@@ -35,6 +35,7 @@ async fn test_end_to_end_manifest_sync_composition() {
         "upstreams".to_string(),
         "plugins".to_string(),
         "tls".to_string(),
+        "etp".to_string(),
     ];
 
     match outcome {

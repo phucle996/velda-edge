@@ -32,7 +32,7 @@ flowchart TD
             DRAIN["SPSC Ring Drain into Batch Arena"]
             POOL["Contiguous Memory Page Pool (LogBatchPool)"]
             SERIALIZER["RowBinary / JSONEachRow Formatter"]
-            CLIENT["ClickHouseHttpClient (Keep-Alive TCP / TLS)"]
+            CLIENT["ClickHouseLease (In-Place Keep-Alive TCP / TLS)"]
 
             TICKER --> DRAIN
             SPSC -.->|"Bulk Drain (Zero Lock Contention)"| DRAIN

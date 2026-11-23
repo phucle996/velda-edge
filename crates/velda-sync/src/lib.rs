@@ -19,6 +19,7 @@ pub use pre_sync::PreSyncStage;
 pub use provider::{ControlPlaneProvider, LocalFileProvider, Provider};
 pub use sync::{SyncComposition, SyncOutcome};
 
+pub use post_sync::etp::{DomainHeader as EtpDomainHeader, EtpFile, EtpSyncConfig};
 pub use post_sync::listener::{
     DomainHeader as ListenerDomainHeader, ListenerApplicationConfig, ListenerConfig,
     ListenerTlsConfig, ListenerTransportConfig, ListenersFile,

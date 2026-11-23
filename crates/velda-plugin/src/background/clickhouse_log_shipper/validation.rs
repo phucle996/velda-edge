@@ -1,8 +1,18 @@
-//! ClickHouse Log Shipper Schema & Semantic Validation.
+//! ClickHouse Log Shipper Schema & Semantic Validation (`clickhouse_log_shipper::validation`).
+//!
+//! ```text
+//!   serde_json::Value ──► Deserialize ClickHouseLogShipperConfig
+//!         │
+//!         ├─► etp_id.trim().is_empty()               ──► Err(PluginError::Config)
+//!         ├─► format not row_binary/json_each_row    ──► Err(PluginError::Config)
+//!         ├─► flush_interval_ms outside 100..=60000  ──► Err(PluginError::Config)
+//!         ├─► max_batch_size outside 1..=50000       ──► Err(PluginError::Config)
+//!         └─► request_timeout_ms outside 100..=60000 ──► Err(PluginError::Config)
+//! ```
 
 use crate::error::PluginError;
 
-pub use super::config::{ClickHouseLogShipperConfig, TransportSecurity, VELDA_ACCESS_LOGS_TABLE};
+pub use super::config::{ClickHouseLogShipperConfig, VELDA_ACCESS_LOGS_TABLE};
 
 /// Validates [`ClickHouseLogShipperConfig`] at configuration compilation time.
 pub fn validate_clickhouse_log_shipper_config(
@@ -16,69 +26,9 @@ pub fn validate_clickhouse_log_shipper_config(
             ))
         })?;
 
-    let endpoint = cfg.endpoint.trim();
-    if !endpoint.starts_with("http://") && !endpoint.starts_with("https://") {
+    if cfg.etp_id.trim().is_empty() {
         return Err(PluginError::Config(format!(
-            "Plugin '{plugin_id}': endpoint must start with 'http://' or 'https://', found '{endpoint}'"
-        )));
-    }
-
-    let sec = cfg
-        .parsed_transport_security()
-        .map_err(|e| PluginError::Config(format!("Plugin '{plugin_id}': {e}")))?;
-
-    match sec {
-        TransportSecurity::Plain => {
-            if endpoint.starts_with("https://") {
-                return Err(PluginError::Config(format!(
-                    "Plugin '{plugin_id}': transport_security is 'plain' but endpoint '{endpoint}' uses 'https://' scheme. Use 'http://' for plain transport."
-                )));
-            }
-            if cfg.tls.client_cert_pem.is_some() || cfg.tls.client_key_pem.is_some() {
-                return Err(PluginError::Config(format!(
-                    "Plugin '{plugin_id}': transport_security is 'plain' but client certificates are configured in 'tls'."
-                )));
-            }
-        }
-        TransportSecurity::Tls => {
-            if endpoint.starts_with("http://") {
-                return Err(PluginError::Config(format!(
-                    "Plugin '{plugin_id}': transport_security is 'tls' but endpoint '{endpoint}' uses unencrypted 'http://' scheme. Use 'https://' for TLS transport."
-                )));
-            }
-            if cfg.tls.client_cert_pem.is_some() || cfg.tls.client_key_pem.is_some() {
-                return Err(PluginError::Config(format!(
-                    "Plugin '{plugin_id}': transport_security is 'tls' (server auth) but client certificates are provided in 'tls'. Use transport_security 'mtls' for mutual TLS."
-                )));
-            }
-            cfg.tls.build_client_config(&["http/1.1"]).map_err(|e| {
-                PluginError::Config(format!(
-                    "Plugin '{plugin_id}': invalid inline TLS configuration: {e}"
-                ))
-            })?;
-        }
-        TransportSecurity::Mtls => {
-            if endpoint.starts_with("http://") {
-                return Err(PluginError::Config(format!(
-                    "Plugin '{plugin_id}': transport_security is 'mtls' but endpoint '{endpoint}' uses unencrypted 'http://' scheme. Use 'https://' for mTLS transport."
-                )));
-            }
-            if cfg.tls.client_cert_pem.is_none() || cfg.tls.client_key_pem.is_none() {
-                return Err(PluginError::Config(format!(
-                    "Plugin '{plugin_id}': transport_security 'mtls' requires both 'client_cert_pem' and 'client_key_pem' in 'tls' config"
-                )));
-            }
-            cfg.tls.build_client_config(&["http/1.1"]).map_err(|e| {
-                PluginError::Config(format!(
-                    "Plugin '{plugin_id}': invalid inline mTLS configuration: {e}"
-                ))
-            })?;
-        }
-    }
-
-    if cfg.database.trim().is_empty() {
-        return Err(PluginError::Config(format!(
-            "Plugin '{plugin_id}': database cannot be empty"
+            "Plugin '{plugin_id}': etp_id cannot be empty"
         )));
     }
 
@@ -108,13 +58,6 @@ pub fn validate_clickhouse_log_shipper_config(
         )));
     }
 
-    if cfg.connect_timeout_ms < 100 || cfg.connect_timeout_ms > 60_000 {
-        return Err(PluginError::Config(format!(
-            "Plugin '{plugin_id}': connect_timeout_ms must be between 100 and 60,000 ms, got {}",
-            cfg.connect_timeout_ms
-        )));
-    }
-
     if cfg.request_timeout_ms < 100 || cfg.request_timeout_ms > 60_000 {
         return Err(PluginError::Config(format!(
             "Plugin '{plugin_id}': request_timeout_ms must be between 100 and 60,000 ms, got {}",
@@ -133,31 +76,41 @@ mod tests {
     #[test]
     fn test_validate_config_valid() {
         let json = serde_json::json!({
-            "endpoint": "http://127.0.0.1:8123",
+            "etp_id": "clickhouse-logs",
             "database": "velda_analytics",
             "format": "row_binary",
-            "username": "writer",
-            "password": "secret_password",
             "flush_interval_ms": 200,
             "max_batch_size": 5000,
-            "connect_timeout_ms": 1500,
             "request_timeout_ms": 3000
         });
 
         let cfg = validate_clickhouse_log_shipper_config("ch_test", &json).unwrap();
-        assert_eq!(cfg.endpoint, "http://127.0.0.1:8123");
+        assert_eq!(cfg.etp_id, "clickhouse-logs");
         assert_eq!(cfg.database, "velda_analytics");
         assert_eq!(cfg.format, "row_binary");
         assert_eq!(cfg.parsed_format(), ClickHouseFormat::RowBinary);
-        assert_eq!(cfg.username, "writer");
         assert_eq!(cfg.flush_interval_ms, 200);
         assert_eq!(cfg.max_batch_size, 5000);
+        assert_eq!(cfg.request_timeout_ms, 3000);
     }
 
     #[test]
-    fn test_validate_config_invalid_endpoint() {
+    fn test_validate_config_defaults_optional_database() {
         let json = serde_json::json!({
-            "endpoint": "tcp://127.0.0.1:9000",
+            "etp_id": "clickhouse-primary"
+        });
+        let cfg = validate_clickhouse_log_shipper_config("ch_test", &json).unwrap();
+        assert_eq!(cfg.database, "");
+        assert_eq!(cfg.format, "row_binary");
+        assert_eq!(cfg.flush_interval_ms, 1000);
+        assert_eq!(cfg.max_batch_size, 8000);
+        assert_eq!(cfg.request_timeout_ms, 5000);
+    }
+
+    #[test]
+    fn test_validate_config_empty_etp_id() {
+        let json = serde_json::json!({
+            "etp_id": "   ",
             "database": "default"
         });
         assert!(validate_clickhouse_log_shipper_config("ch_test", &json).is_err());
@@ -166,7 +119,7 @@ mod tests {
     #[test]
     fn test_validate_config_invalid_format() {
         let json = serde_json::json!({
-            "endpoint": "http://127.0.0.1:8123",
+            "etp_id": "clickhouse-logs",
             "database": "default",
             "format": "parquet"
         });
@@ -174,63 +127,23 @@ mod tests {
     }
 
     #[test]
-    fn test_invalid_flush_interval() {
-        let json = serde_json::json!({
-            "endpoint": "http://127.0.0.1:8123",
-            "database": "default",
-            "flush_interval_ms": 50 // Below 100ms coarse threshold
+    fn test_invalid_flush_interval_and_timeouts() {
+        let low_flush = serde_json::json!({
+            "etp_id": "clickhouse-logs",
+            "flush_interval_ms": 50
         });
-        assert!(validate_clickhouse_log_shipper_config("ch_test", &json).is_err());
-    }
+        assert!(validate_clickhouse_log_shipper_config("ch_test", &low_flush).is_err());
 
-    #[test]
-    fn test_validate_config_invalid_inline_tls() {
-        let json = serde_json::json!({
-            "endpoint": "https://127.0.0.1:8443",
-            "transport_security": "tls",
-            "database": "default",
-            "tls": {
-                "ca_pem": "NOT_A_VALID_PEM_CERTIFICATE"
-            }
+        let zero_batch = serde_json::json!({
+            "etp_id": "clickhouse-logs",
+            "max_batch_size": 0
         });
-        assert!(validate_clickhouse_log_shipper_config("ch_test", &json).is_err());
-    }
+        assert!(validate_clickhouse_log_shipper_config("ch_test", &zero_batch).is_err());
 
-    #[test]
-    fn test_security_conflicts() {
-        // Plain with https://
-        let json = serde_json::json!({
-            "endpoint": "https://127.0.0.1:8443",
-            "transport_security": "plain",
-            "database": "default"
+        let low_req_timeout = serde_json::json!({
+            "etp_id": "clickhouse-logs",
+            "request_timeout_ms": 50
         });
-        assert!(validate_clickhouse_log_shipper_config("ch_test", &json).is_err());
-
-        // TLS with http://
-        let json = serde_json::json!({
-            "endpoint": "http://127.0.0.1:8123",
-            "transport_security": "tls",
-            "database": "default"
-        });
-        assert!(validate_clickhouse_log_shipper_config("ch_test", &json).is_err());
-
-        // mTLS with http://
-        let json = serde_json::json!({
-            "endpoint": "http://127.0.0.1:8123",
-            "transport_security": "mtls",
-            "database": "default"
-        });
-        assert!(validate_clickhouse_log_shipper_config("ch_test", &json).is_err());
-
-        // mTLS with missing client_key_pem
-        let json = serde_json::json!({
-            "endpoint": "https://127.0.0.1:8443",
-            "transport_security": "mtls",
-            "database": "default",
-            "tls": {
-                "client_cert_pem": "-----BEGIN CERTIFICATE-----\nMIIB...-----END CERTIFICATE-----\n"
-            }
-        });
-        assert!(validate_clickhouse_log_shipper_config("ch_test", &json).is_err());
+        assert!(validate_clickhouse_log_shipper_config("ch_test", &low_req_timeout).is_err());
     }
 }

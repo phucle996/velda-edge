@@ -364,7 +364,9 @@ pub unsafe fn fast_write_u64_ptr(ptr: *mut u8, n: u64) -> usize {
 pub fn fast_write_u64(buf: &mut Vec<u8>, n: u64) {
     let mut temp = [0u8; 20];
     let len = unsafe { format_u64_simd(n, temp.as_mut_ptr()) };
-    buf.extend_from_slice(&temp[..len]);
+    if let Some(digits) = temp.get(..len) {
+        buf.extend_from_slice(digits);
+    }
 }
 
 /// Formats an unsigned 64-bit integer into a stack buffer slice, returning written byte length.

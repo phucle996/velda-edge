@@ -1,8 +1,18 @@
 //! Stage 2: Sync (Reconciliation & Orchestration Engine).
 //!
-//! Orchestrates reading candidate manifest from Pre-Sync, detecting deltas against
-//! in-memory state, delegating changed domains to Post-Sync compilers, persisting durable
-//! LKG manifest, and notifying Data Plane workers via UDS IPC.
+//! ```text
+//! +-----------------------------------------------------------------------------+
+//! |                   5-Phase Sync Reconciliation Pipeline                      |
+//! +-----------------------------------------------------------------------------+
+//! |                                                                             |
+//! |  1. Acquire Candidate Manifest (Pre-Sync) ──► SHA-256 short-circuit         |
+//! |  2. Delta & Revision Detection per Domain (listeners, routes, upstreams,    |
+//! |     plugins, tls, etp)                                                      |
+//! |  3. Post-Sync Compilation + Cross-Domain Checks (e.g. plugin -> etp_id)     |
+//! |  4. Durable LKG Manifest Finalization (config/manifest.json)                |
+//! |  5. Hot-Reload IPC Notification to Data Plane (UDS)                         |
+//! +-----------------------------------------------------------------------------+
+//! ```
 
 use std::collections::HashMap;
 use std::fs::{self, File};
@@ -203,6 +213,36 @@ impl SyncComposition {
                     "plugins" => {
                         let mut plugins = post_sync::plugin::parse_plugins(&content)?;
                         post_sync::plugin::validate_plugins(&mut plugins)?;
+
+                        // Validate cross-domain etp_id references against manifest's etp or LKG etp.bin
+                        let etps = if let Some(etp_entry) = manifest
+                            .configuration
+                            .files
+                            .iter()
+                            .find(|f| f.name == "etp")
+                        {
+                            if let Ok(etp_bytes) =
+                                self.stage.read_domain_file(&etp_entry.path).await
+                            {
+                                let etp_file = post_sync::etp::parse_etps(&etp_bytes)?;
+                                post_sync::etp::validate_etps(&etp_file)?;
+                                etp_file.etps
+                            } else {
+                                Vec::new()
+                            }
+                        } else {
+                            let lkg_etp = self.storage_dir.join("runtime/etp.bin");
+                            if lkg_etp.exists()
+                                && let Ok(bytes) = std::fs::read(&lkg_etp)
+                                && let Ok(etp_file) = post_sync::etp::unpack_etps(&bytes)
+                            {
+                                etp_file.etps
+                            } else {
+                                Vec::new()
+                            }
+                        };
+                        post_sync::etp::validate_plugin_etp_references(&plugins, &etps)?;
+
                         let bin = post_sync::plugin::compile_plugins_to_binary(
                             &plugins, domain_rev, checksum,
                         )?;
@@ -214,6 +254,44 @@ impl SyncComposition {
                         let bin =
                             post_sync::tls::compile_tls_to_binary(&tls, domain_rev, checksum)?;
                         post_sync::tls::persist_tls(&self.storage_dir, &content, &bin)?;
+                    }
+                    "etp" => {
+                        let etp_file = post_sync::etp::parse_etps(&content)?;
+                        post_sync::etp::validate_etps(&etp_file)?;
+
+                        // Validate cross-domain etp_id references against manifest's plugins or LKG plugins.bin
+                        let plugins = if let Some(plugins_entry) = manifest
+                            .configuration
+                            .files
+                            .iter()
+                            .find(|f| f.name == "plugins")
+                        {
+                            if let Ok(plugin_bytes) =
+                                self.stage.read_domain_file(&plugins_entry.path).await
+                            {
+                                let mut parsed = post_sync::plugin::parse_plugins(&plugin_bytes)?;
+                                post_sync::plugin::validate_plugins(&mut parsed)?;
+                                parsed
+                            } else {
+                                Vec::new()
+                            }
+                        } else {
+                            let lkg_plugins = self.storage_dir.join("runtime/plugins.bin");
+                            if lkg_plugins.exists()
+                                && let Ok(bytes) = std::fs::read(&lkg_plugins)
+                                && let Ok((_, parsed)) =
+                                    post_sync::plugin::unpack_plugins_from_binary(&bytes)
+                            {
+                                parsed
+                            } else {
+                                Vec::new()
+                            }
+                        };
+                        post_sync::etp::validate_plugin_etp_references(&plugins, &etp_file.etps)?;
+
+                        let config_dir = self.storage_dir.join("config");
+                        let runtime_dir = self.storage_dir.join("runtime");
+                        post_sync::etp::persist_etps(&config_dir, &runtime_dir, &content)?;
                     }
                     other => {
                         return Err(SyncError::Manifest(format!("Unsupported domain '{other}'")));

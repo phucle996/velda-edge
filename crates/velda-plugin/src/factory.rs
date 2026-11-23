@@ -267,6 +267,33 @@ pub fn wire_plugin_dependencies(
     Ok(())
 }
 
+/// Wires External Third-Party (`velda-etp`) pool handles from `etp_registry` into any
+/// instantiated background plugins that declare `etp_id()`.
+pub fn wire_plugin_etps(
+    available_plugins: &FxHashMap<String, LoadedPlugin>,
+    etp_registry: &velda_etp::EtpRegistry,
+) -> Result<(), PluginError> {
+    for (id, plugin) in available_plugins {
+        if let LoadedPlugin::Background(bg) = plugin
+            && let Some(etp_id) = bg.etp_id()
+        {
+            let inst = etp_registry.entries.get(etp_id).ok_or_else(|| {
+                PluginError::Config(format!(
+                    "Background plugin '{id}' requires etp_id '{etp_id}' in EtpRegistry, but none was found"
+                ))
+            })?;
+            bg.attach_etp(inst)?;
+            tracing::info!(
+                plugin_id = %id,
+                etp_id = %etp_id,
+                etp_kind = %inst.kind,
+                "Successfully wired ETP pool to background plugin"
+            );
+        }
+    }
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

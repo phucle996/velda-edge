@@ -2310,6 +2310,7 @@ dependencies = [
  "velda-connection-pool",
  "velda-core",
  "velda-discovery",
+ "velda-etp",
  "velda-grpc",
  "velda-http1",
  "velda-http2",
@@ -2325,6 +2326,23 @@ dependencies = [
  "velda-tls",
  "velda-upstream",
  "velda-xdp",
+]
+
+[[package]]
+name = "velda-etp"
+version = "0.1.0"
+dependencies = [
+ "rcgen",
+ "rustls",
+ "rustls-pemfile",
+ "serde",
+ "serde_json",
+ "thiserror",
+ "tokio",
+ "tokio-rustls",
+ "tracing",
+ "velda-core",
+ "webpki-roots",
 ]
 
 [[package]]
@@ -2464,6 +2482,7 @@ dependencies = [
  "tokio-rustls",
  "tracing",
  "velda-core",
+ "velda-etp",
  "velda-grpc",
  "velda-observability",
  "velda-router",
@@ -2538,6 +2557,7 @@ dependencies = [
  "tracing-appender",
  "tracing-subscriber",
  "velda-core",
+ "velda-etp",
  "velda-plugin",
  "x509-parser",
 ]
@@ -2663,6 +2683,15 @@ checksum = "5a6580f308b1fad9207618087a65c04e7a10bc77e02c8e84e9b00dd4b12fa0bb"
 dependencies = [
  "js-sys",
  "wasm-bindgen",
+]
+
+[[package]]
+name = "webpki-roots"
+version = "1.0.12"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "7265c9301c16a8711c992c2d8da90ee77ef54b1ed51482d6dfeb00dc756b1297"
+dependencies = [
+ "rustls-pki-types",
 ]
 
 [[package]]

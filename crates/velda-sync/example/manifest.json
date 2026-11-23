@@ -27,6 +27,11 @@
         "name": "tls",
         "path": "tls.json",
         "required": false
+      },
+      {
+        "name": "etp",
+        "path": "etp.json",
+        "required": false
       }
     ]
   }

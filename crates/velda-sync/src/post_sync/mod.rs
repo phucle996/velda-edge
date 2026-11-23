@@ -9,6 +9,7 @@
 //! - **`upstream`**: Backend service pools, target endpoints, load-balancing algorithms, and timeouts.
 //! - **`plugin`**: Request/response lifecycle hook policies (rate limiting, auth, WAF).
 //! - **`tls`**: TLS certificates, private keys, and SNI profile catalogs.
+//! - **`etp`**: External Third-Party service endpoints, pools, and TLS configs.
 //!
 //! ### Standard 5-Phase Pipeline for Each Domain Branch:
 //! 1. **Phase 1: Entity & Schema Definitions** — Typed domain structs and configuration file schemas.
@@ -17,6 +18,7 @@
 //! 4. **Phase 4: Binary Compilation & Unpack** (`compile_*`, `unpack_*`) — Emits `DomainHeader` + Bincode.
 //! 5. **Phase 5: Atomic Persistence** (`persist_*`) — Atomically writes `config/*.json` and `runtime/*.bin`.
 
+pub mod etp;
 pub mod listener;
 pub mod plugin;
 pub mod policy;

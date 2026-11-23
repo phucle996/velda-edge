@@ -94,6 +94,20 @@ pub trait BackgroundPlugin: Send + Sync {
     ) -> Result<(), PluginError> {
         Ok(())
     }
+
+    /// If this background plugin borrows connections from an External Third-Party (`velda-etp`)
+    /// data source, returns the target `etp_id`.
+    #[inline(always)]
+    fn etp_id(&self) -> Option<&str> {
+        None
+    }
+
+    /// Attaches the resolved [`velda_etp::EtpInstance`] from [`velda_etp::EtpRegistry`] before
+    /// background workers start.
+    #[inline(always)]
+    fn attach_etp(&self, _instance: &velda_etp::EtpInstance) -> Result<(), PluginError> {
+        Ok(())
+    }
 }
 
 /// Compile-time registry check for plugins owned by the `background` stage.

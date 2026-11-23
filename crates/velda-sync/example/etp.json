@@ -1,0 +1,22 @@
+{
+  "schema_version": 1,
+  "revision": 42,
+  "etps": [
+    {
+      "id": "clickhouse-logs",
+      "kind": "clickhouse",
+      "pool": {
+        "pool_size": 2,
+        "connect_timeout_ms": 2000,
+        "idle_timeout_ms": 60000
+      },
+      "settings": {
+        "host": "127.0.0.1",
+        "port": 8123,
+        "database": "velda_analytics",
+        "user": "default",
+        "password": ""
+      }
+    }
+  ]
+}

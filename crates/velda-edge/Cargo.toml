@@ -13,6 +13,7 @@ path = "src/main.rs"
 
 [dependencies]
 velda-core = { path = "../velda-core" }
+velda-etp = { path = "../velda-etp" }
 velda-ingress = { path = "../velda-ingress" }
 velda-sock = { path = "../velda-sock" }
 velda-xdp = { path = "../velda-xdp" }

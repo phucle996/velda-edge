@@ -18,21 +18,37 @@
 
 ## 2. Configuration Reference
 
-Declare the plugin in `/etc/velda/config/plugins.json`:
+1. Declare the ClickHouse External Third-Party data source in `/etc/velda/config/etp.json`:
+
+```json
+{
+  "id": "clickhouse-main",
+  "kind": "clickhouse",
+  "pool": {
+    "pool_size": 4,
+    "connect_timeout_ms": 2000,
+    "idle_timeout_ms": 60000
+  },
+  "settings": {
+    "endpoint": "http://192.168.1.50:8123",
+    "database": "velda_analytics",
+    "user": "default",
+    "password": "secret_password"
+  }
+}
+```
+
+2. Declare the plugin in `/etc/velda/config/plugins.json` referencing `etp_id`:
 
 ```json
 {
   "id": "clickhouse_log_shipper",
   "config": {
-    "endpoint": "http://192.168.1.50:8123",
-    "transport_security": "plain",
+    "etp_id": "clickhouse-main",
     "database": "velda_analytics",
     "format": "row_binary",
-    "username": "default",
-    "password": "secret_password",
     "flush_interval_ms": 1000,
     "max_batch_size": 8000,
-    "connect_timeout_ms": 2000,
     "request_timeout_ms": 5000
   }
 }
@@ -42,54 +58,18 @@ Declare the plugin in `/etc/velda/config/plugins.json`:
 
 | Field | Type | Default | Valid Range | Description |
 | :--- | :---: | :---: | :---: | :--- |
-| `endpoint` | `String` | **Required** | `http://` or `https://` | ClickHouse HTTP ingestion URL (e.g. `http://clickhouse:8123` or `https://clickhouse.internal:8443`). |
-| `transport_security` | `String` | `"plain"` | `"plain"`, `"tls"`, `"mtls"` | Outbound transport security mode. Strictly enforced at compile time against the endpoint scheme. |
-| `database` | `String` | **Required** | Non-empty string | Target ClickHouse database name (must pre-exist on ClickHouse server). |
+| `etp_id` | `String` | **Required** | Non-empty string | Identifier of a `kind: "clickhouse"` entry in `etp.json` (`EtpRegistry`). |
+| `database` | `String` | `""` (uses ETP `database`) | Optional string | Target ClickHouse database override; defaults to the database configured on the referenced `ClickHouseEtp`. |
 | `format` | `String` | `"row_binary"` | `"row_binary"`, `"json"`, `"json_each_row"` | Wire serialization format. `row_binary` is recommended for high-performance production. |
-| `username` | `String` | `"default"` | String | ClickHouse authentication username. Transmitted via `X-ClickHouse-User` header. |
-| `password` | `String` | `""` | String | ClickHouse authentication password. Transmitted via `X-ClickHouse-Key` header. |
 | `flush_interval_ms` | `Integer` | `1000` | `100` – `60000` ms | Batch flush interval. Clamped to $\ge 100\text{ms}$ aligned with coarse clock ticks. |
 | `max_batch_size` | `Integer` | `8000` | `1` – `50000` records | Maximum number of access log records coalesced into a single HTTP push payload. |
-| `connect_timeout_ms`| `Integer` | `2000` | `100` – `60000` ms | TCP/TLS connection establishment timeout. |
 | `request_timeout_ms`| `Integer` | `5000` | `100` – `60000` ms | HTTP push execution timeout for writing payload and receiving HTTP status header. |
-| `tls` | `Object` | `{}` | `OutboundTlsConfig` | Outbound TLS/mTLS parameters (CA certificates, client certificate, client private key). |
 
 ---
 
-## 3. Transport Security Modes
+## 3. Transport Security & Connection Pooling (`velda-etp`)
 
-### Plaintext TCP (`transport_security: "plain"`)
-Used for intra-cluster or private network deployments:
-- Requires `http://` scheme.
-- Disallows client certificates in `tls` config.
-
-### Standard TLS Server Authentication (`transport_security: "tls"`)
-Used when connecting to ClickHouse Cloud or remote instances:
-```json
-{
-  "endpoint": "https://clickhouse.prod.internal:8443",
-  "transport_security": "tls",
-  "tls": {
-    "ca_pem": "-----BEGIN CERTIFICATE-----\n...\n-----END CERTIFICATE-----",
-    "insecure_skip_verify": false
-  }
-}
-```
-
-### Mutual TLS Authentication (`transport_security: "mtls"`)
-Used in Zero-Trust environments where both client and server identities are cryptographically validated:
-```json
-{
-  "endpoint": "https://clickhouse.secure.internal:8443",
-  "transport_security": "mtls",
-  "tls": {
-    "ca_pem": "-----BEGIN CERTIFICATE-----\n...\n-----END CERTIFICATE-----",
-    "client_cert_pem": "-----BEGIN CERTIFICATE-----\n...\n-----END CERTIFICATE-----",
-    "client_key_pem": "-----BEGIN PRIVATE KEY-----\n...\n-----END PRIVATE KEY-----",
-    "insecure_skip_verify": false
-  }
-}
-```
+All TCP/TLS/mTLS connection parameters, `[u64; 4]` SHA-256 certificate pinning, and `(required_pages + 1) * 4096B` arena pooling are configured on the referenced `ClickHouseEtp` entry in `etp.json`. When `plugins.bin` reloads without modifying `etp.bin`, the warm `ClickHouseEtp` connection arena is preserved with zero reconnection.
 
 ---
 

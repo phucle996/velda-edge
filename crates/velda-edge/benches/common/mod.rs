@@ -323,10 +323,19 @@ pub fn build_mock_runtime(
         upstreams,
         plugins: vec![],
         tls: vec![],
+        etps: vec![],
     };
 
+    let etp_table = std::sync::Arc::new(velda_etp::EtpRegistry::default());
+
     let plugin_table = std::sync::Arc::new(
-        build_plugin_table(&config.plugins, &config.routes, &config.listeners).unwrap(),
+        build_plugin_table(
+            &config.plugins,
+            &config.routes,
+            &config.listeners,
+            &etp_table,
+        )
+        .unwrap(),
     );
 
     let route_to_upstream =
@@ -344,6 +353,7 @@ pub fn build_mock_runtime(
         tls_client: None,
         overload: std::sync::Arc::new(velda_core::hardware::OverloadTracker::auto()),
         buffer_pool: std::sync::Arc::new(velda_core::buffer::ShardedBufferPool::default()),
+        etp_table,
     }
 }
 

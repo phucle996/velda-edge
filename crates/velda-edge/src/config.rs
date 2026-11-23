@@ -1,10 +1,19 @@
 //! Edge configuration structures and binary artifact loader.
 //!
-//! Loads domain-isolated binary artifacts (*.bin) compiled by `velda-sync`
-//! from the durable Last Known Good (LKG) storage directory.
+//! ```text
+//! +-----------------------------------------------------------------------------+
+//! |                        LKG Binary Artifact Loaders                          |
+//! +-----------------------------------------------------------------------------+
+//! |                                                                             |
+//! |  runtime/*.bin ──► load_listeners / load_routes / load_upstreams            |
+//! |                    load_plugins   / load_tls    / load_etps                 |
+//! |  Missing etp.bin ──► Ok(Vec::new()) (clean backward deployment)             |
+//! +-----------------------------------------------------------------------------+
+//! ```
 
 use std::path::{Path, PathBuf};
 
+use velda_sync::post_sync::etp::{self, EtpSyncConfig};
 use velda_sync::post_sync::listener::{self, ListenerConfig};
 use velda_sync::post_sync::plugin::{self, PluginConfig};
 use velda_sync::post_sync::route::{self, RouteConfig};
@@ -141,4 +150,16 @@ pub fn load_tls(runtime_dir: &Path) -> Result<Vec<TlsConfig>, EdgeError> {
     let bytes = std::fs::read(&path)?;
     let (_header, tls) = tls::unpack_tls_from_binary(&bytes)?;
     Ok(tls)
+}
+
+/// Reads and unpacks `etp.bin` from storage if present.
+/// Returns an empty list if `etp.bin` does not exist on disk.
+pub fn load_etps(runtime_dir: &Path) -> Result<Vec<EtpSyncConfig>, EdgeError> {
+    let path = runtime_dir.join("etp.bin");
+    if !path.exists() {
+        return Ok(Vec::new());
+    }
+    let bytes = std::fs::read(&path)?;
+    let file = etp::unpack_etps(&bytes)?;
+    Ok(file.etps)
 }

@@ -1,36 +1,64 @@
 //! Comprehensive Integration Test Suite for ClickHouse Log Shipper (`clickhouse_log_shipper`).
 //!
 //! Validates:
-//! 1. End-to-end RowBinary batch export over persistent HTTP/1.1 to mock ClickHouse server.
-//! 2. End-to-end JSONEachRow batch export over persistent HTTP/1.1.
+//! 1. End-to-end RowBinary batch export over pooled `ClickHouseEtp` HTTP/1.1 keep-alive leases.
+//! 2. End-to-end JSONEachRow batch export over pooled `ClickHouseEtp` HTTP/1.1 leases.
 //! 3. Auto-creation of table `velda_access_logs` on startup via `ensure_table()`.
-//! 4. Compile-time factory registration (`is_known_plugin_id` / `LoadedPlugin::Background`).
-//! 5. Rejection when attaching a background-only plugin to an HTTP route.
+//! 4. Compile-time factory registration, `EtpRegistry` wiring via `wire_plugin_etps()`, and mTLS.
+//! 5. Automatic in-place `lease.reconnect().await` recovery when ClickHouse drops a keep-alive socket.
 
 use std::sync::Arc;
 use std::sync::atomic::Ordering;
 use std::time::Duration;
 
+use rustc_hash::FxHashMap;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::TcpListener;
 use tokio::sync::watch;
 use velda_core::{CompletionReason, GrpcStatus, HttpMethod, PipeKind, UaFamily, UaOs};
+use velda_etp::clickhouse::ClickHouseEtp;
+use velda_etp::registry::build_registry;
+use velda_etp::{EtpEntryConfig, EtpKind, EtpPoolSettings, EtpTlsConfig, EtpTlsVersion};
 use velda_observability::{TelemetryRecord, TelemetryStore};
 use velda_plugin::background::BackgroundPlugin;
 use velda_plugin::background::clickhouse_log_shipper::{
     ClickHouseLogShipperConfig, ClickHouseLogShipperPlugin,
 };
-use velda_plugin::factory::{LoadedPlugin, instantiate_plugin};
+use velda_plugin::factory::{LoadedPlugin, instantiate_plugin, wire_plugin_etps};
 use velda_plugin::{PluginConfig, is_known_plugin_id, validate_plugin_config};
+
+fn make_clickhouse_etp(
+    id: &str,
+    port: u16,
+    database: &str,
+    tls: Option<EtpTlsConfig>,
+) -> Arc<ClickHouseEtp> {
+    let entry = EtpEntryConfig {
+        id: id.to_string(),
+        kind: EtpKind::ClickHouse,
+        pool: EtpPoolSettings {
+            pool_size: 2,
+            connect_timeout_ms: 2000,
+            idle_timeout_ms: 60_000,
+        },
+        tls,
+        settings: serde_json::json!({
+            "host": "127.0.0.1",
+            "port": port,
+            "database": database,
+            "user": "default",
+            "password": ""
+        }),
+    };
+    Arc::new(ClickHouseEtp::from_entry(&entry).unwrap())
+}
 
 fn make_sample_record(id: u64, ts: u32) -> TelemetryRecord {
     let mut rec = TelemetryRecord::zeroed();
     rec.ingress_time_nanos = (ts as u64) * 1_000_000_000;
     rec.request_id = id;
     rec.duration_ns = 150_000;
-    // 192.168.1.100 -> 0xC0A80164
     rec.peer_ip = 0x0000_0000_0000_0000_0000_FFFF_C0A8_0164;
-    // 10.0.0.1 -> 0x0A000001
     rec.upstream_ip = 0x0A000001;
     rec.upstream_port = 8080;
     rec.route_id = 1;
@@ -77,31 +105,31 @@ async fn test_clickhouse_row_binary_e2e() {
     });
 
     let telemetry_store = Arc::new(TelemetryStore::with_cores_and_capacity(1, 1024));
+    let etp = make_clickhouse_etp("ch-rb", port, "test_db", None);
 
     let config = ClickHouseLogShipperConfig {
-        endpoint: format!("http://127.0.0.1:{port}"),
-        transport_security: "plain".into(),
+        etp_id: "ch-rb".into(),
         database: "test_db".into(),
         format: "row_binary".into(),
-        username: "default".into(),
-        password: "".into(),
         flush_interval_ms: 100,
         max_batch_size: 500,
-        connect_timeout_ms: 2000,
         request_timeout_ms: 3000,
-        tls: Default::default(),
     };
 
     let plugin = Arc::new(
-        ClickHouseLogShipperPlugin::with_store("ch_shipper", config, Arc::clone(&telemetry_store))
-            .unwrap(),
+        ClickHouseLogShipperPlugin::with_etp(
+            "ch_shipper",
+            config,
+            etp,
+            Arc::clone(&telemetry_store),
+        )
+        .unwrap(),
     );
 
     let (shutdown_tx, shutdown_rx) = watch::channel(false);
     let p_clone = Arc::clone(&plugin);
     let runner = tokio::spawn(async move { p_clone.run(shutdown_rx).await });
 
-    // Wait until subscriber is active
     while telemetry_store
         .active_subscriber_count
         .load(Ordering::Acquire)
@@ -110,23 +138,21 @@ async fn test_clickhouse_row_binary_e2e() {
         tokio::time::sleep(Duration::from_millis(5)).await;
     }
 
-    // Emit 5 test records
     for i in 0..5 {
         let rec = make_sample_record(100 + i, 1732000000 + i as u32);
         telemetry_store.emit_on_core(0, &rec);
     }
     telemetry_store.flush_all_lanes(128);
 
-    // Wait for shipper to flush batch
     for _ in 0..50 {
-        if plugin.shipped_records() >= 5 {
+        if plugin.shipped_records.load(Ordering::Relaxed) >= 5 {
             break;
         }
         tokio::time::sleep(Duration::from_millis(15)).await;
     }
 
-    assert_eq!(plugin.shipped_records(), 5);
-    assert_eq!(plugin.failed_pushes(), 0);
+    assert_eq!(plugin.shipped_records.load(Ordering::Relaxed), 5);
+    assert_eq!(plugin.failed_pushes.load(Ordering::Relaxed), 0);
 
     let _ = shutdown_tx.send(true);
     let res = runner.await.unwrap();
@@ -163,25 +189,22 @@ async fn test_clickhouse_json_e2e() {
     });
 
     let telemetry_store = Arc::new(TelemetryStore::with_cores_and_capacity(1, 1024));
+    let etp = make_clickhouse_etp("ch-json", port, "test_db", None);
 
     let config = ClickHouseLogShipperConfig {
-        endpoint: format!("http://127.0.0.1:{port}"),
-        transport_security: "plain".into(),
-        database: "test_db".into(),
+        etp_id: "ch-json".into(),
+        database: String::new(), // Inherit from ClickHouseEtp
         format: "json_each_row".into(),
-        username: "default".into(),
-        password: "".into(),
         flush_interval_ms: 100,
         max_batch_size: 500,
-        connect_timeout_ms: 2000,
         request_timeout_ms: 3000,
-        tls: Default::default(),
     };
 
     let plugin = Arc::new(
-        ClickHouseLogShipperPlugin::with_store(
+        ClickHouseLogShipperPlugin::with_etp(
             "ch_shipper_json",
             config,
+            etp,
             Arc::clone(&telemetry_store),
         )
         .unwrap(),
@@ -204,13 +227,13 @@ async fn test_clickhouse_json_e2e() {
     telemetry_store.flush_all_lanes(128);
 
     for _ in 0..50 {
-        if plugin.shipped_records() >= 1 {
+        if plugin.shipped_records.load(Ordering::Relaxed) >= 1 {
             break;
         }
         tokio::time::sleep(Duration::from_millis(15)).await;
     }
 
-    assert_eq!(plugin.shipped_records(), 1);
+    assert_eq!(plugin.shipped_records.load(Ordering::Relaxed), 1);
 
     let _ = shutdown_tx.send(true);
     let res = runner.await.unwrap();
@@ -226,7 +249,7 @@ fn test_clickhouse_validation() {
     let mut cfg = PluginConfig {
         id: "clickhouse_log_shipper".into(),
         config: serde_json::json!({
-            "endpoint": "http://127.0.0.1:8123",
+            "etp_id": "clickhouse-logs",
             "database": "velda_analytics",
             "format": "row_binary",
             "flush_interval_ms": 250
@@ -234,6 +257,15 @@ fn test_clickhouse_validation() {
     };
 
     validate_plugin_config(&mut cfg).expect("validation should succeed");
+
+    let mut invalid_cfg = PluginConfig {
+        id: "clickhouse_log_shipper".into(),
+        config: serde_json::json!({
+            "etp_id": "",
+            "database": "velda_analytics"
+        }),
+    };
+    assert!(validate_plugin_config(&mut invalid_cfg).is_err());
 }
 
 #[test]
@@ -241,7 +273,7 @@ fn test_clickhouse_factory() {
     let cfg = PluginConfig {
         id: "clickhouse_log_shipper".into(),
         config: serde_json::json!({
-            "endpoint": "http://127.0.0.1:8123",
+            "etp_id": "clickhouse-logs",
             "database": "velda_analytics",
             "format": "row_binary",
             "flush_interval_ms": 100,
@@ -255,6 +287,7 @@ fn test_clickhouse_factory() {
 
     if let LoadedPlugin::Background(bg) = loaded {
         assert_eq!(bg.pbww(), 75);
+        assert_eq!(bg.etp_id(), Some("clickhouse-logs"));
     }
 }
 
@@ -276,7 +309,7 @@ async fn test_clickhouse_tls_mtls_e2e() {
         alpn: vec!["http/1.1".into()],
         cert_pem: server_cert_pem.clone(),
         key_pem: server_key_pem,
-        client_ca_pem: Some(client_cert_pem.clone()), // Enforce mTLS: client cert must match this CA
+        client_ca_pem: Some(client_cert_pem.clone()),
     };
 
     let server_engine = velda_tls::TlsServerEngine::new(&[server_config]).unwrap();
@@ -311,30 +344,35 @@ async fn test_clickhouse_tls_mtls_e2e() {
     });
 
     let telemetry_store = Arc::new(TelemetryStore::with_cores_and_capacity(1, 1024));
-
-    let config = ClickHouseLogShipperConfig {
-        endpoint: format!("https://127.0.0.1:{port}"),
-        transport_security: "mtls".into(),
-        database: "mtls_db".into(),
-        format: "row_binary".into(),
-        username: "default".into(),
-        password: "".into(),
-        flush_interval_ms: 100,
-        max_batch_size: 500,
-        connect_timeout_ms: 2000,
-        request_timeout_ms: 3000,
-        tls: velda_plugin::OutboundTlsConfig {
-            ca_pem: Some(server_cert_pem),
+    let etp = make_clickhouse_etp(
+        "ch-mtls",
+        port,
+        "mtls_db",
+        Some(EtpTlsConfig {
+            ca_cert_pem: Some(server_cert_pem),
             client_cert_pem: Some(client_cert_pem),
             client_key_pem: Some(client_key_pem),
+            server_name: Some("localhost".into()),
             insecure_skip_verify: false,
-        },
+            tls_version: EtpTlsVersion::Tls13,
+            pinned_cert_sha256: None,
+        }),
+    );
+
+    let config = ClickHouseLogShipperConfig {
+        etp_id: "ch-mtls".into(),
+        database: "mtls_db".into(),
+        format: "row_binary".into(),
+        flush_interval_ms: 100,
+        max_batch_size: 500,
+        request_timeout_ms: 3000,
     };
 
     let plugin = Arc::new(
-        ClickHouseLogShipperPlugin::with_store(
+        ClickHouseLogShipperPlugin::with_etp(
             "ch_mtls_shipper",
             config,
+            etp,
             Arc::clone(&telemetry_store),
         )
         .unwrap(),
@@ -356,14 +394,14 @@ async fn test_clickhouse_tls_mtls_e2e() {
     telemetry_store.flush_all_lanes(128);
 
     for _ in 0..50 {
-        if plugin.shipped_records() >= 1 {
+        if plugin.shipped_records.load(Ordering::Relaxed) >= 1 {
             break;
         }
         tokio::time::sleep(Duration::from_millis(15)).await;
     }
 
-    assert_eq!(plugin.shipped_records(), 1);
-    assert_eq!(plugin.failed_pushes(), 0);
+    assert_eq!(plugin.shipped_records.load(Ordering::Relaxed), 1);
+    assert_eq!(plugin.failed_pushes.load(Ordering::Relaxed), 0);
 
     let _ = shutdown_tx.send(true);
     let res = runner.await.unwrap();
@@ -390,25 +428,22 @@ async fn test_clickhouse_backoff_and_disconnect() {
     });
 
     let telemetry_store = Arc::new(TelemetryStore::with_cores_and_capacity(1, 1024));
+    let etp = make_clickhouse_etp("ch-backoff", port, "test_db", None);
 
     let config = ClickHouseLogShipperConfig {
-        endpoint: format!("http://127.0.0.1:{port}"),
-        transport_security: "plain".into(),
+        etp_id: "ch-backoff".into(),
         database: "test_db".into(),
         format: "row_binary".into(),
-        username: "default".into(),
-        password: "".into(),
         flush_interval_ms: 100,
         max_batch_size: 500,
-        connect_timeout_ms: 500,
         request_timeout_ms: 500,
-        tls: Default::default(),
     };
 
     let plugin = Arc::new(
-        ClickHouseLogShipperPlugin::with_store(
+        ClickHouseLogShipperPlugin::with_etp(
             "ch_backoff_shipper",
             config,
+            etp,
             Arc::clone(&telemetry_store),
         )
         .unwrap(),
@@ -430,7 +465,7 @@ async fn test_clickhouse_backoff_and_disconnect() {
     telemetry_store.flush_all_lanes(128);
 
     for _ in 0..50 {
-        if plugin.failed_pushes() >= 2 {
+        if plugin.failed_pushes.load(Ordering::Relaxed) >= 2 {
             break;
         }
         telemetry_store.emit_on_core(0, &make_sample_record(1, 1732000000));
@@ -438,61 +473,12 @@ async fn test_clickhouse_backoff_and_disconnect() {
         tokio::time::sleep(Duration::from_millis(30)).await;
     }
 
-    assert!(plugin.failed_pushes() >= 2);
-    assert_eq!(plugin.shipped_records(), 0);
+    assert!(plugin.failed_pushes.load(Ordering::Relaxed) >= 2);
+    assert_eq!(plugin.shipped_records.load(Ordering::Relaxed), 0);
 
     let _ = shutdown_tx.send(true);
     let _ = runner.await;
     server_task.abort();
-}
-
-#[test]
-fn test_clickhouse_tls_validation() {
-    use velda_plugin::background::clickhouse_log_shipper::validation::validate_clickhouse_log_shipper_config;
-
-    // 1. Plain with http:// succeeds
-    let valid_plain = serde_json::json!({
-        "endpoint": "http://127.0.0.1:8123",
-        "transport_security": "plain",
-        "database": "velda"
-    });
-    let cfg = validate_clickhouse_log_shipper_config("ch_test", &valid_plain).unwrap();
-    assert_eq!(cfg.transport_security, "plain");
-
-    // 2. Plain with https:// fails fast
-    let invalid_plain = serde_json::json!({
-        "endpoint": "https://127.0.0.1:8443",
-        "transport_security": "plain",
-        "database": "velda"
-    });
-    assert!(validate_clickhouse_log_shipper_config("ch_test", &invalid_plain).is_err());
-
-    // 3. TLS with http:// fails fast
-    let invalid_tls = serde_json::json!({
-        "endpoint": "http://127.0.0.1:8123",
-        "transport_security": "tls",
-        "database": "velda"
-    });
-    assert!(validate_clickhouse_log_shipper_config("ch_test", &invalid_tls).is_err());
-
-    // 4. mTLS with http:// fails fast
-    let invalid_mtls_http = serde_json::json!({
-        "endpoint": "http://127.0.0.1:8123",
-        "transport_security": "mtls",
-        "database": "velda"
-    });
-    assert!(validate_clickhouse_log_shipper_config("ch_test", &invalid_mtls_http).is_err());
-
-    // 5. mTLS missing client_key_pem fails fast
-    let invalid_mtls_missing_key = serde_json::json!({
-        "endpoint": "https://127.0.0.1:8443",
-        "transport_security": "mtls",
-        "database": "velda",
-        "tls": {
-            "client_cert_pem": "-----BEGIN CERTIFICATE-----\nMIIB...-----END CERTIFICATE-----\n"
-        }
-    });
-    assert!(validate_clickhouse_log_shipper_config("ch_test", &invalid_mtls_missing_key).is_err());
 }
 
 #[tokio::test]
@@ -524,25 +510,22 @@ async fn test_clickhouse_full_logs_e2e() {
     });
 
     let telemetry_store = Arc::new(TelemetryStore::with_cores_and_capacity(1, 1024));
+    let etp = make_clickhouse_etp("ch-full", port, "test_db", None);
 
     let config = ClickHouseLogShipperConfig {
-        endpoint: format!("http://127.0.0.1:{port}"),
-        transport_security: "plain".into(),
+        etp_id: "ch-full".into(),
         database: "test_db".into(),
         format: "row_binary".into(),
-        username: "default".into(),
-        password: "".into(),
         flush_interval_ms: 100,
         max_batch_size: 500,
-        connect_timeout_ms: 2000,
         request_timeout_ms: 3000,
-        tls: Default::default(),
     };
 
     let plugin = Arc::new(
-        ClickHouseLogShipperPlugin::with_store(
+        ClickHouseLogShipperPlugin::with_etp(
             "ch_full_logger",
             config,
+            etp,
             Arc::clone(&telemetry_store),
         )
         .unwrap(),
@@ -560,7 +543,6 @@ async fn test_clickhouse_full_logs_e2e() {
         tokio::time::sleep(Duration::from_millis(5)).await;
     }
 
-    // Emit 5 OK records (status 200) and 2 ERROR records (status 500)
     for i in 0..5 {
         let rec = make_sample_record(100 + i, 1732000000 + i as u32);
         telemetry_store.emit_on_core(0, &rec);
@@ -572,13 +554,110 @@ async fn test_clickhouse_full_logs_e2e() {
     }
     telemetry_store.flush_all_lanes(128);
 
-    // Give background shipper time to process
     tokio::time::sleep(Duration::from_millis(250)).await;
 
-    // Verify: exactly 7 records shipped (100% full logs, zero sampling drop)
-    assert_eq!(plugin.shipped_records(), 7);
+    assert_eq!(plugin.shipped_records.load(Ordering::Relaxed), 7);
 
     let _ = shutdown_tx.send(true);
     let _ = runner.await;
     let _ = server_task.await;
+}
+
+#[tokio::test]
+async fn test_clickhouse_etp_registry_wiring_and_reconnect_recovery() {
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let port = listener.local_addr().unwrap().port();
+
+    let server_task = tokio::spawn(async move {
+        // Connection 1: handles ensure_table() -> 200 OK, then closes socket abruptly
+        // when the first INSERT batch arrives so ClickHouseLogShipperPlugin triggers lease.reconnect().
+        let (mut s1, _) = listener.accept().await.unwrap();
+        let mut buf = vec![0u8; 16384];
+        let n1 = s1.read(&mut buf).await.unwrap();
+        assert!(String::from_utf8_lossy(&buf[..n1]).contains("CREATE TABLE IF NOT EXISTS"));
+        s1.write_all(b"HTTP/1.1 200 OK\r\nContent-Length: 0\r\nConnection: keep-alive\r\n\r\n")
+            .await
+            .unwrap();
+        s1.flush().await.unwrap();
+        // Wait for client's first INSERT attempt, then drop s1 without replying!
+        let _ = s1.read(&mut buf).await;
+        drop(s1);
+
+        // Connection 2: receives the in-place reconnected retry from Slot[0] and replies 200 OK.
+        let (mut s2, _) = listener.accept().await.unwrap();
+        let n2 = s2.read(&mut buf).await.unwrap();
+        let req2 = String::from_utf8_lossy(&buf[..n2]);
+        assert!(req2.contains("INSERT%20INTO%20wired_db.velda_access_logs%20FORMAT%20RowBinary"));
+        s2.write_all(b"HTTP/1.1 200 OK\r\nContent-Length: 0\r\nConnection: keep-alive\r\n\r\n")
+            .await
+            .unwrap();
+        s2.flush().await.unwrap();
+    });
+
+    // 1. Build EtpRegistry containing the clickhouse ETP
+    let registry = build_registry(&[EtpEntryConfig {
+        id: "ch-wired".into(),
+        kind: EtpKind::ClickHouse,
+        pool: EtpPoolSettings {
+            pool_size: 1,
+            connect_timeout_ms: 2000,
+            idle_timeout_ms: 60_000,
+        },
+        tls: None,
+        settings: serde_json::json!({
+            "host": "127.0.0.1",
+            "port": port,
+            "database": "wired_db",
+            "user": "default",
+            "password": ""
+        }),
+    }])
+    .unwrap();
+
+    // 2. Instantiate plugin via factory and wire it via wire_plugin_etps()
+    let plugin_cfg = PluginConfig {
+        id: "clickhouse_log_shipper".into(),
+        config: serde_json::json!({
+            "etp_id": "ch-wired",
+            "format": "row_binary",
+            "flush_interval_ms": 100,
+            "max_batch_size": 100,
+            "request_timeout_ms": 2000
+        }),
+    };
+    let loaded = instantiate_plugin(&plugin_cfg).unwrap();
+    let mut available = FxHashMap::default();
+    available.insert(loaded.id().to_string(), loaded.clone());
+    wire_plugin_etps(&available, &registry).unwrap();
+
+    // 3. Emit records onto global TelemetryStore and verify background task recovers transparently
+    let store = velda_observability::global_telemetry_store();
+    let (shutdown_tx, shutdown_rx) = watch::channel(false);
+    let runner = tokio::spawn(loaded.run_background(shutdown_rx).unwrap());
+
+    while store.active_subscriber_count.load(Ordering::Acquire) == 0 {
+        tokio::time::sleep(Duration::from_millis(5)).await;
+    }
+
+    for i in 0..3 {
+        store.emit_on_core(0, &make_sample_record(500 + i, 1732000000 + i as u32));
+    }
+    store.flush_all_lanes(128);
+
+    // Wait for reconnect + retry push to complete
+    server_task.await.unwrap();
+    tokio::time::sleep(Duration::from_millis(50)).await;
+
+    let _ = shutdown_tx.send(true);
+    let res = runner.await.unwrap();
+    assert!(res.is_ok());
+
+    if let LoadedPlugin::Background(bg) = loaded {
+        // Also verify missing ETP produces an explicit PluginError
+        let err_plugin = instantiate_plugin(&plugin_cfg).unwrap();
+        let mut missing_map = FxHashMap::default();
+        missing_map.insert(bg.id().to_string(), err_plugin);
+        let empty_registry = velda_etp::EtpRegistry::default();
+        assert!(wire_plugin_etps(&missing_map, &empty_registry).is_err());
+    }
 }

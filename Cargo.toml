@@ -18,6 +18,7 @@ members = [
     "crates/velda-connection-pool",
     "crates/velda-observability",
     "crates/velda-edge",
+    "crates/velda-etp",
     "crates/velda-rdma",
     "crates/velda-xdp",
     "crates/velda-bench-backend",

@@ -305,15 +305,11 @@
     {
       "id": "clickhouse_log_shipper",
       "config": {
-        "endpoint": "http://127.0.0.1:8123",
-        "transport_security": "plain",
+        "etp_id": "clickhouse-logs",
         "database": "velda_analytics",
         "format": "row_binary",
-        "username": "default",
-        "password": "",
         "flush_interval_ms": 1000,
         "max_batch_size": 8000,
-        "connect_timeout_ms": 2000,
         "request_timeout_ms": 5000
       }
     },

@@ -1,9 +1,18 @@
 //! In-memory Runtime snapshot and lock-free state owner.
 //!
-//! Owns the compiled runtime snapshot holding all domain models (listeners,
-//! routes, upstreams, plugins, tls) loaded from binary artifacts (*.bin).
-//! Wrapped in [`ArcSwap`] to enable zero-overhead, lock-free $O(1)$ reads on the
-//! request serving hot path, and atomic swaps upon configuration reloads.
+//! ```text
+//! +-----------------------------------------------------------------------------+
+//! |                   Lock-Free ArcSwap<Runtime> Snapshot                       |
+//! +-----------------------------------------------------------------------------+
+//! |                                                                             |
+//! |  Runtime                                                                    |
+//! |   ├─ config: RuntimeConfig (listeners, routes, upstreams, plugins, tls, etps)
+//! |   ├─ router: Router                  ├─ upstreams: UpstreamTable            |
+//! |   ├─ pipelines: PipelineTable        ├─ etp_table: Arc<EtpRegistry>         |
+//! |   ├─ tls_server / tls_client         ├─ plugins: Arc<PluginTable>           |
+//! |   └─ overload: Arc<OverloadTracker>  └─ buffer_pool: Arc<ShardedBufferPool> |
+//! +-----------------------------------------------------------------------------+
+//! ```
 
 mod ingress;
 pub mod lut;
@@ -27,6 +36,7 @@ use velda_core::hardware::OverloadTracker;
 use velda_ingress::IngressBinding;
 use velda_router::Router;
 use velda_sock::{TcpListenerConfig, UdpSocketConfig};
+use velda_sync::post_sync::etp::EtpSyncConfig;
 use velda_sync::post_sync::listener::ListenerConfig;
 use velda_sync::post_sync::plugin::PluginConfig;
 use velda_sync::post_sync::route::RouteConfig;
@@ -49,6 +59,8 @@ pub struct RuntimeConfig {
     pub plugins: Vec<PluginConfig>,
     /// Active TLS configurations and certificate references.
     pub tls: Vec<TlsConfig>,
+    /// Active External Third-Party (ETP) service definitions.
+    pub etps: Vec<EtpSyncConfig>,
 }
 
 impl RuntimeConfig {
@@ -94,6 +106,8 @@ pub struct Runtime {
     pub overload: Arc<OverloadTracker>,
     /// Pre-warmed sharded user-space buffer and object pool for zero-allocation serving.
     pub buffer_pool: Arc<velda_core::buffer::ShardedBufferPool>,
+    /// External Third-Party (ETP) connection pool registry with Make-Before-Break reload.
+    pub etp_table: Arc<velda_etp::EtpRegistry>,
 }
 
 /// Thread-safe, lock-free container for the active [`Runtime`] snapshot.

@@ -4,7 +4,7 @@
 //!   PluginConfig[]
 //!        │
 //!        ▼
-//!   instantiate_plugin() + wire_plugin_dependencies()
+//!   instantiate_plugin() + wire_plugin_dependencies() + wire_plugin_etps()
 //!        │
 //!        ├──► route.plugins ─► RoutePluginPlan (O(1) hot-path dispatch per route_id)
 //!        │
@@ -26,7 +26,7 @@ use rustc_hash::FxHashMap;
 use velda_core::{ProtocolFamily, StreamingMode};
 use velda_plugin::{
     LoadedPlugin, RoutePluginPlan, build_route_plugin_plan, instantiate_plugin,
-    wire_plugin_dependencies,
+    wire_plugin_dependencies, wire_plugin_etps,
 };
 use velda_sync::post_sync::listener::ListenerConfig;
 use velda_sync::post_sync::plugin::PluginConfig;
@@ -100,6 +100,7 @@ pub fn build_plugin_table(
     plugins: &[PluginConfig],
     routes: &[RouteConfig],
     listeners: &[ListenerConfig],
+    etp_registry: &velda_etp::EtpRegistry,
 ) -> Result<PluginTable, EdgeError> {
     // 1. Instantiate all available plugins into typed LoadedPlugin instances
     let mut available_plugins = FxHashMap::default();
@@ -126,6 +127,11 @@ pub fn build_plugin_table(
     // 1b. Wire inter-plugin dependencies (e.g. jwks_rotator -> jwt_auth SharedJwksStore)
     wire_plugin_dependencies(&available_plugins).map_err(|e| EdgeError::InvalidConfig {
         detail: format!("Failed to wire plugin dependencies: {e}"),
+    })?;
+
+    // 1c. Wire External Third-Party (velda-etp) pool instances into background plugins
+    wire_plugin_etps(&available_plugins, etp_registry).map_err(|e| EdgeError::InvalidConfig {
+        detail: format!("Failed to wire plugin ETPs: {e}"),
     })?;
 
     // 2. Host Ingress Port Authority: register Traffic Ingress listeners with SocketManager
