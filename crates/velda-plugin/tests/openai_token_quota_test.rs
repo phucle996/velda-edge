@@ -112,7 +112,7 @@ fn test_distributed_mode_continues_local_counting_when_redis_disconnected() {
         config: serde_json::json!({
             "mode": "distributed",
             "consumer_id_headers": ["x-tenant-id", "x-user-id"],
-            "redis_url": "redis://127.0.0.1:6399",
+            "etp_id": "redis-offline",
             "micro_quota_batch": 5000,
             "refill_watermark": 1000
         }),
@@ -228,13 +228,26 @@ async fn test_pbww_and_run_background_shutdown() {
         config: serde_json::json!({
             "mode": "distributed",
             "consumer_id_headers": ["x-consumer-id"],
-            "redis_url": "redis://127.0.0.1:6399",
+            "etp_id": "redis-offline",
             "shadow_weight": 35,
             "sync_interval_ms": 50
         }),
     };
     let dist_plugin = Arc::new(OpenAiTokenQuotaPlugin::from_config(&dist_cfg).unwrap());
     assert_eq!(dist_plugin.pbww(), 35);
+    assert_eq!(dist_plugin.etp_id(), Some("redis-offline"));
+
+    let entry = velda_etp::EtpEntryConfig {
+        id: "redis-offline".into(),
+        kind: velda_etp::EtpKind::Redis,
+        settings: serde_json::json!({ "endpoint": "127.0.0.1:6399" }),
+        pool: velda_etp::EtpPoolSettings::default(),
+        tls: None,
+    };
+    let registry = velda_etp::registry::build_registry(&[entry]).unwrap();
+    dist_plugin
+        .attach_etp(registry.entries.get("redis-offline").unwrap())
+        .unwrap();
 
     let (shutdown_tx, shutdown_rx) = tokio::sync::watch::channel(false);
     let fut = dist_plugin
@@ -246,4 +259,82 @@ async fn test_pbww_and_run_background_shutdown() {
     let _ = shutdown_tx.send(true);
     let res = handle.await.expect("background task must join cleanly");
     assert!(res.is_ok());
+}
+
+#[tokio::test]
+async fn test_distributed_mode_leases_micro_quota_via_redis_etp() {
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+    use tokio::net::TcpListener;
+
+    velda_core::clock::init_clock();
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let port = listener.local_addr().unwrap().port();
+
+    let server = tokio::spawn(async move {
+        let (mut sock, _) = listener.accept().await.unwrap();
+        let mut buf = [0u8; 4096];
+        loop {
+            let n = match sock.read(&mut buf).await {
+                Ok(0) | Err(_) => break,
+                Ok(n) => n,
+            };
+            let req = String::from_utf8_lossy(&buf[..n]);
+            if req.contains("PING") {
+                let _ = sock.write_all(b"+PONG\r\n").await;
+            } else if req.contains("EVAL") {
+                let _ = sock.write_all(b"*1\r\n:5000\r\n").await;
+            }
+        }
+    });
+
+    let entry = velda_etp::EtpEntryConfig {
+        id: "redis-quota".into(),
+        kind: velda_etp::EtpKind::Redis,
+        settings: serde_json::json!({ "endpoint": format!("127.0.0.1:{port}") }),
+        pool: velda_etp::EtpPoolSettings {
+            pool_size: 1,
+            ..Default::default()
+        },
+        tls: None,
+    };
+    let registry = velda_etp::registry::build_registry(&[entry]).unwrap();
+
+    let cfg = PluginConfig {
+        id: "openai_token_quota".into(),
+        config: serde_json::json!({
+            "mode": "distributed",
+            "consumer_id_headers": ["x-consumer-id"],
+            "etp_id": "redis-quota",
+            "micro_quota_batch": 5000,
+            "refill_watermark": 1000,
+            "sync_interval_ms": 50
+        }),
+    };
+    let loaded = velda_plugin::instantiate_plugin(&cfg).unwrap();
+    let mut map = rustc_hash::FxHashMap::default();
+    map.insert("openai_token_quota".to_string(), loaded);
+    velda_plugin::wire_plugin_etps(&map, &registry).unwrap();
+
+    let velda_plugin::LoadedPlugin::PostResponse(pr) = map.remove("openai_token_quota").unwrap()
+    else {
+        panic!("expected PostResponse plugin");
+    };
+    let (shutdown_tx, shutdown_rx) = tokio::sync::watch::channel(false);
+    let bg = pr.clone().run_background(shutdown_rx).unwrap();
+    let bg_handle = tokio::spawn(bg);
+
+    let response_json =
+        br#"{"usage":{"prompt_tokens":100,"completion_tokens":50,"total_tokens":150}}"#;
+    let mut resp = L7Response::from_bytes(StatusCode::OK, &response_json[..]);
+    let mut req_ws = HeaderWorkspace::default();
+    req_ws.insert(
+        HeaderName::from_static("x-consumer-id"),
+        HeaderValue::from_static("tenant-etp"),
+    );
+    pr.on_response(&req_ws, &mut resp);
+
+    tokio::time::sleep(std::time::Duration::from_millis(120)).await;
+    let _ = shutdown_tx.send(true);
+    bg_handle.await.unwrap().unwrap();
+    server.abort();
 }

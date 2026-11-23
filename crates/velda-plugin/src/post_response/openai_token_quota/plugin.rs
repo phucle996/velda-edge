@@ -29,18 +29,20 @@
 //! ```
 
 use std::str::FromStr;
-use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+use std::sync::{Arc, OnceLock};
 
 use http::HeaderValue;
 use http::header::HeaderName;
 use tokio::sync::Notify;
 use velda_core::clock::coarse_sec;
 use velda_core::{HeaderWorkspace, L7Response};
+use velda_etp::redis::RedisEtp;
+use velda_etp::{EtpBackend, EtpInstance};
 
 use crate::BackgroundTaskFuture;
 use crate::capability::{AccessLevel, PluginCapability, SupportedProtocols};
-use crate::config::{OutboundTlsConfig, PluginConfig};
+use crate::config::PluginConfig;
 use crate::error::PluginError;
 use crate::post_response::PostResponsePlugin;
 use crate::post_response::openai_token_quota::config::QuotaMode;
@@ -65,9 +67,8 @@ pub struct OpenAiTokenQuotaPlugin {
     pub ledger: Arc<SharedUsageArena>,
     pub refill_notify: Arc<Notify>,
     pub redis_connected: Arc<AtomicBool>,
-    pub redis_url: Option<String>,
-    pub redis_password: Option<String>,
-    pub redis_tls: Option<OutboundTlsConfig>,
+    pub etp_id: Option<String>,
+    pub etp: OnceLock<Arc<RedisEtp>>,
     pub micro_quota_batch: u64,
     pub batch_users: usize,
     pub sync_interval_ms: u64,
@@ -108,9 +109,8 @@ impl OpenAiTokenQuotaPlugin {
             ledger,
             refill_notify: Arc::new(Notify::new()),
             redis_connected: Arc::new(AtomicBool::new(false)),
-            redis_url: cfg.redis_url,
-            redis_password: cfg.redis_password,
-            redis_tls: cfg.redis_tls,
+            etp_id: cfg.etp_id,
+            etp: OnceLock::new(),
             micro_quota_batch: cfg.micro_quota_batch,
             batch_users: cfg.batch_users,
             sync_interval_ms: cfg.sync_interval_ms,
@@ -148,6 +148,30 @@ impl PostResponsePlugin for OpenAiTokenQuotaPlugin {
         }
     }
 
+    #[inline(always)]
+    fn etp_id(&self) -> Option<&str> {
+        if self.mode == QuotaMode::Distributed {
+            self.etp_id.as_deref()
+        } else {
+            None
+        }
+    }
+
+    fn attach_etp(&self, instance: &EtpInstance) -> Result<(), PluginError> {
+        match &instance.backend {
+            EtpBackend::Redis(pool) => {
+                let _ = self.etp.set(Arc::clone(pool));
+                Ok(())
+            }
+            _ => Err(PluginError::Config(format!(
+                "Plugin '{}' (openai_token_quota) requires a 'redis' ETP for etp_id '{}', got '{}'",
+                self.id,
+                self.etp_id.as_deref().unwrap_or(""),
+                instance.kind
+            ))),
+        }
+    }
+
     fn run_background(
         self: Arc<Self>,
         shutdown: tokio::sync::watch::Receiver<bool>,
@@ -155,15 +179,23 @@ impl PostResponsePlugin for OpenAiTokenQuotaPlugin {
         if self.mode != QuotaMode::Distributed {
             return None;
         }
-        let redis_url = self.redis_url.clone()?;
+        let etp = match self.etp.get() {
+            Some(pool) => Arc::clone(pool),
+            None => {
+                let msg = format!(
+                    "Plugin '{}' (openai_token_quota) has no attached RedisEtp for etp_id '{}'",
+                    self.id,
+                    self.etp_id.as_deref().unwrap_or("")
+                );
+                return Some(Box::pin(async move { Err(PluginError::Config(msg)) }));
+            }
+        };
         let params = RedisSyncParams {
             plugin_id: self.id.clone(),
             arena: Arc::clone(&self.ledger),
             notify: Arc::clone(&self.refill_notify),
             connected: Arc::clone(&self.redis_connected),
-            redis_url,
-            redis_password: self.redis_password.clone(),
-            redis_tls: self.redis_tls.clone(),
+            etp,
             micro_quota_batch: self.micro_quota_batch,
             batch_users: self.batch_users,
             sync_interval_ms: self.sync_interval_ms,
@@ -205,23 +237,35 @@ impl PostResponsePlugin for OpenAiTokenQuotaPlugin {
                 if !trimmed.is_empty() {
                     if has_segment {
                         hasher.write_byte(b'.');
-                        if key_len < MAX_CONSUMER_KEY_LEN {
-                            key_buf[key_len] = b'.';
+                        if let Some(slot) = key_buf.get_mut(key_len) {
+                            *slot = b'.';
                             key_len += 1;
                         }
                     }
                     let bytes = trimmed.as_bytes();
                     hasher.write_bytes(bytes);
-                    let copy_len = bytes.len().min(MAX_CONSUMER_KEY_LEN - key_len);
-                    key_buf[key_len..key_len + copy_len].copy_from_slice(&bytes[..copy_len]);
-                    key_len += copy_len;
+                    // INVARIANT: Use checked `.get_mut(..)` / `.get(..)` + `saturating_sub`
+                    // instead of `[..]` so LLVM emits zero `slice_index_fail` stubs on Frontline.
+                    let copy_len = bytes
+                        .len()
+                        .min(MAX_CONSUMER_KEY_LEN.saturating_sub(key_len));
+                    if let (Some(dst), Some(src)) = (
+                        key_buf.get_mut(key_len..key_len + copy_len),
+                        bytes.get(..copy_len),
+                    ) {
+                        dst.copy_from_slice(src);
+                        key_len += copy_len;
+                    }
                     has_segment = true;
                 }
             }
         }
 
         let (consumer_hash, consumer_key): (u64, &[u8]) = if has_segment {
-            (hasher.finish_non_zero(), &key_buf[..key_len])
+            (
+                hasher.finish_non_zero(),
+                key_buf.get(..key_len).unwrap_or_default(),
+            )
         } else {
             (fnv1a_64(b"anonymous"), b"anonymous")
         };

@@ -5,7 +5,7 @@
 //!     ├── Deserialize OpenAiTokenQuotaConfig (#[serde(deny_unknown_fields)])
 //!     ├── Validate consumer_id_headers (non-empty RFC 9110 header tokens, lowercase)
 //!     ├── Normalize ledger_slots (power-of-2 in 64..=1_048_576 -> k * 4096B shared arena)
-//!     └── If mode == "distributed": validate redis_url, micro_quota_batch > 0, sync_interval_ms >= 50
+//!     └── If mode == "distributed": validate etp_id, micro_quota_batch > 0, sync_interval_ms >= 50
 //! ```
 
 use serde_json::Value;
@@ -76,30 +76,17 @@ pub fn validate_openai_token_quota_config(
     cfg.ledger_slots = cfg.ledger_slots.next_power_of_two();
 
     if cfg.mode == QuotaMode::Distributed {
-        let url = cfg
-            .redis_url
+        let etp_id = cfg
+            .etp_id
             .as_deref()
             .map(str::trim)
             .filter(|s| !s.is_empty())
             .ok_or_else(|| {
                 PluginError::Config(format!(
-                    "Plugin '{plugin_id}': redis_url is required when mode is 'distributed'"
+                    "Plugin '{plugin_id}': etp_id is required when mode is 'distributed'"
                 ))
             })?;
-        if !url.starts_with("redis://") && !url.starts_with("rediss://") {
-            return Err(PluginError::Config(format!(
-                "Plugin '{plugin_id}': redis_url '{url}' must start with 'redis://' or 'rediss://'"
-            )));
-        }
-        cfg.redis_url = Some(url.to_string());
-
-        if let Some(ref tls) = cfg.redis_tls {
-            tls.build_client_config(&[]).map_err(|e| {
-                PluginError::Config(format!(
-                    "Plugin '{plugin_id}': invalid redis_tls config: {e}"
-                ))
-            })?;
-        }
+        cfg.etp_id = Some(etp_id.to_string());
 
         if cfg.micro_quota_batch == 0 {
             return Err(PluginError::Config(format!(
@@ -164,7 +151,7 @@ mod tests {
         let valid_dist = json!({
             "mode": "distributed",
             "consumer_id_headers": ["x-tenant-id", "x-user-id"],
-            "redis_url": "redis://127.0.0.1:6379",
+            "etp_id": "redis-quota",
             "micro_quota_batch": 5000,
             "refill_watermark": 1000
         });

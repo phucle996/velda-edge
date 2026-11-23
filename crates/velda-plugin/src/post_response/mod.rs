@@ -59,6 +59,21 @@ pub trait PostResponsePlugin: Send + Sync {
     /// Plugin Background Workload Weight (`0` = hot-path only, `1..=100` = shadow daemon weight).
     fn pbww(&self) -> u32;
 
+    /// Optional `etp_id` referencing an external third-party pool in `EtpRegistry`.
+    #[inline(always)]
+    fn etp_id(&self) -> Option<&str> {
+        None
+    }
+
+    /// Attaches the resolved [`velda_etp::EtpInstance`] from `EtpRegistry` before
+    /// `run_background()` starts.
+    fn attach_etp(
+        &self,
+        _instance: &velda_etp::EtpInstance,
+    ) -> Result<(), crate::error::PluginError> {
+        Ok(())
+    }
+
     /// Starts optional background workload daemon on the assigned Shadow Worker (`pbww() > 0`).
     #[inline]
     fn run_background(

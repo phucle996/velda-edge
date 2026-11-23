@@ -40,33 +40,38 @@ pub fn scan_token_usage(body: &[u8]) -> Option<TokenUsage> {
         return None;
     }
 
-    let search_window = if body.len() > 4096 {
-        &body[body.len() - 4096..]
-    } else {
-        body
-    };
+    // INVARIANT: Keep `.get(..)` / `.saturating_sub(..)` instead of raw `[..]` indexing throughout
+    // this scanner. Runs on Frontline Workers (`velda-worker-*`): checked `.get` eliminates
+    // `core::panicking::slice_index_fail` stubs in release ASM even on truncated/malformed JSON.
+    let search_window = body.get(body.len().saturating_sub(4096)..).unwrap_or(body);
 
     let mut search_slice = search_window;
     let mut usage_obj_slice = None;
 
     while let Some(idx) = rfind_subslice(search_slice, b"\"usage\"") {
-        let after = &search_slice[idx + 7..];
+        let after = search_slice.get(idx + 7..).unwrap_or_default();
         let mut p = 0;
-        while p < after.len() && is_ws(after[p]) {
+        while let Some(&b) = after.get(p) {
+            if !is_ws(b) {
+                break;
+            }
             p += 1;
         }
-        if p < after.len() && after[p] == b':' {
+        if after.get(p).copied() == Some(b':') {
             p += 1;
-            while p < after.len() && is_ws(after[p]) {
+            while let Some(&b) = after.get(p) {
+                if !is_ws(b) {
+                    break;
+                }
                 p += 1;
             }
-            if p < after.len() && after[p] == b'{' {
-                let obj_end = (p + 1024).min(after.len());
-                usage_obj_slice = Some(&after[p..obj_end]);
+            if after.get(p).copied() == Some(b'{') {
+                let obj_end = p.saturating_add(1024).min(after.len());
+                usage_obj_slice = after.get(p..obj_end);
                 break;
             }
         }
-        search_slice = &search_slice[..idx];
+        search_slice = search_slice.get(..idx).unwrap_or_default();
     }
 
     let obj = usage_obj_slice?;
@@ -76,8 +81,11 @@ pub fn scan_token_usage(body: &[u8]) -> Option<TokenUsage> {
     // Single linear pass over the `"usage": { ... }` object.
     let mut i = 1;
     let mut depth: i32 = 1;
-    while i < obj.len() && depth > 0 {
-        match obj[i] {
+    while depth > 0 {
+        let Some(&ch) = obj.get(i) else {
+            break;
+        };
+        match ch {
             b'{' => {
                 depth += 1;
                 i += 1;
@@ -89,33 +97,42 @@ pub fn scan_token_usage(body: &[u8]) -> Option<TokenUsage> {
             b'"' => {
                 let key_start = i + 1;
                 let mut key_end = key_start;
-                while key_end < obj.len() && obj[key_end] != b'"' {
-                    if obj[key_end] == b'\\' {
+                while let Some(&kb) = obj.get(key_end) {
+                    if kb == b'"' {
+                        break;
+                    }
+                    if kb == b'\\' {
                         key_end += 2;
                     } else {
                         key_end += 1;
                     }
                 }
-                if key_end >= obj.len() {
+                let Some(key) = obj.get(key_start..key_end) else {
                     break;
-                }
-                let key = &obj[key_start..key_end];
+                };
                 i = key_end + 1;
 
-                while i < obj.len() && is_ws(obj[i]) {
+                while let Some(&wb) = obj.get(i) {
+                    if !is_ws(wb) {
+                        break;
+                    }
                     i += 1;
                 }
-                if i < obj.len() && obj[i] == b':' {
+                if obj.get(i).copied() == Some(b':') {
                     i += 1;
-                    while i < obj.len() && is_ws(obj[i]) {
+                    while let Some(&wb) = obj.get(i) {
+                        if !is_ws(wb) {
+                            break;
+                        }
                         i += 1;
                     }
-                    if i < obj.len() && obj[i].is_ascii_digit() {
+                    if obj.get(i).is_some_and(u8::is_ascii_digit) {
                         let mut val: u64 = 0;
-                        while i < obj.len() && obj[i].is_ascii_digit() {
-                            val = val
-                                .saturating_mul(10)
-                                .saturating_add((obj[i] - b'0') as u64);
+                        while let Some(&db) = obj.get(i) {
+                            if !db.is_ascii_digit() {
+                                break;
+                            }
+                            val = val.saturating_mul(10).saturating_add((db - b'0') as u64);
                             i += 1;
                         }
                         match key {

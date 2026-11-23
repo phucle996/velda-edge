@@ -6,16 +6,16 @@
 //!     ├── consumer_id_headers : ["x-tenant-id", "x-user-id"] (required, hierarchical)
 //!     ├── ledger_slots        : power-of-2 in 64..=1_048_576 (128B/slot, k * 4096B)
 //!     ├── local_default_quota : i64 (initial local quota per consumer in local mode)
-//!     ├── redis_url           : Option<String> (required when mode == "distributed")
-//!     ├── redis_password      : Option<String>
+//!     ├── etp_id              : Option<String> (RedisEtp in EtpRegistry when mode == "distributed")
 //!     ├── micro_quota_batch   : u64 (micro-quota chunk leased from Redis per refill)
 //!     ├── refill_watermark    : i64 (triggers shadow worker refill when remaining <= watermark)
 //!     └── sync_interval_ms    : u64 (background shadow sweep interval)
 //! ```
+//!
+//! Redis endpoint, authentication, database index, pool capacity, and TLS/mTLS settings belong
+//! strictly to the referenced `redis` entry in `etp.json` / [`velda_etp::EtpRegistry`].
 
 use serde::{Deserialize, Serialize};
-
-use crate::config::OutboundTlsConfig;
 
 /// Operating mode for the token quota ledger.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
@@ -85,17 +85,9 @@ pub struct OpenAiTokenQuotaConfig {
     #[serde(default = "default_local_quota")]
     pub local_default_quota: i64,
 
-    /// Redis endpoint (`redis://host:port` or `rediss://host:port`) in `distributed` mode.
+    /// Identifier of the `redis` ETP entry in [`velda_etp::EtpRegistry`] when `mode == "distributed"`.
     #[serde(default)]
-    pub redis_url: Option<String>,
-
-    /// Optional Redis password (`AUTH`).
-    #[serde(default)]
-    pub redis_password: Option<String>,
-
-    /// Optional TLS / mTLS client configuration for Redis (`rediss://` or explicit TLS).
-    #[serde(default)]
-    pub redis_tls: Option<OutboundTlsConfig>,
+    pub etp_id: Option<String>,
 
     /// Micro-quota batch size leased from Redis per refill in `distributed` mode.
     #[serde(default = "default_micro_quota_batch")]

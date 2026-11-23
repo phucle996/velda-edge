@@ -218,6 +218,8 @@ impl SharedUsageArena {
 
     #[inline]
     fn write_cold_key(slot: &UsageSlot, key: &[u8]) {
+        // INVARIANT: `len` must stay clamped to `MAX_CONSUMER_KEY_LEN` (62 bytes) to match
+        // `slot.key_bytes: [AtomicU8; 62]` and prevent out-of-bounds panics on Frontline Workers.
         let len = key.len().min(MAX_CONSUMER_KEY_LEN);
         for (i, &b) in key[..len].iter().enumerate() {
             slot.key_bytes[i].store(b, Ordering::Relaxed);
