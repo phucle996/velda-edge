@@ -1,12 +1,13 @@
 //! Canary Traffic Splitting Pre-Upstream Plugin (`canary::plugin`).
 //!
 //! ```text
-//! on_upstream_request(req, target_upstream)  [AccessLevel::Read, 0 Header Mutations]
-//!   ├─► 1. Header Rules (`rules` against HeaderWorkspace)     -> force canary
-//!   ├─► 2. Ratio Shortcuts (`ratio == 0` -> false, `>= 1000` -> true)
-//!   └─► 3. Stateless Permille Split (`((swar_hash64 * 1000) >> 64) < ratio`)
-//!         ├── true  ─► *target_upstream = canary_upstream_id -> Continue
-//!         └── false ─► keep default upstream                 -> Continue
+//! on_upstream_request(req, target_upstream)  [AccessLevel::Read, 0 Header Mutations, 0 Fallback]
+//!   ├─► 1. Header Rules (`rules` against HeaderWorkspace)              -> force canary
+//!   └─► 2. Multi-Header SWAR Hash (`hash_headers` all required)
+//!         ├─ None (any configured hash_header missing/empty)           -> keep baseline
+//!         └─ Some(bucket) -> ((hash64 as u128 * 1000) >> 64) < ratio
+//!               ├── true  ─► *target_upstream = canary_upstream_id     -> Continue
+//!               └── false ─► keep default baseline upstream            -> Continue
 //! ```
 
 use std::sync::Arc;
@@ -15,7 +16,7 @@ use std::sync::atomic::{AtomicU16, Ordering};
 use http::HeaderName;
 use velda_core::{Action, L7Request, UNASSIGNED_UPSTREAM_ID};
 
-use super::config::{CanaryConfig, HashStrategy, HeaderRule, RuleOperator, schema_to_config};
+use super::config::{CanaryConfig, HeaderRule, RuleOperator, schema_to_config};
 use super::hash::evaluate_permille;
 use super::validation::validate_canary_config;
 use crate::capability::{AccessLevel, PluginCapability, SupportedProtocols};
@@ -28,10 +29,9 @@ pub struct CanaryPlugin {
     pub id: String,
     pub canary_upstream: Arc<str>,
     pub canary_upstream_id: AtomicU16,
-    /// Traffic share routed to canary in permille (`0..=1000`).
+    /// Traffic share routed to canary in permille (`1..=999`).
     pub ratio: u32,
     pub rules: Box<[HeaderRule]>,
-    pub hash_strategy: HashStrategy,
     pub hash_headers: Box<[HeaderName]>,
 }
 
@@ -45,7 +45,7 @@ impl std::fmt::Debug for CanaryPlugin {
                 &self.canary_upstream_id.load(Ordering::Relaxed),
             )
             .field("ratio", &self.ratio)
-            .field("hash_strategy", &self.hash_strategy)
+            .field("hash_headers", &self.hash_headers)
             .finish()
     }
 }
@@ -58,11 +58,16 @@ impl CanaryPlugin {
                 "canary_upstream cannot be empty".to_string(),
             ));
         }
-        if config.ratio > 1000 {
+        if config.ratio == 0 || config.ratio >= 1000 {
             return Err(PluginError::Config(format!(
-                "canary ratio ({}) must be in 0..=1000",
+                "canary ratio ({}) must be in 1..=999",
                 config.ratio
             )));
+        }
+        if config.hash_headers.is_empty() {
+            return Err(PluginError::Config(
+                "canary hash_headers cannot be empty".to_string(),
+            ));
         }
 
         Ok(Self {
@@ -71,7 +76,6 @@ impl CanaryPlugin {
             canary_upstream_id: AtomicU16::new(UNASSIGNED_UPSTREAM_ID),
             ratio: config.ratio,
             rules: config.rules.into_boxed_slice(),
-            hash_strategy: config.hash_strategy,
             hash_headers: config.hash_headers.into_boxed_slice(),
         })
     }
@@ -91,13 +95,10 @@ impl CanaryPlugin {
                 return true;
             }
         }
-        if self.ratio == 0 {
-            return false;
+        match evaluate_permille(req, &self.hash_headers) {
+            Some(bucket) => bucket < self.ratio,
+            None => false,
         }
-        if self.ratio >= 1000 {
-            return true;
-        }
-        evaluate_permille(req, self.hash_strategy, &self.hash_headers) < self.ratio
     }
 }
 
@@ -197,10 +198,10 @@ mod tests {
     use velda_core::{Body, HeaderWorkspace};
 
     #[test]
-    fn test_canary_header_rules_read_only() {
+    fn test_canary_header_rules_and_missing_header_baseline() {
         let config = CanaryConfig {
             canary_upstream: "payments-v2".into(),
-            ratio: 0,
+            ratio: 500,
             rules: vec![
                 HeaderRule {
                     header: HeaderName::from_static("x-canary"),
@@ -228,8 +229,10 @@ mod tests {
                     pattern: Box::new([]),
                 },
             ],
-            hash_strategy: HashStrategy::Random,
-            hash_headers: Vec::new(),
+            hash_headers: vec![
+                HeaderName::from_static("x-tenant-id"),
+                HeaderName::from_static("x-user-id"),
+            ],
         };
 
         let plugin = CanaryPlugin::new("canary-test", config).unwrap();
@@ -239,20 +242,21 @@ mod tests {
         );
         plugin.attach_canary_upstream(2);
 
-        let make_req = |k: &'static str, v: &'static str| {
+        let make_req = |pairs: &[(&'static str, &'static str)]| {
+            let mut h = HeaderWorkspace::empty(4);
+            for &(k, v) in pairs {
+                h.insert(k, HeaderValue::from_static(v));
+            }
             L7Request::new(
                 Method::GET,
                 Uri::from_static("/v1/pay"),
                 Version::HTTP_11,
-                {
-                    let mut h = HeaderWorkspace::empty(4);
-                    h.insert(k, HeaderValue::from_static(v));
-                    h
-                },
+                h,
                 Body::Empty,
             )
         };
 
+        // Rules force canary even when hash_headers are absent
         for (hdr, val) in [
             ("x-canary", "ALWAYS"),
             ("x-user-email", "dev@velda.io"),
@@ -260,14 +264,32 @@ mod tests {
             ("user-agent", "Mozilla-Mobile-Safari"),
             ("x-debug", "1"),
         ] {
-            let mut req = make_req(hdr, val);
+            let mut req = make_req(&[(hdr, val)]);
             let mut target = 0;
             plugin.on_upstream_request(&mut req, &mut target);
             assert_eq!(target, 2, "failed rule {hdr}={val}");
         }
 
-        // Unmatched request leaves target_upstream unchanged and mutates zero headers
-        let mut base = make_req("x-canary", "never");
+        // Missing or partial hash_headers -> always stays safely on baseline (0), zero PRNG fallback
+        for _ in 0..32 {
+            let mut no_hdrs = make_req(&[]);
+            let mut t1 = 0;
+            plugin.on_upstream_request(&mut no_hdrs, &mut t1);
+            assert_eq!(t1, 0);
+
+            let mut partial = make_req(&[("x-tenant-id", "acme")]);
+            let mut t2 = 0;
+            plugin.on_upstream_request(&mut partial, &mut t2);
+            assert_eq!(t2, 0);
+
+            let mut blank_user = make_req(&[("x-tenant-id", "acme"), ("x-user-id", "   ")]);
+            let mut t3 = 0;
+            plugin.on_upstream_request(&mut blank_user, &mut t3);
+            assert_eq!(t3, 0);
+        }
+
+        // Unmatched rule & missing headers preserves original headers verbatim
+        let mut base = make_req(&[("x-canary", "never")]);
         let mut target_base = 0;
         plugin.on_upstream_request(&mut base, &mut target_base);
         assert_eq!(target_base, 0);
@@ -275,25 +297,34 @@ mod tests {
     }
 
     #[test]
-    fn test_canary_permille_distribution_and_priority_headers() {
-        let config = CanaryConfig {
+    fn test_canary_multi_header_permille_and_monotonic_ratio() {
+        let config_low = CanaryConfig {
             canary_upstream: "canary-v2".into(),
             ratio: 125, // 125/1000 = 12.5%
             rules: Vec::new(),
-            hash_strategy: HashStrategy::Priority,
             hash_headers: vec![
+                HeaderName::from_static("x-tenant-id"),
                 HeaderName::from_static("x-user-id"),
-                HeaderName::from_static("x-real-ip"),
             ],
         };
-        let plugin = CanaryPlugin::new("canary-dist", config).unwrap();
-        plugin.attach_canary_upstream(1);
+        let config_high = CanaryConfig {
+            canary_upstream: "canary-v2".into(),
+            ratio: 350, // Increasing threshold must preserve every canary user from ratio=125
+            rules: Vec::new(),
+            hash_headers: config_low.hash_headers.clone(),
+        };
+
+        let plugin_low = CanaryPlugin::new("canary-low", config_low).unwrap();
+        let plugin_high = CanaryPlugin::new("canary-high", config_high).unwrap();
+        plugin_low.attach_canary_upstream(1);
+        plugin_high.attach_canary_upstream(1);
 
         let mut canary_hits = 0u64;
         let total = 20_000u64;
         let mut buf = itoa::Buffer::new();
         for uid in 1_000_000_000u64..(1_000_000_000u64 + total) {
-            let mut h = HeaderWorkspace::empty(2);
+            let mut h = HeaderWorkspace::empty(4);
+            h.insert("x-tenant-id", HeaderValue::from_static("tenant-prod"));
             h.insert("x-user-id", HeaderValue::from_str(buf.format(uid)).unwrap());
             let mut req = L7Request::new(
                 Method::GET,
@@ -302,10 +333,17 @@ mod tests {
                 h,
                 Body::Empty,
             );
-            let mut target = 0;
-            plugin.on_upstream_request(&mut req, &mut target);
-            if target == 1 {
+            let mut t_low = 0;
+            plugin_low.on_upstream_request(&mut req, &mut t_low);
+            let mut t_high = 0;
+            plugin_high.on_upstream_request(&mut req, &mut t_high);
+
+            if t_low == 1 {
                 canary_hits += 1;
+                assert_eq!(
+                    t_high, 1,
+                    "increasing ratio dropped previously canary user {uid}"
+                );
             }
         }
         let observed_permille = (canary_hits as f64 / total as f64) * 1000.0;
@@ -313,39 +351,56 @@ mod tests {
             (observed_permille - 125.0).abs() < 15.0,
             "expected ~125/1000, got {observed_permille:.1}"
         );
-
-        // Whitespace x-user-id falls back cleanly to x-real-ip
-        let mut ws = HeaderWorkspace::empty(4);
-        ws.insert("x-user-id", HeaderValue::from_static("   "));
-        ws.insert("x-real-ip", HeaderValue::from_static("10.0.0.42"));
-        let r_fallback = L7Request::new(
-            Method::GET,
-            Uri::from_static("/"),
-            Version::HTTP_11,
-            ws,
-            Body::Empty,
-        );
-        assert_eq!(
-            evaluate_permille(&r_fallback, plugin.hash_strategy, &plugin.hash_headers),
-            evaluate_permille(&r_fallback, plugin.hash_strategy, &plugin.hash_headers)
-        );
     }
 
     #[test]
-    fn test_canary_from_config_validation_and_wiring() {
+    fn test_canary_validation_rejects_boundaries_and_wires_upstream() {
+        for bad_ratio in [0u32, 1000u32, 1001u32] {
+            assert!(
+                validate_canary_config(
+                    "c_bad_ratio",
+                    &serde_json::json!({
+                        "canary_upstream": "v2",
+                        "ratio": bad_ratio,
+                        "rules": [],
+                        "hash_headers": ["x-user-id"]
+                    })
+                )
+                .is_err(),
+                "ratio={bad_ratio} must be rejected"
+            );
+        }
+
+        // Empty hash_headers must be rejected by sync validation
         assert!(
             validate_canary_config(
-                "c_bad",
+                "c_empty_headers",
                 &serde_json::json!({
                     "canary_upstream": "v2",
-                    "ratio": 1001,
+                    "ratio": 200,
                     "rules": [],
-                    "hash_strategy": "random",
                     "hash_headers": []
                 })
             )
             .is_err()
         );
+
+        // Legacy extra fields like hash_strategy must be rejected strictly
+        assert!(
+            validate_canary_config(
+                "c_legacy_field",
+                &serde_json::json!({
+                    "canary_upstream": "v2",
+                    "ratio": 200,
+                    "rules": [],
+                    "hash_strategy": "priority",
+                    "hash_headers": ["x-user-id"]
+                })
+            )
+            .is_err()
+        );
+
+        // Whitespace rule pattern for Equals must be rejected
         assert!(
             validate_canary_config(
                 "c_ws",
@@ -353,8 +408,7 @@ mod tests {
                     "canary_upstream": "v2",
                     "ratio": 50,
                     "rules": [{ "name": "x-env", "operator": "equals", "value": "   " }],
-                    "hash_strategy": "random",
-                    "hash_headers": []
+                    "hash_headers": ["x-user-id"]
                 })
             )
             .is_err()
@@ -365,9 +419,8 @@ mod tests {
                 id: "canary_main".into(),
                 config: serde_json::json!({
                     "canary_upstream": "orders-v2",
-                    "ratio": 1000,
-                    "rules": [],
-                    "hash_strategy": "composite",
+                    "ratio": 999,
+                    "rules": [{ "name": "x-canary", "operator": "equals", "value": "true" }],
                     "hash_headers": ["x-tenant-id", "cookie"]
                 }),
             })
@@ -385,7 +438,11 @@ mod tests {
             Method::GET,
             Uri::from_static("/orders"),
             Version::HTTP_11,
-            HeaderWorkspace::empty(2),
+            {
+                let mut h = HeaderWorkspace::empty(2);
+                h.insert("x-canary", HeaderValue::from_static("true"));
+                h
+            },
             Body::Empty,
         );
         let mut target = 0;

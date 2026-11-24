@@ -3,10 +3,9 @@
 //! ```text
 //! JSON Config ──► CanarySchemaConfig ──► validate_canary_config()
 //!   ├─ canary_upstream : non-empty upstream pool ID
-//!   ├─ ratio           : integer 0..=1000 (permille: 1 = 0.1%, 250 = 25%, 1000 = 100%)
+//!   ├─ ratio           : integer 1..=999 (permille: 1 = 0.1%, 250 = 25%, 999 = 99.9%)
 //!   ├─ rules           : RFC 9110 header rules (`equals`|`prefix`|`suffix`|`contains`|`exists`)
-//!   ├─ hash_strategy   : `"priority"` | `"composite"` | `"random"`
-//!   └─ hash_headers    : RFC 9110 header names in HeaderWorkspace (required unless `"random"`)
+//!   └─ hash_headers    : non-empty RFC 9110 header names required for multi-header hashing
 //! ```
 
 use http::HeaderName;
@@ -16,6 +15,7 @@ use crate::error::PluginError;
 
 /// Declarative rule matching on request headers to force canary routing.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct CanaryHeaderRuleConfig {
     /// Header field name in `HeaderWorkspace`.
     pub name: String,
@@ -27,16 +27,15 @@ pub struct CanaryHeaderRuleConfig {
 
 /// Declarative JSON schema for the Canary plugin.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct CanarySchemaConfig {
     /// Target canary upstream pool identifier.
     pub canary_upstream: String,
-    /// Traffic share routed to canary in parts-per-thousand (`0..=1000`, i.e. 3-digit scale `000..=1000`).
+    /// Traffic share routed to canary in parts-per-thousand (`1..=999`).
     pub ratio: u32,
     /// Header rules forcing immediate canary routing.
     pub rules: Vec<CanaryHeaderRuleConfig>,
-    /// Hashing strategy: `"priority"`, `"composite"`, or `"random"`.
-    pub hash_strategy: String,
-    /// Ordered list of RFC 9110 headers in `HeaderWorkspace` used for hashing.
+    /// Ordered non-empty list of RFC 9110 headers in `HeaderWorkspace` folded together for hashing.
     pub hash_headers: Vec<String>,
 }
 
@@ -57,9 +56,9 @@ pub fn validate_canary_config(
         )));
     }
 
-    if cfg.ratio > 1000 {
+    if cfg.ratio == 0 || cfg.ratio >= 1000 {
         return Err(PluginError::Config(format!(
-            "Plugin '{plugin_id}': ratio ({}) must be between 0 and 1000 (parts-per-thousand)",
+            "Plugin '{plugin_id}': ratio ({}) must be between 1 and 999 (disable canary for 0, route directly to target upstream for 1000)",
             cfg.ratio
         )));
     }
@@ -91,26 +90,16 @@ pub fn validate_canary_config(
         }
     }
 
-    let strat_lower = cfg.hash_strategy.trim().to_ascii_lowercase();
-    match strat_lower.as_str() {
-        "priority" | "composite" => {
-            if cfg.hash_headers.is_empty() {
-                return Err(PluginError::Config(format!(
-                    "Plugin '{plugin_id}': hash_strategy '{strat_lower}' requires at least one entry in 'hash_headers'"
-                )));
-            }
-            for (idx, hdr) in cfg.hash_headers.iter().enumerate() {
-                if HeaderName::from_bytes(hdr.trim().as_bytes()).is_err() {
-                    return Err(PluginError::Config(format!(
-                        "Plugin '{plugin_id}': hash_headers[{idx}] has invalid header name '{hdr}'"
-                    )));
-                }
-            }
-        }
-        "random" => {}
-        other => {
+    if cfg.hash_headers.is_empty() {
+        return Err(PluginError::Config(format!(
+            "Plugin '{plugin_id}': hash_headers cannot be empty (at least one RFC 9110 header is required)"
+        )));
+    }
+
+    for (idx, hdr) in cfg.hash_headers.iter().enumerate() {
+        if HeaderName::from_bytes(hdr.trim().as_bytes()).is_err() {
             return Err(PluginError::Config(format!(
-                "Plugin '{plugin_id}': invalid hash_strategy '{other}' (expected 'priority', 'composite', or 'random')"
+                "Plugin '{plugin_id}': hash_headers[{idx}] has invalid header name '{hdr}'"
             )));
         }
     }

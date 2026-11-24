@@ -36,7 +36,7 @@ pub use api_metering::{
     AccountState, ApiMeteringConfig, ApiMeteringPlugin, ExhaustedAction, MICRO_CREDITS_PER_UNIT,
     MeteringDecision, ShardedMeteringState, TierConfig,
 };
-pub use canary::{CanaryConfig, CanaryPlugin, HashStrategy, HeaderRule, RuleOperator};
+pub use canary::{CanaryConfig, CanaryPlugin, HeaderRule, RuleOperator};
 pub use consumer_quota::{
     ConsumerQuotaConfig, ConsumerQuotaPlugin, QuotaAlgorithm, QuotaDecision, QuotaWindowConfig,
     ShardedQuotaState, WindowState,

@@ -3,9 +3,9 @@
 //! ```text
 //! CanarySchemaConfig ──► schema_to_config() ──► CanaryConfig
 //!   ├─ canary_upstream : String
-//!   ├─ ratio           : u32 (0..=1000)
+//!   ├─ ratio           : u32 (1..=999)
 //!   ├─ rules           : Vec<HeaderRule>
-//!   └─ hash_headers    : Vec<HeaderName>
+//!   └─ hash_headers    : Vec<HeaderName> (non-empty)
 //! ```
 
 use http::HeaderName;
@@ -39,26 +39,6 @@ impl RuleOperator {
     }
 }
 
-/// Strategy for evaluating stateless header-based request splitting.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
-pub enum HashStrategy {
-    #[default]
-    Priority,
-    Composite,
-    Random,
-}
-
-impl HashStrategy {
-    /// Parses hashing strategy string (`"priority"`, `"composite"`, or `"random"`).
-    pub fn parse(s: &str) -> Self {
-        match s.trim().to_ascii_lowercase().as_str() {
-            "composite" | "combine" => Self::Composite,
-            "random" => Self::Random,
-            _ => Self::Priority,
-        }
-    }
-}
-
 /// Read-only rule matching directly on a single header inside `HeaderWorkspace`.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct HeaderRule {
@@ -71,10 +51,10 @@ pub struct HeaderRule {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct CanaryConfig {
     pub canary_upstream: String,
-    /// Traffic share routed to canary in permille (`0..=1000`, e.g. `5` = `0.5%`, `250` = `25%`).
+    /// Traffic share routed to canary in permille (`1..=999`, e.g. `5` = `0.5%`, `250` = `25%`).
     pub ratio: u32,
     pub rules: Vec<HeaderRule>,
-    pub hash_strategy: HashStrategy,
+    /// Ordered headers folded jointly for deterministic sticky hashing.
     pub hash_headers: Vec<HeaderName>,
 }
 
@@ -97,21 +77,17 @@ pub(crate) fn schema_to_config(schema: CanarySchemaConfig) -> Result<CanaryConfi
         });
     }
 
-    let hash_strategy = HashStrategy::parse(&schema.hash_strategy);
     let mut hash_headers = Vec::with_capacity(schema.hash_headers.len());
-    if !matches!(hash_strategy, HashStrategy::Random) {
-        for hdr in &schema.hash_headers {
-            let name = HeaderName::from_bytes(hdr.trim().as_bytes())
-                .map_err(|e| PluginError::Config(format!("Invalid hash header '{hdr}': {e}")))?;
-            hash_headers.push(name);
-        }
+    for hdr in &schema.hash_headers {
+        let name = HeaderName::from_bytes(hdr.trim().as_bytes())
+            .map_err(|e| PluginError::Config(format!("Invalid hash header '{hdr}': {e}")))?;
+        hash_headers.push(name);
     }
 
     Ok(CanaryConfig {
         canary_upstream: schema.canary_upstream.trim().to_string(),
         ratio: schema.ratio,
         rules,
-        hash_strategy,
         hash_headers,
     })
 }
