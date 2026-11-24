@@ -1,68 +1,137 @@
-//! Domain-Blind Dual-Representation Header Workspace (`velda_core::buffer::header`).
+//! Contiguous Single-Allocation Header Workspace (`velda_core::buffer::header`).
+//!
+//! Replaces `http::HeaderMap` and dual-tier numeric staging with a single flat contiguous buffer
+//! `[tags | slots]` recycled per worker via a lock-free `thread_local!` LIFO local pool:
 //!
 //! ```text
-//! ┌─────────────────────────────────────────────────────────────────────────────────────────┐
-//! │                 DUAL-REPRESENTATION HEADER WORKSPACE (L1D + ZERO-COPY)                  │
-//! ├─────────────────────────────────────────────────────────────────────────────────────────┤
-//! │  Short / Numeric Values (<= 16B)             Long Values (> 16B)                        │
-//! │  ┌──────────────────────────────┐            ┌───────────────────────────────────────┐  │
-//! │  │ numeric_entries: [Entry; 16] │            │ inner: HeaderMap (zero-copy Bytes)    │  │
-//! │  │ (512B = 8x 64B L1D lines)    │            │ (JWT, Cookies, User-Agent, etc.)      │  │
-//! │  │ key: u64 FNV-1a | raw: u128  │            │ MAX_WIRE_HEADERS = 1024               │  │
-//! │  └──────────────┬───────────────┘            └───────────────────▲───────────────────┘  │
-//! │                 │                                                │                      │
-//! │                 └────────► render() (single-pass flush) ─────────┘                      │
-//! └─────────────────────────────────────────────────────────────────────────────────────────┘
+//!   HeaderWorkspace { storage, ingress_time_nanos, cache_hash }
+//!     └─► FlatHeaderStorage (1 contiguous heap block, default cap = 32, cold grow -> 256):
+//!           [ tag_0 .. tag_{cap-1} : u64 | slot_0 .. slot_{cap-1} : HeaderSlot ]
+//!               └─ bit 63: TAG_BYPASS_BIT (0 = Discard, 1 = Preserve-on-Reject)
+//!               └─ bits 0..62: 63-bit case-insensitive FNV-1a header name hash
+//!
+//!   Hot paths:
+//!     ├─ insert / append ──► check len < cap -> write tag + slot (`#[cold] grow_cold` 32->64->128->256)
+//!     ├─ get / remove    ──► sequential scan on tags[..len] -> match -> AGU access slots[i]
+//!     ├─ prepare_for_rejection ──► 1-pass compact keeping `(tag & TAG_BYPASS_BIT) != 0` in place
+//!     └─ Drop / reset    ──► return cap == 32 blocks to `thread_local!` LIFO pool (0 Mutex/Arc)
 //! ```
 
+use std::alloc::{Layout, alloc, dealloc};
 use std::cell::RefCell;
-use std::ops::Deref;
+use std::ptr::NonNull;
 
-use http::HeaderMap;
-use http::header::{AsHeaderName, HeaderName, HeaderValue, IntoHeaderName};
-
-pub use super::{HeaderPool, HeaderWorkspaceLease};
+use http::header::{AsHeaderName, HeaderName, HeaderValue};
 
 /// Canonical header name for the W3C TraceContext Request Identifier.
 pub const X_REQUEST_ID: HeaderName = HeaderName::from_static("x-request-id");
 
-/// Compile-time 64-bit integer key for `x-request-id`.
-pub const KEY_X_REQUEST_ID: u64 = header_key(b"x-request-id");
+/// Default initial capacity for each header workspace (32 slots -> 256B tags + contiguous slots).
+pub const DEFAULT_HEADER_CAPACITY: usize = 32;
 
-/// Maximum number of Bit-1 (Bypass on Reject) headers tracked on the stack.
-pub const MAX_BYPASS_HEADERS: usize = 8;
+/// Hard ceiling on total headers per request/response (Anti-DoS, `u8` slot-indexable `0..256`).
+pub const MAX_WIRE_HEADERS: usize = 256;
 
-/// Capacity of the L1-resident hardware register staging buffer for deferred 16-byte numeric mutations.
-///
-/// # Dual-Representation Architecture Note
-/// This does **NOT** limit total HTTP/gRPC request headers (the physical wire ceiling is [`MAX_WIRE_HEADERS`] = 1024).
-///
-/// Rather, this defines a 16-entry (512 bytes, exactly 8x 64-byte L1D CPU cache lines) fast-path register
-/// staging array (`numeric_entries`) storing short `u128` values (U64 counters, IPv4/IPv6 addresses, 128-bit trace IDs,
-/// short ASCII tokens).
-///
-/// If more than 16 numeric header mutations occur in a single request, [`HeaderWorkspace::render`] is automatically
-/// triggered to flush all pending entries into the underlying [`HeaderMap`] and reset the register array, ensuring
-/// that no header is ever dropped or rejected due to this staging limit.
-pub const MAX_NUMERIC_HEADERS: usize = 16;
+/// Bit 63 in each `u64` tag: `1` = Preserve-on-Reject (Bypass), `0` = Discard-on-Reject.
+pub const TAG_BYPASS_BIT: u64 = 1u64 << 63;
 
-/// Maximum physical wire headers allowed across all ingress protocols (Anti-OOM DoS ceiling).
-pub const MAX_WIRE_HEADERS: usize = 1024;
+/// Lower 63 bits of each `u64` tag storing the non-zero case-insensitive FNV-1a name hash.
+const TAG_HASH_MASK: u64 = (1u64 << 63) - 1;
 
-/// Computes a case-insensitive 64-bit FNV-1a integer key for an HTTP header name at compile time or runtime.
+/// Maximum `DEFAULT_HEADER_CAPACITY` buffers cached per worker thread in the local LIFO pool.
+const LOCAL_POOL_MAX_BUFFERS: usize = 64;
+
+/// Computes a non-zero 63-bit case-insensitive FNV-1a key for an HTTP header name.
 #[inline(always)]
 pub const fn header_key(name: &[u8]) -> u64 {
-    let mut hash: u64 = 0xcbf29ce484222325;
+    let mut hash: u64 = 0xcbf2_9ce4_8422_2325;
     let mut i = 0;
     while i < name.len() {
         let b = name[i];
         let lower = if b >= b'A' && b <= b'Z' { b + 32 } else { b };
         hash ^= lower as u64;
-        hash = hash.wrapping_mul(0x100000001b3);
+        hash = hash.wrapping_mul(0x0100_0000_01b3);
         i += 1;
     }
-    hash
+    let masked = hash & TAG_HASH_MASK;
+    if masked == 0 { 1 } else { masked }
 }
+
+const SMALL_U64_DIGITS_STR: &str = {
+    // 10 + 180 + 2700 = 2890 ASCII bytes containing "0".."9", "10".."99", "100".."999".
+    // Using a const byte buffer converted once guarantees static lifetime and zero runtime validation.
+    const TOTAL: usize = 10 + 180 + 2700;
+    const BUF: [u8; TOTAL] = {
+        let mut buf = [0u8; TOTAL];
+        let mut n = 0usize;
+        while n < 10 {
+            buf[n] = b'0' + (n as u8);
+            n += 1;
+        }
+        while n < 100 {
+            let idx = 10 + (n - 10) * 2;
+            buf[idx] = b'0' + ((n / 10) as u8);
+            buf[idx + 1] = b'0' + ((n % 10) as u8);
+            n += 1;
+        }
+        while n < 1000 {
+            let idx = 190 + (n - 100) * 3;
+            buf[idx] = b'0' + ((n / 100) as u8);
+            buf[idx + 1] = b'0' + (((n / 10) % 10) as u8);
+            buf[idx + 2] = b'0' + ((n % 10) as u8);
+            n += 1;
+        }
+        buf
+    };
+    match std::str::from_utf8(&BUF) {
+        Ok(s) => s,
+        Err(_) => unreachable!(),
+    }
+};
+
+const fn const_substr(s: &'static str, start: usize, len: usize) -> &'static str {
+    let (_, tail) = s.as_bytes().split_at(start);
+    let (mid, _) = tail.split_at(len);
+    match std::str::from_utf8(mid) {
+        Ok(sub) => sub,
+        Err(_) => unreachable!(),
+    }
+}
+
+/// Pre-validated static `HeaderValue` table for `0..1000` (zero runtime validation, zero refcount ops).
+static SMALL_U64_HEADERS: [HeaderValue; 1000] = {
+    use std::mem::MaybeUninit;
+    let mut table: [MaybeUninit<HeaderValue>; 1000] = [const { MaybeUninit::uninit() }; 1000];
+    let mut n = 0usize;
+    while n < 10 {
+        table[n].write(HeaderValue::from_static(const_substr(
+            SMALL_U64_DIGITS_STR,
+            n,
+            1,
+        )));
+        n += 1;
+    }
+    while n < 100 {
+        let idx = 10 + (n - 10) * 2;
+        table[n].write(HeaderValue::from_static(const_substr(
+            SMALL_U64_DIGITS_STR,
+            idx,
+            2,
+        )));
+        n += 1;
+    }
+    while n < 1000 {
+        let idx = 190 + (n - 100) * 3;
+        table[n].write(HeaderValue::from_static(const_substr(
+            SMALL_U64_DIGITS_STR,
+            idx,
+            3,
+        )));
+        n += 1;
+    }
+    // Safety: Every index in 0..1000 is partitioned cleanly across 0..10, 10..100, 100..1000 and initialized.
+    unsafe { std::mem::transmute::<[MaybeUninit<HeaderValue>; 1000], [HeaderValue; 1000]>(table) }
+};
 
 const DIGITS_1: [u8; 10] = *b"0123456789";
 
@@ -78,48 +147,28 @@ const DIGITS_2: [u8; 180] = {
     buf
 };
 
-const DIGITS_3: [u8; 2700] = {
-    let mut buf = [0u8; 2700];
-    let mut n = 100usize;
-    while n < 1000 {
-        let idx = (n - 100) * 3;
-        buf[idx] = b'0' + ((n / 100) as u8);
-        buf[idx + 1] = b'0' + (((n / 10) % 10) as u8);
-        buf[idx + 2] = b'0' + ((n % 10) as u8);
-        n += 1;
-    }
-    buf
-};
-
 thread_local! {
     static U64_HEADER_CACHE: RefCell<(u64, HeaderValue)> = const {
         RefCell::new((0, HeaderValue::from_static("0")))
     };
+
+    static LOCAL_HEADER_POOL: RefCell<Vec<RawHeaderBlock>> = const {
+        RefCell::new(Vec::new())
+    };
 }
 
 /// Resolves any unsigned 64-bit integer into an HTTP [`HeaderValue`].
-/// Values `0..1000` (including HTTP status codes `100..599` and rate-limit counters) resolve in ~0.3 ns from `.rodata`.
 #[inline(always)]
 pub fn resolve_u64_header_value(val: u64) -> HeaderValue {
-    if val < 10 {
-        let idx = val as usize;
-        return HeaderValue::from_static(unsafe {
-            std::str::from_utf8_unchecked(&DIGITS_1[idx..idx + 1])
-        });
-    }
-    if val < 100 {
-        let idx = ((val as usize) - 10) * 2;
-        return HeaderValue::from_static(unsafe {
-            std::str::from_utf8_unchecked(&DIGITS_2[idx..idx + 2])
-        });
-    }
     if val < 1000 {
-        let idx = ((val as usize) - 100) * 3;
-        return HeaderValue::from_static(unsafe {
-            std::str::from_utf8_unchecked(&DIGITS_3[idx..idx + 3])
-        });
+        return SMALL_U64_HEADERS[val as usize].clone();
     }
+    resolve_u64_header_value_cold(val)
+}
 
+#[cold]
+#[inline(never)]
+fn resolve_u64_header_value_cold(val: u64) -> HeaderValue {
     U64_HEADER_CACHE.with(|cell| {
         let mut cache = cell.borrow_mut();
         if cache.0 == val {
@@ -176,94 +225,533 @@ fn parse_hex_128(bytes: &[u8]) -> Option<u128> {
     Some(acc)
 }
 
-/// Wire rendering format for a 16-byte [`NumericHeaderEntry::raw`] register.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum NumericFmt {
-    /// 64-bit unsigned decimal integer (`raw as u64`, including HTTP status codes `100..=599`).
-    U64,
-    /// 128-bit W3C identifier rendered as 32 lowercase hexadecimal characters.
-    Hex128,
-    /// 32-bit IPv4 address (`raw as u32`).
-    Ipv4,
-    /// 128-bit IPv6 address (`raw`).
-    Ipv6,
-    /// Short ASCII string `<= 16` bytes packed little-endian into `raw: u128`, with byte length `0..=16`.
-    InlineAscii(u8),
+#[inline(always)]
+fn format_u128_hex_header(id: u128) -> HeaderValue {
+    let mut hex = [0u8; 32];
+    let hi = (id >> 64) as u64;
+    let lo = id as u64;
+    let (hi_out, lo_out) = hex.split_at_mut(16);
+    if let (Ok(hi_arr), Ok(lo_arr)) = (hi_out.try_into(), lo_out.try_into()) {
+        crate::request_id::format_hex_16(hi, hi_arr);
+        crate::request_id::format_hex_16(lo, lo_arr);
+    }
+    HeaderValue::from_bytes(&hex)
+        .unwrap_or_else(|_| HeaderValue::from_static("00000000000000000000000000000000"))
 }
 
-/// Mutation semantics for a deferred 16-byte register header entry.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum NumericOp {
-    Set,
-    Append,
-    SetBypass,
+#[inline(always)]
+fn format_ip_header(ip: u128) -> HeaderValue {
+    if let Some(v4) = crate::lut::ip::is_ipv4_mapped_u128(ip) {
+        let (buf, len) = crate::lut::ip::format_ipv4_bytes(v4);
+        HeaderValue::from_bytes(buf.get(..len).unwrap_or(&[]))
+            .unwrap_or_else(|_| HeaderValue::from_static("0.0.0.0"))
+    } else {
+        let (buf, len) = crate::lut::ip::format_ipv6_bytes(ip);
+        HeaderValue::from_bytes(buf.get(..len).unwrap_or(&[]))
+            .unwrap_or_else(|_| HeaderValue::from_static("::"))
+    }
 }
 
-/// Single 16-byte register header entry held in [`HeaderWorkspace`], indexed by `key: u64`.
+/// Single flat header slot stored contiguously right after the `tags` region.
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub struct NumericHeaderEntry {
-    pub key: u64,
+pub struct HeaderSlot {
     pub name: HeaderName,
-    pub raw: u128,
-    pub fmt: NumericFmt,
-    pub op: NumericOp,
+    pub value: HeaderValue,
 }
 
-impl NumericHeaderEntry {
-    /// Materializes the 16-byte `raw` integer register into an HTTP [`HeaderValue`].
-    #[inline(always)]
-    pub fn into_header_value(&self) -> HeaderValue {
-        match self.fmt {
-            NumericFmt::U64 => resolve_u64_header_value(self.raw as u64),
-            NumericFmt::Hex128 => {
-                let mut hex = [0u8; 32];
-                let hi = (self.raw >> 64) as u64;
-                let lo = self.raw as u64;
-                let (hi_out, lo_out) = hex.split_at_mut(16);
-                crate::request_id::format_hex_16(hi, hi_out.try_into().unwrap());
-                crate::request_id::format_hex_16(lo, lo_out.try_into().unwrap());
-                HeaderValue::from_bytes(&hex).unwrap_or_else(|_| {
-                    HeaderValue::from_static("00000000000000000000000000000000")
-                })
-            }
-            NumericFmt::Ipv4 => {
-                let (buf, len) = crate::lut::ip::format_ipv4_bytes(self.raw as u32);
-                HeaderValue::from_bytes(&buf[..len])
-                    .unwrap_or_else(|_| HeaderValue::from_static("0.0.0.0"))
-            }
-            NumericFmt::Ipv6 => {
-                let (buf, len) = crate::lut::ip::format_ipv6_bytes(self.raw);
-                HeaderValue::from_bytes(&buf[..len])
-                    .unwrap_or_else(|_| HeaderValue::from_static("::"))
-            }
-            NumericFmt::InlineAscii(len) => {
-                let bytes = self.raw.to_le_bytes();
-                let n = (len as usize).min(16);
-                HeaderValue::from_bytes(&bytes[..n])
-                    .unwrap_or_else(|_| HeaderValue::from_static(""))
-            }
+/// Owned raw contiguous allocation laid out as `[tags: [u64; cap] | slots: [HeaderSlot; cap]]`.
+struct RawHeaderBlock {
+    ptr: NonNull<u8>,
+    layout: Layout,
+    slots_offset: usize,
+    cap: u16,
+}
+
+impl Drop for RawHeaderBlock {
+    #[inline]
+    fn drop(&mut self) {
+        if self.cap > 0 {
+            unsafe { dealloc(self.ptr.as_ptr(), self.layout) };
         }
     }
 }
 
-/// Domain-blind dual-representation workspace holding:
-/// - `headers`: Pre-allocated [`HeaderMap`] holding zero-copy pointers for `> 16` byte strings and wire headers.
-/// - `numeric_entries`: L1-resident 16-byte integer registers (`raw: u128`) indexed by `key: u64` for all values `<= 16` bytes.
-#[derive(Debug, Clone, PartialEq, Eq)]
+unsafe impl Send for RawHeaderBlock {}
+unsafe impl Sync for RawHeaderBlock {}
+
+impl RawHeaderBlock {
+    fn layout_for(cap: usize) -> (Layout, usize) {
+        let slot_align = std::mem::align_of::<HeaderSlot>().max(std::mem::align_of::<u64>());
+        let tags_bytes = cap * std::mem::size_of::<u64>();
+        let slots_offset = (tags_bytes + slot_align - 1) & !(slot_align - 1);
+        let slots_bytes = cap * std::mem::size_of::<HeaderSlot>();
+        let total = slots_offset + slots_bytes;
+        let layout = Layout::from_size_align(total, slot_align).expect("valid header block layout");
+        (layout, slots_offset)
+    }
+
+    fn alloc_raw(cap: usize) -> Self {
+        let clamped_cap = cap.clamp(DEFAULT_HEADER_CAPACITY, MAX_WIRE_HEADERS);
+        let (layout, slots_offset) = Self::layout_for(clamped_cap);
+        // Safety: `layout.size() > 0` because `clamped_cap >= 32`.
+        let ptr = unsafe { alloc(layout) };
+        let non_null = NonNull::new(ptr).expect("header workspace block allocation failed");
+        Self {
+            ptr: non_null,
+            layout,
+            slots_offset,
+            cap: clamped_cap as u16,
+        }
+    }
+
+    #[inline(always)]
+    fn acquire_pooled(requested_cap: usize) -> Self {
+        let target = if requested_cap <= DEFAULT_HEADER_CAPACITY {
+            DEFAULT_HEADER_CAPACITY
+        } else {
+            requested_cap
+                .next_power_of_two()
+                .clamp(DEFAULT_HEADER_CAPACITY, MAX_WIRE_HEADERS)
+        };
+
+        if target == DEFAULT_HEADER_CAPACITY
+            && let Some(block) = LOCAL_HEADER_POOL
+                .try_with(|cell| cell.borrow_mut().pop())
+                .ok()
+                .flatten()
+        {
+            return block;
+        }
+        Self::alloc_raw(target)
+    }
+
+    #[inline(always)]
+    fn recycle_or_free(self) {
+        if self.cap == DEFAULT_HEADER_CAPACITY as u16 {
+            let _ = LOCAL_HEADER_POOL.try_with(|cell| {
+                let mut pool = cell.borrow_mut();
+                if pool.len() < LOCAL_POOL_MAX_BUFFERS {
+                    pool.push(self);
+                }
+            });
+        }
+    }
+}
+
+/// Manages initialization and lifetime of slots `0..len` inside a [`RawHeaderBlock`].
+struct FlatHeaderStorage {
+    block: RawHeaderBlock,
+    len: u16,
+}
+
+impl Drop for FlatHeaderStorage {
+    #[inline]
+    fn drop(&mut self) {
+        self.clear_slots();
+        // Move `block` out cleanly for LIFO local pool return without running Drop recursively.
+        let dummy_layout = Layout::new::<u8>();
+        let placeholder = RawHeaderBlock {
+            ptr: NonNull::dangling(),
+            layout: dummy_layout,
+            slots_offset: 0,
+            cap: 0,
+        };
+        let block = std::mem::replace(&mut self.block, placeholder);
+        if block.cap > 0 {
+            block.recycle_or_free();
+        }
+    }
+}
+
+impl Clone for FlatHeaderStorage {
+    fn clone(&self) -> Self {
+        let len = self.len as usize;
+        let block = RawHeaderBlock::acquire_pooled(len.max(DEFAULT_HEADER_CAPACITY));
+        unsafe {
+            std::ptr::copy_nonoverlapping(
+                self.block.ptr.as_ptr() as *const u64,
+                block.ptr.as_ptr() as *mut u64,
+                len,
+            );
+            let src_slots = self.slots();
+            let dst_slots_ptr = block.ptr.as_ptr().add(block.slots_offset) as *mut HeaderSlot;
+            for (i, slot) in src_slots.iter().enumerate() {
+                std::ptr::write(dst_slots_ptr.add(i), slot.clone());
+            }
+        }
+        Self {
+            block,
+            len: self.len,
+        }
+    }
+}
+
+impl FlatHeaderStorage {
+    #[inline(always)]
+    fn new(capacity: usize) -> Self {
+        Self {
+            block: RawHeaderBlock::acquire_pooled(capacity),
+            len: 0,
+        }
+    }
+
+    #[inline(always)]
+    fn tags(&self) -> &[u64] {
+        unsafe {
+            std::slice::from_raw_parts(self.block.ptr.as_ptr() as *const u64, self.len as usize)
+        }
+    }
+
+    #[inline(always)]
+    fn slots(&self) -> &[HeaderSlot] {
+        unsafe {
+            std::slice::from_raw_parts(
+                self.block.ptr.as_ptr().add(self.block.slots_offset) as *const HeaderSlot,
+                self.len as usize,
+            )
+        }
+    }
+
+    #[inline(always)]
+    fn slots_mut(&mut self) -> &mut [HeaderSlot] {
+        unsafe {
+            std::slice::from_raw_parts_mut(
+                self.block.ptr.as_ptr().add(self.block.slots_offset) as *mut HeaderSlot,
+                self.len as usize,
+            )
+        }
+    }
+
+    #[inline(always)]
+    fn clear_slots(&mut self) {
+        let n = self.len as usize;
+        if n == 0 {
+            return;
+        }
+        unsafe {
+            let slots_ptr = self.block.ptr.as_ptr().add(self.block.slots_offset) as *mut HeaderSlot;
+            let slice = std::ptr::slice_from_raw_parts_mut(slots_ptr, n);
+            std::ptr::drop_in_place(slice);
+        }
+        self.len = 0;
+    }
+
+    #[inline(always)]
+    fn tag_at(&self, idx: usize) -> u64 {
+        self.tags().get(idx).copied().unwrap_or(0)
+    }
+
+    #[inline(always)]
+    fn set_tag_at(&mut self, idx: usize, tag: u64) {
+        if idx < self.block.cap as usize {
+            unsafe {
+                let tags_ptr = self.block.ptr.as_ptr() as *mut u64;
+                std::ptr::write(tags_ptr.add(idx), tag);
+            }
+        }
+    }
+
+    #[inline(always)]
+    fn write_entry_at(&mut self, idx: usize, tag: u64, slot: HeaderSlot) {
+        if idx < self.block.cap as usize {
+            unsafe {
+                let tags_ptr = self.block.ptr.as_ptr() as *mut u64;
+                let slots_ptr =
+                    self.block.ptr.as_ptr().add(self.block.slots_offset) as *mut HeaderSlot;
+                std::ptr::write(tags_ptr.add(idx), tag);
+                std::ptr::write(slots_ptr.add(idx), slot);
+            }
+        }
+    }
+
+    /// Grows allocation on the cold path: `32 -> 64 -> 128 -> 256` (capped at `MAX_WIRE_HEADERS`).
+    #[cold]
+    #[inline(never)]
+    fn grow_cold(&mut self) -> bool {
+        let cur_cap = self.block.cap as usize;
+        if cur_cap >= MAX_WIRE_HEADERS {
+            return false;
+        }
+        let next_cap = (cur_cap * 2).min(MAX_WIRE_HEADERS);
+        let new_block = RawHeaderBlock::alloc_raw(next_cap);
+        let n = self.len as usize;
+
+        unsafe {
+            std::ptr::copy_nonoverlapping(
+                self.block.ptr.as_ptr() as *const u64,
+                new_block.ptr.as_ptr() as *mut u64,
+                n,
+            );
+            std::ptr::copy_nonoverlapping(
+                self.block.ptr.as_ptr().add(self.block.slots_offset) as *const HeaderSlot,
+                new_block.ptr.as_ptr().add(new_block.slots_offset) as *mut HeaderSlot,
+                n,
+            );
+        }
+
+        let old_block = std::mem::replace(&mut self.block, new_block);
+        old_block.recycle_or_free();
+        true
+    }
+
+    #[inline(never)]
+    fn slot_name_matches(slots: &[HeaderSlot], idx: usize, name_str: &str) -> bool {
+        slots
+            .get(idx)
+            .is_some_and(|s| s.name.as_str().eq_ignore_ascii_case(name_str))
+    }
+
+    #[inline]
+    fn find_first(&self, key: u64, name_str: &str) -> Option<usize> {
+        let target = key & TAG_HASH_MASK;
+        let tags = self.tags();
+        let slots = self.slots();
+        for (idx, &tag) in tags.iter().enumerate() {
+            if (tag & TAG_HASH_MASK) == target && Self::slot_name_matches(slots, idx, name_str) {
+                return Some(idx);
+            }
+        }
+        None
+    }
+
+    #[inline]
+    fn remove_at_shift(&mut self, idx: usize) -> Option<HeaderSlot> {
+        let n = self.len as usize;
+        if idx >= n {
+            return None;
+        }
+        unsafe {
+            let tags_ptr = self.block.ptr.as_ptr() as *mut u64;
+            let slots_ptr = self.block.ptr.as_ptr().add(self.block.slots_offset) as *mut HeaderSlot;
+            let removed = std::ptr::read(slots_ptr.add(idx));
+            let tail = n - idx - 1;
+            if tail > 0 {
+                std::ptr::copy(tags_ptr.add(idx + 1), tags_ptr.add(idx), tail);
+                std::ptr::copy(slots_ptr.add(idx + 1), slots_ptr.add(idx), tail);
+            }
+            self.len = (n - 1) as u16;
+            Some(removed)
+        }
+    }
+
+    #[inline]
+    fn insert_internal(
+        &mut self,
+        name: HeaderName,
+        value: HeaderValue,
+        bypass: bool,
+    ) -> Option<HeaderValue> {
+        let key = header_key(name.as_str().as_bytes());
+        let tag = if bypass { key | TAG_BYPASS_BIT } else { key };
+        let name_str = name.as_str();
+
+        if let Some(first_idx) = self.find_first(key, name_str) {
+            self.set_tag_at(first_idx, tag);
+            let old = if let Some(slot) = self.slots_mut().get_mut(first_idx) {
+                Some(std::mem::replace(&mut slot.value, value))
+            } else {
+                None
+            };
+
+            // Remove any duplicate slots for the same header name (matching HeaderMap::insert semantics).
+            let mut i = first_idx + 1;
+            while i < self.len as usize {
+                let cur_tag = self.tag_at(i);
+                let is_dup = (cur_tag & TAG_HASH_MASK) == key
+                    && self
+                        .slots()
+                        .get(i)
+                        .is_some_and(|s| s.name.as_str() == name_str);
+                if is_dup {
+                    let _ = self.remove_at_shift(i);
+                } else {
+                    i += 1;
+                }
+            }
+            return old;
+        }
+
+        let len = self.len as usize;
+        if len >= self.block.cap as usize && !self.grow_cold() {
+            return None;
+        }
+        self.write_entry_at(len, tag, HeaderSlot { name, value });
+        self.len = (len + 1) as u16;
+        None
+    }
+
+    #[inline]
+    fn append_internal(&mut self, name: HeaderName, value: HeaderValue, bypass: bool) -> bool {
+        let len = self.len as usize;
+        if len >= self.block.cap as usize && !self.grow_cold() {
+            return false;
+        }
+        let key = header_key(name.as_str().as_bytes());
+        let tag = if bypass { key | TAG_BYPASS_BIT } else { key };
+        self.write_entry_at(len, tag, HeaderSlot { name, value });
+        self.len = (len + 1) as u16;
+        true
+    }
+
+    #[inline]
+    fn remove_by_name(&mut self, name_str: &str) -> Option<HeaderValue> {
+        let key = header_key(name_str.as_bytes());
+        let first_idx = self.find_first(key, name_str)?;
+        let first_val = self.remove_at_shift(first_idx).map(|s| s.value);
+
+        let mut i = first_idx;
+        while i < self.len as usize {
+            let cur_tag = self.tag_at(i);
+            let is_dup = (cur_tag & TAG_HASH_MASK) == key
+                && self
+                    .slots()
+                    .get(i)
+                    .is_some_and(|s| s.name.as_str().eq_ignore_ascii_case(name_str));
+            if is_dup {
+                let _ = self.remove_at_shift(i);
+            } else {
+                i += 1;
+            }
+        }
+        first_val
+    }
+
+    /// Compacts entries in place keeping only slots whose `tag & TAG_BYPASS_BIT != 0`.
+    #[inline]
+    fn compact_bypass_only(&mut self) {
+        let n = self.len as usize;
+        let mut write_idx = 0usize;
+        unsafe {
+            let tags_ptr = self.block.ptr.as_ptr() as *mut u64;
+            let slots_ptr = self.block.ptr.as_ptr().add(self.block.slots_offset) as *mut HeaderSlot;
+            for read_idx in 0..n {
+                let tag = *tags_ptr.add(read_idx);
+                if (tag & TAG_BYPASS_BIT) != 0 {
+                    if write_idx != read_idx {
+                        std::ptr::write(tags_ptr.add(write_idx), tag);
+                        let moved = std::ptr::read(slots_ptr.add(read_idx));
+                        std::ptr::write(slots_ptr.add(write_idx), moved);
+                    }
+                    write_idx += 1;
+                } else {
+                    std::ptr::drop_in_place(slots_ptr.add(read_idx));
+                }
+            }
+        }
+        self.len = write_idx as u16;
+    }
+
+    /// Reclaims oversized buffers (`cap > 32`) back to a fresh 32-slot block from the local pool.
+    #[inline]
+    fn reset_storage(&mut self) {
+        self.clear_slots();
+        if self.block.cap > DEFAULT_HEADER_CAPACITY as u16 {
+            let new_block = RawHeaderBlock::acquire_pooled(DEFAULT_HEADER_CAPACITY);
+            let old_block = std::mem::replace(&mut self.block, new_block);
+            old_block.recycle_or_free();
+        }
+    }
+}
+
+/// Iterator over matching header values for [`HeaderWorkspace::get_all`].
+pub struct HeaderValues<'a> {
+    tags: &'a [u64],
+    slots: &'a [HeaderSlot],
+    target_key: u64,
+    match_name: Option<&'a HeaderName>,
+    idx: usize,
+}
+
+impl<'a> HeaderValues<'a> {
+    // BACKWARD-COMPAT: Drop-in adapter for `http::header::GetAll::iter()` callers; remove once call sites iterate `get_all(...)` directly.
+    /// Returns self for drop-in compatibility with `http::header::GetAll::iter()`.
+    #[inline(always)]
+    pub fn iter(self) -> Self {
+        self
+    }
+}
+
+impl<'a> Iterator for HeaderValues<'a> {
+    type Item = &'a HeaderValue;
+
+    #[inline]
+    fn next(&mut self) -> Option<Self::Item> {
+        let match_name = self.match_name?;
+        while self.idx < self.tags.len() {
+            let i = self.idx;
+            self.idx += 1;
+            let tag = self.tags.get(i).copied().unwrap_or(0);
+            if (tag & TAG_HASH_MASK) == self.target_key
+                && let Some(slot) = self.slots.get(i)
+                && slot.name == *match_name
+            {
+                return Some(&slot.value);
+            }
+        }
+        None
+    }
+}
+
+/// Iterator over all `(HeaderName, HeaderValue)` entries in insertion order.
+pub struct HeaderIter<'a> {
+    inner: std::slice::Iter<'a, HeaderSlot>,
+}
+
+impl<'a> Iterator for HeaderIter<'a> {
+    type Item = (&'a HeaderName, &'a HeaderValue);
+
+    #[inline(always)]
+    fn next(&mut self) -> Option<Self::Item> {
+        self.inner.next().map(|s| (&s.name, &s.value))
+    }
+
+    #[inline(always)]
+    fn size_hint(&self) -> (usize, Option<usize>) {
+        self.inner.size_hint()
+    }
+}
+
+/// Contiguous single-buffer header table with native Bit-63 Preserve-on-Reject tagging.
+#[derive(Clone)]
 pub struct HeaderWorkspace {
-    headers: HeaderMap,
-    pub request_id_raw: u128,
+    storage: FlatHeaderStorage,
     pub ingress_time_nanos: u64,
-    numeric_entries: [Option<NumericHeaderEntry>; MAX_NUMERIC_HEADERS],
-    pub numeric_len: u8,
-    bypass_keys: [Option<HeaderName>; MAX_BYPASS_HEADERS],
-    bypass_len: u8,
-    initial_capacity: usize,
+    /// Optional 64-bit HTTP cache key hash passed locklessly from lookup to store (`0` = unset).
+    pub cache_hash: u64,
+}
+
+impl std::fmt::Debug for HeaderWorkspace {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("HeaderWorkspace")
+            .field("len", &self.storage.len)
+            .field("cap", &self.storage.block.cap)
+            .field("ingress_time_nanos", &self.ingress_time_nanos)
+            .field("cache_hash", &self.cache_hash)
+            .field("entries", &self.storage.slots())
+            .finish()
+    }
+}
+
+impl PartialEq for HeaderWorkspace {
+    fn eq(&self, other: &Self) -> bool {
+        self.ingress_time_nanos == other.ingress_time_nanos
+            && self.cache_hash == other.cache_hash
+            && self.storage.slots() == other.storage.slots()
+    }
+}
+
+impl Eq for HeaderWorkspace {}
+
+impl Default for HeaderWorkspace {
+    #[inline(always)]
+    fn default() -> Self {
+        Self::new(DEFAULT_HEADER_CAPACITY)
+    }
 }
 
 impl HeaderWorkspace {
     pub const X_REQUEST_ID: HeaderName = X_REQUEST_ID;
-    pub const DEFAULT_CAPACITY: usize = 32;
+    pub const DEFAULT_CAPACITY: usize = DEFAULT_HEADER_CAPACITY;
 
     /// Returns the ingress timestamp in Unix epoch seconds.
     #[inline(always)]
@@ -271,98 +759,59 @@ impl HeaderWorkspace {
         self.ingress_time_nanos / 1_000_000_000
     }
 
-    /// Creates and pre-warms a header workspace with specified initial bucket capacity.
+    /// Creates and pre-warms a flat header workspace backed by the worker's local pool.
+    #[inline]
     pub fn new(capacity: usize) -> Self {
-        let mut headers = HeaderMap::with_capacity(capacity);
-        headers.reserve(capacity);
+        let mut storage = FlatHeaderStorage::new(capacity);
         let ingress_time_nanos = crate::clock::now_unix_nanos();
-        let (id, req_id) = crate::request_id::next_request_id(ingress_time_nanos);
-        headers.insert(X_REQUEST_ID, req_id);
-        let mut bypass_keys = [const { None }; MAX_BYPASS_HEADERS];
-        bypass_keys[0] = Some(X_REQUEST_ID);
+        let (_id, req_id) = crate::request_id::next_request_id(ingress_time_nanos);
+        let _ = storage.insert_internal(X_REQUEST_ID, req_id, true);
         Self {
-            headers,
-            request_id_raw: id,
+            storage,
             ingress_time_nanos,
-            numeric_entries: [const { None }; MAX_NUMERIC_HEADERS],
-            numeric_len: 0,
-            bypass_keys,
-            bypass_len: 1,
-            initial_capacity: capacity,
+            cache_hash: 0,
         }
     }
 
-    /// Creates and pre-warms a header workspace with an explicit Request ID and initial capacity.
+    /// Creates an empty flat header workspace backed by the worker's local pool without generating a Request ID.
+    #[inline(always)]
+    pub fn empty(capacity: usize) -> Self {
+        Self {
+            storage: FlatHeaderStorage::new(capacity),
+            ingress_time_nanos: 0,
+            cache_hash: 0,
+        }
+    }
+
+    /// Creates a flat header workspace seeded with an explicit Request ID.
     #[inline]
     pub fn with_request_id(req_id: HeaderValue, capacity: usize) -> Self {
-        let raw = parse_hex_128(req_id.as_bytes()).unwrap_or(0);
-        let ingress_time_nanos = if raw != 0 {
-            (raw >> 64) as u64
-        } else {
-            crate::clock::now_unix_nanos()
-        };
-        let mut headers = HeaderMap::with_capacity(capacity);
-        headers.reserve(capacity);
-        headers.insert(X_REQUEST_ID, req_id);
-        let mut bypass_keys = [const { None }; MAX_BYPASS_HEADERS];
-        bypass_keys[0] = Some(X_REQUEST_ID);
+        let ingress_time_nanos = parse_hex_128(req_id.as_bytes())
+            .filter(|&id| id != 0)
+            .map(|id| (id >> 64) as u64)
+            .unwrap_or_else(crate::clock::now_unix_nanos);
+        let mut storage = FlatHeaderStorage::new(capacity);
+        let _ = storage.insert_internal(X_REQUEST_ID, req_id, true);
         Self {
-            headers,
-            request_id_raw: raw,
+            storage,
             ingress_time_nanos,
-            numeric_entries: [const { None }; MAX_NUMERIC_HEADERS],
-            numeric_len: 0,
-            bypass_keys,
-            bypass_len: 1,
-            initial_capacity: capacity,
+            cache_hash: 0,
         }
     }
 
-    /// Wraps an existing [`HeaderMap`] into a [`HeaderWorkspace`].
-    #[inline]
-    pub fn from_headers(mut headers: HeaderMap) -> Self {
-        let cap = headers.capacity().max(Self::DEFAULT_CAPACITY);
-        let now_nanos = crate::clock::now_unix_nanos();
-        let (raw, ingress_time_nanos) = if let Some(existing) = headers.get(&X_REQUEST_ID) {
-            let parsed = parse_hex_128(existing.as_bytes()).unwrap_or(0);
-            let nanos = if parsed != 0 {
-                (parsed >> 64) as u64
-            } else {
-                now_nanos
-            };
-            (parsed, nanos)
-        } else {
-            let (id, req_id) = crate::request_id::next_request_id(now_nanos);
-            headers.insert(X_REQUEST_ID, req_id);
-            (id, now_nanos)
-        };
-        let mut bypass_keys = [const { None }; MAX_BYPASS_HEADERS];
-        bypass_keys[0] = Some(X_REQUEST_ID);
-        Self {
-            headers,
-            request_id_raw: raw,
-            ingress_time_nanos,
-            numeric_entries: [const { None }; MAX_NUMERIC_HEADERS],
-            numeric_len: 0,
-            bypass_keys,
-            bypass_len: 1,
-            initial_capacity: cap,
-        }
-    }
-
-    /// Issues hardware Tier-2 (`T1` / L2 Cache) Prefetch hints (`_MM_HINT_T1` / `pldl2keep`).
-    ///
-    /// Pulls the workspace's memory lines into the CPU L2 Cache without displacing the hot
-    /// `velda-router` lookup tables (`_MM_HINT_T0`) from L1D Cache.
+    /// Issues hardware Tier-2 (`T1` / L2 Cache) Prefetch hints on the flat buffer.
     #[inline(always)]
     pub fn prefetch_l2_keep(&self) {
-        let ptr = self as *const Self as *const u8;
-        let size = std::mem::size_of::<Self>();
+        let ptr = self.storage.block.ptr.as_ptr();
+        let tags_bytes = (self.storage.len as usize) * std::mem::size_of::<u64>();
+        let slots_end = self.storage.block.slots_offset
+            + (self.storage.len as usize) * std::mem::size_of::<HeaderSlot>();
+        let total = slots_end.max(tags_bytes);
         #[cfg(target_arch = "x86_64")]
         {
             use std::arch::x86_64::{_MM_HINT_T1, _mm_prefetch};
-            let mut offset = 0;
-            while offset < size {
+            let mut offset = 0usize;
+            while offset < total {
                 unsafe {
                     _mm_prefetch(ptr.add(offset) as *const i8, _MM_HINT_T1);
                 }
@@ -371,8 +820,8 @@ impl HeaderWorkspace {
         }
         #[cfg(target_arch = "aarch64")]
         {
-            let mut offset = 0;
-            while offset < size {
+            let mut offset = 0usize;
+            while offset < total {
                 unsafe {
                     std::arch::asm!(
                         "prfm pldl2keep, [{0}]",
@@ -383,135 +832,176 @@ impl HeaderWorkspace {
                 offset += 64;
             }
         }
-    }
-
-    /// Looks up a 16-byte register entry by its 64-bit integer key (`header_key(name)`).
-    #[inline(always)]
-    pub fn get_raw_by_key(&self, key: u64) -> Option<(u128, NumericFmt)> {
-        let len = self.numeric_len as usize;
-        for i in (0..len).rev() {
-            if let Some(ref entry) = self.numeric_entries[i]
-                && entry.key == key
-            {
-                return Some((entry.raw, entry.fmt));
-            }
-        }
-        None
+        #[cfg(not(any(target_arch = "x86_64", target_arch = "aarch64")))]
+        let _ = (ptr, total);
     }
 
     #[inline(always)]
-    pub fn contains_key<K: AsHeaderName>(&self, name: K) -> bool {
-        if self.numeric_len > 0
-            && self
-                .get_raw_by_key(header_key(name.as_str().as_bytes()))
-                .is_some()
+    pub fn len(&self) -> usize {
+        self.storage.len as usize
+    }
+
+    #[inline(always)]
+    pub fn is_empty(&self) -> bool {
+        self.storage.len == 0
+    }
+
+    #[inline(always)]
+    pub fn capacity(&self) -> usize {
+        self.storage.block.cap as usize
+    }
+
+    #[inline(always)]
+    pub fn clear(&mut self) {
+        self.storage.clear_slots();
+    }
+
+    #[inline]
+    pub fn reserve(&mut self, additional: usize) {
+        let needed = (self.storage.len as usize).saturating_add(additional);
+        while (self.storage.block.cap as usize) < needed
+            && (self.storage.block.cap as usize) < MAX_WIRE_HEADERS
         {
-            return true;
+            if !self.storage.grow_cold() {
+                break;
+            }
         }
-        self.headers.contains_key(name)
+    }
+
+    #[inline]
+    pub fn get<K: AsHeaderName>(&self, name: K) -> Option<&HeaderValue> {
+        let name_str = name.as_str();
+        let idx = self
+            .storage
+            .find_first(header_key(name_str.as_bytes()), name_str)?;
+        self.storage.slots().get(idx).map(|s| &s.value)
+    }
+
+    #[inline]
+    pub fn get_all<K: AsHeaderName>(&self, name: K) -> HeaderValues<'_> {
+        let name_str = name.as_str();
+        let target_key = header_key(name_str.as_bytes());
+        match self.storage.find_first(target_key, name_str) {
+            Some(first_idx) => HeaderValues {
+                tags: self.storage.tags(),
+                slots: self.storage.slots(),
+                target_key,
+                match_name: self.storage.slots().get(first_idx).map(|s| &s.name),
+                idx: first_idx,
+            },
+            None => HeaderValues {
+                tags: &[],
+                slots: &[],
+                target_key: 0,
+                match_name: None,
+                idx: 0,
+            },
+        }
+    }
+
+    #[inline]
+    pub fn contains_key<K: AsHeaderName>(&self, name: K) -> bool {
+        let name_str = name.as_str();
+        self.storage
+            .find_first(header_key(name_str.as_bytes()), name_str)
+            .is_some()
     }
 
     #[inline(always)]
-    fn push_numeric(&mut self, name: HeaderName, raw: u128, fmt: NumericFmt, op: NumericOp) {
-        let key = header_key(name.as_str().as_bytes());
-        if !matches!(op, NumericOp::Append) {
-            if key == KEY_X_REQUEST_ID && matches!(fmt, NumericFmt::Hex128) {
-                self.request_id_raw = raw;
-            }
-            let len = self.numeric_len as usize;
-            for i in 0..len {
-                if let Some(ref mut entry) = self.numeric_entries[i]
-                    && entry.key == key
-                {
-                    entry.raw = raw;
-                    entry.fmt = fmt;
-                    entry.op = op;
-                    return;
-                }
-            }
-        }
-        let len = self.numeric_len as usize;
-        if len < MAX_NUMERIC_HEADERS {
-            self.numeric_entries[len] = Some(NumericHeaderEntry {
-                key,
-                name,
-                raw,
-                fmt,
-                op,
-            });
-            self.numeric_len += 1;
-        } else {
-            self.render();
-            self.numeric_entries[0] = Some(NumericHeaderEntry {
-                key,
-                name,
-                raw,
-                fmt,
-                op,
-            });
-            self.numeric_len = 1;
-        }
+    pub fn insert<K: IntoHeaderKey>(&mut self, name: K, value: HeaderValue) -> Option<HeaderValue> {
+        self.storage
+            .insert_internal(name.into_header_name(), value, false)
     }
 
-    #[cold]
-    #[inline(never)]
-    fn remove_numeric_by_key(&mut self, key: u64) {
-        let mut len = self.numeric_len as usize;
-        let mut i = 0;
-        while i < len {
-            if self.numeric_entries[i]
-                .as_ref()
-                .is_some_and(|e| e.key == key)
-            {
-                for j in i..len - 1 {
-                    self.numeric_entries[j] = self.numeric_entries[j + 1].take();
-                }
-                self.numeric_entries[len - 1] = None;
-                len -= 1;
-            } else {
-                i += 1;
-            }
+    #[inline(always)]
+    pub fn append<K: IntoHeaderKey>(&mut self, name: K, value: HeaderValue) -> bool {
+        self.storage
+            .append_internal(name.into_header_name(), value, false)
+    }
+
+    #[inline]
+    pub fn remove<K: AsHeaderName>(&mut self, name: K) -> Option<HeaderValue> {
+        self.storage.remove_by_name(name.as_str())
+    }
+
+    #[inline]
+    pub fn insert_bypass(&mut self, name: HeaderName, value: HeaderValue) -> bool {
+        let _ = self.storage.insert_internal(name, value, true);
+        true
+    }
+
+    /// Appends a header directly using a pre-computed 63-bit case-insensitive FNV-1a key hash.
+    ///
+    /// Intended for protocol wire decoders that compute name hashes alongside SIMD validation.
+    #[inline(always)]
+    pub fn push_prehashed(&mut self, key_hash: u64, name: HeaderName, value: HeaderValue) -> bool {
+        let len = self.storage.len as usize;
+        if len >= self.storage.block.cap as usize && !self.storage.grow_cold() {
+            return false;
         }
-        self.numeric_len = len as u8;
+        let tag = (key_hash & TAG_HASH_MASK).max(1);
+        self.storage
+            .write_entry_at(len, tag, HeaderSlot { name, value });
+        self.storage.len = (len + 1) as u16;
+        true
+    }
+
+    /// Appends a Bit-63 bypass header directly using a pre-computed 63-bit key hash without scanning.
+    #[inline(always)]
+    pub fn push_prehashed_bypass(
+        &mut self,
+        key_hash: u64,
+        name: HeaderName,
+        value: HeaderValue,
+    ) -> bool {
+        let len = self.storage.len as usize;
+        if len >= self.storage.block.cap as usize && !self.storage.grow_cold() {
+            return false;
+        }
+        let tag = (key_hash & TAG_HASH_MASK).max(1) | TAG_BYPASS_BIT;
+        self.storage
+            .write_entry_at(len, tag, HeaderSlot { name, value });
+        self.storage.len = (len + 1) as u16;
+        true
+    }
+
+    /// Overwrites the value of an already-populated slot index in place without hashing or scanning.
+    #[inline(always)]
+    pub fn set_value_at(&mut self, idx: usize, value: HeaderValue) {
+        if let Some(slot) = self.storage.slots_mut().get_mut(idx) {
+            slot.value = value;
+        }
     }
 
     #[inline(always)]
     pub fn set_u64(&mut self, name: HeaderName, val: u64) {
-        self.push_numeric(name, val as u128, NumericFmt::U64, NumericOp::Set);
+        let hv = resolve_u64_header_value(val);
+        self.storage.insert_internal(name, hv, false);
     }
 
     #[inline(always)]
     pub fn append_u64(&mut self, name: HeaderName, val: u64) {
-        self.push_numeric(name, val as u128, NumericFmt::U64, NumericOp::Append);
+        let hv = resolve_u64_header_value(val);
+        self.storage.append_internal(name, hv, false);
     }
 
     #[inline]
     pub fn insert_bypass_u64(&mut self, name: HeaderName, val: u64) -> bool {
-        let b_len = self.bypass_len as usize;
-        let exists = (0..b_len).any(|i| self.bypass_keys[i].as_ref() == Some(&name));
-        let ok = if !exists {
-            if b_len < MAX_BYPASS_HEADERS {
-                self.bypass_keys[b_len] = Some(name.clone());
-                self.bypass_len += 1;
-                true
-            } else {
-                false
-            }
-        } else {
-            true
-        };
-        self.push_numeric(name, val as u128, NumericFmt::U64, NumericOp::SetBypass);
-        ok
+        let hv = resolve_u64_header_value(val);
+        self.storage.insert_internal(name, hv, true);
+        true
     }
 
     #[inline(always)]
     pub fn set_hex128(&mut self, name: HeaderName, id: u128) {
-        self.push_numeric(name, id, NumericFmt::Hex128, NumericOp::Set);
+        self.storage
+            .insert_internal(name, format_u128_hex_header(id), false);
     }
 
     #[inline(always)]
     pub fn append_hex128(&mut self, name: HeaderName, id: u128) {
-        self.push_numeric(name, id, NumericFmt::Hex128, NumericOp::Append);
+        self.storage
+            .append_internal(name, format_u128_hex_header(id), false);
     }
 
     #[inline(always)]
@@ -526,60 +1016,36 @@ impl HeaderWorkspace {
 
     #[inline(always)]
     pub fn set_ip_u128(&mut self, name: HeaderName, ip: u128) {
-        if let Some(v4) = crate::lut::ip::is_ipv4_mapped_u128(ip) {
-            self.push_numeric(name, v4 as u128, NumericFmt::Ipv4, NumericOp::Set);
-        } else {
-            self.push_numeric(name, ip, NumericFmt::Ipv6, NumericOp::Set);
-        }
+        self.storage
+            .insert_internal(name, format_ip_header(ip), false);
     }
 
     #[inline(always)]
     pub fn append_ip_u128(&mut self, name: HeaderName, ip: u128) {
-        if let Some(v4) = crate::lut::ip::is_ipv4_mapped_u128(ip) {
-            self.push_numeric(name, v4 as u128, NumericFmt::Ipv4, NumericOp::Append);
-        } else {
-            self.push_numeric(name, ip, NumericFmt::Ipv6, NumericOp::Append);
-        }
+        self.storage
+            .append_internal(name, format_ip_header(ip), false);
     }
 
     #[inline(always)]
     pub fn set_inline_ascii(&mut self, name: HeaderName, bytes: &[u8]) {
-        debug_assert!(bytes.len() <= 16);
-        let len = bytes.len().min(16);
-        let mut buf = [0u8; 16];
-        buf[..len].copy_from_slice(&bytes[..len]);
-        self.push_numeric(
-            name,
-            u128::from_le_bytes(buf),
-            NumericFmt::InlineAscii(len as u8),
-            NumericOp::Set,
-        );
+        let slice = bytes.get(..bytes.len().min(16)).unwrap_or(bytes);
+        if let Ok(hv) = HeaderValue::from_bytes(slice) {
+            self.storage.insert_internal(name, hv, false);
+        }
     }
 
     #[inline(always)]
     pub fn append_inline_ascii(&mut self, name: HeaderName, bytes: &[u8]) {
-        debug_assert!(bytes.len() <= 16);
-        let len = bytes.len().min(16);
-        let mut buf = [0u8; 16];
-        buf[..len].copy_from_slice(&bytes[..len]);
-        self.push_numeric(
-            name,
-            u128::from_le_bytes(buf),
-            NumericFmt::InlineAscii(len as u8),
-            NumericOp::Append,
-        );
+        let slice = bytes.get(..bytes.len().min(16)).unwrap_or(bytes);
+        if let Ok(hv) = HeaderValue::from_bytes(slice) {
+            self.storage.append_internal(name, hv, false);
+        }
     }
 
-    /// Reads a header as a `u64` integer via 64-bit integer key lookup or branchless wire byte parsing.
+    /// Parses a header as an unsigned 64-bit integer from the flat slot slice.
     #[inline]
     pub fn get_u64<K: AsHeaderName>(&self, name: K) -> Option<u64> {
-        if self.numeric_len > 0
-            && let Some((raw, NumericFmt::U64)) =
-                self.get_raw_by_key(header_key(name.as_str().as_bytes()))
-        {
-            return Some(raw as u64);
-        }
-        let bytes = self.headers.get(name)?.as_bytes();
+        let bytes = self.get(name)?.as_bytes();
         if bytes.is_empty() || bytes.len() > 20 {
             return None;
         }
@@ -594,108 +1060,52 @@ impl HeaderWorkspace {
         Some(acc)
     }
 
-    /// Reads a header as a 128-bit hexadecimal integer via 64-bit integer key lookup or wire bytes.
+    /// Reads a header value parsed as a 128-bit hex identifier.
     #[inline]
     pub fn get_hex128<K: AsHeaderName>(&self, name: K) -> Option<u128> {
-        if self.numeric_len > 0 {
-            let key = header_key(name.as_str().as_bytes());
-            if let Some((raw, NumericFmt::Hex128)) = self.get_raw_by_key(key) {
-                return Some(raw);
-            }
-            if key == KEY_X_REQUEST_ID && self.request_id_raw != 0 {
-                return Some(self.request_id_raw);
-            }
-        } else if self.request_id_raw != 0
-            && name
-                .as_str()
-                .as_bytes()
-                .eq_ignore_ascii_case(b"x-request-id")
-        {
-            return Some(self.request_id_raw);
-        }
-        parse_hex_128(self.headers.get(name)?.as_bytes())
+        parse_hex_128(self.get(name)?.as_bytes())
     }
 
-    /// Reads a header as an RFC 4291 `u128` IP integer via 64-bit integer key lookup or zero-allocation wire byte parsing.
+    /// Parses a header value as an RFC 4291 `u128` IP integer.
     #[inline]
     pub fn get_ip_u128<K: AsHeaderName>(&self, name: K) -> Option<u128> {
-        if self.numeric_len > 0
-            && let Some((raw, fmt)) = self.get_raw_by_key(header_key(name.as_str().as_bytes()))
-        {
-            return match fmt {
-                NumericFmt::Ipv4 => Some(crate::lut::ip::encode_ipv4_u128(raw as u32)),
-                NumericFmt::Ipv6 => Some(raw),
-                _ => None,
-            };
-        }
-        let bytes = self.headers.get(name)?.as_bytes();
+        let bytes = self.get(name)?.as_bytes();
         let first = match bytes.iter().position(|&b| b == b',') {
-            Some(idx) => &bytes[..idx],
+            Some(idx) => bytes.get(..idx).unwrap_or(bytes),
             None => bytes,
         };
         crate::lut::ip::parse_ip_u128(first.trim_ascii())
     }
 
-    /// Batch-renders all pending 16-byte register mutations into the underlying [`HeaderMap`].
-    #[inline]
-    pub fn render(&mut self) {
-        let len = self.numeric_len as usize;
-        if len == 0 {
-            return;
+    #[inline(always)]
+    pub fn iter(&self) -> HeaderIter<'_> {
+        HeaderIter {
+            inner: self.storage.slots().iter(),
         }
-        for i in 0..len {
-            if let Some(entry) = self.numeric_entries[i].take() {
-                let hv = entry.into_header_value();
-                match entry.op {
-                    NumericOp::Set | NumericOp::SetBypass => {
-                        self.headers.insert(entry.name, hv);
-                    }
-                    NumericOp::Append => {
-                        self.headers.append(entry.name, hv);
-                    }
-                }
+    }
+
+    #[inline(always)]
+    pub fn keys(&self) -> impl Iterator<Item = &HeaderName> {
+        self.storage.slots().iter().map(|s| &s.name)
+    }
+
+    /// Iterates over all entries marked with Bit-63 (`TAG_BYPASS_BIT`).
+    #[inline]
+    pub fn bypass_headers(&self) -> impl Iterator<Item = (&HeaderName, &HeaderValue)> {
+        let tags = self.storage.tags();
+        let slots = self.storage.slots();
+        tags.iter().enumerate().filter_map(move |(i, &tag)| {
+            if (tag & TAG_BYPASS_BIT) != 0 {
+                slots.get(i).map(|s| (&s.name, &s.value))
+            } else {
+                None
             }
-        }
-        self.numeric_len = 0;
-    }
-
-    #[inline(always)]
-    pub fn into_inner(mut self) -> HeaderMap {
-        self.render();
-        self.headers
-    }
-
-    #[inline]
-    pub fn insert<K: IntoHeaderName>(
-        &mut self,
-        name: K,
-        value: HeaderValue,
-    ) -> Option<HeaderValue> {
-        self.headers.insert(name, value)
-    }
-
-    #[inline]
-    pub fn append<K: IntoHeaderName>(&mut self, name: K, value: HeaderValue) -> bool {
-        self.headers.append(name, value)
-    }
-
-    #[inline]
-    pub fn reserve(&mut self, additional: usize) {
-        self.headers.reserve(additional);
-    }
-
-    /// Removes a header from the workspace.
-    #[inline(always)]
-    pub fn remove<K: AsHeaderName>(&mut self, name: K) -> Option<HeaderValue> {
-        if self.numeric_len > 0 {
-            self.remove_numeric_by_key(header_key(name.as_str().as_bytes()));
-        }
-        self.headers.remove(name)
+        })
     }
 
     #[inline(always)]
     pub fn request_id(&self) -> &HeaderValue {
-        if let Some(val) = self.headers.get(&X_REQUEST_ID) {
+        if let Some(val) = self.get(&X_REQUEST_ID) {
             val
         } else {
             static FALLBACK_ID: HeaderValue =
@@ -706,481 +1116,126 @@ impl HeaderWorkspace {
 
     #[inline]
     pub fn set_request_id(&mut self, req_id: HeaderValue) {
-        if let Some(raw) = parse_hex_128(req_id.as_bytes()) {
-            self.request_id_raw = raw;
-        }
-        self.headers.insert(X_REQUEST_ID, req_id);
-        self.bypass_keys[0] = Some(X_REQUEST_ID);
-        if self.bypass_len == 0 {
-            self.bypass_len = 1;
-        }
+        let _ = self.storage.insert_internal(X_REQUEST_ID, req_id, true);
     }
 
-    #[inline]
-    pub fn insert_bypass(&mut self, name: HeaderName, value: HeaderValue) -> bool {
-        let len = self.bypass_len as usize;
-        let exists = (0..len).any(|i| self.bypass_keys[i].as_ref() == Some(&name));
-        let ok = if !exists {
-            if len < MAX_BYPASS_HEADERS {
-                self.bypass_keys[len] = Some(name.clone());
-                self.bypass_len += 1;
-                true
-            } else {
-                false
-            }
-        } else {
-            true
-        };
-        if self.numeric_len > 0 {
-            self.remove_numeric_by_key(header_key(name.as_str().as_bytes()));
-        }
-        self.headers.insert(name, value);
-        ok
-    }
-
-    pub fn bypass_headers(&self) -> impl Iterator<Item = (&HeaderName, &HeaderValue)> {
-        let len = self.bypass_len as usize;
-        (0..len).filter_map(move |i| {
-            let key = self.bypass_keys[i].as_ref()?;
-            let val = self.headers.get(key)?;
-            Some((key, val))
-        })
-    }
-
-    /// In-place transformation of the request's existing HeaderWorkspace into early rejection response headers:
-    ///
-    /// 1. Discards inbound client request headers (Host, User-Agent, Cookie, Authorization, etc.).
-    /// 2. Preserves all Bit-1 bypass headers (x-request-id, rate-limit counters, traceparent).
-    /// 3. Injects anti-CPDoS cache headers (`Cache-Control: no-store`).
-    /// 4. If `include_content_headers` is true (HTTP/1.1 & HTTP/3), injects `Content-Type` and `Content-Length`.
-    /// 5. If `429 Too Many Requests`, injects `Retry-After: 1` if not already present.
-    /// 6. Executes exactly one atomic `render()` pass.
+    /// In-place single-pass compaction preserving Bit-63 bypass headers on early rejection.
     pub fn prepare_for_rejection(
         &mut self,
         meta: &'static crate::lut::RejectStaticMeta,
         include_content_headers: bool,
     ) {
-        let b_len = self.bypass_len as usize;
+        self.storage.compact_bypass_only();
 
-        // Step 1: Discard non-bypass entries from numeric registers
-        let num_len = self.numeric_len as usize;
-        for i in 0..num_len {
-            if let Some(ref entry) = self.numeric_entries[i]
-                && !matches!(entry.op, NumericOp::SetBypass)
-            {
-                self.numeric_entries[i] = None;
-            }
-        }
-
-        // Step 2: Save Bit-1 bypass headers on the stack (max 8)
-        let mut saved_bypass: [Option<(HeaderName, HeaderValue)>; MAX_BYPASS_HEADERS] =
-            [const { None }; MAX_BYPASS_HEADERS];
-        let mut saved_count = 0;
-        for i in 0..b_len {
-            if let Some(ref key) = self.bypass_keys[i]
-                && let Some(val) = self.headers.get(key)
-            {
-                saved_bypass[saved_count] = Some((key.clone(), val.clone()));
-                saved_count += 1;
-            }
-        }
-
-        // Step 3: Clear all client request headers in-place (preserves bucket heap capacity)
-        self.headers.clear();
-
-        // Step 4: Restore Bit-1 bypass headers
-        for item in saved_bypass.iter_mut().take(saved_count) {
-            if let Some((k, v)) = item.take() {
-                self.headers.insert(k, v);
-            }
-        }
-
-        // Step 5: Inject CPDoS defense header
-        self.headers.insert(
+        self.insert(
             http::header::CACHE_CONTROL,
             HeaderValue::from_static("no-store"),
         );
 
-        // Step 6: Conditionally inject payload headers (HTTP/1 & HTTP/3)
         if include_content_headers {
-            self.headers.insert(
+            self.insert(
                 http::header::CONTENT_TYPE,
                 HeaderValue::from_static("text/plain; charset=utf-8"),
             );
-            self.headers.insert(
+            self.insert(
                 http::header::CONTENT_LENGTH,
-                HeaderValue::from_static(meta.content_len_str),
+                resolve_u64_header_value(meta.body.len() as u64),
             );
         }
 
-        // Step 7: Rate limit retry guidance (RFC 6585)
+        const KEY_RETRY_AFTER: u64 = header_key(b"retry-after");
         if meta.status == http::StatusCode::TOO_MANY_REQUESTS
-            && !self.headers.contains_key(http::header::RETRY_AFTER)
+            && self
+                .storage
+                .find_first(KEY_RETRY_AFTER, "retry-after")
+                .is_none()
         {
-            self.headers
-                .insert(http::header::RETRY_AFTER, HeaderValue::from_static("1"));
+            self.insert(http::header::RETRY_AFTER, HeaderValue::from_static("1"));
         }
-
-        // Step 8: Single render pass for any remaining numeric registers (e.g. SetBypass)
-        self.render();
     }
 
-    /// In-place transformation of the request's existing HeaderWorkspace into gRPC Trailers-Only rejection headers:
-    ///
-    /// 1. Discards inbound client request headers.
-    /// 2. Preserves all Bit-1 bypass headers (x-request-id, rate-limit counters).
-    /// 3. Injects `content-type: application/grpc`, `grpc-status: <code>`, and optional `grpc-message`.
-    /// 4. Executes exactly one atomic `render()` pass.
+    /// In-place compaction preserving Bit-63 bypass headers for gRPC Trailers-Only rejection.
     pub fn prepare_for_grpc_rejection(
         &mut self,
         status: crate::lut::GrpcStatus,
         message: Option<&str>,
     ) {
-        let b_len = self.bypass_len as usize;
+        self.storage.compact_bypass_only();
 
-        // Step 1: Discard non-bypass entries from numeric registers
-        let num_len = self.numeric_len as usize;
-        for i in 0..num_len {
-            if let Some(ref entry) = self.numeric_entries[i]
-                && !matches!(entry.op, NumericOp::SetBypass)
-            {
-                self.numeric_entries[i] = None;
-            }
-        }
-
-        // Step 2: Save Bit-1 bypass headers on the stack (max 8)
-        let mut saved_bypass: [Option<(HeaderName, HeaderValue)>; MAX_BYPASS_HEADERS] =
-            [const { None }; MAX_BYPASS_HEADERS];
-        let mut saved_count = 0;
-        for i in 0..b_len {
-            if let Some(ref key) = self.bypass_keys[i]
-                && let Some(val) = self.headers.get(key)
-            {
-                saved_bypass[saved_count] = Some((key.clone(), val.clone()));
-                saved_count += 1;
-            }
-        }
-
-        // Step 3: Clear all client request headers in-place (preserves bucket heap capacity)
-        self.headers.clear();
-
-        // Step 4: Restore Bit-1 bypass headers
-        for item in saved_bypass.iter_mut().take(saved_count) {
-            if let Some((k, v)) = item.take() {
-                self.headers.insert(k, v);
-            }
-        }
-
-        // Step 5: Inject gRPC content-type and canonical trailers
-        self.headers.insert(
+        self.insert(
             http::header::CONTENT_TYPE,
             HeaderValue::from_static("application/grpc"),
         );
-        self.headers.insert(
-            http::header::HeaderName::from_static("grpc-status"),
+        self.insert(
+            HeaderName::from_static("grpc-status"),
             HeaderValue::from_static(status.code_str()),
         );
         if let Some(msg) = message
             && let Ok(val) = HeaderValue::from_str(msg)
         {
-            self.headers
-                .insert(http::header::HeaderName::from_static("grpc-message"), val);
+            self.insert(HeaderName::from_static("grpc-message"), val);
         }
-
-        // Step 6: Single render pass
-        self.render();
     }
 
-    #[inline(always)]
-    pub fn take(&mut self) -> HeaderMap {
-        self.render();
-        self.bypass_keys = [const { None }; MAX_BYPASS_HEADERS];
-        let ingress_nanos = crate::clock::now_unix_nanos();
-        let (id, req_id) = crate::request_id::next_request_id(ingress_nanos);
-        self.request_id_raw = id;
-        self.ingress_time_nanos = ingress_nanos;
-        self.bypass_keys[0] = Some(X_REQUEST_ID);
-        self.bypass_len = 1;
-        let mut new_map = HeaderMap::with_capacity(self.initial_capacity);
-        new_map.insert(X_REQUEST_ID, req_id);
-        std::mem::replace(&mut self.headers, new_map)
-    }
-
+    /// Resets workspace for reuse, returning oversized spike buffers to a clean 32-slot block.
     #[inline(always)]
     pub fn reset(&mut self) {
-        for i in 0..(self.numeric_len as usize) {
-            self.numeric_entries[i] = None;
-        }
-        self.numeric_len = 0;
+        self.storage.reset_storage();
         let ingress_nanos = crate::clock::now_unix_nanos();
-        let (id, req_id) = crate::request_id::next_request_id(ingress_nanos);
-        self.request_id_raw = id;
+        let (_id, req_id) = crate::request_id::next_request_id(ingress_nanos);
         self.ingress_time_nanos = ingress_nanos;
-        self.bypass_keys = [const { None }; MAX_BYPASS_HEADERS];
-        self.bypass_keys[0] = Some(X_REQUEST_ID);
-        self.bypass_len = 1;
-        // ---------------------------------------------------------------------
-        // Anti-Memory Bloat & Zero-Syscall Jemalloc Recycling Mechanism:
-        //
-        // 1. Capacity <= 4x baseline (<= 128 headers):
-        //    Calls `headers.clear()` (O(1)). Retains the existing heap capacity
-        //    so subsequent requests with 40-100 headers run with ZERO allocations.
-        //
-        // 2. Capacity > 4x baseline (> 128 headers):
-        //    Anomalous/spike request. Re-instantiates `HeaderMap::with_capacity(32)`.
-        //    The oversized vector is dropped back to `jemalloc`'s user-space thread
-        //    free-list (pure user-space dealloc, ZERO kernel syscalls `munmap`).
-        //    This allows jemalloc's dirty page decay (`madvise(MADV_DONTNEED)`) to reclaim
-        //    physical RSS RAM if the surge subsides, eliminating unbounded memory bloat.
-        // ---------------------------------------------------------------------
-        if self.headers.capacity() > self.initial_capacity * 4 {
-            self.headers = HeaderMap::with_capacity(self.initial_capacity);
-        } else {
-            self.headers.clear();
-        }
-        self.headers.insert(X_REQUEST_ID, req_id);
+        self.cache_hash = 0;
+        let _ = self.storage.insert_internal(X_REQUEST_ID, req_id, true);
     }
 }
 
-impl Default for HeaderWorkspace {
+/// Zero-allocation header key conversion for [`HeaderWorkspace::insert`] and [`HeaderWorkspace::append`].
+pub trait IntoHeaderKey {
+    /// Converts the key into an owned [`HeaderName`] without allocating a temporary `HeaderMap`.
+    fn into_header_name(self) -> HeaderName;
+}
+
+impl IntoHeaderKey for HeaderName {
     #[inline(always)]
-    fn default() -> Self {
-        Self::new(Self::DEFAULT_CAPACITY)
+    fn into_header_name(self) -> HeaderName {
+        self
     }
 }
 
-impl Deref for HeaderWorkspace {
-    type Target = HeaderMap;
-
+impl IntoHeaderKey for &HeaderName {
     #[inline(always)]
-    fn deref(&self) -> &Self::Target {
-        &self.headers
+    fn into_header_name(self) -> HeaderName {
+        self.clone()
     }
 }
 
-impl AsRef<HeaderMap> for HeaderWorkspace {
+impl IntoHeaderKey for &str {
     #[inline(always)]
-    fn as_ref(&self) -> &HeaderMap {
-        &self.headers
-    }
-}
-
-impl From<HeaderMap> for HeaderWorkspace {
-    #[inline(always)]
-    fn from(headers: HeaderMap) -> Self {
-        Self::from_headers(headers)
-    }
-}
-
-impl From<HeaderWorkspace> for HeaderMap {
-    #[inline(always)]
-    fn from(ws: HeaderWorkspace) -> Self {
-        ws.into_inner()
+    fn into_header_name(self) -> HeaderName {
+        HeaderName::from_bytes(self.as_bytes()).unwrap_or(X_REQUEST_ID)
     }
 }
 
 impl FromIterator<(HeaderName, HeaderValue)> for HeaderWorkspace {
     fn from_iter<T: IntoIterator<Item = (HeaderName, HeaderValue)>>(iter: T) -> Self {
-        Self::from_headers(HeaderMap::from_iter(iter))
+        let mut ws = Self::empty(DEFAULT_HEADER_CAPACITY);
+        for (name, val) in iter {
+            if name == X_REQUEST_ID {
+                ws.insert_bypass(name, val);
+            } else {
+                ws.append(name, val);
+            }
+        }
+        ws
     }
 }
 
 impl<'a> IntoIterator for &'a HeaderWorkspace {
     type Item = (&'a HeaderName, &'a HeaderValue);
-    type IntoIter = http::header::Iter<'a, HeaderValue>;
+    type IntoIter = HeaderIter<'a>;
 
     #[inline(always)]
     fn into_iter(self) -> Self::IntoIter {
-        self.headers.iter()
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-    use http::header::{AUTHORIZATION, CONTENT_TYPE, RETRY_AFTER};
-
-    #[test]
-    fn test_header_workspace_recycle_preserves_capacity() {
-        let mut ws = HeaderWorkspace::new(32);
-        assert!(ws.capacity() >= 32);
-        assert_ne!(ws.request_id_raw, 0);
-        assert!(ws.ingress_time_nanos > 1_700_000_000_000_000_000);
-        assert!(ws.ingress_time_sec() > 1_700_000_000);
-
-        ws.insert(CONTENT_TYPE, HeaderValue::from_static("application/json"));
-        ws.insert(AUTHORIZATION, HeaderValue::from_static("Bearer token123"));
-        assert_eq!(ws.len(), 3);
-        assert!(ws.remove(&HeaderWorkspace::X_REQUEST_ID).is_some());
-        assert_eq!(ws.len(), 2);
-
-        ws.reset();
-        assert_eq!(ws.len(), 1);
-        assert!(ws.capacity() >= 32);
-    }
-
-    #[test]
-    fn test_header_workspace_arithmetic_defer_and_batch_render() {
-        let mut ws = HeaderWorkspace::new(32);
-        let req_id_u128 = ws.request_id_raw;
-        let ts = ws.ingress_time_sec();
-
-        let h_limit = HeaderName::from_static("x-ratelimit-limit");
-        let h_rem = HeaderName::from_static("x-ratelimit-remaining");
-        let h_status = HeaderName::from_static("x-upstream-status");
-        let h_trace = HeaderName::from_static("x-trace-id");
-        let h_ip = HeaderName::from_static("x-real-ip");
-        let h_ts = HeaderName::from_static("x-edge-ts");
-
-        let ip_v4 = crate::lut::ip::encode_ipv4_u128(0x0A18_0005);
-        ws.set_u64(h_limit.clone(), 100);
-        ws.set_u64(h_rem.clone(), 99);
-        ws.set_u64(h_status.clone(), 200);
-        ws.set_hex128(h_trace.clone(), req_id_u128);
-        ws.set_ip(h_ip.clone(), ip_v4);
-        ws.set_u64(h_ts.clone(), ts);
-
-        assert_eq!(ws.numeric_len, 6);
-        assert_eq!(ws.get_u64(&h_limit), Some(100));
-        assert_eq!(ws.get_u64(&h_rem), Some(99));
-        assert_eq!(ws.get_u64(&h_status), Some(200));
-        assert_eq!(ws.get_hex128(&h_trace), Some(req_id_u128));
-        assert_eq!(ws.get_ip_u128(&h_ip), Some(ip_v4));
-        assert_eq!(ws.get_u64(&h_ts), Some(ts));
-        assert!(ws.contains_key(&h_limit));
-
-        ws.render();
-        assert_eq!(ws.numeric_len, 0);
-        assert_eq!(ws.get(&h_limit).unwrap(), "100");
-        assert_eq!(ws.get(&h_rem).unwrap(), "99");
-        assert_eq!(ws.get(&h_status).unwrap(), "200");
-        assert_eq!(ws.get(&h_trace).unwrap(), ws.request_id());
-        assert_eq!(ws.get(&h_ip).unwrap(), "10.24.0.5");
-        assert_eq!(ws.get_ip_u128(&h_ip), Some(ip_v4));
-        assert_eq!(ws.get(&h_ts).unwrap(), &ts.to_string());
-
-        ws.set_ip(h_ip.clone(), 1);
-        assert_eq!(ws.get_ip_u128(&h_ip), Some(1));
-        ws.render();
-        assert_eq!(ws.get(&h_ip).unwrap(), "::1");
-        assert_eq!(ws.get_ip_u128(&h_ip), Some(1));
-
-        const KEY_PROTO: u64 = header_key(b"x-forwarded-proto");
-        let h_proto = HeaderName::from_static("x-forwarded-proto");
-        ws.set_inline_ascii(h_proto.clone(), b"https");
-        assert!(matches!(
-            ws.get_raw_by_key(KEY_PROTO),
-            Some((_, NumericFmt::InlineAscii(5)))
-        ));
-        ws.render();
-        assert_eq!(ws.get(&h_proto).unwrap(), "https");
-    }
-
-    #[test]
-    fn test_header_workspace_bypass_tagging() {
-        let mut ws = HeaderWorkspace::default();
-        assert_eq!(ws.bypass_headers().count(), 1);
-        ws.insert(
-            HeaderName::from_static("x-internal-secret"),
-            HeaderValue::from_static("secret123"),
-        );
-        ws.insert_bypass_u64(RETRY_AFTER, 60);
-        assert_eq!(ws.get_u64(RETRY_AFTER), Some(60));
-        ws.render();
-        assert_eq!(ws.bypass_headers().count(), 2);
-
-        ws.reset();
-        assert_eq!(ws.len(), 1);
-        assert_eq!(ws.bypass_headers().count(), 1);
-    }
-
-    #[test]
-    fn test_header_workspace_prepare_for_rejection_in_place() {
-        use crate::error::RejectReason;
-        use crate::lut::get_reject_meta;
-
-        let mut ws = HeaderWorkspace::new(32);
-        let req_id_str = ws.request_id().to_str().unwrap().to_string();
-
-        // Inbound client request headers
-        ws.insert(http::header::HOST, HeaderValue::from_static("example.com"));
-        ws.insert(
-            http::header::USER_AGENT,
-            HeaderValue::from_static("curl/8.6.0"),
-        );
-        ws.insert(
-            http::header::COOKIE,
-            HeaderValue::from_static("session=abc"),
-        );
-        ws.insert(
-            http::header::AUTHORIZATION,
-            HeaderValue::from_static("Bearer token"),
-        );
-
-        // Plugin tagged Bit-1 bypass headers
-        let h_ratelimit = HeaderName::from_static("x-ratelimit-remaining");
-        ws.insert_bypass_u64(h_ratelimit.clone(), 0);
-
-        let meta = get_reject_meta(RejectReason::TooManyRequests);
-        ws.prepare_for_rejection(meta, true);
-
-        // Client request headers MUST be dropped
-        assert!(!ws.contains_key(http::header::HOST));
-        assert!(!ws.contains_key(http::header::USER_AGENT));
-        assert!(!ws.contains_key(http::header::COOKIE));
-        assert!(!ws.contains_key(http::header::AUTHORIZATION));
-
-        // Bit-1 bypass headers MUST be preserved
-        assert_eq!(
-            ws.get(&HeaderWorkspace::X_REQUEST_ID).unwrap(),
-            req_id_str.as_str()
-        );
-        assert_eq!(ws.get(&h_ratelimit).unwrap(), "0");
-
-        // Static response headers MUST be injected
-        assert_eq!(ws.get(http::header::CACHE_CONTROL).unwrap(), "no-store");
-        assert_eq!(
-            ws.get(http::header::CONTENT_TYPE).unwrap(),
-            "text/plain; charset=utf-8"
-        );
-        assert_eq!(ws.get(http::header::CONTENT_LENGTH).unwrap(), "22");
-        assert_eq!(ws.get(http::header::RETRY_AFTER).unwrap(), "1");
-
-        // Single render pass ensures all registers are materialized
-        assert_eq!(ws.numeric_len, 0);
-    }
-
-    #[test]
-    fn test_header_workspace_prepare_for_grpc_rejection_in_place() {
-        use crate::lut::GrpcStatus;
-
-        let mut ws = HeaderWorkspace::new(32);
-        let req_id_str = ws.request_id().to_str().unwrap().to_string();
-
-        ws.insert(
-            http::header::HOST,
-            HeaderValue::from_static("grpc.example.com"),
-        );
-        ws.insert(
-            http::header::USER_AGENT,
-            HeaderValue::from_static("grpc-go/1.64"),
-        );
-
-        ws.prepare_for_grpc_rejection(GrpcStatus::ResourceExhausted, Some("quota exceeded"));
-
-        assert!(!ws.contains_key(http::header::HOST));
-        assert!(!ws.contains_key(http::header::USER_AGENT));
-
-        assert_eq!(
-            ws.get(&HeaderWorkspace::X_REQUEST_ID).unwrap(),
-            req_id_str.as_str()
-        );
-        assert_eq!(
-            ws.get(http::header::CONTENT_TYPE).unwrap(),
-            "application/grpc"
-        );
-        assert_eq!(ws.get("grpc-status").unwrap(), "8");
-        assert_eq!(ws.get("grpc-message").unwrap(), "quota exceeded");
-        assert_eq!(ws.numeric_len, 0);
+        self.iter()
     }
 }

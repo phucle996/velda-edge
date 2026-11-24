@@ -24,7 +24,7 @@ use std::cell::UnsafeCell;
 use std::ptr::NonNull;
 use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
 
-use velda_core::buffer::{ArenaBackingKind, ContiguousArena};
+use velda_core::buffer::slab::{ArenaBackingKind, ContiguousArena};
 
 use super::record::TelemetryRecord;
 

@@ -18,7 +18,8 @@ use std::sync::Arc;
 use bytes::Bytes;
 use http::{Method, Uri, Version};
 
-use crate::buffer::{HeaderWorkspace, PayloadSlabLease};
+use crate::buffer::header::HeaderWorkspace;
+use crate::buffer::slab::PayloadSlabLease;
 use crate::context::RequestState;
 
 /// HTTP request and response body.
@@ -30,7 +31,7 @@ pub enum Body {
     /// No request body.
     Empty,
 
-    /// Body backed by a pre-warmed physical slab leased from [`crate::buffer::PayloadSlabPool`].
+    /// Body backed by a pre-warmed physical slab leased from [`crate::buffer::slab::PayloadSlabPool`].
     /// Automatically recycles back to the pool on final drop.
     Slab {
         lease: Arc<PayloadSlabLease>,
@@ -227,54 +228,5 @@ impl L7Request {
     #[inline(always)]
     pub fn ingress_time_sec(&self) -> u64 {
         self.ingress_time_nanos / 1_000_000_000
-    }
-
-    /// Attaches explicit request lifecycle state.
-    #[inline(always)]
-    pub fn with_state(mut self, state: RequestState) -> Self {
-        self.state = state;
-        self
-    }
-
-    /// Returns `true` when the request contains a non-empty body.
-    #[inline]
-    pub fn has_body(&self) -> bool {
-        !self.body.is_empty()
-    }
-
-    /// Returns the value of a request header.
-    #[inline]
-    pub fn header(&self, name: &http::header::HeaderName) -> Option<&http::HeaderValue> {
-        self.headers.get(name)
-    }
-
-    /// Returns the Host header when present.
-    #[inline]
-    pub fn host(&self) -> Option<&http::HeaderValue> {
-        self.headers.get(http::header::HOST)
-    }
-
-    /// Returns the request path.
-    #[inline]
-    pub fn path(&self) -> &str {
-        self.uri.path()
-    }
-
-    /// Returns the request query string when present.
-    #[inline]
-    pub fn query(&self) -> Option<&str> {
-        self.uri.query()
-    }
-
-    /// Returns `true` if the request uses HTTP/2.
-    #[inline]
-    pub fn is_http2(&self) -> bool {
-        self.version == Version::HTTP_2
-    }
-
-    /// Returns `true` if the request uses HTTP/1.1.
-    #[inline]
-    pub fn is_http11(&self) -> bool {
-        self.version == Version::HTTP_11
     }
 }

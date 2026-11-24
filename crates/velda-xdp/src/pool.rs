@@ -49,7 +49,7 @@ use std::ops::{Deref, DerefMut};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
 
-use velda_core::buffer::{ArenaBackingKind, HUGE_PAGE_SIZE};
+use velda_core::buffer::slab::{ArenaBackingKind, HUGE_PAGE_SIZE};
 
 use crate::config::XdpConfig;
 use crate::error::{Result, XdpError};
@@ -406,7 +406,7 @@ impl XdpSlabArena {
 
         let mut scan_start = self.inner.hint.load(Ordering::Relaxed) % num_words;
         // Keep UMEM pool management bitmask metadata warm in L2 (_MM_HINT_T1).
-        velda_core::buffer::prefetch_l2_range(
+        velda_core::buffer::slab::prefetch_l2_range(
             unsafe { words.as_ptr().add(scan_start) as *const u8 },
             std::mem::size_of_val(words).min(256),
         );
@@ -447,7 +447,7 @@ impl XdpSlabArena {
                             let ws_offset = (frame_idx as usize) * self.inner.frame_size
                                 + self.inner.frame_size
                                 - self.inner.header_workspace;
-                            velda_core::buffer::prefetch_l2_range(
+                            velda_core::buffer::slab::prefetch_l2_range(
                                 unsafe { self.inner.base_ptr.add(ws_offset) },
                                 self.inner.header_workspace,
                             );
@@ -507,13 +507,13 @@ impl XdpSlabArena {
         // 2. 1792B Header Workspace is prefetched into L2 (_MM_HINT_T1) for L7 header parsing.
         let frame_base = (frame_idx as usize) * self.inner.frame_size;
         if payload_len > 0 {
-            velda_core::buffer::prefetch_l3_range(
+            velda_core::buffer::slab::prefetch_l3_range(
                 unsafe { self.inner.base_ptr.add(frame_base + self.inner.headroom) },
                 payload_len,
             );
         }
         if self.inner.header_workspace > 0 {
-            velda_core::buffer::prefetch_l2_range(
+            velda_core::buffer::slab::prefetch_l2_range(
                 unsafe {
                     self.inner
                         .base_ptr
@@ -701,7 +701,7 @@ impl XdpSlabLease {
             return;
         }
         let dst = self.payload_mut();
-        velda_core::buffer::copy_non_temporal(&src[..len], dst);
+        velda_core::buffer::slab::copy_non_temporal(&src[..len], dst);
     }
 }
 

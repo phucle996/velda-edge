@@ -12,5 +12,5 @@
 pub mod request;
 pub mod response;
 
-pub use crate::buffer::HeaderWorkspace;
+pub use crate::buffer::header::HeaderWorkspace;
 pub use request::Body;

@@ -15,7 +15,7 @@
 use http::{StatusCode, Version};
 
 use super::request::Body;
-use crate::buffer::HeaderWorkspace;
+use crate::buffer::header::HeaderWorkspace;
 
 /// HTTP response returned by the Velda L7 pipeline or upstream.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -41,12 +41,6 @@ impl L7Response {
             headers: headers.into(),
             body,
         }
-    }
-
-    /// Returns `true` when the response contains a non-empty body.
-    #[inline]
-    pub fn has_body(&self) -> bool {
-        !self.body.is_empty()
     }
 
     /// Creates an HTTP response with no body (e.g. 204 No Content, 304 Not Modified, or fast 403).
@@ -75,7 +69,7 @@ impl L7Response {
     #[inline]
     pub fn from_slab(
         status: StatusCode,
-        lease: crate::buffer::PayloadSlabLease,
+        lease: crate::buffer::slab::PayloadSlabLease,
         len: usize,
     ) -> Self {
         Self {
@@ -111,12 +105,12 @@ mod tests {
     fn test_l7_response_constructors() {
         let empty_404 = L7Response::empty(StatusCode::NOT_FOUND);
         assert_eq!(empty_404.status, StatusCode::NOT_FOUND);
-        assert!(!empty_404.has_body());
+        assert!(empty_404.body.is_empty());
 
         let ok_json = L7Response::from_bytes(StatusCode::OK, b"{\"status\":\"ok\"}".to_vec())
             .with_header(CONTENT_TYPE, HeaderValue::from_static("application/json"));
         assert_eq!(ok_json.status, StatusCode::OK);
-        assert!(ok_json.has_body());
+        assert!(!ok_json.body.is_empty());
         assert_eq!(
             ok_json.headers.get(CONTENT_TYPE).unwrap(),
             "application/json"

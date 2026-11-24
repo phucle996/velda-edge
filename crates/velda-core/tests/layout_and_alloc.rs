@@ -7,12 +7,12 @@ use std::alloc::{GlobalAlloc, Layout, System};
 use std::mem::size_of;
 use std::sync::atomic::{AtomicUsize, Ordering};
 
-use http::{HeaderMap, Method, Uri, Version};
+use http::{Method, Uri, Version};
 use velda_core::l4::request::TransportProtocol;
 use velda_core::l7::request::Body;
 use velda_core::{
-    Action, ErrorKind, HookPhase, L4Action, L4Request, L7Request, Phase, RequestContext,
-    RequestState, UNASSIGNED_UPSTREAM_ID, UNMATCHED_ROUTE_ID,
+    Action, ErrorKind, HeaderWorkspace, HookPhase, L4Action, L4Request, L7Request, Phase,
+    RequestContext, RequestState, UNASSIGNED_UPSTREAM_ID, UNMATCHED_ROUTE_ID,
 };
 
 /// Custom counting allocator to verify zero heap allocation on the hot path.
@@ -176,7 +176,7 @@ fn test_zero_allocation_context_lookups() {
         Method::GET,
         Uri::from_static("/healthz"),
         Version::HTTP_11,
-        HeaderMap::new(),
+        HeaderWorkspace::empty(0),
         Body::Empty,
     );
 

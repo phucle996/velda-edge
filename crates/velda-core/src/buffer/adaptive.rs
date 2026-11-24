@@ -7,19 +7,16 @@
 //! │  max_cap = min( baseline * 3, baseline + (total_mem * 0.20) / (cores * item_bytes) )    │
 //! │                                                                                         │
 //! │  Per-Core Baseline Clamps (from max_idle):                                              │
-//! │    header_slots   : (max_idle * 2)  clamp [256..2048]   (1 KiB / slot)                  │
-//! │    small_4k_slabs : (headers / 2)   clamp [128..1024]   (4 KiB / slab)                  │
-//! │    medium_16k     : (headers / 4)   clamp [ 64.. 512]   (16 KiB / slab)                 │
-//! │    standard_32k   : (headers / 8)   clamp [ 32.. 256]   (32 KiB / slab)                 │
-//! │    large_64k      : (headers / 16)  clamp [ 16.. 128]   (64 KiB / slab)                 │
+//! │    small_4k_slabs : max_idle        clamp [128..1024]   (4 KiB / slab)                  │
+//! │    medium_16k     : max_idle / 2    clamp [ 64.. 512]   (16 KiB / slab)                 │
+//! │    standard_32k   : max_idle / 4    clamp [ 32.. 256]   (32 KiB / slab)                 │
+//! │    large_64k      : max_idle / 8    clamp [ 16.. 128]   (64 KiB / slab)                 │
 //! └─────────────────────────────────────────────────────────────────────────────────────────┘
 //! ```
 
 /// Pre-computed continuous adaptive buffer pool dimensions per traffic worker core.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct AdaptiveBufferDimensions {
-    pub header_baseline: usize,
-    pub header_max_cap: usize,
     pub small_baseline: usize,
     pub small_max_cap: usize,
     pub medium_baseline: usize,
@@ -31,25 +28,17 @@ pub struct AdaptiveBufferDimensions {
 }
 
 impl AdaptiveBufferDimensions {
-    /// Computes recommended pre-warmed buffer and slab pool dimensions per traffic worker core.
+    /// Computes recommended pre-warmed slab pool dimensions per traffic worker core.
     ///
-    /// Returns `(header_slots, small_4k_slabs, medium_16k_slabs, standard_32k_slabs, large_64k_slabs)`.
+    /// Returns `(small_4k_slabs, medium_16k_slabs, standard_32k_slabs, large_64k_slabs)`.
     #[inline]
-    pub fn buffer_pool_dimensions_per_core(max_idle: usize) -> (usize, usize, usize, usize, usize) {
-        let header_slots = (max_idle * 2).clamp(256, 2048);
+    pub fn buffer_pool_dimensions_per_core(max_idle: usize) -> (usize, usize, usize, usize) {
+        let small_slabs = max_idle.clamp(128, 1024);
+        let medium_slabs = (max_idle / 2).clamp(64, 512);
+        let standard_slabs = (max_idle / 4).clamp(32, 256);
+        let large_slabs = (max_idle / 8).clamp(16, 128);
 
-        let small_slabs = (header_slots / 2).clamp(128, 1024);
-        let medium_slabs = (header_slots / 4).clamp(64, 512);
-        let standard_slabs = (header_slots / 8).clamp(32, 256);
-        let large_slabs = (header_slots / 16).clamp(16, 128);
-
-        (
-            header_slots,
-            small_slabs,
-            medium_slabs,
-            standard_slabs,
-            large_slabs,
-        )
+        (small_slabs, medium_slabs, standard_slabs, large_slabs)
     }
 
     /// Calculates the strict anti-OOM max burst ceiling for a buffer class.
@@ -70,31 +59,22 @@ impl AdaptiveBufferDimensions {
         let triple_baseline = baseline.saturating_mul(3);
         let headroom_20_pct = (total_memory_bytes as f64 * 0.20) as usize;
         let per_core_headroom = headroom_20_pct / num_cores.max(1);
-        let max_from_headroom = baseline + (per_core_headroom / item_bytes.max(1));
+        let max_from_headroom = baseline.saturating_add(per_core_headroom / item_bytes.max(1));
         triple_baseline.min(max_from_headroom).max(baseline)
     }
 
     /// Derives per-core adaptive buffer dimensions bounded by the Dual-Constraint Anti-OOM formula.
     #[inline]
     pub fn from_hardware(max_idle: usize, total_memory_bytes: usize, num_cores: usize) -> Self {
-        let (header_base, small_base, med_base, std_base, large_base) =
+        let (small_base, med_base, std_base, large_base) =
             Self::buffer_pool_dimensions_per_core(max_idle);
 
-        const HEADER_WORKSPACE_BYTES: usize = 1024;
-        let header_max = Self::adaptive_burst_cap(
-            header_base,
-            total_memory_bytes,
-            num_cores,
-            HEADER_WORKSPACE_BYTES,
-        );
         let small_max = Self::adaptive_burst_cap(small_base, total_memory_bytes, num_cores, 4096);
         let med_max = Self::adaptive_burst_cap(med_base, total_memory_bytes, num_cores, 16384);
         let std_max = Self::adaptive_burst_cap(std_base, total_memory_bytes, num_cores, 32768);
         let large_max = Self::adaptive_burst_cap(large_base, total_memory_bytes, num_cores, 65536);
 
         Self {
-            header_baseline: header_base,
-            header_max_cap: header_max,
             small_baseline: small_base,
             small_max_cap: small_max,
             medium_baseline: med_base,

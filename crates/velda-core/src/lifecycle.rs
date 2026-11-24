@@ -19,7 +19,7 @@ use std::time::Duration;
 use http::{HeaderValue, StatusCode};
 
 use crate::{
-    buffer::HeaderWorkspace,
+    buffer::header::HeaderWorkspace,
     context::RequestContext,
     error::RejectReason,
     l7::{request::Body, response::L7Response},

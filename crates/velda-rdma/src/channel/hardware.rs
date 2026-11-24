@@ -126,9 +126,9 @@ impl HardwareSender {
             // Non-temporal prefetch on source payload + non-temporal streaming copy into pinned DMA buffer.
             // Bypasses L1D/L2 cache allocation so 64KB RDMA chunks never evict the L1D router table
             // and never dirty core L1D/L2 lines (eliminating PCIe DMA snoop stalls on the HCA).
-            velda_core::buffer::prefetch_nta_range(data.as_ptr(), data.len().min(256));
+            velda_core::buffer::slab::prefetch_nta_range(data.as_ptr(), data.len().min(256));
             let dst_slice = unsafe { std::slice::from_raw_parts_mut(send_ptr, data.len()) };
-            velda_core::buffer::copy_non_temporal(data, dst_slice);
+            velda_core::buffer::slab::copy_non_temporal(data, dst_slice);
 
             let sge = [ibv_sge {
                 addr: send_ptr as u64,
@@ -415,9 +415,9 @@ impl HardwareSender {
 
         unsafe {
             let send_ptr = self.shared.raw_buf.add(send_offset);
-            velda_core::buffer::prefetch_nta_range(data.as_ptr(), data.len().min(256));
+            velda_core::buffer::slab::prefetch_nta_range(data.as_ptr(), data.len().min(256));
             let dst_slice = std::slice::from_raw_parts_mut(send_ptr, data.len());
-            velda_core::buffer::copy_non_temporal(data, dst_slice);
+            velda_core::buffer::slab::copy_non_temporal(data, dst_slice);
 
             let sge = [ibv_sge {
                 addr: send_ptr as u64,
@@ -503,7 +503,7 @@ impl HardwareReceiver {
 
             // Prefetch inbound DMA buffer at L3 LLC (_MM_HINT_T2 / pldl3keep) where PCIe DDIO
             // deposits frames, preventing 64KB RX payloads from evicting L1D router or L2 headers.
-            velda_core::buffer::prefetch_l3_range(rx_ptr, safe_len.min(256));
+            velda_core::buffer::slab::prefetch_l3_range(rx_ptr, safe_len.min(256));
 
             // Only read imm_data if IBV_WC_WITH_IMM flag is set, and saturate at max_recv_wr.
             // Also inspect RDMA_FLAG_EOF bit to detect clean connection shutdown (Fixes Scenario 5).

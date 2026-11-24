@@ -18,10 +18,10 @@
 //! ```
 
 use http::StatusCode;
-use http::header::{CONTENT_TYPE, HeaderMap, HeaderValue};
+use http::header::{CONTENT_TYPE, HeaderName, HeaderValue};
 use serde::{Deserialize, Serialize};
 
-use crate::L7Response;
+use crate::{HeaderWorkspace, L7Response};
 
 /// Canonical gRPC status code discriminant.
 ///
@@ -102,6 +102,24 @@ pub static GRPC_STATUS_CODE_STRINGS: [&str; 18] = [
     "17",
 ];
 
+const GRPC_STATUS_NAME: HeaderName = HeaderName::from_static("grpc-status");
+const GRPC_MESSAGE_NAME: HeaderName = HeaderName::from_static("grpc-message");
+const APPLICATION_GRPC_VALUE: HeaderValue = HeaderValue::from_static("application/grpc");
+
+/// Pre-built compile-time [`HeaderValue`] LUT mapping `GrpcStatus` (0..=17) in O(1)
+/// with zero runtime byte-validation loops.
+static GRPC_STATUS_HEADER_VALUES: [HeaderValue; 18] = {
+    use std::mem::MaybeUninit;
+    let mut arr: [MaybeUninit<HeaderValue>; 18] = [const { MaybeUninit::uninit() }; 18];
+    let mut i = 0;
+    while i < 18 {
+        arr[i].write(HeaderValue::from_static(GRPC_STATUS_CODE_STRINGS[i]));
+        i += 1;
+    }
+    // SAFETY: All 18 slots [0..18] are initialized above prior to transmuting.
+    unsafe { std::mem::transmute::<[MaybeUninit<HeaderValue>; 18], [HeaderValue; 18]>(arr) }
+};
+
 impl GrpcStatus {
     /// Total number of distinct gRPC status variants.
     pub const COUNT: usize = 18;
@@ -174,36 +192,36 @@ impl GrpcStatus {
         GRPC_STATUS_CODE_STRINGS[self as usize]
     }
 
+    /// Returns a pre-validated O(1) [`HeaderValue`] for this status code ("0".."17").
+    #[inline(always)]
+    pub fn code_header_value(self) -> HeaderValue {
+        GRPC_STATUS_HEADER_VALUES[self as usize].clone()
+    }
+
     /// Converts an integer code to a typed [`GrpcStatus`].
     #[inline(always)]
     pub const fn from_code(code: u32) -> Self {
         Self::from_wire_u32(code)
     }
 
-    /// Constructs standard gRPC trailers containing `grpc-status` and optional `grpc-message`.
-    pub fn to_trailers(self, message: Option<&str>) -> HeaderMap {
-        let mut map = HeaderMap::with_capacity(2);
-        map.insert(
-            http::header::HeaderName::from_static("grpc-status"),
-            HeaderValue::from_static(self.code_str()),
-        );
+    /// Constructs standard gRPC trailers in a [`HeaderWorkspace`] containing `grpc-status` and optional `grpc-message`.
+    pub fn to_trailer_workspace(self, message: Option<&str>) -> HeaderWorkspace {
+        let mut ws = HeaderWorkspace::empty(2);
+        ws.insert(GRPC_STATUS_NAME, self.code_header_value());
         if let Some(val) = message.and_then(|m| HeaderValue::from_str(m).ok()) {
-            map.insert(http::header::HeaderName::from_static("grpc-message"), val);
+            ws.insert(GRPC_MESSAGE_NAME, val);
         }
-        map
+        ws
     }
 
     /// Constructs a standard gRPC Trailers-Only [`L7Response`].
     pub fn to_l7_response(self, message: Option<&str>) -> L7Response {
         let mut resp = L7Response::empty(StatusCode::OK)
-            .with_header(CONTENT_TYPE, HeaderValue::from_static("application/grpc"))
-            .with_header(
-                http::header::HeaderName::from_static("grpc-status"),
-                HeaderValue::from_static(self.code_str()),
-            );
+            .with_header(CONTENT_TYPE, APPLICATION_GRPC_VALUE)
+            .with_header(GRPC_STATUS_NAME, self.code_header_value());
 
         if let Some(val) = message.and_then(|m| HeaderValue::from_str(m).ok()) {
-            resp = resp.with_header(http::header::HeaderName::from_static("grpc-message"), val);
+            resp = resp.with_header(GRPC_MESSAGE_NAME, val);
         }
         resp
     }
@@ -453,7 +471,7 @@ mod tests {
         assert_eq!(resp.headers.get("grpc-status").unwrap(), "7");
         assert_eq!(resp.headers.get("grpc-message").unwrap(), "access denied");
 
-        let trailers = GrpcStatus::ResourceExhausted.to_trailers(Some("rate limited"));
+        let trailers = GrpcStatus::ResourceExhausted.to_trailer_workspace(Some("rate limited"));
         assert_eq!(trailers.get("grpc-status").unwrap(), "8");
         assert_eq!(trailers.get("grpc-message").unwrap(), "rate limited");
     }

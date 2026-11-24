@@ -365,7 +365,7 @@ impl RdmaSlabArenaInner {
         let start = hint_atom.load(Ordering::Relaxed) & word_mask;
 
         // Keep pool management bitmap metadata warm in L2 (_MM_HINT_T1) while payload stays in L3/DRAM.
-        velda_core::buffer::prefetch_l2_range(
+        velda_core::buffer::slab::prefetch_l2_range(
             unsafe { words.as_ptr().add(start) as *const u8 },
             std::mem::size_of_val(words).min(256),
         );
@@ -668,7 +668,7 @@ impl RdmaSlabArena {
 
         // Prefetch into L3 Last-Level Cache (_MM_HINT_T2 / pldl3keep) where PCIe rNIC DMA
         // (Intel DDIO / AMD SDCI) operates, strictly avoiding L1D/L2 cache pollution.
-        velda_core::buffer::prefetch_l3_range(ptr, 64);
+        velda_core::buffer::slab::prefetch_l3_range(ptr, 64);
 
         let addr = ptr as u64;
 
@@ -791,7 +791,7 @@ impl Drop for RdmaSlabLease {
         // Uses Non-Temporal Streaming Zero (`vmovntdq` / `movntdq` / `movnti`) to flush zeros
         // directly through Write-Combining (WC) buffers to L3/RAM without triggering
         // Read-For-Ownership (RFO) or evicting the hot `velda-router` table from L1D/L2.
-        velda_core::buffer::zero_non_temporal(self.as_mut_slice());
+        velda_core::buffer::slab::zero_non_temporal(self.as_mut_slice());
         self.inner.free_slot(self.class, self.slot_idx);
     }
 }
@@ -828,7 +828,7 @@ impl RdmaSlabLease {
             return;
         }
         let dst = &mut self.as_mut_slice()[offset..offset + to_copy];
-        velda_core::buffer::copy_non_temporal(&src[..to_copy], dst);
+        velda_core::buffer::slab::copy_non_temporal(&src[..to_copy], dst);
     }
 
     /// Prefetches `[offset .. offset + len)` of this RDMA slot into L3 Cache (`_MM_HINT_T2` / `pldl3keep`),
@@ -840,7 +840,10 @@ impl RdmaSlabLease {
         }
         let to_prefetch = len.min(self.len - offset);
         if to_prefetch > 0 {
-            velda_core::buffer::prefetch_l3_range(unsafe { self.ptr.add(offset) }, to_prefetch);
+            velda_core::buffer::slab::prefetch_l3_range(
+                unsafe { self.ptr.add(offset) },
+                to_prefetch,
+            );
         }
     }
 
@@ -852,7 +855,10 @@ impl RdmaSlabLease {
         }
         let to_prefetch = len.min(self.len - offset);
         if to_prefetch > 0 {
-            velda_core::buffer::prefetch_nta_range(unsafe { self.ptr.add(offset) }, to_prefetch);
+            velda_core::buffer::slab::prefetch_nta_range(
+                unsafe { self.ptr.add(offset) },
+                to_prefetch,
+            );
         }
     }
 

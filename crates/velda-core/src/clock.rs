@@ -69,9 +69,22 @@ pub fn init_clock() {
 
 /// Returns current Unix epoch time in integer seconds via relaxed atomic load.
 ///
-/// Requires [`init_clock()`] to be invoked at process/test startup.
+/// Lazily initializes the background clock worker on first cold call if [`init_clock()`]
+/// was not yet invoked (e.g. inside standalone unit/integration tests).
 #[inline(always)]
 pub fn coarse_sec() -> u64 {
+    let sec = COARSE_SECS.load(Ordering::Relaxed);
+    if sec != 0 {
+        sec
+    } else {
+        init_and_load_coarse_sec()
+    }
+}
+
+#[cold]
+#[inline(never)]
+fn init_and_load_coarse_sec() -> u64 {
+    init_clock();
     COARSE_SECS.load(Ordering::Relaxed)
 }
 

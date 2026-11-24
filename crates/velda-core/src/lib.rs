@@ -32,7 +32,7 @@ pub mod worker;
 // Core Request Buffer Workspace
 // -----------------------------------------------------------------------------
 
-pub use buffer::HeaderWorkspace;
+pub use buffer::header::{HeaderWorkspace, TAG_BYPASS_BIT, header_key};
 
 // -----------------------------------------------------------------------------
 // Canonical L1D Vocabulary

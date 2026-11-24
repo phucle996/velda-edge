@@ -7,10 +7,10 @@ use std::error::Error as StdError;
 use std::net::SocketAddr;
 
 use bytes::Bytes;
-use http::{HeaderMap, Method, Uri, Version};
+use http::{Method, Uri, Version};
 use velda_core::l4::request::TransportProtocol;
 use velda_core::l7::request::Body;
-use velda_core::{Error, ErrorKind, L4Request, L7Request, RequestState};
+use velda_core::{Error, ErrorKind, HeaderWorkspace, L4Request, L7Request, RequestState};
 
 #[test]
 fn test_extreme_integer_boundaries() {
@@ -102,13 +102,13 @@ fn test_unusual_and_dirty_l7_requests() {
             Method::POST,
             uri.clone(),
             Version::HTTP_11,
-            HeaderMap::new(),
+            HeaderWorkspace::empty(0),
             Body::Empty,
         );
 
-        assert_eq!(l7.path(), uri.path());
-        assert_eq!(l7.query(), uri.query());
-        assert!(!l7.has_body());
+        assert_eq!(l7.uri.path(), uri.path());
+        assert_eq!(l7.uri.query(), uri.query());
+        assert!(l7.body.is_empty());
     }
 
     // Malformed raw unencoded characters must be rejected by URI parser
@@ -120,13 +120,12 @@ fn test_unusual_and_dirty_l7_requests() {
         Method::PUT,
         Uri::from_static("/upload"),
         Version::HTTP_2,
-        HeaderMap::new(),
+        HeaderWorkspace::empty(0),
         Body::Bytes(large_bytes.clone()),
     );
 
-    assert!(l7_large.has_body());
-    assert!(l7_large.is_http2());
-    assert!(!l7_large.is_http11());
+    assert!(!l7_large.body.is_empty());
+    assert_eq!(l7_large.version, Version::HTTP_2);
 
     if let Body::Bytes(b) = &l7_large.body {
         assert_eq!(b.len(), 1024 * 1024);
