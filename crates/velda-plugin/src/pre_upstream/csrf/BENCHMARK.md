@@ -1,430 +1,61 @@
-# Performance Benchmark Report: Cross-Site Request Forgery Protection Plugin (`csrf`) (`csrf`)
+# CSRF Plugin Benchmark Report
 
-Performance benchmark specification and evaluation framework for the `csrf` plugin across **Velda Edge**, **Kong Gateway 3.9**, **Apache APISIX 3.10**, and **Envoy Proxy 1.31**.
-
----
-
-## 1. Test Environment & Measurement Methodology
-
-### 1.1 Production-Grade Hardware & Network Testbed
-
-*[TBD]*
+All live proxy measurements were executed in an isolated dual-node KVM environment (`velda-gw` ↔ `velda-obs`). Clean macro runs had no profilers attached; PMU (`perf stat`) and CPU symbol sampling (`perf record`) were collected in separate steady-state windows.
 
 ---
 
-### 1.2 Standardized 5-Tier Metric Taxonomy
+## 1. Testbed Specification
 
-All benchmark scenarios are evaluated across five standardized, non-abbreviated metric tiers:
-
-1. **Tier 1: Macro Network, L7 & CSRF Validation Delivery Metrics**:
-   - **Duration (seconds)**: Continuous execution duration of the benchmark session (standard 15.00 seconds).
-   - **Total Requests**: Total downstream requests successfully served.
-   - **Throughput (requests/second)**: Processing throughput rate.
-   - **Wire Bandwidth (Megabytes/second)**: Aggregate data transfer rate across the network interface.
-   - **Total Requests Inspected**: Total downstream requests evaluated for CSRF tokens.
-   - **State-Changing Requests Validated**: Total POST, PUT, DELETE, PATCH requests evaluated against CSRF policies.
-   - **CSRF Violations Blocked (403)**: Total invalid or missing CSRF token requests rejected with 403 Forbidden.
-   - **Mean Latency (milliseconds)**: Average time from request receipt to response completion.
-   - **Min Latency (milliseconds)**: Minimum recorded latency.
-   - **Median Latency P50 (milliseconds)**: 50th percentile response latency.
-   - **P75 Latency (milliseconds)**: 75th percentile response latency.
-   - **P90 Latency (milliseconds)**: 90th percentile response latency.
-   - **P99 Tail Latency (milliseconds)**: 99th percentile response latency.
-   - **P99.9 Tail Latency (milliseconds)**: 99.9th percentile deep tail latency.
-   - **Max Latency (milliseconds)**: Maximum recorded response latency.
-   - **Latency Standard Deviation (milliseconds)**: Jitter and dispersion of response latency.
-   - **Connect Time Average (milliseconds)**: Downstream connection handshake duration.
-   - **HTTP Status Code Distribution (2xx / 4xx / 5xx)**: Proportional breakdown of response status codes.
-   - **Success Rate (%)**: Percentage of requests successfully completed without connection resets or drops.
-2. **Tier 2: System Resource Footprint**:
-   - **Total CPU Utilization (% CPU)**: Normalized aggregate CPU utilization across all allocated processor cores.
-   - **User CPU (% User CPU)**: CPU time spent in userspace logic.
-   - **System / Kernel CPU (% System / Kernel CPU)**: CPU time spent in kernel syscalls and socket I/O.
-   - **SoftIRQ CPU (% SoftIRQ CPU)**: CPU time spent processing network interrupt handlers.
-   - **Frontline Worker 0 CPU (%)**: Core 0 request-serving worker CPU load.
-   - **Frontline Worker 1 CPU (%)**: Core 1 request-serving worker CPU load.
-   - **Shadow Logistics Worker CPU (%)**: Dedicated background worker CPU load running under `SCHED_IDLE`.
-   - **Peak Resident Set Size (Megabytes)**: Maximum non-swapped physical memory footprint (`VmHWM`).
-   - **RAM Usage (%)**: Percentage of total system memory consumed.
-   - **Heap Allocations per Request (Bytes / Count)**: Dynamic memory allocation rate on the serving hot-path.
-   - **Memory Leak Rate (Megabytes / minute)**: Long-term memory drift over sustained execution.
-3. **Tier 3: Micro Linux Kernel & OS Telemetry via `perf stat` & tracepoints**:
-   - **System Calls per Request (System Calls / Request)**: Average syscall overhead per request.
-   - **Context Switches per Request (Context Switches / Request)**: Average thread/process context switch rate.
-   - **Total System Calls**: Aggregate transitions into the Linux kernel.
-   - **Total Context Switches**: Aggregate involuntary and voluntary scheduler context switches.
-   - **Kernel Time (seconds)**: Total cumulative time spent inside the Linux kernel.
-   - **Futex Calls**: Number of user-space locking and synchronization sleep/wake syscalls.
-   - **Futex Percentage of Total System Calls (%)**: Ratio of futex contention syscalls to total syscalls.
-4. **Tier 4: Micro High-Performance Computing & CPU Hardware Counters via `perf stat`**:
-   - **Total CPU Instructions**: Aggregate retired machine instructions executed by the CPU.
-   - **Instructions per Request (Instructions / Request)**: Average retired instructions per request.
-   - **Total CPU Cycles**: Aggregate unhalted hardware clock cycles consumed.
-   - **Cycles per Request (Cycles / Request)**: Average CPU clock cycles consumed per request.
-   - **Instructions Per Cycle (IPC)**: Hardware instruction pipeline execution efficiency.
-   - **Total Branches**: Aggregate hardware conditional and unconditional branch instructions.
-   - **Branches per Request (Branches / Request)**: Average branch instructions per request.
-   - **Branch Mispredictions**: Hardware branch prediction misses.
-   - **Branch Misprediction Rate (%)**: Ratio of branch misses to total branches.
-   - **L1 Data Cache Miss Rate (%)**: Level 1 data cache miss ratio.
-   - **Last Level Cache Miss Rate (%)**: Level 3 (LLC) cache miss ratio.
-5. **Tier 5: Plugin-Specific Mechanics & Wire Efficiency**:
-   - **Safe HTTP Method Fast-Path Bypass Latency (nanoseconds)**: CPU cost to bypass CSRF validation for safe HTTP methods (GET, HEAD, OPTIONS).
-   - **Cookie Token Extraction & Slicing Latency (nanoseconds)**: Duration to extract CSRF cookie value directly from cookie header map.
-   - **Header (X-CSRF-Token) Extraction Latency (nanoseconds)**: Duration to extract CSRF token directly from request header map.
-   - **Constant-Time Cryptographic Token Comparison Duration (nanoseconds)**: Time to compare cookie token vs header token resisting timing attacks.
-   - **Immediate 403 Forbidden Response Synthesis Latency (nanoseconds)**: Duration to synthesize and transmit 403 Forbidden response.
-   - **Token Byte Allocation Count (0 on Pre-Allocated Slice Buffers)**: Dynamic heap allocations observed during token extraction and comparison.
-   - **Timing Attack Resistance Variance (nanoseconds)**: Standard deviation of verification duration between valid and invalid tokens.
+| Component | Node / VM | Hardware & Software Spec | Role |
+| :--- | :--- | :--- | :--- |
+| **Gateway Proxy** | `velda-gw` (`192.168.122.10`) | 2 vCPUs (11th Gen Intel Core i5-11400H @ 2.70GHz, SMT off), 1.9 GB RAM, Linux 6.8.0 (`x86_64`, `x86-64-v3`) | Velda Edge (`2` pinned workers, `RUST_LOG=warn`, `http1` listener on `:18080`) |
+| **Load Gen + Backend** | `velda-obs` (`192.168.122.20`) | 4 vCPUs, 4 GB RAM, Linux 6.8.0; `wrk` (`-t4 -c128 -d10s --latency`) + `velda-bench-backend` (`:8081`) | Sustained HTTP/1.1 `GET /ping` & `POST /ping` workload (`Sec-Fetch-Site: same-origin` / `Cookie` / `X-XSRF-TOKEN`) |
 
 ---
 
-## 2. Focused Benchmark Scenarios
+## 2. Micro-Architectural Release ASM Audit (`x86-64-v3`)
 
-To focus directly on essential operational requirements, the evaluation framework defines five targeted scenarios:
-- **Scenario 01: Safe HTTP Method Bypass Baseline (GET / HEAD / OPTIONS, 5,000 req/s)** — Measure added baseline latency overhead when fast-path bypassing safe HTTP methods under light load.
-- **Scenario 02: Nominal Production State-Changing Traffic (POST / PUT / DELETE, 40,000 req/s)** — Evaluate sustained serving stability, tail latency, and resource footprint when validating Double Submit Cookie tokens.
-- **Scenario 03: Peak Hot-Path Double Submit Cookie Verification (100,000+ req/s)** — Extreme stress testing to verify constant-time comparison throughput and confirm non-blocking frontline worker guarantees.
-- **Scenario 04: Custom Header vs Form-URLEncoded CSRF Token Extraction** — Evaluate extraction overhead when comparing cookie tokens against form-encoded body tokens vs custom headers.
-- **Scenario 05: Invalid / Missing CSRF Token Flood (Immediate 403 Forbidden Rejection)** — Simulate CSRF attack flood with mismatched or absent tokens to verify immediate 403 short-circuit without upstream contact.
+Audited via `audit_asm.py` on `target/release/deps/velda_plugin-*.s` (`-C target-cpu=x86-64-v3`):
 
----
-
-## 3. Detailed Benchmark Results
+| Build Variant (`CsrfPlugin::on_upstream_request`) | Total Insts | Heap Allocs (`alloc::*`) | Stack Spills (W / R) | Unaligned Vector Ops | Jump Tables (`jmpq *%reg`) | Atomic Locks (`lock *`) | Out-of-Line Cold Calls |
+| :--- | :---: | :---: | :---: | :---: | :---: | :---: | :--- |
+| **Inline Fallback (Before `#[cold]`)** | `1,099` | **0** | `19 W / 85 R` | `10` | `1` (`MethodMask`) | **0** | `0` |
+| **Cold-Split Final (`#[cold]` Legacy + Double-Submit)** | **`507`** (**-53.9%**) | **0** | **`11 W / 22 R`** | **`2`** (**-80%**) | `1` (`MethodMask`) | **0** | `verify_legacy_origin_fallback`, `verify_double_submit` |
 
 ---
 
-### Scenario 01: Safe HTTP Method Bypass Baseline (GET / HEAD / OPTIONS, 5,000 req/s)
-- **Objective**: Determine baseline latency addition and CPU footprint when skipping CSRF checks on idempotent requests.
-- **Execution Command**: `oha -z 15s -q 5000 -c 50 http://<gateway_host>:<port>/api/v1/ping`
+## 3. Macro Throughput & Latency (Clean Runs)
 
-| Detailed Measurement Metric | **Velda Edge** (Rust 2024) | **Kong Gateway 3.9** (LuaJIT) | **Apache APISIX 3.10** (LuaJIT) | **Envoy Proxy 1.31** (C++) |
-| :--- | :---: | :---: | :---: | :---: |
-| **Duration (seconds)** | **15.00** | **15.00** | **15.00** | **15.00** |
-| **Total Requests** | *[TBD]* | *[TBD]* | *[TBD]* | *[TBD]* |
-| **Throughput (requests/second)** | *[TBD]* | *[TBD]* | *[TBD]* | *[TBD]* |
-| **Wire Bandwidth (Megabytes/second)** | *[TBD]* | *[TBD]* | *[TBD]* | *[TBD]* |
-| **Total Requests Inspected** | *[TBD]* | *[TBD]* | *[TBD]* | *[TBD]* |
-| **State-Changing Requests Validated** | *[TBD]* | *[TBD]* | *[TBD]* | *[TBD]* |
-| **CSRF Violations Blocked (403)** | *[TBD]* | *[TBD]* | *[TBD]* | *[TBD]* |
-| **Mean Latency (milliseconds)** | *[TBD]* | *[TBD]* | *[TBD]* | *[TBD]* |
-| **Min Latency (milliseconds)** | *[TBD]* | *[TBD]* | *[TBD]* | *[TBD]* |
-| **Median Latency P50 (milliseconds)** | *[TBD]* | *[TBD]* | *[TBD]* | *[TBD]* |
-| **P75 Latency (milliseconds)** | *[TBD]* | *[TBD]* | *[TBD]* | *[TBD]* |
-| **P90 Latency (milliseconds)** | *[TBD]* | *[TBD]* | *[TBD]* | *[TBD]* |
-| **P99 Tail Latency (milliseconds)** | *[TBD]* | *[TBD]* | *[TBD]* | *[TBD]* |
-| **P99.9 Tail Latency (milliseconds)** | *[TBD]* | *[TBD]* | *[TBD]* | *[TBD]* |
-| **Max Latency (milliseconds)** | *[TBD]* | *[TBD]* | *[TBD]* | *[TBD]* |
-| **Latency Standard Deviation (milliseconds)** | *[TBD]* | *[TBD]* | *[TBD]* | *[TBD]* |
-| **Connect Time Average (milliseconds)** | *[TBD]* | *[TBD]* | *[TBD]* | *[TBD]* |
-| **HTTP Status Code Distribution (2xx / 4xx / 5xx)** | *[TBD]* | *[TBD]* | *[TBD]* | *[TBD]* |
-| **Success Rate (%)** | *[TBD]* | *[TBD]* | *[TBD]* | *[TBD]* |
-| **Total CPU Utilization (% CPU)** | *[TBD]* | *[TBD]* | *[TBD]* | *[TBD]* |
-| **User CPU (% User CPU)** | *[TBD]* | *[TBD]* | *[TBD]* | *[TBD]* |
-| **System / Kernel CPU (% System / Kernel CPU)** | *[TBD]* | *[TBD]* | *[TBD]* | *[TBD]* |
-| **SoftIRQ CPU (% SoftIRQ CPU)** | *[TBD]* | *[TBD]* | *[TBD]* | *[TBD]* |
-| **Frontline Worker 0 CPU (%)** | *[TBD]* | *[TBD]* | *[TBD]* | *[TBD]* |
-| **Frontline Worker 1 CPU (%)** | *[TBD]* | *[TBD]* | *[TBD]* | *[TBD]* |
-| **Shadow Logistics Worker CPU (%)** | *[TBD]* | N/A | N/A | N/A |
-| **Peak Resident Set Size (Megabytes)** | *[TBD]* | *[TBD]* | *[TBD]* | *[TBD]* |
-| **RAM Usage (%)** | *[TBD]* | *[TBD]* | *[TBD]* | *[TBD]* |
-| **Heap Allocations per Request (Bytes / Count)** | *[TBD]* | *[TBD]* | *[TBD]* | *[TBD]* |
-| **Memory Leak Rate (Megabytes / minute)** | *[TBD]* | *[TBD]* | *[TBD]* | *[TBD]* |
-| **System Calls per Request (System Calls / Request)** | *[TBD]* | *[TBD]* | *[TBD]* | *[TBD]* |
-| **Context Switches per Request (Context Switches / Request)** | *[TBD]* | *[TBD]* | *[TBD]* | *[TBD]* |
-| **Total System Calls** | *[TBD]* | *[TBD]* | *[TBD]* | *[TBD]* |
-| **Total Context Switches** | *[TBD]* | *[TBD]* | *[TBD]* | *[TBD]* |
-| **Kernel Time (seconds)** | *[TBD]* | *[TBD]* | *[TBD]* | *[TBD]* |
-| **Futex Calls** | *[TBD]* | *[TBD]* | *[TBD]* | *[TBD]* |
-| **Futex Percentage of Total System Calls (%)** | *[TBD]* | *[TBD]* | *[TBD]* | *[TBD]* |
-| **Total CPU Instructions** | *[TBD]* | *[TBD]* | *[TBD]* | *[TBD]* |
-| **Instructions per Request (Instructions / Request)** | *[TBD]* | *[TBD]* | *[TBD]* | *[TBD]* |
-| **Total CPU Cycles** | *[TBD]* | *[TBD]* | *[TBD]* | *[TBD]* |
-| **Cycles per Request (Cycles / Request)** | *[TBD]* | *[TBD]* | *[TBD]* | *[TBD]* |
-| **Instructions Per Cycle (IPC)** | *[TBD]* | *[TBD]* | *[TBD]* | *[TBD]* |
-| **Total Branches** | *[TBD]* | *[TBD]* | *[TBD]* | *[TBD]* |
-| **Branches per Request (Branches / Request)** | *[TBD]* | *[TBD]* | *[TBD]* | *[TBD]* |
-| **Branch Mispredictions** | *[TBD]* | *[TBD]* | *[TBD]* | *[TBD]* |
-| **Branch Misprediction Rate (%)** | *[TBD]* | *[TBD]* | *[TBD]* | *[TBD]* |
-| **L1 Data Cache Miss Rate (%)** | *[TBD]* | *[TBD]* | *[TBD]* | *[TBD]* |
-| **Last Level Cache Miss Rate (%)** | *[TBD]* | *[TBD]* | *[TBD]* | *[TBD]* |
-| **Safe HTTP Method Fast-Path Bypass Latency (nanoseconds)** | *[TBD]* | *[TBD]* | *[TBD]* | *[TBD]* |
-| **Cookie Token Extraction & Slicing Latency (nanoseconds)** | *[TBD]* | *[TBD]* | *[TBD]* | *[TBD]* |
-| **Header (X-CSRF-Token) Extraction Latency (nanoseconds)** | *[TBD]* | *[TBD]* | *[TBD]* | *[TBD]* |
-| **Constant-Time Cryptographic Token Comparison Duration (nanoseconds)** | *[TBD]* | *[TBD]* | *[TBD]* | *[TBD]* |
-| **Immediate 403 Forbidden Response Synthesis Latency (nanoseconds)** | *[TBD]* | *[TBD]* | *[TBD]* | *[TBD]* |
-| **Token Byte Allocation Count (0 on Pre-Allocated Slice Buffers)** | *[TBD]* | *[TBD]* | *[TBD]* | *[TBD]* |
-| **Timing Attack Resistance Variance (nanoseconds)** | *[TBD]* | *[TBD]* | *[TBD]* | *[TBD]* |
+Executed via `wrk -t4 -c128 -d10s --latency` after 2s connection-pool warmup:
+
+| Scenario | Throughput (RPS) | Delta vs C1 | Avg | P50 | P90 | P99 | Max | Stdev |
+| :--- | :---: | :---: | :---: | :---: | :---: | :---: | :---: | :---: |
+| **C1: Raw Proxy `POST` (`plugins: []`)** | **69,640.66** | baseline | 1.83ms | 1.72ms | 2.40ms | 4.41ms | 18.27ms | 642.59us |
+| **C2: CSRF Safe `GET` Fast-Path (Gate 1)** | **67,363.57** | `-3.3%` | 1.88ms | 1.79ms | 2.36ms | 3.90ms | 10.76ms | 504.23us |
+| **C3: CSRF Modern Cross-Origin `POST` (`Sec-Fetch-Site`, Gate 2)** | **63,171.11** | `-9.3%` | 2.01ms | 1.93ms | 2.48ms | 4.04ms | 10.04ms | 516.35us |
+| **C4: CSRF Legacy Double-Submit `POST` (`XSRF-TOKEN`, Gate 2+4)** | **61,566.53** | `-11.6%` | 2.06ms | 2.00ms | 2.61ms | 4.27ms | 9.98ms | 540.52us |
 
 ---
 
-### Scenario 02: Nominal Production State-Changing Traffic (POST / PUT / DELETE, 40,000 req/s)
-- **Objective**: Measure sustained throughput, latency profile, and resource consumption under valid CSRF token validation.
-- **Execution Command**: `oha -z 15s -q 40000 -c 100 -m POST -H "Cookie: csrf_token=secure_random_token_42" -H "X-CSRF-Token: secure_random_token_42" http://<gateway_host>:<port>/api/v1/update`
+## 4. Hardware PMU Counters (10s Steady-State `perf stat`)
 
-| Detailed Measurement Metric | **Velda Edge** (Rust 2024) | **Kong Gateway 3.9** (LuaJIT) | **Apache APISIX 3.10** (LuaJIT) | **Envoy Proxy 1.31** (C++) |
-| :--- | :---: | :---: | :---: | :---: |
-| **Duration (seconds)** | **15.00** | **15.00** | **15.00** | **15.00** |
-| **Total Requests** | *[TBD]* | *[TBD]* | *[TBD]* | *[TBD]* |
-| **Throughput (requests/second)** | *[TBD]* | *[TBD]* | *[TBD]* | *[TBD]* |
-| **Wire Bandwidth (Megabytes/second)** | *[TBD]* | *[TBD]* | *[TBD]* | *[TBD]* |
-| **Total Requests Inspected** | *[TBD]* | *[TBD]* | *[TBD]* | *[TBD]* |
-| **State-Changing Requests Validated** | *[TBD]* | *[TBD]* | *[TBD]* | *[TBD]* |
-| **CSRF Violations Blocked (403)** | *[TBD]* | *[TBD]* | *[TBD]* | *[TBD]* |
-| **Mean Latency (milliseconds)** | *[TBD]* | *[TBD]* | *[TBD]* | *[TBD]* |
-| **Min Latency (milliseconds)** | *[TBD]* | *[TBD]* | *[TBD]* | *[TBD]* |
-| **Median Latency P50 (milliseconds)** | *[TBD]* | *[TBD]* | *[TBD]* | *[TBD]* |
-| **P75 Latency (milliseconds)** | *[TBD]* | *[TBD]* | *[TBD]* | *[TBD]* |
-| **P90 Latency (milliseconds)** | *[TBD]* | *[TBD]* | *[TBD]* | *[TBD]* |
-| **P99 Tail Latency (milliseconds)** | *[TBD]* | *[TBD]* | *[TBD]* | *[TBD]* |
-| **P99.9 Tail Latency (milliseconds)** | *[TBD]* | *[TBD]* | *[TBD]* | *[TBD]* |
-| **Max Latency (milliseconds)** | *[TBD]* | *[TBD]* | *[TBD]* | *[TBD]* |
-| **Latency Standard Deviation (milliseconds)** | *[TBD]* | *[TBD]* | *[TBD]* | *[TBD]* |
-| **Connect Time Average (milliseconds)** | *[TBD]* | *[TBD]* | *[TBD]* | *[TBD]* |
-| **HTTP Status Code Distribution (2xx / 4xx / 5xx)** | *[TBD]* | *[TBD]* | *[TBD]* | *[TBD]* |
-| **Success Rate (%)** | *[TBD]* | *[TBD]* | *[TBD]* | *[TBD]* |
-| **Total CPU Utilization (% CPU)** | *[TBD]* | *[TBD]* | *[TBD]* | *[TBD]* |
-| **User CPU (% User CPU)** | *[TBD]* | *[TBD]* | *[TBD]* | *[TBD]* |
-| **System / Kernel CPU (% System / Kernel CPU)** | *[TBD]* | *[TBD]* | *[TBD]* | *[TBD]* |
-| **SoftIRQ CPU (% SoftIRQ CPU)** | *[TBD]* | *[TBD]* | *[TBD]* | *[TBD]* |
-| **Frontline Worker 0 CPU (%)** | *[TBD]* | *[TBD]* | *[TBD]* | *[TBD]* |
-| **Frontline Worker 1 CPU (%)** | *[TBD]* | *[TBD]* | *[TBD]* | *[TBD]* |
-| **Shadow Logistics Worker CPU (%)** | *[TBD]* | N/A | N/A | N/A |
-| **Peak Resident Set Size (Megabytes)** | *[TBD]* | *[TBD]* | *[TBD]* | *[TBD]* |
-| **RAM Usage (%)** | *[TBD]* | *[TBD]* | *[TBD]* | *[TBD]* |
-| **Heap Allocations per Request (Bytes / Count)** | *[TBD]* | *[TBD]* | *[TBD]* | *[TBD]* |
-| **Memory Leak Rate (Megabytes / minute)** | *[TBD]* | *[TBD]* | *[TBD]* | *[TBD]* |
-| **System Calls per Request (System Calls / Request)** | *[TBD]* | *[TBD]* | *[TBD]* | *[TBD]* |
-| **Context Switches per Request (Context Switches / Request)** | *[TBD]* | *[TBD]* | *[TBD]* | *[TBD]* |
-| **Total System Calls** | *[TBD]* | *[TBD]* | *[TBD]* | *[TBD]* |
-| **Total Context Switches** | *[TBD]* | *[TBD]* | *[TBD]* | *[TBD]* |
-| **Kernel Time (seconds)** | *[TBD]* | *[TBD]* | *[TBD]* | *[TBD]* |
-| **Futex Calls** | *[TBD]* | *[TBD]* | *[TBD]* | *[TBD]* |
-| **Futex Percentage of Total System Calls (%)** | *[TBD]* | *[TBD]* | *[TBD]* | *[TBD]* |
-| **Total CPU Instructions** | *[TBD]* | *[TBD]* | *[TBD]* | *[TBD]* |
-| **Instructions per Request (Instructions / Request)** | *[TBD]* | *[TBD]* | *[TBD]* | *[TBD]* |
-| **Total CPU Cycles** | *[TBD]* | *[TBD]* | *[TBD]* | *[TBD]* |
-| **Cycles per Request (Cycles / Request)** | *[TBD]* | *[TBD]* | *[TBD]* | *[TBD]* |
-| **Instructions Per Cycle (IPC)** | *[TBD]* | *[TBD]* | *[TBD]* | *[TBD]* |
-| **Total Branches** | *[TBD]* | *[TBD]* | *[TBD]* | *[TBD]* |
-| **Branches per Request (Branches / Request)** | *[TBD]* | *[TBD]* | *[TBD]* | *[TBD]* |
-| **Branch Mispredictions** | *[TBD]* | *[TBD]* | *[TBD]* | *[TBD]* |
-| **Branch Misprediction Rate (%)** | *[TBD]* | *[TBD]* | *[TBD]* | *[TBD]* |
-| **L1 Data Cache Miss Rate (%)** | *[TBD]* | *[TBD]* | *[TBD]* | *[TBD]* |
-| **Last Level Cache Miss Rate (%)** | *[TBD]* | *[TBD]* | *[TBD]* | *[TBD]* |
-| **Safe HTTP Method Fast-Path Bypass Latency (nanoseconds)** | *[TBD]* | *[TBD]* | *[TBD]* | *[TBD]* |
-| **Cookie Token Extraction & Slicing Latency (nanoseconds)** | *[TBD]* | *[TBD]* | *[TBD]* | *[TBD]* |
-| **Header (X-CSRF-Token) Extraction Latency (nanoseconds)** | *[TBD]* | *[TBD]* | *[TBD]* | *[TBD]* |
-| **Constant-Time Cryptographic Token Comparison Duration (nanoseconds)** | *[TBD]* | *[TBD]* | *[TBD]* | *[TBD]* |
-| **Immediate 403 Forbidden Response Synthesis Latency (nanoseconds)** | *[TBD]* | *[TBD]* | *[TBD]* | *[TBD]* |
-| **Token Byte Allocation Count (0 on Pre-Allocated Slice Buffers)** | *[TBD]* | *[TBD]* | *[TBD]* | *[TBD]* |
-| **Timing Attack Resistance Variance (nanoseconds)** | *[TBD]* | *[TBD]* | *[TBD]* | *[TBD]* |
+| Scenario | PMU Window RPS | Cycles (B) | Instructions (B) | IPC | Inst / Req | Branch Miss (%) | L1d Load Miss (%) | Context Switches | Futex |
+| :--- | :---: | :---: | :---: | :---: | :---: | :---: | :---: | :---: | :---: |
+| **C1: Raw `POST` Baseline** | 52,948.70 | 34.59 | 34.96 | `1.01` | `66,033` | `0.86%` | `10.11%` | 8,783 | **`0`** |
+| **C2: CSRF Safe `GET`** | 51,910.51 | 33.96 | 32.99 | `0.97` | `63,558` | `0.90%` | `10.02%` | 9,292 | **`0`** |
+| **C3: CSRF Modern `POST`** | 44,410.29 | 31.97 | 30.63 | `0.96` | `68,964` (`+2,931`) | **`0.86%`** | `10.28%` | 7,400 | **`0`** |
+| **C4: CSRF Double-Submit `POST`** | 45,860.06 | 33.93 | 33.18 | `0.98` | `72,355` (`+6,322`) | **`0.86%`** | `10.13%` | 7,677 | **`0`** |
 
 ---
 
-### Scenario 03: Peak Hot-Path Double Submit Cookie Verification (100,000+ req/s)
-- **Objective**: Confirm maximum possible throughput when authenticating authorized state-changing requests.
-- **Execution Command**: `oha -z 15s -c 256 -m POST -H "Cookie: csrf_token=secure_random_token_42" -H "X-CSRF-Token: secure_random_token_42" http://<gateway_host>:<port>/api/v1/update`
+## 5. `perf record` CPU Symbol Profile (`C3_CSRF_Modern_POST`)
 
-| Detailed Measurement Metric | **Velda Edge** (Rust 2024) | **Kong Gateway 3.9** (LuaJIT) | **Apache APISIX 3.10** (LuaJIT) | **Envoy Proxy 1.31** (C++) |
-| :--- | :---: | :---: | :---: | :---: |
-| **Duration (seconds)** | **15.00** | **15.00** | **15.00** | **15.00** |
-| **Total Requests** | *[TBD]* | *[TBD]* | *[TBD]* | *[TBD]* |
-| **Throughput (requests/second)** | *[TBD]* | *[TBD]* | *[TBD]* | *[TBD]* |
-| **Wire Bandwidth (Megabytes/second)** | *[TBD]* | *[TBD]* | *[TBD]* | *[TBD]* |
-| **Total Requests Inspected** | *[TBD]* | *[TBD]* | *[TBD]* | *[TBD]* |
-| **State-Changing Requests Validated** | *[TBD]* | *[TBD]* | *[TBD]* | *[TBD]* |
-| **CSRF Violations Blocked (403)** | *[TBD]* | *[TBD]* | *[TBD]* | *[TBD]* |
-| **Mean Latency (milliseconds)** | *[TBD]* | *[TBD]* | *[TBD]* | *[TBD]* |
-| **Min Latency (milliseconds)** | *[TBD]* | *[TBD]* | *[TBD]* | *[TBD]* |
-| **Median Latency P50 (milliseconds)** | *[TBD]* | *[TBD]* | *[TBD]* | *[TBD]* |
-| **P75 Latency (milliseconds)** | *[TBD]* | *[TBD]* | *[TBD]* | *[TBD]* |
-| **P90 Latency (milliseconds)** | *[TBD]* | *[TBD]* | *[TBD]* | *[TBD]* |
-| **P99 Tail Latency (milliseconds)** | *[TBD]* | *[TBD]* | *[TBD]* | *[TBD]* |
-| **P99.9 Tail Latency (milliseconds)** | *[TBD]* | *[TBD]* | *[TBD]* | *[TBD]* |
-| **Max Latency (milliseconds)** | *[TBD]* | *[TBD]* | *[TBD]* | *[TBD]* |
-| **Latency Standard Deviation (milliseconds)** | *[TBD]* | *[TBD]* | *[TBD]* | *[TBD]* |
-| **Connect Time Average (milliseconds)** | *[TBD]* | *[TBD]* | *[TBD]* | *[TBD]* |
-| **HTTP Status Code Distribution (2xx / 4xx / 5xx)** | *[TBD]* | *[TBD]* | *[TBD]* | *[TBD]* |
-| **Success Rate (%)** | *[TBD]* | *[TBD]* | *[TBD]* | *[TBD]* |
-| **Total CPU Utilization (% CPU)** | *[TBD]* | *[TBD]* | *[TBD]* | *[TBD]* |
-| **User CPU (% User CPU)** | *[TBD]* | *[TBD]* | *[TBD]* | *[TBD]* |
-| **System / Kernel CPU (% System / Kernel CPU)** | *[TBD]* | *[TBD]* | *[TBD]* | *[TBD]* |
-| **SoftIRQ CPU (% SoftIRQ CPU)** | *[TBD]* | *[TBD]* | *[TBD]* | *[TBD]* |
-| **Frontline Worker 0 CPU (%)** | *[TBD]* | *[TBD]* | *[TBD]* | *[TBD]* |
-| **Frontline Worker 1 CPU (%)** | *[TBD]* | *[TBD]* | *[TBD]* | *[TBD]* |
-| **Shadow Logistics Worker CPU (%)** | *[TBD]* | N/A | N/A | N/A |
-| **Peak Resident Set Size (Megabytes)** | *[TBD]* | *[TBD]* | *[TBD]* | *[TBD]* |
-| **RAM Usage (%)** | *[TBD]* | *[TBD]* | *[TBD]* | *[TBD]* |
-| **Heap Allocations per Request (Bytes / Count)** | *[TBD]* | *[TBD]* | *[TBD]* | *[TBD]* |
-| **Memory Leak Rate (Megabytes / minute)** | *[TBD]* | *[TBD]* | *[TBD]* | *[TBD]* |
-| **System Calls per Request (System Calls / Request)** | *[TBD]* | *[TBD]* | *[TBD]* | *[TBD]* |
-| **Context Switches per Request (Context Switches / Request)** | *[TBD]* | *[TBD]* | *[TBD]* | *[TBD]* |
-| **Total System Calls** | *[TBD]* | *[TBD]* | *[TBD]* | *[TBD]* |
-| **Total Context Switches** | *[TBD]* | *[TBD]* | *[TBD]* | *[TBD]* |
-| **Kernel Time (seconds)** | *[TBD]* | *[TBD]* | *[TBD]* | *[TBD]* |
-| **Futex Calls** | *[TBD]* | *[TBD]* | *[TBD]* | *[TBD]* |
-| **Futex Percentage of Total System Calls (%)** | *[TBD]* | *[TBD]* | *[TBD]* | *[TBD]* |
-| **Total CPU Instructions** | *[TBD]* | *[TBD]* | *[TBD]* | *[TBD]* |
-| **Instructions per Request (Instructions / Request)** | *[TBD]* | *[TBD]* | *[TBD]* | *[TBD]* |
-| **Total CPU Cycles** | *[TBD]* | *[TBD]* | *[TBD]* | *[TBD]* |
-| **Cycles per Request (Cycles / Request)** | *[TBD]* | *[TBD]* | *[TBD]* | *[TBD]* |
-| **Instructions Per Cycle (IPC)** | *[TBD]* | *[TBD]* | *[TBD]* | *[TBD]* |
-| **Total Branches** | *[TBD]* | *[TBD]* | *[TBD]* | *[TBD]* |
-| **Branches per Request (Branches / Request)** | *[TBD]* | *[TBD]* | *[TBD]* | *[TBD]* |
-| **Branch Mispredictions** | *[TBD]* | *[TBD]* | *[TBD]* | *[TBD]* |
-| **Branch Misprediction Rate (%)** | *[TBD]* | *[TBD]* | *[TBD]* | *[TBD]* |
-| **L1 Data Cache Miss Rate (%)** | *[TBD]* | *[TBD]* | *[TBD]* | *[TBD]* |
-| **Last Level Cache Miss Rate (%)** | *[TBD]* | *[TBD]* | *[TBD]* | *[TBD]* |
-| **Safe HTTP Method Fast-Path Bypass Latency (nanoseconds)** | *[TBD]* | *[TBD]* | *[TBD]* | *[TBD]* |
-| **Cookie Token Extraction & Slicing Latency (nanoseconds)** | *[TBD]* | *[TBD]* | *[TBD]* | *[TBD]* |
-| **Header (X-CSRF-Token) Extraction Latency (nanoseconds)** | *[TBD]* | *[TBD]* | *[TBD]* | *[TBD]* |
-| **Constant-Time Cryptographic Token Comparison Duration (nanoseconds)** | *[TBD]* | *[TBD]* | *[TBD]* | *[TBD]* |
-| **Immediate 403 Forbidden Response Synthesis Latency (nanoseconds)** | *[TBD]* | *[TBD]* | *[TBD]* | *[TBD]* |
-| **Token Byte Allocation Count (0 on Pre-Allocated Slice Buffers)** | *[TBD]* | *[TBD]* | *[TBD]* | *[TBD]* |
-| **Timing Attack Resistance Variance (nanoseconds)** | *[TBD]* | *[TBD]* | *[TBD]* | *[TBD]* |
+Sampled via `perf record -F 999 -g --call-graph dwarf -p <velda-edge-pid> -- sleep 8` and analyzed with `analyze_perf.py`:
 
----
-
-### Scenario 04: Custom Header vs Form-URLEncoded CSRF Token Extraction
-- **Objective**: Measure extraction latency difference between header map slicing and form-urlencoded body parsing.
-- **Execution Command**: `oha -z 15s -q 50000 -c 128 -m POST -H "Cookie: csrf_token=secure_token_42" -H "Content-Type: application/x-www-form-urlencoded" -d "csrf_token=secure_token_42&data=test" http://<gateway_host>:<port>/api/v1/form`
-
-| Detailed Measurement Metric | **Velda Edge** (Rust 2024) | **Kong Gateway 3.9** (LuaJIT) | **Apache APISIX 3.10** (LuaJIT) | **Envoy Proxy 1.31** (C++) |
-| :--- | :---: | :---: | :---: | :---: |
-| **Duration (seconds)** | **15.00** | **15.00** | **15.00** | **15.00** |
-| **Total Requests** | *[TBD]* | *[TBD]* | *[TBD]* | *[TBD]* |
-| **Throughput (requests/second)** | *[TBD]* | *[TBD]* | *[TBD]* | *[TBD]* |
-| **Wire Bandwidth (Megabytes/second)** | *[TBD]* | *[TBD]* | *[TBD]* | *[TBD]* |
-| **Total Requests Inspected** | *[TBD]* | *[TBD]* | *[TBD]* | *[TBD]* |
-| **State-Changing Requests Validated** | *[TBD]* | *[TBD]* | *[TBD]* | *[TBD]* |
-| **CSRF Violations Blocked (403)** | *[TBD]* | *[TBD]* | *[TBD]* | *[TBD]* |
-| **Mean Latency (milliseconds)** | *[TBD]* | *[TBD]* | *[TBD]* | *[TBD]* |
-| **Min Latency (milliseconds)** | *[TBD]* | *[TBD]* | *[TBD]* | *[TBD]* |
-| **Median Latency P50 (milliseconds)** | *[TBD]* | *[TBD]* | *[TBD]* | *[TBD]* |
-| **P75 Latency (milliseconds)** | *[TBD]* | *[TBD]* | *[TBD]* | *[TBD]* |
-| **P90 Latency (milliseconds)** | *[TBD]* | *[TBD]* | *[TBD]* | *[TBD]* |
-| **P99 Tail Latency (milliseconds)** | *[TBD]* | *[TBD]* | *[TBD]* | *[TBD]* |
-| **P99.9 Tail Latency (milliseconds)** | *[TBD]* | *[TBD]* | *[TBD]* | *[TBD]* |
-| **Max Latency (milliseconds)** | *[TBD]* | *[TBD]* | *[TBD]* | *[TBD]* |
-| **Latency Standard Deviation (milliseconds)** | *[TBD]* | *[TBD]* | *[TBD]* | *[TBD]* |
-| **Connect Time Average (milliseconds)** | *[TBD]* | *[TBD]* | *[TBD]* | *[TBD]* |
-| **HTTP Status Code Distribution (2xx / 4xx / 5xx)** | *[TBD]* | *[TBD]* | *[TBD]* | *[TBD]* |
-| **Success Rate (%)** | *[TBD]* | *[TBD]* | *[TBD]* | *[TBD]* |
-| **Total CPU Utilization (% CPU)** | *[TBD]* | *[TBD]* | *[TBD]* | *[TBD]* |
-| **User CPU (% User CPU)** | *[TBD]* | *[TBD]* | *[TBD]* | *[TBD]* |
-| **System / Kernel CPU (% System / Kernel CPU)** | *[TBD]* | *[TBD]* | *[TBD]* | *[TBD]* |
-| **SoftIRQ CPU (% SoftIRQ CPU)** | *[TBD]* | *[TBD]* | *[TBD]* | *[TBD]* |
-| **Frontline Worker 0 CPU (%)** | *[TBD]* | *[TBD]* | *[TBD]* | *[TBD]* |
-| **Frontline Worker 1 CPU (%)** | *[TBD]* | *[TBD]* | *[TBD]* | *[TBD]* |
-| **Shadow Logistics Worker CPU (%)** | *[TBD]* | N/A | N/A | N/A |
-| **Peak Resident Set Size (Megabytes)** | *[TBD]* | *[TBD]* | *[TBD]* | *[TBD]* |
-| **RAM Usage (%)** | *[TBD]* | *[TBD]* | *[TBD]* | *[TBD]* |
-| **Heap Allocations per Request (Bytes / Count)** | *[TBD]* | *[TBD]* | *[TBD]* | *[TBD]* |
-| **Memory Leak Rate (Megabytes / minute)** | *[TBD]* | *[TBD]* | *[TBD]* | *[TBD]* |
-| **System Calls per Request (System Calls / Request)** | *[TBD]* | *[TBD]* | *[TBD]* | *[TBD]* |
-| **Context Switches per Request (Context Switches / Request)** | *[TBD]* | *[TBD]* | *[TBD]* | *[TBD]* |
-| **Total System Calls** | *[TBD]* | *[TBD]* | *[TBD]* | *[TBD]* |
-| **Total Context Switches** | *[TBD]* | *[TBD]* | *[TBD]* | *[TBD]* |
-| **Kernel Time (seconds)** | *[TBD]* | *[TBD]* | *[TBD]* | *[TBD]* |
-| **Futex Calls** | *[TBD]* | *[TBD]* | *[TBD]* | *[TBD]* |
-| **Futex Percentage of Total System Calls (%)** | *[TBD]* | *[TBD]* | *[TBD]* | *[TBD]* |
-| **Total CPU Instructions** | *[TBD]* | *[TBD]* | *[TBD]* | *[TBD]* |
-| **Instructions per Request (Instructions / Request)** | *[TBD]* | *[TBD]* | *[TBD]* | *[TBD]* |
-| **Total CPU Cycles** | *[TBD]* | *[TBD]* | *[TBD]* | *[TBD]* |
-| **Cycles per Request (Cycles / Request)** | *[TBD]* | *[TBD]* | *[TBD]* | *[TBD]* |
-| **Instructions Per Cycle (IPC)** | *[TBD]* | *[TBD]* | *[TBD]* | *[TBD]* |
-| **Total Branches** | *[TBD]* | *[TBD]* | *[TBD]* | *[TBD]* |
-| **Branches per Request (Branches / Request)** | *[TBD]* | *[TBD]* | *[TBD]* | *[TBD]* |
-| **Branch Mispredictions** | *[TBD]* | *[TBD]* | *[TBD]* | *[TBD]* |
-| **Branch Misprediction Rate (%)** | *[TBD]* | *[TBD]* | *[TBD]* | *[TBD]* |
-| **L1 Data Cache Miss Rate (%)** | *[TBD]* | *[TBD]* | *[TBD]* | *[TBD]* |
-| **Last Level Cache Miss Rate (%)** | *[TBD]* | *[TBD]* | *[TBD]* | *[TBD]* |
-| **Safe HTTP Method Fast-Path Bypass Latency (nanoseconds)** | *[TBD]* | *[TBD]* | *[TBD]* | *[TBD]* |
-| **Cookie Token Extraction & Slicing Latency (nanoseconds)** | *[TBD]* | *[TBD]* | *[TBD]* | *[TBD]* |
-| **Header (X-CSRF-Token) Extraction Latency (nanoseconds)** | *[TBD]* | *[TBD]* | *[TBD]* | *[TBD]* |
-| **Constant-Time Cryptographic Token Comparison Duration (nanoseconds)** | *[TBD]* | *[TBD]* | *[TBD]* | *[TBD]* |
-| **Immediate 403 Forbidden Response Synthesis Latency (nanoseconds)** | *[TBD]* | *[TBD]* | *[TBD]* | *[TBD]* |
-| **Token Byte Allocation Count (0 on Pre-Allocated Slice Buffers)** | *[TBD]* | *[TBD]* | *[TBD]* | *[TBD]* |
-| **Timing Attack Resistance Variance (nanoseconds)** | *[TBD]* | *[TBD]* | *[TBD]* | *[TBD]* |
-
----
-
-### Scenario 05: Invalid / Missing CSRF Token Flood (Immediate 403 Forbidden Rejection)
-- **Objective**: Confirm that invalid CSRF attempts are rejected at wire speed with zero upstream leakage.
-- **Execution Command**: `oha -z 15s -q 80000 -c 128 -m POST -H "Cookie: csrf_token=valid_token" -H "X-CSRF-Token: malicious_attacker_token" http://<gateway_host>:<port>/api/v1/update`
-
-| Detailed Measurement Metric | **Velda Edge** (Rust 2024) | **Kong Gateway 3.9** (LuaJIT) | **Apache APISIX 3.10** (LuaJIT) | **Envoy Proxy 1.31** (C++) |
-| :--- | :---: | :---: | :---: | :---: |
-| **Duration (seconds)** | **15.00** | **15.00** | **15.00** | **15.00** |
-| **Total Requests** | *[TBD]* | *[TBD]* | *[TBD]* | *[TBD]* |
-| **Throughput (requests/second)** | *[TBD]* | *[TBD]* | *[TBD]* | *[TBD]* |
-| **Wire Bandwidth (Megabytes/second)** | *[TBD]* | *[TBD]* | *[TBD]* | *[TBD]* |
-| **Total Requests Inspected** | *[TBD]* | *[TBD]* | *[TBD]* | *[TBD]* |
-| **State-Changing Requests Validated** | *[TBD]* | *[TBD]* | *[TBD]* | *[TBD]* |
-| **CSRF Violations Blocked (403)** | *[TBD]* | *[TBD]* | *[TBD]* | *[TBD]* |
-| **Mean Latency (milliseconds)** | *[TBD]* | *[TBD]* | *[TBD]* | *[TBD]* |
-| **Min Latency (milliseconds)** | *[TBD]* | *[TBD]* | *[TBD]* | *[TBD]* |
-| **Median Latency P50 (milliseconds)** | *[TBD]* | *[TBD]* | *[TBD]* | *[TBD]* |
-| **P75 Latency (milliseconds)** | *[TBD]* | *[TBD]* | *[TBD]* | *[TBD]* |
-| **P90 Latency (milliseconds)** | *[TBD]* | *[TBD]* | *[TBD]* | *[TBD]* |
-| **P99 Tail Latency (milliseconds)** | *[TBD]* | *[TBD]* | *[TBD]* | *[TBD]* |
-| **P99.9 Tail Latency (milliseconds)** | *[TBD]* | *[TBD]* | *[TBD]* | *[TBD]* |
-| **Max Latency (milliseconds)** | *[TBD]* | *[TBD]* | *[TBD]* | *[TBD]* |
-| **Latency Standard Deviation (milliseconds)** | *[TBD]* | *[TBD]* | *[TBD]* | *[TBD]* |
-| **Connect Time Average (milliseconds)** | *[TBD]* | *[TBD]* | *[TBD]* | *[TBD]* |
-| **HTTP Status Code Distribution (2xx / 4xx / 5xx)** | *[TBD]* | *[TBD]* | *[TBD]* | *[TBD]* |
-| **Success Rate (%)** | *[TBD]* | *[TBD]* | *[TBD]* | *[TBD]* |
-| **Total CPU Utilization (% CPU)** | *[TBD]* | *[TBD]* | *[TBD]* | *[TBD]* |
-| **User CPU (% User CPU)** | *[TBD]* | *[TBD]* | *[TBD]* | *[TBD]* |
-| **System / Kernel CPU (% System / Kernel CPU)** | *[TBD]* | *[TBD]* | *[TBD]* | *[TBD]* |
-| **SoftIRQ CPU (% SoftIRQ CPU)** | *[TBD]* | *[TBD]* | *[TBD]* | *[TBD]* |
-| **Frontline Worker 0 CPU (%)** | *[TBD]* | *[TBD]* | *[TBD]* | *[TBD]* |
-| **Frontline Worker 1 CPU (%)** | *[TBD]* | *[TBD]* | *[TBD]* | *[TBD]* |
-| **Shadow Logistics Worker CPU (%)** | *[TBD]* | N/A | N/A | N/A |
-| **Peak Resident Set Size (Megabytes)** | *[TBD]* | *[TBD]* | *[TBD]* | *[TBD]* |
-| **RAM Usage (%)** | *[TBD]* | *[TBD]* | *[TBD]* | *[TBD]* |
-| **Heap Allocations per Request (Bytes / Count)** | *[TBD]* | *[TBD]* | *[TBD]* | *[TBD]* |
-| **Memory Leak Rate (Megabytes / minute)** | *[TBD]* | *[TBD]* | *[TBD]* | *[TBD]* |
-| **System Calls per Request (System Calls / Request)** | *[TBD]* | *[TBD]* | *[TBD]* | *[TBD]* |
-| **Context Switches per Request (Context Switches / Request)** | *[TBD]* | *[TBD]* | *[TBD]* | *[TBD]* |
-| **Total System Calls** | *[TBD]* | *[TBD]* | *[TBD]* | *[TBD]* |
-| **Total Context Switches** | *[TBD]* | *[TBD]* | *[TBD]* | *[TBD]* |
-| **Kernel Time (seconds)** | *[TBD]* | *[TBD]* | *[TBD]* | *[TBD]* |
-| **Futex Calls** | *[TBD]* | *[TBD]* | *[TBD]* | *[TBD]* |
-| **Futex Percentage of Total System Calls (%)** | *[TBD]* | *[TBD]* | *[TBD]* | *[TBD]* |
-| **Total CPU Instructions** | *[TBD]* | *[TBD]* | *[TBD]* | *[TBD]* |
-| **Instructions per Request (Instructions / Request)** | *[TBD]* | *[TBD]* | *[TBD]* | *[TBD]* |
-| **Total CPU Cycles** | *[TBD]* | *[TBD]* | *[TBD]* | *[TBD]* |
-| **Cycles per Request (Cycles / Request)** | *[TBD]* | *[TBD]* | *[TBD]* | *[TBD]* |
-| **Instructions Per Cycle (IPC)** | *[TBD]* | *[TBD]* | *[TBD]* | *[TBD]* |
-| **Total Branches** | *[TBD]* | *[TBD]* | *[TBD]* | *[TBD]* |
-| **Branches per Request (Branches / Request)** | *[TBD]* | *[TBD]* | *[TBD]* | *[TBD]* |
-| **Branch Mispredictions** | *[TBD]* | *[TBD]* | *[TBD]* | *[TBD]* |
-| **Branch Misprediction Rate (%)** | *[TBD]* | *[TBD]* | *[TBD]* | *[TBD]* |
-| **L1 Data Cache Miss Rate (%)** | *[TBD]* | *[TBD]* | *[TBD]* | *[TBD]* |
-| **Last Level Cache Miss Rate (%)** | *[TBD]* | *[TBD]* | *[TBD]* | *[TBD]* |
-| **Safe HTTP Method Fast-Path Bypass Latency (nanoseconds)** | *[TBD]* | *[TBD]* | *[TBD]* | *[TBD]* |
-| **Cookie Token Extraction & Slicing Latency (nanoseconds)** | *[TBD]* | *[TBD]* | *[TBD]* | *[TBD]* |
-| **Header (X-CSRF-Token) Extraction Latency (nanoseconds)** | *[TBD]* | *[TBD]* | *[TBD]* | *[TBD]* |
-| **Constant-Time Cryptographic Token Comparison Duration (nanoseconds)** | *[TBD]* | *[TBD]* | *[TBD]* | *[TBD]* |
-| **Immediate 403 Forbidden Response Synthesis Latency (nanoseconds)** | *[TBD]* | *[TBD]* | *[TBD]* | *[TBD]* |
-| **Token Byte Allocation Count (0 on Pre-Allocated Slice Buffers)** | *[TBD]* | *[TBD]* | *[TBD]* | *[TBD]* |
-| **Timing Attack Resistance Variance (nanoseconds)** | *[TBD]* | *[TBD]* | *[TBD]* | *[TBD]* |
-
----
-
-## 4. Comprehensive Architecture Comparison: Velda Edge vs Kong vs APISIX vs Envoy
-
-| Architecture Evaluation Criterion | Velda Edge (Rust Edition 2024) | Kong Gateway 3.9 (LuaJIT) | Apache APISIX 3.10 (LuaJIT) | Envoy Proxy 1.31 (C++) |
-| :--- | :--- | :--- | :--- | :--- |
-| **Implementation Language** | **Rust (Edition 2024, Zero-Cost Abstractions)** | C (OpenResty) + LuaJIT 2.1 | C (OpenResty) + LuaJIT 2.1 | C++ 20 |
-| **Thread Model** | **Thread-Per-Core (Shared-Nothing)** | Multi-Process (Nginx Master-Worker) | Multi-Process (Nginx Master-Worker) | Thread-Per-Core (Worker EventLoop) |
-| **Primary Execution Mechanism** | **Double Submit Cookie + Constant-Time subtle Token Compare** | Kong csrf plugin via Lua string matching | APISIX csrf plugin via Lua access phase | Envoy csrf filter in HTTP filter chain |
-| **Heap Allocations** | **Zero allocations (Header slice pointer)** | Lua string allocation per cookie/header read | Lua string allocation per cookie/header read | C++ string allocations per header read |
-| **Garbage Collection (GC) Impact** | None (Zero GC Pauses by design) | Periodic Lua GC collection cycles | Periodic Lua GC collection cycles | None (TCMalloc heap churn) |
-| **Hot-Path Request Serving Impact** | **Method bitmask check + constant-time cmp (< 6 ns)** | Lua string comparison in access phase | Lua string comparison in access phase | C++ string comparison in filter chain |
-| **Backpressure / Failure Mechanism** | **Immediate 403 local reply** | Lua ngx.exit(403) | Lua ngx.exit(403) | Envoy local reply 403 |
-| **Worker Execution Allocation** | **Frontline Worker 0/1 (`velda-worker-{id}`)** | Main Nginx worker thread | Main Nginx worker thread | Main Envoy worker threads |
-| **HTTP/3 Support (QUIC Ingress)** | **Native RFC 9114 / RFC 9000 (H3 Production)** | Not Supported | Experimental | Native HTTP/3 Production |
-| **Resident Memory Footprint (Peak RSS)** | *[TBD]* | *[TBD]* | *[TBD]* | *[TBD]* |
+| Architectural Layer | CPU Overhead (%) | Attributed Scope & Notes |
+| :--- | :---: | :--- |
+| **Linux Kernel Network Stack** | `61.66%` | Kernel socket I/O & TCP transmission (`[kernel.kallsyms]`) |
+| **Component Serving Hot Path** | `39.87%` | Velda HTTP/1.1 & `epoll` hot path (`CsrfPlugin` < `0.01%`, zero standalone hotspot leaves) |
+| **Kernel Slab / `sk_buff` Allocators** | `3.33%` | Kernel network buffer slab only; **`0.00%`** userspace heap `alloc::*` |
+| **Tokio Runtime & Transport** | `0.04%` | Async runtime driver overhead |
+| **Userspace Mutex Contention** | `0.06%` | Runtime/libc locks only; zero `csrf` lock symbols |

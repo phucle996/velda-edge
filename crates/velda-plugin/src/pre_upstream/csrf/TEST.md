@@ -1,70 +1,34 @@
-# CSRF Protection Plugin (`csrf`) — Test & Verification Report
+# CSRF Protection Verification & Test Matrix
 
-This document records the official verification methodology, attack simulations, and empirical results for the **`csrf`** pre-upstream plugin.
+## 1. Unit & Static Analysis Tests
 
----
-
-## 1. Objectives & Threat Model
-
-The `csrf` test harness validates defense against the following vectors:
-- **W3C Simple Request Form Trap**: Malicious sites submitting `<form action="..." method="POST" enctype="text/plain">` without triggering CORS preflights.
-- **Subdomain Cookie Tossing (RFC 6265 §8.5)**: Adversaries possessing an unprivileged subdomain attempting to inject forged CSRF cookies.
-- **Timing Side-Channel Exploits**: Byte-by-byte signature deduction attacks.
-- **Token Tampering & Expiration**: Manipulating timestamp bits or using expired tokens.
-- **Safe Method Bypasses**: Ensuring zero degradation or interference with idempotent requests (`GET`, `HEAD`, `OPTIONS`).
+| Scope | Location | Verified Invariants | Command |
+| :--- | :--- | :--- | :--- |
+| **Modern Fetch Metadata & Same-Site (1 test)** | `crates/velda-plugin/src/pre_upstream/csrf/plugin.rs` | Safe `GET`/`HEAD`/`OPTIONS` bypass; `same-origin` & `none` pass without cookies/tokens; `cross-site` & strict `same-site` return `403 Forbidden`; explicit `trusted_origins` passes; `allow_same_site: true` permits `same-site`. | `cargo test -p velda-plugin --lib csrf` |
+| **Legacy Origin/Referer & H2 Authority Fallback (1 test)** | `crates/velda-plugin/src/pre_upstream/csrf/plugin.rs` | Verifies H1 `Host` + `Origin`, HTTP/2 URI `:authority` without `Host`, valid `Referer` with `?query#frag`, fail-closed rejection on malformed userinfo (`https://evil.com@app.example.com/`), rejection on cookie-only requests lacking provenance, and clean bypass for cookie-less Bearer API clients. | `cargo test -p velda-plugin --lib csrf` |
+| **Legacy Double-Submit & Multi-Cookie H2 (1 test)** | `crates/velda-plugin/src/pre_upstream/csrf/plugin.rs` | Verifies scanning across multiple `Cookie` header lines (`req.headers.get_all(COOKIE)`), matching `XSRF-TOKEN == X-XSRF-TOKEN` passes `200`, mismatch/missing cookie returns `403`. | `cargo test -p velda-plugin --lib csrf` |
+| **Schema Validation (2 tests + 135 validation suite)** | `crates/velda-plugin/src/pre_upstream/csrf/validation.rs` | Accepts modern & legacy `double_submit` configs; rejects unsafe `POST` in `safe_methods`, wildcards (`*`, `https://*`, `https://*.com`), invalid headers/cookies, and removed legacy fields (`secret_key`, etc.). | `cargo test -p velda-plugin --lib validation` |
+| **Hot-Path ASM Invariant** | `target/release/deps/velda_plugin-*.s` | Confirms `0` `alloc::*`, `0` `lock *`, `0` `clock_gettime`, `0` `hmac`/`ring` calls, `507` instructions after `#[cold]` splitting of `verify_legacy_origin_fallback` and `verify_double_submit`. | `audit_asm.py <file.s> --symbol ...` |
 
 ---
 
-## 2. Test Verification Matrix
+## 2. Isolated Dual-Node KVM End-to-End Verification
 
-| Test Case | Scenario / Attack Vector | Cookie State | Header State | Method & Metadata | Expected Result | Status |
-| :---: | :--- | :--- | :--- | :--- | :---: | :---: |
-| **C1** | **Safe Method Bypass** | *(None)* | *(None)* | `GET`, `HEAD`, `OPTIONS` | **PASS (Action::Continue)** | **PASS** |
-| **C2** | **Simple Request Form Attack** | Valid Cookie | *(Missing Header)* | `POST`, `cross-site` | **REJECTED (403 Forbidden)** | **PASS** |
-| **C3** | **Legitimate Double-Submit** | `aurora_csrf=token123` | `X-CSRF-Token: token123` | `POST`, `same-origin` | **ACCEPTED (Action::Continue)** | **PASS** |
-| **C4** | **Token Mismatch Attempt** | `csrf=token_victim` | `X-CSRF-Token: token_evil` | `POST`, `same-origin` | **REJECTED (403 Forbidden)** | **PASS** |
-| **C5** | **Subdomain Cookie Tossing** | Forged matching token | Forged matching header | `POST` (Invalid HMAC) | **REJECTED (403 Forbidden)** | **PASS** |
-| **C6** | **Expired Signed Token** | Token older than TTL | Token older than TTL | `POST` (Valid HMAC, Expired) | **REJECTED (403 Forbidden)** | **PASS** |
-| **C7** | **Tampered Signature Byte** | 1 bit altered in token | Matching altered token | `POST` (Signature mismatch) | **REJECTED (403 Forbidden)** | **PASS** |
-| **C8** | **Untrusted Cross-Site Origin** | *(Any)* | *(Any)* | `POST`, `Sec-Fetch-Site: cross-site` | **REJECTED (403 Forbidden)** | **PASS** |
-| **C9** | **Trusted Cross-Site Partner** | Valid signed token | Matching signed header | `POST`, `Sec-Fetch-Site: cross-site` | **ACCEPTED (Action::Continue)** | **PASS** |
-| **C10**| **Origin / Host Mismatch** | Valid token | Valid token | `POST`, `Origin: https://evil.com` | **REJECTED (403 Forbidden)** | **PASS** |
+Executed live between `velda-obs` (Python HTTP client + raw TCP socket client → `velda-gw:18080`) and `velda-obs:8081` (`velda-bench-backend`):
+
+| Test Group | Assertions Executed | Result |
+| :--- | :--- | :---: |
+| **Modern + Legacy Provenance Suite (`11/11`)** | `GET /ping` (`200`), `POST` `same-origin` (`200`), `none` (`200`), untrusted `cross-site` (`403`), strict `same-site` (`403`), trusted partner (`200`), legacy `Origin == Host` (`200`), `Referer` (`200`), `@` userinfo spoofed `Referer` (`403`), cookie-only missing provenance (`403`), Bearer API client with no cookie (`200`). | **PASS (11/11)** |
+| **Double-Submit Multi-Cookie Split Lines (`3/3`)** | Hot-reloaded `double_submit` config (`manifest revision=2`); split `Cookie: session=user_1` + `Cookie: XSRF-TOKEN=tok_ok_99` with matching header (`200`), mismatched header (`403`), missing header (`403`). | **PASS (3/3)** |
 
 ---
 
-## 3. Multi-Phase Pipeline Integration Verification
+## 3. Reproducing Checks Locally
 
-In [`crates/velda-plugin/tests/csrf_suite_test.rs`](../../../tests/csrf_suite_test.rs), the CSRF plugin was verified alongside `cors_preflight` through a compiled [`RoutePluginPlan`](../../plan.rs).
-
-### Attack Scenario Execution:
-```http
-POST /api/transfer HTTP/1.1
-Host: api.example.com
-Origin: https://evil-attacker.com
-Content-Type: text/plain
-Sec-Fetch-Site: cross-site
-Cookie: __Host-velda_csrf=some_token
-
-{"amount": 5000000, "to": "attacker"}
+```bash
+cargo fmt --all --check
+cargo clippy -p velda-plugin -p velda-sync -p velda-edge --all-targets --all-features -- -D warnings
+cargo test -p velda-plugin --lib csrf
+cargo test -p velda-plugin --lib validation
+cargo test -p velda-sync --lib post_sync::plugin
 ```
-
-**Observed Pipeline Response:**
-1. **`pre_route: cors_preflight`**:
-   - Request is `POST`, not `OPTIONS`.
-   - `cors_preflight` returns `Action::Continue` (as mandated by W3C CORS).
-2. **`pre_upstream: csrf`**:
-   - Intercepts the request prior to upstream forwarding.
-   - Detects missing `X-CSRF-Token` header and `Sec-Fetch-Site: cross-site`.
-   - **Immediately terminates request with `403 Forbidden` (`Bytes::from_static`)**.
-   - Upstream backend receives 0 requests; financial state remains completely unmutated.
-
----
-
-## 4. Test Suite Coverage Summary
-
-| Test File | Test Focus | Cases | Status |
-| :--- | :--- | :---: | :---: |
-| `crates/velda-sync/src/post_sync/plugin/pre_upstream/csrf.rs` | Schema validation, unsafe method rejection, secret key length | 3 | **PASS** |
-| `crates/velda-plugin/src/pre_upstream/csrf/plugin.rs` | Unit tests: bitmask bypass, double-submit, signed token lifecycle, cookie tossing defense, Fetch Metadata | 5 | **PASS** |
-| `crates/velda-plugin/tests/csrf_suite_test.rs` | Multi-phase pipeline test with `cors_preflight`, simple request neutralization, origin matching | 3 | **PASS** |
-| **Total** | **Comprehensive CSRF Protection Verification** | **11** | **100% PASS** |
