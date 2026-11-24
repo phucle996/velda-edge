@@ -1,47 +1,40 @@
 # Canary Traffic Splitting Plugin (`canary`)
 
-The `canary` plugin executes deterministic, header-only traffic splitting in the **`pre_upstream`** phase by switching the target upstream index (`u16`) inside `RequestState` (`AccessLevel::Read`) with zero heap allocations, zero header mutations, and zero 64-bit integer division.
+The `canary` plugin executes deterministic, header-only traffic splitting in the **`pre_upstream`** phase by switching the target upstream index (`u16`) inside `RequestState` (`AccessLevel::Read`) with zero heap allocations, zero header mutations, zero fallback randomness, and zero 64-bit integer division.
 
 ---
 
 ## Core Design Principles
 
 1. **Header-Only Workspace (`AccessLevel::Read`)**:
-   Reads exclusively from the downstream request `HeaderWorkspace`. It never modifies, injects, or strips headers on the wire (`x-user-id`, `x-canary`, etc. arrive unmodified at the selected upstream).
+   Reads exclusively from the downstream request `HeaderWorkspace`. It never modifies, injects, or strips headers on the wire (`x-user-id`, `x-tenant-id`, `x-canary`, etc. arrive unmodified at the selected upstream).
 2. **Dense `u16` Upstream Switch**:
    At bootstrap and hot-reload (`velda-edge`), `wire_plugin_upstreams()` resolves `"canary_upstream"` string IDs to their dense `u16` index in the compiled `upstreams` table (`AtomicU16` with `Ordering::Relaxed`). Request execution requires a single atomic register load.
-3. **SWAR + SplitMix64 + Division-Free Fixed-Point Scaling**:
-   Hashes extracted header bytes in 8-byte little-endian words (`slice::as_chunks::<8>()`) and maps `u64 -> 0..1000` permille buckets via 128-bit upper-half multiplication (`((hash as u128).wrapping_mul(1000)) >> 64`), compiling to a single BMI2 `mulxq` instruction without `divq` or integer counter wrap-around.
+3. **Strict Multi-Header Hashing with Zero Random Fallback**:
+   Folds all configured `hash_headers` together in order using 8-byte SWAR chunks (`slice::as_chunks::<8>()`) and SplitMix64. If **any** configured header is missing or whitespace-only (and no override rule matches), the request **stays safely on the baseline upstream** — there is zero hidden PRNG fallback, so a user never flips between versions across requests.
+4. **Division-Free Permille Scaling (`1..=999`)**:
+   Maps `u64 -> 0..999` permille buckets via 128-bit upper-half multiplication (`((hash as u128).wrapping_mul(1000)) >> 64`), compiling to a single BMI2 `mulxq` instruction without `divq` or integer counter wrap-around.
 
 ---
 
 ## Configuration Schema
 
-Configured in `plugins.json` with canonical plugin ID `"canary"` and referenced by name in route `plugins` arrays.
+Configured in `plugins.json` with canonical plugin ID `"canary"` and referenced by name in route `plugins` arrays. All unknown fields are strictly rejected (`#[serde(deny_unknown_fields)]`).
 
 | Field | Type | Required | Constraints / Allowed Values | Description |
 | :--- | :--- | :---: | :--- | :--- |
 | `canary_upstream` | `string` | Yes | Non-empty upstream ID present in `upstreams.json` | Target upstream ID selected when a rule matches or permille threshold is met. |
-| `ratio` | `integer` (`u32`) | Yes | `0..=1000` (permille, tenths of a percent) | Fraction routed to canary (`200` = `20.0%`). `0` = rule-only override; `1000` = `100%` canary. |
-| `rules` | `array<HeaderRule>` | Yes | May be empty `[]` | Ordered override rules evaluated before hashing (short-circuit OR logic). |
-| `hash_strategy` | `string` | Yes | `"priority"`, `"composite"`, `"random"` | Key derivation mode when no rule matches. |
-| `hash_headers` | `array<string>` | Yes | Valid HTTP header names; non-empty for `"priority"` / `"composite"` | Lowercased RFC 7230 header names used as hash keys. |
+| `ratio` | `integer` (`u32`) | Yes | **`1..=999`** (permille, tenths of a percent) | Fraction routed to canary (`200` = `20.0%`). `0` and `1000` are rejected (disable plugin for `0%`, point route upstream directly for `100%`). |
+| `rules` | `array<HeaderRule>` | Yes | May be empty `[]` | Ordered override rules evaluated before hashing (short-circuit OR logic; forces canary regardless of `hash_headers`). |
+| `hash_headers` | `array<string>` | Yes | **Non-empty** list of valid HTTP header names | Ordered RFC 9110 header names folded jointly to compute the sticky bucket. If any header in this list is absent/empty, the request stays on baseline. |
 
 ### `HeaderRule` Schema
 
 | Field | Type | Required | Allowed Values | Description |
 | :--- | :--- | :---: | :--- | :--- |
 | `name` | `string` | Yes | Valid HTTP header name | Header name inspected in `HeaderWorkspace`. |
-| `operator` | `string` | Yes | `"equals"`, `"prefix"`, `"suffix"`, `"contains"`, `"exists"` | Case-sensitive value matcher (`exists` ignores `value`). |
+| `operator` | `string` | Yes | `"equals"`, `"prefix"`, `"suffix"`, `"contains"`, `"exists"` | Case-insensitive ASCII value matcher (`exists` ignores `value`). |
 | `value` | `string` | Yes | Non-empty except when `operator` is `"exists"` | Target byte sequence matched against the header value. |
-
-### Hash Strategies
-
-| Strategy | Behavior | Fallback When Header Absent |
-| :--- | :--- | :--- |
-| **`priority`** | Iterates `hash_headers` in order and hashes the **first** non-empty header value found. | Falls back to `fast_prng_u64()` (`splitmix64` over thread-local RNG counter). |
-| **`composite`** | Feeds every present header from `hash_headers` (separated by `0xFF` delimiter) into a single continuous hash state. | Falls back to `fast_prng_u64()` if all listed headers are absent. |
-| **`random`** | Ignores `hash_headers` and evaluates per-request via `fast_prng_u64()`. | Always non-sticky stateless PRNG split. |
 
 ---
 
@@ -83,10 +76,9 @@ Configured in `plugins.json` with canonical plugin ID `"canary"` and referenced 
         "ratio": 200,
         "rules": [
           { "name": "x-canary", "operator": "equals", "value": "true" },
-          { "name": "x-beta-group", "operator": "prefix", "value": "internal-" }
+          { "name": "x-beta", "operator": "prefix", "value": "vip-" }
         ],
-        "hash_strategy": "priority",
-        "hash_headers": ["x-user-id", "x-real-ip"]
+        "hash_headers": ["x-tenant-id", "x-user-id"]
       }
     }
   ]
@@ -114,7 +106,7 @@ Configured in `plugins.json` with canonical plugin ID `"canary"` and referenced 
 
 ## Constraints & Non-Goals
 
-- **No Header Mutation**: `canary` declares `AccessLevel::Read` and does not inject response markers or upstream canary headers. Distinguish traffic at the upstream service or via route metrics.
-- **Strict Validation**: Unknown extra fields or omitted required schema keys (`canary_upstream`, `ratio`, `rules`, `hash_strategy`, `hash_headers`) are rejected by `velda-sync` before config publication.
-- **No Raw Socket / IP Address Hashing**: Client IP stickiness requires downstream ingress enrichment (`x-real-ip` / `x-forwarded-for`, guaranteed present by the single ingress enrichment invariant before routing).
+- **No Random / Unkeyed Fallback**: There is no thread-local PRNG or IP fallback. Every configured header in `hash_headers` must be present and non-empty (e.g., injected by `jwt_auth` or supplied by the client); missing any configured key fails safe to the baseline upstream.
+- **`ratio` Strictly `1..=999`**: For `0%` canary (baseline only), disable the plugin or remove `"canary"` from `route.plugins`. For `100%` cutover, update `route.upstream` directly to `backend-canary` and remove `"canary"`.
+- **No Header Mutation**: `canary` declares `AccessLevel::Read` and never injects or strips proxy headers.
 - **L7 Only**: Evaluates in `pre_upstream` over HTTP `HeaderWorkspace`. Raw TCP/UDP L4 listeners bypass `canary`.

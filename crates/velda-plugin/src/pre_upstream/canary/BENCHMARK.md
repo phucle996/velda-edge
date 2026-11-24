@@ -1,6 +1,6 @@
 # Canary Plugin Benchmark Report
 
-All live proxy measurements were executed in an isolated dual-node KVM environment under identical hardware constraints (`velda-gw` ↔ `velda-obs`). Clean macro throughput runs had no profilers attached; hardware PMU (`perf stat`) and CPU symbol sampling (`perf record`) were collected in separate steady-state runs.
+All live proxy measurements were executed in an isolated dual-node KVM environment (`velda-gw` ↔ `velda-obs`). Clean macro runs had zero profilers attached; hardware PMU (`perf stat`) runs were executed in separate steady-state windows.
 
 ---
 
@@ -8,9 +8,9 @@ All live proxy measurements were executed in an isolated dual-node KVM environme
 
 | Component | Node / VM | Hardware & Software Spec | Role |
 | :--- | :--- | :--- | :--- |
-| **Gateway Proxy** | `velda-gw` (`192.168.122.10`) | 2 vCPUs (11th Gen Intel Core i5-11400H @ 2.70GHz, SMT off), 1.9 GB RAM, Linux 6.8.0 (`x86_64`, `x86-64-v3`) | Velda Edge (`2` pinned workers), Nginx `1.24.0` (`2` workers), Envoy `1.31.4` (`--concurrency 2`) |
-| **Load Gen + Backends** | `velda-obs` (`192.168.122.20`) | 4 vCPUs, 4 GB RAM, Linux 6.8.0; `wrk 4.x` (`-t4 -c128 -d10s --latency`) | Rotating `4,096`-user Lua request generator + symmetric HTTP/1.1 backends (`base` on `:18081`, `canary` on `:18091`) |
-| **Canary Ruleset** | N/A | `ratio: 200` (`20.0%`), `3` header rules (`equals`, `prefix`, `exists`) | Baseline S2 (`Priority`: `x-user-id`, `x-real-ip`), S3 (`Composite`: `x-tenant-id`, `x-user-id`), S4 (`Rule Hit`: `X-Canary: true`) |
+| **Gateway Proxy** | `velda-gw` (`192.168.122.10`) | 2 vCPUs (11th Gen Intel Core i5-11400H @ 2.70GHz, SMT off), 1.9 GB RAM, Linux 6.8.0 (`x86_64`, `x86-64-v3`) | Velda Edge (`2` pinned workers), Nginx `1.24.0` (`2` workers), APISIX `3.21.0` (`2` workers), Kong `3.9.5` (`2` workers), Envoy `1.31.4` (`--concurrency 2`) |
+| **Load Gen + Backends** | `velda-obs` (`192.168.122.20`) | 4 vCPUs, 4 GB RAM, Linux 6.8.0; `wrk` (`-t4 -c128 -d10s --latency`) | Rotating `4,096`-user Lua generator + symmetric HTTP/1.1 backends (`base` on `:18081`, `canary` on `:18091`) |
+| **Canary Config** | N/A | `ratio: 200` (`20.0%`), `3` ordered header rules (`equals`, `prefix`, `exists`), strict all-headers-present SWAR hash | Tested with single header (`["x-user-id"]`) and multi-header (`["x-tenant-id", "x-user-id"]`) |
 
 ---
 
@@ -18,59 +18,50 @@ All live proxy measurements were executed in an isolated dual-node KVM environme
 
 Audited via `audit_asm.py` on release assembly (`target/release/deps/velda_plugin-e12321c47c0fe0f9.s`, compiled with `-C target-cpu=x86-64-v3`):
 
-| Function Symbol | Total Insts | Heap Allocs (`alloc::*`) | Unaligned Vector Stores | Jump Tables (`jmpq *%reg`) | Atomic Bus Locks (`lock *`) | `divq` / `ud2` Traps | Fixed-Point Lowering |
+| Function Symbol | Total Insts | Heap Allocs (`alloc::*`) | Unaligned Vector Stores | Jump Tables (`jmpq *%reg`) | Atomic Bus Locks (`lock *`) | `divq` / `ud2` / TLS | Fixed-Point Lowering |
 | :--- | :---: | :---: | :---: | :---: | :---: | :---: | :--- |
-| **`CanaryPlugin::on_upstream_request`** | `545` | **0** | **0** | `1` (`RuleOperator` 5-arm match) | **0** | **0 / 0** | `mulxq %rax, %rax, %rax` (`$1000`) |
-| **`extract_header_bytes`** | `172` | **0** | **0** | **0** | **0** | **0 / 0** | Inline linear workspace slice |
-| **`swar_hash64`** | Inlined | **0** | **0** | **0** | **0** | **0 / 0** | `as_chunks::<8>()` + SplitMix64 |
+| **`CanaryPlugin::on_upstream_request`** (inlined `evaluate_permille`) | `582` | **0** | **0** | `1` (`RuleOperator` 5-arm match) | **0** | **0 / 0 / 0** | `mulxq %rax, %rax, %rax` (`$1000`) |
 
 ---
 
-## 3. Macro Throughput, Latency & Split Accuracy (Clean Runs)
+## 3. Velda Edge Macro Throughput & Hardware PMU (Final Zero-Fallback Build)
 
-All proxies target the identical `192.168.122.20:18081` (`base`) and `:18091` (`canary`) backends across 4,096 distinct rotating `X-User-Id` / `X-Tenant-Id` headers (`-t4 -c128 -d10s --latency` after a 2s warmup):
+Measured sequentially on `velda-gw` ↔ `velda-obs` (`wrk -t4 -c128 -d10s --latency`, 4,096 rotating `X-Tenant-Id` / `X-User-Id` pairs):
 
-| Scenario | Throughput (RPS) | Avg | P50 | P90 | P99 | Max | Stdev | Base Hits | Canary Hits | Empirical Ratio |
-| :--- | :---: | :---: | :---: | :---: | :---: | :---: | :---: | :---: | :---: | :---: |
-| **S1: Velda Raw Proxy (Baseline)** | **60,439.36** | 2.14ms | 1.83ms | 3.93ms | 6.39ms | 14.44ms | 1.29ms | 604,898 | 0 | 0.00‰ |
-| **S2: Velda Canary (`Priority`, 200‰)** | **61,482.83** | 2.10ms | 1.82ms | 3.67ms | 6.20ms | 17.27ms | 1.19ms | 494,634 | 120,775 | **196.25‰** |
-| **S3: Velda Canary (`Composite`, 200‰)** | **56,843.00** | 2.28ms | 1.94ms | 4.15ms | 6.82ms | 16.16ms | 1.36ms | 452,768 | 116,426 | **204.55‰** |
-| **S4: Velda Canary (`Rule Hit`, `x-canary: true`)** | **56,120.26** | 2.31ms | 1.96ms | 4.26ms | 7.13ms | 13.60ms | 1.41ms | 0 | 562,242 | **1000.00‰** |
-| **S5: Nginx 1.24.0 (`split_clients` + `map`)** | **58,824.57** | 2.19ms | 1.89ms | 3.91ms | 6.54ms | 17.98ms | 1.30ms | 475,709 | 118,511 | **199.44‰** |
-| **S6: Envoy 1.31.4 (`weighted_clusters 80/20`)** | **22,740.42** | 5.60ms | 5.44ms | 7.07ms | 8.96ms | 15.39ms | 1.13ms | 183,984 | 45,791 | **199.29‰** |
+| Scenario | Clean RPS | Avg | P50 | P90 | P99 | Canary Hits / Total | Empirical Ratio | PMU Inst / Req | IPC | Branch Miss | Futex |
+| :--- | :---: | :---: | :---: | :---: | :---: | :---: | :---: | :---: | :---: | :---: | :---: |
+| **S1: Velda Raw Baseline (`plugins: []`)** | **51,259.42** | 2.50ms | 2.19ms | 4.42ms | 7.20ms | `0 / 517,781` | 0.00‰ | `63,378` | 0.71 | `1.04%` | **`0`** |
+| **S2: Canary Single-Header (`["x-user-id"]`, 200‰)** | **44,289.01** | 2.89ms | 2.59ms | 4.86ms | 8.19ms | `93,929 / 447,413` | **209.94‰** | `65,283` (`+3.0%`) | 0.72 | `1.03%` | **`0`** |
+| **S3: Canary Multi-Header (`["x-tenant-id", "x-user-id"]`, 200‰)** | **47,159.79** | 2.73ms | 2.36ms | 4.92ms | 8.13ms | `97,396 / 476,169` | **204.54‰** | `67,733` (`+6.9%`) | **0.91** | **`0.92%`** | **`0`** |
+| **S4: Canary Rule Hit (`X-Canary: true`)** | **50,873.40** | 2.56ms | 2.17ms | 4.63ms | 8.10ms | `509,861 / 509,861` | **1000.00‰** | `65,733` (`+3.7%`) | **0.93** | **`0.92%`** | **`0`** |
 
-### Key Quantitative Observations
-- **+4.5% faster than native C Nginx (`split_clients`)** on identical 2-vCPU KVM hardware (`61,482.83` vs `58,824.57` RPS) and lower P99 latency (`6.20ms` vs `6.54ms`), while executing 3 ordered header rules and multi-header `Priority` fallback.
-- **2.70× higher throughput than Envoy 1.31.4** (`61,482.83` vs `22,740.42` RPS) with **2.99× lower P50 latency** (`1.82ms` vs `5.44ms`).
-- **`Priority` matches Raw Proxy Baseline**: S2 maintains parity within KVM run-to-run variance against S1 (`61,482.83` vs `60,439.36` RPS), demonstrating negligible per-request cost compared to network stack traversal.
+*(Instruction delta per full HTTP/1.1 request between Raw Baseline and active canary evaluation is `+1,905` to `+4,355` instructions/req across the complete socket pipeline, with `0` futex contention.)*
 
 ---
 
-## 4. Hardware PMU Counters (10s Steady-State `perf stat`)
+## 4. Competitor Isolation Benchmarks (Same `velda-gw` 2-vCPU VM ↔ `velda-obs`)
 
-Measured over 10s steady-state under concurrent `wrk -t4 -c128` load:
+Measured on identical KVM hardware (`worker_processes 2` / `--concurrency 2`, access logs disabled, 256 keepalive connections):
 
-| Scenario | PMU Window RPS* | Cycles (B) | Instructions (B) | IPC | Inst / Req | Branch Miss (%) | L1d Load Miss (%) | LLC Miss (%) | Context Switches | Futex Calls |
-| :--- | :---: | :---: | :---: | :---: | :---: | :---: | :---: | :---: | :---: | :---: |
-| **S1: Velda Raw Baseline** | 46,077.64 | 33.14 | 30.10 | `0.91` | `65,329` | `0.92%` | `10.41%` | `24.64%` | 9,400 | `4` |
-| **S2: Velda Canary Priority** | 45,717.34 | 32.93 | 31.44 | `0.95` | `68,781` | `0.89%` | `10.22%` | `24.48%` | 9,500 | **`0`** |
-| **S3: Velda Canary Composite** | 43,102.23 | 32.44 | 29.39 | `0.91` | `68,181` | `0.90%` | `10.46%` | `25.71%` | 8,699 | **`0`** |
-| **S4: Velda Canary Rule Hit** | 42,015.06 | 31.02 | 28.21 | `0.91` | `67,146` | `0.92%` | `10.29%` | `25.84%` | 8,619 | **`0`** |
-| **S5: Nginx 1.24.0 (`split_clients`)** | 39,919.13* | 31.88 | 29.69 | `0.93` | `74,366` | `1.01%` | `9.28%` | `21.06%` | 8,052 | `0` |
-| **S6: Envoy 1.31.4** | 16,121.45* | 49.42 | 40.96 | `0.83` | `254,060` | `2.38%` | `7.80%` | `23.19%` | 670 | `37` |
+| Gateway & Mode | Raw RPS | Canary Enabled RPS | Self Overhead vs Raw | Canary P50 | Canary P99 | Canary Inst / Req | Empirical Ratio | Notes |
+| :--- | :---: | :---: | :---: | :---: | :---: | :---: | :---: | :--- |
+| **Nginx `1.24.0`** (`split_clients` + `map`) | — | `58,824.57` | — | 1.89ms | 6.54ms | `74,366`* | 199.44‰ | Native C string murmur2 (`split_clients`) |
+| **Apache APISIX `3.21.0`** (`traffic-split` + 3 rules) | `46,128.22` | **`31,302.13`** | **-32.1%** | 3.84ms | 8.56ms | **`162,994`** (`+53.5%`) | 200.00‰ | `traffic-split.lua` rebuilds upstream pickers per request |
+| **Kong `3.9.5` OSS** (`pre-function` Lua canary + 3 rules) | `36,649.55` | **`26,970.38`** | **-26.4%** | 4.58ms | 10.94ms | **`172,390`** (`+24.0%`) | 200.04‰ | Kong native `canary` plugin is Enterprise-only; weighted `round-robin` without rules measured `28,188.52` RPS (`-23.1%`) |
+| **Envoy `1.31.4`** (`weighted_clusters 80/20` + header match) | — | **`22,740.42`** | — | 5.44ms | 8.96ms | **`254,060`** (`*`) | 199.29‰ | `37` futex calls during 10s steady state |
 
-*\*Inst/Req is computed using `(instructions / (PMU_RPS × 10))`. For S5 and S6, daemon shutdown at second 11 interrupted the final second of the 12s `wrk` window while `perf stat` had already captured full 10s worker PMU counters; S5/S6 `Inst/Req` are lower-bound approximations.*
+*\*Nginx/Envoy PMU `Inst/Req` values are lower bounds from a 10s `perf stat` capture inside a 12s `wrk` window stopped at second 11.*
 
 ---
 
-## 5. `perf record` CPU Symbol Profile (`S2_Canary_Priority`)
+## 5. `perf record` CPU Symbol Profile (Pre-Refactor Steady-State `Priority` Capture)
 
-Sampled via `perf record -F 999 -g --call-graph dwarf -p <velda-edge-pid> -- sleep 8` (`13,000` samples, `0` lost) and classified via `analyze_perf.py`:
+Sampled on `velda-gw` via `perf record -F 999 -g --call-graph dwarf -- sleep 8` (`13,000` samples, `0` lost) and classified via `analyze_perf.py`:
 
 | Architectural Layer | CPU Overhead (%) | Attributed Scope & Notes |
 | :--- | :---: | :--- |
 | **Linux Kernel Network Stack** | `60.90%` | TCP/IP socket `writev` / `virtqueue_notify` (`[kernel.kallsyms]`) |
-| **Component Serving Hot Path** | `39.18%` | Velda ingress/upstream HTTP/1.1 & `epoll` serving (`CanaryPlugin` < `0.01%`, absent from `>= 0.01%` sampled leaves) |
-| **Kernel Slab / `sk_buff` Allocators** | `3.27%` | 100% kernel slab (`[k] kmem_cache_free`, `kmem_cache_alloc_node`, `__kmalloc`, `__alloc_skb`); **0.00%** userspace heap `alloc::*` |
+| **Component Serving Hot Path** | `39.18%` | Velda ingress/upstream HTTP/1.1 & `epoll` serving (`CanaryPlugin` < `0.01%`, absent from sampled hot leaves) |
+| **Kernel Slab / `sk_buff` Allocators** | `3.27%` | 100% kernel slab (`[k] kmem_cache_free`, `kmem_cache_alloc_node`, `__kmalloc`, `__alloc_skb`); **`0.00%`** userspace heap `alloc::*` |
 | **Tokio Runtime & Transport** | `0.11%` | Async driver scheduling |
-| **Userspace Mutex Contention** | `0.05%`–`0.09%` | `libc.so.6 pthread_mutex_trylock` (`0.02%` per worker) / `unlock` (`0.01%`), zero `canary` lock symbols |
+| **Userspace Mutex Contention** | `0.05%`–`0.09%` | `libc.so.6 pthread_mutex_trylock` (`0.02%` per worker) / `unlock` (`0.01%`) |

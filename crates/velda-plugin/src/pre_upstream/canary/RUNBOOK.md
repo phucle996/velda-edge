@@ -6,9 +6,9 @@ Before enabling `canary` on a live route:
 
 1. **Upstream Presence**: Confirm the target `canary_upstream` ID (for example `backend-canary`) is defined in `upstreams.json` and has active endpoints.
 2. **Route Attachment**: Verify `"canary"` is listed in the target route's `plugins` array in `routes.json`, and the route's default `upstream` points to the baseline backend (for example `backend-base`).
-3. **Header Stickiness Readiness**:
-   - If using `priority` or `composite` on `x-user-id` / `x-tenant-id`, verify clients or upstream ingress proxies pass those headers cleanly.
-   - If falling back to `x-real-ip`, rely on Velda Edge's single ingress enrichment invariant (`downstream.rs` populates `x-real-ip` and `x-forwarded-for` prior to `route` / `pre_upstream`).
+3. **Guaranteed `hash_headers` Presence**:
+   - All headers listed in `hash_headers` (for example `["x-tenant-id", "x-user-id"]`) are required at request time.
+   - Any request missing one or more configured `hash_headers` safely stays on baseline unless forced by a header `rule`. Ensure upstream auth/edge plugins (e.g., `jwt_auth` claim injection) run before `canary` if internal identity headers are used.
 
 ---
 
@@ -16,15 +16,17 @@ Before enabling `canary` on a live route:
 
 `velda-sync` validates configuration changes, compiles binary runtime artifacts, and atomically notifies `velda-edge` over UDS without restarting workers or dropping active TCP connections.
 
-| Stage | `ratio` (Permille) | Effective Canary Share | Operational Purpose |
-| :---: | :---: | :---: | :--- |
-| **Stage 0 — Dark / Rule-Only** | `0` | `0.0%` (+ rule overrides) | Validate connectivity to `backend-canary` via QA headers (`x-canary: true`, `x-beta: vip-...`) with zero impact on general traffic. |
-| **Stage 1 — Initial Smoke** | `10` | `1.0%` | Catch application panics, latency spikes, or backend dependency mismatches at minimal blast radius. |
-| **Stage 2 — Partial Rollout** | `200` | `20.0%` | Evaluate saturation, cache hit ratios, and p99 stability under sustained deterministic user cohorts. |
-| **Stage 3 — Majority Shift** | `500` | `50.0%` | Equal traffic distribution prior to cutover. |
-| **Stage 4 — Full Canary** | `1000` | `100.0%` | Route all eligible route traffic to `canary_upstream`; afterward update default `route.upstream` and disable plugin. |
+Because `ratio` is enforced within `1..=999`:
 
-Increment `manifest.json` `revision` cleanly alongside `plugins.json` updates so `velda-sync` triggers deterministic delta compilation.
+| Stage | Operational Action | Effective Canary Share | Purpose |
+| :---: | :--- | :---: | :--- |
+| **Stage 0 — Baseline Only** | Keep `"canary"` disabled or omitted from `route.plugins` | `0.0%` | All traffic remains on `backend-base`. (`ratio: 0` is rejected by validation.) |
+| **Stage 1 — Initial Smoke** | Enable `"canary"` with `ratio: 1` or `10` | `0.1%` – `1.0%` | Validate canary stability with QA rules (`x-canary: true`) and minimal organic share. |
+| **Stage 2 — Partial Rollout** | Increase `ratio` to `200` (keep same `hash_headers`) | `20.0%` | All users routed to canary at Stage 1 stay pinned to canary while cohort expands monotonically. |
+| **Stage 3 — Majority Rollout** | Increase `ratio` to `500` – `999` | `50.0%` – `99.9%` | High-volume verification prior to full cutover. |
+| **Stage 4 — Full Cutover** | Set `route.upstream = "backend-canary"` and remove `"canary"` from `route.plugins` | `100.0%` | Permanent cutover with zero canary plugin overhead. (`ratio: 1000` is rejected by validation.) |
+
+Increment `manifest.json` `revision` alongside `plugins.json` updates so `velda-sync` triggers deterministic delta compilation. Keep `hash_headers` constant throughout a rollout so existing cohorts never flip between versions when increasing `ratio`.
 
 ---
 
@@ -40,20 +42,19 @@ INFO Successfully reloaded runtime state via atomic swap revision=2 changed_doma
 
 Notice `upstream_id` tracks the position of `canary_upstream` in `upstreams.json`. If `upstreams.json` is reordered (`backend-canary` moved to index `0`), `velda-edge` automatically rebuilds `PluginTable` and re-wires `upstream_id=0`.
 
-### Probe Deterministic & Rule Behavior
-Send requests with QA rule headers and rotating user IDs against an inspection or health endpoint:
-
+### Probe Deterministic, Rule & Missing-Header Safety
 ```bash
-# 1. Verify header rule override routes directly to canary upstream
+# 1. Rule override forces canary even when hash_headers are absent
 curl -s -H "x-canary: true" http://<gateway>:8080/inspect
 
-# 2. Verify sticky routing across repeated requests for the same user ID
+# 2. Missing any configured hash_header stays safely on baseline
+curl -s -H "x-user-id: prod-user-00001" http://<gateway>:8080/ping   # (when ["x-tenant-id", "x-user-id"] is configured)
+
+# 3. Repeated requests with full hash_headers always pin to the same upstream
 for i in $(seq 1 10); do
-  curl -s -H "x-user-id: prod-user-00001" http://<gateway>:8080/ping
+  curl -s -H "x-tenant-id: acme" -H "x-user-id: prod-user-00001" http://<gateway>:8080/ping
 done
 ```
-
-Because `canary` uses `AccessLevel::Read`, `/inspect` will reflect the client's original headers (`X-Canary`, `X-User-Id`) verbatim without any injected proxy canary markers.
 
 ---
 
@@ -61,8 +62,7 @@ Because `canary` uses `AccessLevel::Read`, `/inspect` will reflect the client's 
 
 | Symptom / Failure Mode | Root Cause | Immediate Operator Action |
 | :--- | :--- | :--- |
-| **`Unknown plugin ID 'canary_main'`** in `velda-sync` | `plugins.json` used a custom `"id"` instead of canonical `"canary"`. | Change `"id"` in `plugins.json` and `route.plugins` entries to `"canary"`. |
-| **`Ratio N exceeds maximum allowed 1000`** | `ratio` configured outside `0..=1000` (for example percentage confused with permille, or negative value). | Fix `ratio` to integer `0..=1000`. Note `velda-sync` preserves LKG runtime state on validation failure. |
-| **Canary receives 0% traffic unexpectedly** | `canary_upstream` ID does not match any entry in `upstreams.json` (leaves `AtomicU16` at `u16::MAX` sentinel). | Verify exact string match against `upstreams[].id` and check `edge.log` for `Wired dense upstream index`. |
-| **Elevated 5xx or latency from canary backend** | Regression in canary deployment. | **Instant Rollback**: Set `"ratio": 0` (and clear `rules: []`) OR remove `"canary"` from `route.plugins` / set `"enabled": false` in `plugins.json`. Existing LKG keeps traffic on `backend-base` immediately upon swap. |
-| **`Invalid header rule name` or `requires non-empty value`** | Invalid RFC 7230 token in `rules[].name` / `hash_headers`, or empty `value` for `equals`/`prefix`/`suffix`/`contains`. | Supply valid lowercase HTTP header names and non-empty match strings (`value` may only be empty for `operator: "exists"`). |
+| **`ratio (0)` or `ratio (1000) must be between 1 and 999`** in `velda-sync` | `ratio` set outside `1..=999`. | Use `1..=999` for active canary, or disable plugin / remove `"canary"` from `route.plugins` for `0%`, or update `route.upstream` directly for `100%`. LKG keeps running safely. |
+| **`hash_headers cannot be empty`** or **`unknown field 'hash_strategy'`** | Legacy schema or empty `hash_headers`. | Supply non-empty `hash_headers` (e.g., `["x-user-id"]`) and remove legacy `hash_strategy`. |
+| **Traffic stays 100% on baseline despite `ratio > 0`** | Requests are missing one of the configured `hash_headers`, or `canary_upstream` ID does not exist in `upstreams.json` (`u16::MAX` sentinel). | Check client / JWT claim headers arrive in `HeaderWorkspace` and verify `Wired dense upstream index` log entry in `edge.log`. |
+| **Elevated 5xx or latency from canary backend** | Regression in canary deployment. | **Instant Rollback**: Set `"enabled": false` in `plugins.json` or remove `"canary"` from `route.plugins`. Atomic LKG swap routes 100% back to baseline without dropping active connections. |
