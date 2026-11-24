@@ -59,7 +59,7 @@ Every plugin across **all four traits** must explicitly implement `fn pbww(&self
 - **`pbww() == 0`**: Pure hot-path plugin (e.g., `ip_filter`, `cors`, `waf_lite`, `header_mutation`), or a hybrid plugin operating in `local` mode (e.g., `openai_token_quota` with `mode: "local"`). Ignored by the background scheduler with zero runtime cost.
 - **`pbww() ∈ 1..=100`**: Plugin has a persistent background daemon (e.g., Redis quota lease sync, log shipping, telemetry export, certificate rotation).
   - Pure `BackgroundPlugin` implementations simply represent plugins with no hot-path hook and non-zero PBWW (`1..=100`).
-  - Traffic-phase plugins with optional background loops (`openai_token_quota`, `consumer_quota`, `api_metering`, `rate_limit`) implement `run_background(self: Arc<Self>, shutdown: watch::Receiver<bool>) -> Option<BackgroundTaskFuture>`.
+  - Traffic-phase plugins with optional background loops (`openai_token_quota`, `api_metering`, `rate_limit`) implement `run_background(self: Arc<Self>, shutdown: watch::Receiver<bool>) -> Option<BackgroundTaskFuture>`.
 - **Static Multi-Core Greedy LPT Balancing**: In `velda-edge` ([`partition_background_plugins`](../velda-edge/src/runtime/plugin.rs)), all plugins with `pbww() > 0` across all phases are pooled together, sorted descending by PBWW, and placed greedily onto the least-loaded Shadow Worker (`velda-shadow-{i}`).
 - **Lazy Connection Ownership**: Because `from_config` never opens sockets, outbound connections (Redis, ClickHouse, OTLP, etc.) are opened lazily inside `run_background()` directly by the assigned Shadow Worker thread on its own `SCHED_IDLE` Tokio runtime.
 
@@ -67,7 +67,7 @@ Every plugin across **all four traits** must explicitly implement `fn pbww(&self
 
 | Pattern | Mechanism | Target Plugins |
 | :--- | :--- | :--- |
-| **Long-Running Daemon** | **`pbww() > 0` + `run_background(shutdown)`** | `openai_token_quota`, `consumer_quota`, `api_metering`, `rate_limit`, all 14 `background/*` plugins |
+| **Long-Running Daemon** | **`pbww() > 0` + `run_background(shutdown)`** | `openai_token_quota`, `api_metering`, `rate_limit`, all 14 `background/*` plugins |
 | **Per-Request One-Shot Offload** | **[`try_dispatch_shadow`](src/hook.rs)** (`LOCAL_SHADOW_SENDER`) | `request_mirror`, `oauth2_introspection` (non-blocking core-local fire-and-forget from `velda-worker-{i}` to `velda-shadow-{i}`) |
 
 ---
@@ -102,7 +102,6 @@ To allow protocol-independent short-circuiting without leaking internal headers:
 | [`api_key_auth`](src/pre_upstream/api_key_auth/) | HTTP | `0` | Constant-time API key verification and consumer metadata injection. |
 | [`api_metering`](src/pre_upstream/api_metering/) | All L7 | `0` / `1..=100` | Tiered micro-credit billing & optional distributed Redis delta sync. |
 | [`canary`](src/pre_upstream/canary/) | HTTP / gRPC | `0` | Deterministic hash/header/weight-based canary upstream rerouting. |
-| [`consumer_quota`](src/pre_upstream/consumer_quota/) | All L7 | `0` / `1..=100` | Multi-window fair-use quotas & optional distributed Redis sync. |
 | [`csrf`](src/pre_upstream/csrf/) | HTTP | `0` | Double-submit cookie / origin-verified CSRF token enforcement. |
 | [`grpc_fault_injection`](src/pre_upstream/grpc_fault_injection/) | gRPC | `0` | Deterministic gRPC status abort & latency fault injection. |
 | [`header_mutation`](src/pre_upstream/header_mutation/) | All L7 | `0` | Request header insertion, dynamic variable substitution, and stripping. |

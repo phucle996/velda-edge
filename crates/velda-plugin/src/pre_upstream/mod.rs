@@ -15,9 +15,7 @@ use crate::capability::{Direction, PluginCapability, SupportedProtocols};
 pub mod api_key_auth;
 pub mod api_metering;
 pub mod canary;
-pub mod consumer_quota;
 pub mod csrf;
-pub mod distributed;
 pub mod grpc_fault_injection;
 pub mod header_mutation;
 pub mod hmac_auth;
@@ -34,15 +32,10 @@ pub mod url_rewrite;
 pub use api_key_auth::{ApiKeyAuthConfig, ApiKeyAuthPlugin, ApiKeyEntryConfig};
 pub use api_metering::{
     AccountState, ApiMeteringConfig, ApiMeteringPlugin, ExhaustedAction, MICRO_CREDITS_PER_UNIT,
-    MeteringDecision, ShardedMeteringState, TierConfig,
+    MeteringDecision, QuotaAlgorithm, QuotaWindowConfig, ShardedMeteringState, TierConfig,
 };
 pub use canary::{CanaryConfig, CanaryPlugin, HeaderRule, RuleOperator};
-pub use consumer_quota::{
-    ConsumerQuotaConfig, ConsumerQuotaPlugin, QuotaAlgorithm, QuotaDecision, QuotaWindowConfig,
-    ShardedQuotaState, WindowState,
-};
 pub use csrf::{CsrfConfig, CsrfPlugin};
-pub use distributed::{DistributedSyncConfig, RedisClient, RedisError};
 pub use grpc_fault_injection::{GrpcAbortConfig, GrpcDelayConfig, GrpcFaultInjectionPlugin};
 pub use header_mutation::{
     DynamicVar, HeaderMutationConfig, HeaderMutationPlugin, HeaderValueSpec,
@@ -179,7 +172,6 @@ pub fn owns_id(id: &str) -> bool {
             | "csrf_protection"
             | "hmac_auth"
             | "oauth2_introspection"
-            | "consumer_quota"
             | "api_metering"
             | "ja4_filter"
     )
@@ -209,7 +201,6 @@ pub fn instantiate(
         "csrf" | "csrf_protection" => Ok(Arc::new(CsrfPlugin::from_config(config)?)),
         "hmac_auth" => Ok(Arc::new(HmacAuthPlugin::from_config(config)?)),
         "oauth2_introspection" => Ok(Arc::new(Oauth2IntrospectionPlugin::from_config(config)?)),
-        "consumer_quota" => Ok(Arc::new(ConsumerQuotaPlugin::from_config(config)?)),
         "api_metering" => Ok(Arc::new(ApiMeteringPlugin::from_config(config)?)),
         "ja4_filter" => Ok(Arc::new(Ja4FilterPlugin::from_config(config)?)),
         other => Err(crate::error::PluginError::Config(format!(

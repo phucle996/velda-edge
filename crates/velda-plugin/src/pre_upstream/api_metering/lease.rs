@@ -10,9 +10,8 @@
 //! ```
 
 use super::arena::{AccountState, LocalAccountRecord, ShardArena};
-use super::config::{CompiledTier, CompiledWindow, ExhaustedAction};
+use super::config::{CompiledTier, CompiledWindow, ExhaustedAction, QuotaAlgorithm};
 use super::window::{apply_node_window_lease, init_inline_windows, peek_node_window_capacity};
-use crate::pre_upstream::consumer_quota::QuotaAlgorithm;
 
 pub(crate) enum LevelLeaseOutcome {
     Ready {

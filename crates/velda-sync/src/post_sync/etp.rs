@@ -187,9 +187,7 @@ pub fn validate_etps(file: &EtpFile) -> Result<(), SyncError> {
 
 fn expected_etp_kind_for_plugin(plugin_id: &str) -> Option<EtpKind> {
     match plugin_id {
-        "openai_token_quota" | "rate_limit" | "consumer_quota" | "api_metering" => {
-            Some(EtpKind::Redis)
-        }
+        "openai_token_quota" | "rate_limit" | "api_metering" => Some(EtpKind::Redis),
         "clickhouse_log_shipper" => Some(EtpKind::ClickHouse),
         "s3_log_shipper" => Some(EtpKind::S3),
         "loki_log_shipper" => Some(EtpKind::Loki),

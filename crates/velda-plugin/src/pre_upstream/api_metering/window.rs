@@ -8,8 +8,7 @@
 //! ```
 
 use super::arena::{InlineWindowSlot, MAX_WINDOWS_PER_TIER};
-use super::config::CompiledWindow;
-use crate::pre_upstream::consumer_quota::{QuotaAlgorithm, QuotaWindowConfig};
+use super::config::{CompiledWindow, QuotaAlgorithm, QuotaWindowConfig};
 
 /// Fixed-point token scaling (1 request token = 1,000,000,000 nano-tokens).
 pub(crate) const NANO_TOKENS_PER_UNIT: u64 = 1_000_000_000;

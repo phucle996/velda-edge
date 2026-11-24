@@ -16,6 +16,9 @@ pub use arena::{
     AccountState, InlineWindowSlot, LocalAccountRecord, MAX_ACCOUNTS_PER_SHARD,
     MAX_HIERARCHY_LEVELS, MAX_WINDOWS_PER_TIER,
 };
-pub use config::{ApiMeteringConfig, CompiledTier, CompiledWindow, ExhaustedAction, TierConfig};
+pub use config::{
+    ApiMeteringConfig, CompiledTier, CompiledWindow, ExhaustedAction, QuotaAlgorithm,
+    QuotaWindowConfig, TierConfig,
+};
 pub use key::{AccountKeyChain, pack_tagged_key, resolve_account_keys, resolve_tier};
 pub use plugin::ApiMeteringPlugin;

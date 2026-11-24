@@ -15,7 +15,42 @@ use rustc_hash::{FxHashMap, FxHasher};
 use super::arena::MAX_WINDOWS_PER_TIER;
 use crate::config::PluginConfig;
 use crate::error::PluginError;
-use crate::pre_upstream::consumer_quota::{QuotaAlgorithm, QuotaWindowConfig};
+
+/// Evaluation algorithm selected for a metering quota window.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum QuotaAlgorithm {
+    /// Sliding window counter with smooth basis-point interpolation.
+    #[default]
+    SlidingWindow,
+    /// Fixed calendar/clock window.
+    FixedWindow,
+    /// Token bucket for absorbing bursts while constraining sustained rate.
+    TokenBucket,
+}
+
+impl QuotaAlgorithm {
+    /// Parses an algorithm identifier from configuration string.
+    pub fn parse(s: &str) -> Self {
+        match s.trim().to_ascii_lowercase().as_str() {
+            "fixed" | "fixed_window" => Self::FixedWindow,
+            "token" | "token_bucket" => Self::TokenBucket,
+            _ => Self::SlidingWindow,
+        }
+    }
+}
+
+/// Static definition of a single quota window within an API metering tier.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct QuotaWindowConfig {
+    /// Human-readable identifier for this window (e.g. "monthly_cap", "daily_cap").
+    pub name: String,
+    /// Window duration strictly in seconds.
+    pub window_seconds: u64,
+    /// Maximum allowed request count within this window.
+    pub limit: u64,
+    /// Measurement algorithm applied to this window.
+    pub algorithm: QuotaAlgorithm,
+}
 
 /// Action taken when an account exhausts its tier quota or credit balance.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
