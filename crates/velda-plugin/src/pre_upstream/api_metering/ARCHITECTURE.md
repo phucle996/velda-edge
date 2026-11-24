@@ -1,197 +1,176 @@
-# API Metering & Monetization (`api_metering`) — Deep Systems Architecture
+# API Metering & Monetization (`api_metering`) — Architecture Guide
 
-This specification details the thread-per-core escrow topology, 2-phase hierarchical Check-Then-Commit protocol, `PageSlab` cache-line geometry, adaptive micro-leasing, and lossless distributed reconciliation mechanics of the **`api_metering`** plugin in **Velda Edge**.
+This guide explains how `api_metering` delivers multi-level quota and wallet accounting at ~`70k–77k req/s` on 2 vCPUs without hitting Redis or locking across CPU cores on every request.
 
 ---
 
-## 1. Dual-Tier Escrow & Thread-Per-Core Topology
+## 1. The Core Idea: Three-Tier Escrow
 
-`api_metering` decouples steady-state request metering from cross-core lock contention and external Redis I/O across three isolated memory/execution tiers:
+Checking a central counter or Redis on every HTTP request creates lock contention and network latency. Instead, `api_metering` splits accounting into three tiers — just like a **local cash register**, a **store vault**, and **bank settlement**:
+
+1. **Tier 1 — Per-Core Desk (`LaneArena`)**: Each CPU core keeps a small, private batch of pre-approved quota ("micro-lease", up to `32` requests) in its own local memory. ~97% of requests only touch their own core's desk — zero cross-core cache fighting.
+2. **Tier 2 — Node Vault (`ShardArena`, 64 shards)**: When a core's micro-lease runs out, it briefly locks one of 64 independent shards to flush what it spent and lease a fresh batch.
+3. **Tier 3 — Background Bank Sync (`RedisEtp`)**: If distributed sync is enabled, a background Shadow Worker periodically batches node deltas to Redis using `HINCRBY`, completely off the request path.
 
 ```mermaid
-flowchart TD
-    subgraph Core["Physical CPU Core i — Frontline Traffic Worker (velda-worker-i)"]
-        REQ["Inbound L7Request\n(HTTP/1.1, HTTP/2, HTTP/3, gRPC)"]
-        KEYS["key.rs: SWAR + SplitMix64 (0 div)\nL0 (tenant) -> L1 (team) -> L2 (user)"]
-        FAIL400["#[cold] 400 Bad Request\n(0 locks, fail-closed)"]
-        TIER["resolve_tier(): len + eq_ignore_ascii_case\n-> &CompiledTier (0 alloc)"]
+flowchart LR
+    REQ["Incoming Request"] --> KEY["1. Hash Identity\n(L0 -> L1 -> L2)"]
+    KEY -->|"No account headers"| R400["400 Bad Request\n(No locks taken)"]
+    KEY -->|"Valid chain"| DESK
 
-        REQ --> KEYS
-        KEYS -->|"All headers missing/blank"| FAIL400
-        KEYS -->|"AccountKeyChain [0..depth]"| TIER
+    subgraph Core["CPU Core i (Local Memory)"]
+        DESK["2. Per-Core Desk\n(LaneArena)"]
+        COMMIT["Deduct Locally\n& Set Headers"]
+        DESK -->|"Lease Hit (~97%)"| COMMIT
     end
 
-    subgraph LocalTier["Tier 1: Per-Core LaneArena (L1d/L2 Resident, 0 Cross-Core MESI)"]
-        LANE["Lane[core_id].levels[0..3]\n16B AccountIndexSlot -> 128B LocalAccountRecord"]
-        HIT{"Local Lease\nCovers Request?"}
-        COMMIT["Phase 2: O(1) record_mut_by_idx()\nDeduct local_credits_lease & local_window_lease"]
-
-        TIER --> LANE
-        LANE --> HIT
-        HIT -->|"~96.9% Steady-State Hit"| COMMIT
+    subgraph Node["Shared Node Memory (64 Shards)"]
+        VAULT["3. Node Vault\n(ShardArena)"]
+        DESK -->|"Lease Empty (~3%)"| VAULT
+        VAULT -->|"Refill Batch (1..32)"| COMMIT
+        VAULT -->|"Quota = 0"| R402["402 / 429 Reject"]
     end
 
-    subgraph NodeTier["Tier 2: Node-Global 64 Shards (Cache-Aligned Mutex)"]
-        SHARD["Shard[raw_hash & 63]\n16B AccountIndexSlot -> 192B AccountState"]
-        REFILL["#[cold] refill_from_node_shard()\nFlush unflushed credits + lease batch (1..32)\n+ Bounded Node Grace"]
-
-        HIT -->|"Lease Depleted / Cold Key"| SHARD
-        SHARD --> REFILL
-        REFILL -->|"Ready"| COMMIT
-    end
-
-    subgraph ShadowTier["Tier 3: Shadow Logistics Worker (velda-shadow-i, SCHED_IDLE)"]
-        TICK["Sync Ticker (sync_interval_ms)"]
-        COLLECT["collect_deltas(): delta -> in_flight_delta"]
-        REDIS["RedisEtp Pipelined HINCRBY\n(RESP2 TCP Keep-Alive)"]
-        RECON["ACK -> reconcile_balances()\nERR -> revert_in_flight_deltas()"]
-
-        TICK --> COLLECT
-        SHARD -.->|"Atomic Delta Swap"| COLLECT
-        COLLECT --> REDIS
-        REDIS --> RECON
-        RECON -.->|"Update global balance & epoch"| SHARD
+    subgraph Bg["Background Shadow Worker"]
+        REDIS["4. Redis HINCRBY\n(Async Batch Sync)"]
+        VAULT -.->|"Periodic Delta Flush"| REDIS
+        REDIS -.->|"Update Global Balance"| VAULT
     end
 ```
 
-### Architectural Guarantees
-1. **Zero Cross-Core Cache Bouncing on Hits**: Each core operates exclusively inside its own `LaneArena` (`self.lanes[core_lane]`), eliminating MESI invalidation ping-pong on hot tenants.
-2. **Zero-IO Hot Path**: Frontline workers never touch sockets, filesystems, or JSON parsers. Redis synchronization executes asynchronously on Shadow Workers (`pbww: 1..=100`).
-3. **Fail-Closed Before Locking**: Missing/blank account headers short-circuit immediately to `400 Bad Request` before acquiring any `LaneArena` or `ShardArena` lock.
-
 ---
 
-## 2. 2-Phase Hierarchical Check-Then-Commit Protocol
+## 2. How Hierarchical Quotas Work (2-Phase Check-Then-Commit)
 
-To guarantee that a leaf rejection (e.g., `L2 user` exhausted) never partially deducts parent quotas (`L0 tenant`, `L1 team`), `evaluate_chain_compiled()` executes strictly in two phases while holding the local `LaneArena` lock:
+Suppose a route enforces 3 levels: **Tenant (`L0`) $\rightarrow$ Team (`L1`) $\rightarrow$ User (`L2`)**.
+
+If the User (`L2`) is out of quota, we **must not** deduct a request from the Tenant (`L0`) or Team (`L1`). To prevent partial deductions, every request runs in **two phases**:
+
+- **Phase 1 (Check & Reserve)**: Walk `L0 -> L1 -> L2`. Make sure every level has enough quota/credits (refilling from the Node Vault if needed) and remember each level's direct slot index (`record_idx`). If *any* level is exhausted, **stop immediately with 0 deductions**.
+- **Phase 2 (Commit)**: Jump directly to each level's `record_idx` in $O(1)$ time (no second hash-table lookup) and subtract the request.
 
 ```mermaid
 sequenceDiagram
     autonumber
-    participant Req as Frontline Worker
-    participant L0 as Lane Level 0 (Tenant)
-    participant L1 as Lane Level 1 (Team)
-    participant L2 as Lane Level 2 (User)
-    participant Node as Node Shard[64]
+    participant Req as Request
+    participant L0 as Level 0 (Tenant)
+    participant L1 as Level 1 (Team)
+    participant L2 as Level 2 (User)
 
-    Note over Req,L2: Phase 1 — Check & Ensure Leases (0 Commits)
-    Req->>L0: Probe tagged_key[0] -> capture record_idx[0]
-    alt Lease Exhausted
-        L0->>Node: #[cold] refill_from_node_shard()
-        Node-->>L0: Lease batch (or Exhausted)
+    Note over Req,L2: Phase 1 — Check All Levels First (0 Deductions Yet)
+    Req->>L0: Check lease (save slot index 0)
+    L0-->>Req: OK
+    Req->>L1: Check lease (save slot index 1)
+    L1-->>Req: OK
+    Req->>L2: Check lease (save slot index 2)
+
+    alt Any Level Exhausted (e.g. L2 = 0)
+        L2-->>Req: Exhausted!
+        Note over Req,L2: Abort immediately -> L0 and L1 remain untouched!
+    else All Levels Ready
+        Note over Req,L2: Phase 2 — Commit in O(1) via Saved Slot Index
+        Req->>L0: Deduct 1 request & cost
+        Req->>L1: Deduct 1 request & cost
+        Req->>L2: Deduct 1 request & cost
     end
-
-    opt bit 0 (has_child) == 1
-        Req->>L1: Probe tagged_key[1] -> capture record_idx[1]
-        opt bit 0 (has_child) == 1
-            Req->>L2: Probe tagged_key[2] -> capture record_idx[2]
-            Note over L2: Suppose L2 is Exhausted!
-            L2-->>Req: Abort immediately (0 deductions committed on L0/L1!)
-        end
-    end
-
-    Note over Req,L2: Phase 2 — Atomic Local Commit (Only if ALL Levels Ready)
-    Req->>L0: O(1) record_mut_by_idx(record_idx[0]) -> deduct
-    Req->>L1: O(1) record_mut_by_idx(record_idx[1]) -> deduct
-    Req->>L2: O(1) record_mut_by_idx(record_idx[2]) -> deduct
 ```
-
-- **O(1) Phase-2 Direct Indexing**: Phase 1 captures each level's dense slab index (`record_idx`) inside `PendingLevelLease`. Phase 2 writes directly via `record_mut_by_idx(p.record_idx)` without re-probing the hash table.
 
 ---
 
-## 3. Cumulative Key Hashing & Tagged `bit 0` Geometry
+## 3. Identity Key Layout & Division-Free Hashing
 
-Each hierarchy level `L` hashes cumulatively (`L0`, `L0|L1`, `L0|L1|L2`) using 64-bit SWAR chunking (`slice::as_chunks::<8>()`) followed by a SplitMix64 avalanche with **zero division instructions**:
+Each present header in `account_headers` is hashed cumulatively (`L0`, `L0|L1`, `L0|L1|L2`) in 8-byte chunks using `SWAR` + `SplitMix64` — **zero hardware division instructions** (`ud2 = 0`), so long enterprise tenant names never fail or trap.
+
+Bit `0` of the 64-bit key tells Phase 1 whether another child level follows:
 
 ```text
-+-----------------------------------------------------------------------------------+
-|                        64-BIT TAGGED KEY & SENTINEL LAYOUT                        |
-+-----------------------------------------------------------------------------------+
-|  Bits [63 .. 1] : 63-bit Account Segment Hash (raw_hash = hash.max(2))            |
-|  Bit  [0]       : Hierarchy Continuation Flag (has_child)                         |
-|                   ├── 1 -> Parent level (continue to L_{i+1})                     |
-|                   └── 0 -> Leaf level   (stop traversal immediately)              |
-+-----------------------------------------------------------------------------------+
-|  Special Index Table Sentinels (AccountIndexSlot.key):                            |
-|    0x0000_0000_0000_0000 (0) -> SLOT_EMPTY                                        |
-|    0x0000_0000_0000_0001 (1) -> SLOT_TOMBSTONE                                    |
-|    >= 2                      -> Live Tagged Key                                   |
-+-----------------------------------------------------------------------------------+
+  63                                                         1   0
+  +----------------------------------------------------------+---+
+  |               63-bit Account Segment Hash                | C |
+  +----------------------------------------------------------+---+
+                                                               │
+                 C = 1 : Has child level (keep walking) ───────┘
+                 C = 0 : Leaf level (stop walking)
+
+  Reserved sentinel values in hash table:
+    0 = Empty slot    1 = Tombstone (deleted)    >= 2 = Live key
 ```
 
 ---
 
-## 4. `PageSlab` & Cache-Line Memory Geometry
+## 4. Memory Layout & Why RAM Doesn't Fragment
 
-Both `LaneLevelArena` and `ShardArena` separate **probe metadata** (`16 B`) from **account state** (`128 B` / `192 B`) inside contiguous `(k + 1) * 4096 B` extents (`alloc_zeroed`, 4 KiB-aligned):
+Instead of allocating millions of small Rust objects on the heap, `api_metering` stores everything in contiguous **4 KiB-aligned page slabs** (`(k + 1) * 4096 B`) split into two arrays:
+
+1. **Index Array (`16 B` per slot)**: 4 slots fit inside a single 64-byte CPU cache line, making hash-table probing fast and pointing directly to the account record.
+2. **Dense Record Array**:
+   - **Per-Core Record (`128 B` = 2 cache lines)**: Stores only the core's local lease counters and unflushed spend.
+   - **Node-Global Record (`192 B` = 3 cache lines)**: Stores the authoritative wallet balance, up to `4` inline quota windows (`24 B` each, no heap pointers), and node grace budget.
 
 ```text
-+-----------------------------------------------------------------------------------+
-|                 2-TIER CONTIGUOUS PageSlab<T> ((k + 1) * 4096 B)                  |
-+-----------------------------------------------------------------------------------+
-|  Tier A: Index Slab (16B/slot -> 4 slots fit in ONE 64B L1D Cache Line)           |
-|  +--------------------+--------------------+--------------------+---------------+ |
-|  | key (8B, u64)      | record_idx (4B)    | clock_ref (1B)     | _pad (3B)     | |
-|  +--------------------+--------------------+--------------------+---------------+ |
-|                                  |                                                |
-|                                  +--> Direct O(1) Offset into Tier B              |
-|                                                                                   |
-|  Tier B (Per-Core): LocalAccountRecord (128B = 2 Cache Lines, align(64))          |
-|  +------------------------------------------------------------------------------+ |
-|  | CL0 (0x00..0x3F): tagged_key, raw_hash, tier_fp, epoch, credits_lease/snap   | |
-|  | CL1 (0x40..0x7F): unflushed_credits, window_lease[4], window_epoch[4], hint  | |
-|  +------------------------------------------------------------------------------+ |
-|                                                                                   |
-|  Tier B (Node-Global): AccountState (192B = 3 Cache Lines, align(64))             |
-|  +------------------------------------------------------------------------------+ |
-|  | CL0 (0x00..0x3F): account_hash, tier_fp, last_access, balance, delta, inflt  | |
-|  | CL1 (0x40..0x7F): windows[0..2] (InlineWindowSlot: 24B each, no pointers)    | |
-|  | CL2 (0x80..0xBF): windows[3], grace_credits, grace_win[4], epoch, win_count  | |
-|  +------------------------------------------------------------------------------+ |
-+-----------------------------------------------------------------------------------+
+  Index Slab (16B/slot, 4 slots per 64B cache line)
+  ┌──────────────────┬──────────────────┬──────────────────┬──────────────────┐
+  │ key | record_idx │ key | record_idx │ key | record_idx │ key | record_idx │
+  └─────────┬────────┴──────────────────┴──────────────────┴──────────────────┘
+            │
+            ▼  O(1) Direct Offset
+  Record Slab (128B per-core  OR  192B node-global)
+  ┌───────────────────────────────────────────────────────────────────────────┐
+  │ CL0 (64B): Identity hash, tier fingerprint, balance, unflushed deltas     │
+  │ CL1 (64B): Inline quota windows [0..2] (no Vec / no Box pointers)         │
+  │ CL2 (64B): Window [3], node grace budget, reconcile epoch (192B only)     │
+  └───────────────────────────────────────────────────────────────────────────┘
 ```
 
-- **Zero External Fragmentation**: Slabs resize in powers of 2 (`64 -> 128 -> ... -> 32,768`) by allocating the new contiguous extent and immediately deallocating the old extent (`VmHWM == VmRSS`).
-- **CLOCK Eviction Cap**: When a shard or lane reaches `MAX_ACCOUNTS_PER_SHARD = 32,768`, `evict_local_clock` / `evict_one_clock_slot` scans at most `64` slots, bounding worst-case eviction latency to $O(1)$.
+- **Bounded Growth & Eviction**: Tables grow in powers of 2 up to `32,768` accounts per shard (`~2.09M` accounts node-wide across 64 shards). Above that, a bounded CLOCK sweep (max `64` probes) evicts the coldest idle account in $O(1)$ time.
+- **Zero External Fragmentation**: When a slab doubles, the old contiguous slab is freed as one block (`VmHWM == VmRSS`).
 
 ---
 
-## 5. Adaptive Micro-Lease, Node Grace & Redis Reconciliation
+## 5. Adaptive Leasing, Node Grace & Redis Reconciliation
 
-### 5.1 Adaptive Batch Leasing & Bounded Node Grace
-$$\text{LeaseBatch}(\text{avail}) = \begin{cases} 1 & \text{if } \text{avail} < 256 \\ \operatorname{clamp}(\lfloor \text{avail} / 128 \rfloor,\, 1,\, 32) & \text{otherwise} \end{cases}$$
+### 5.1 Adaptive Micro-Lease Sizing
+To avoid overshooting small quotas across multiple cores while staying fast on large quotas:
+- When remaining quota `avail < 256`: lease **`1` request** at a time (strict accuracy).
+- When `avail >= 256`: lease **`clamp(avail / 128, 1, 32)` requests** per refill.
 
-- Near exhaustion (`avail < 256`), leasing collapses to `1` request per refill to prevent overshooting strict limits.
-- When `grace_enabled = true`, each node shard grants a bounded grace budget:
-  $$\text{NodeGrace} = \operatorname{clamp}(\lfloor \text{limit} / 200 \rfloor,\, 2,\, 1000)$$
-  absorbing small cross-core lease skew without permitting unbounded overdraft.
+When `grace_enabled: true`, the node grants a small bounded grace buffer (`clamp(limit / 200, 2, 1000)`) so multi-core lease rounding doesn't trigger premature `402`/`429` errors just below the limit.
 
-### 5.2 Lossless Distributed Delta Conservation
+### 5.2 Lossless Redis Sync
+Even if new requests arrive *while* a Redis `HINCRBY` batch is in flight over the network, no deductions are lost or double-counted:
+
 ```mermaid
 sequenceDiagram
     autonumber
     participant Worker as Frontline Cores
-    participant Shard as Node Shard (AccountState)
-    participant Shadow as Shadow Sync Task
-    participant Redis as Redis Cluster (HINCRBY)
+    participant Node as Node Vault (AccountState)
+    participant Shadow as Shadow Sync Worker
+    participant Redis as Redis (HINCRBY)
 
-    Worker->>Shard: Flush local_credits_spent_unflushed -> delta
-    Shadow->>Shard: collect_deltas() (in_flight_delta = delta, delta = 0)
-    Shadow->>Redis: Pipelined HINCRBY(key, -in_flight_delta)
+    Worker->>Node: Flush local spend into delta
+    Shadow->>Node: Move delta -> in_flight_delta (reset delta = 0)
+    Shadow->>Redis: Send pipelined HINCRBY(-in_flight_delta)
 
-    alt Redis ACK (Global Balance G returned)
-        Note over Worker,Shard: Meanwhile Worker may have added new delta'
-        Shadow->>Shard: balance = G - delta', in_flight_delta = 0, reconcile_epoch++
-    else Redis Timeout / Network Error
-        Shadow->>Shard: revert_in_flight_deltas() (delta += in_flight_delta, in_flight_delta = 0)
+    alt Redis Returns New Global Balance G
+        Note over Worker,Node: New traffic may have added delta' while waiting
+        Shadow->>Node: Set balance = G - delta', clear in_flight_delta, bump epoch
+    else Redis Fails / Times Out
+        Shadow->>Node: Restore delta += in_flight_delta, clear in_flight_delta
     end
 ```
 
 ---
 
-## 6. Security & Compiler Safety Invariants
+## 6. Module Map (`9` Focused Files)
 
-1. **Zero-Trap Machine Code (`ud2 = 0`)**: Division-free hashing (`as_chunks::<8>()`), saturated arithmetic, and checked/masked slice indexing yield `0` panic traps on the hot path under `x86-64-v3`.
-2. **Header Spoofing Prevention**: Inbound `x-metering-*` headers are authoritatively overwritten via `HeaderWorkspace::insert`.
-3. **JSON Payload Safety**: Cold `402 Payment Required` responses escape `tier` and `window` identifiers via `push_json_escaped` before serialization.
+| File | Role |
+| :--- | :--- |
+| `plugin.rs` | `PreUpstreamPlugin` entrypoint (`on_upstream_request`), ETP attachment, cold `400`/`402`/`429` builders. |
+| `algorithm.rs` | `ShardedMeteringState`, 2-phase Check-Then-Commit loop, and Redis delta collection/reconciliation. |
+| `lease.rs` | Per-core lease check, $O(1)$ local deduction, and `#[cold]` node shard refill. |
+| `arena.rs` | `PageSlab<T>` allocator, `LaneArena` (`128B`), `ShardArena` (`192B`), and CLOCK eviction. |
+| `key.rs` | SWAR + SplitMix64 hashing, `AccountKeyChain` (`bit 0`), and `resolve_tier()`. |
+| `window.rs` | `FixedWindow`, `SlidingWindow`, and `TokenBucket` math on `24B` `InlineWindowSlot`. |
+| `config.rs` | JSON config parsing, `CompiledTier` compilation, and grace budget calculation. |
+| `redis.rs` | Background `RedisEtp` `HINCRBY` sync loop (`run_shadow_metering_sync`). |
+| `mod.rs` | Crate exports. |
