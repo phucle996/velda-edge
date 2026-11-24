@@ -1,6 +1,8 @@
 //! Canary Traffic Splitting Pre-Upstream Plugin (`canary::plugin`).
 //!
 //! ```text
+//! Core Upstreams Loaded ──► CanaryPlugin::from_config(cfg, upstream_ids) ──► canary_upstream_id: u16
+//!
 //! on_upstream_request(req, target_upstream)  [AccessLevel::Read, 0 Header Mutations, 0 Fallback]
 //!   ├─► 1. Header Rules (`rules` against HeaderWorkspace)              -> force canary
 //!   └─► 2. Multi-Header SWAR Hash (`hash_headers` all required)
@@ -10,11 +12,8 @@
 //!               └── false ─► keep default baseline upstream            -> Continue
 //! ```
 
-use std::sync::Arc;
-use std::sync::atomic::{AtomicU16, Ordering};
-
 use http::HeaderName;
-use velda_core::{Action, L7Request, UNASSIGNED_UPSTREAM_ID};
+use velda_core::{Action, L7Request};
 
 use super::config::{CanaryConfig, HeaderRule, RuleOperator, schema_to_config};
 use super::hash::evaluate_permille;
@@ -25,34 +24,23 @@ use crate::error::PluginError;
 use crate::pre_upstream::PreUpstreamPlugin;
 
 /// Lean, header-only, read-only Canary Traffic Splitting plugin.
+#[derive(Debug)]
 pub struct CanaryPlugin {
     pub id: String,
-    pub canary_upstream: Arc<str>,
-    pub canary_upstream_id: AtomicU16,
+    pub canary_upstream_id: u16,
     /// Traffic share routed to canary in permille (`1..=999`).
     pub ratio: u32,
     pub rules: Box<[HeaderRule]>,
     pub hash_headers: Box<[HeaderName]>,
 }
 
-impl std::fmt::Debug for CanaryPlugin {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.debug_struct("CanaryPlugin")
-            .field("id", &self.id)
-            .field("canary_upstream", &self.canary_upstream)
-            .field(
-                "canary_upstream_id",
-                &self.canary_upstream_id.load(Ordering::Relaxed),
-            )
-            .field("ratio", &self.ratio)
-            .field("hash_headers", &self.hash_headers)
-            .finish()
-    }
-}
-
 impl CanaryPlugin {
-    /// Constructs a new canary plugin from typed configuration.
-    pub fn new(id: impl Into<String>, config: CanaryConfig) -> Result<Self, PluginError> {
+    /// Constructs a canary plugin with an already-resolved dense upstream index (`u16`).
+    pub fn new(
+        id: impl Into<String>,
+        config: CanaryConfig,
+        canary_upstream_id: u16,
+    ) -> Result<Self, PluginError> {
         if config.canary_upstream.trim().is_empty() {
             return Err(PluginError::Config(
                 "canary_upstream cannot be empty".to_string(),
@@ -72,19 +60,33 @@ impl CanaryPlugin {
 
         Ok(Self {
             id: id.into(),
-            canary_upstream: Arc::from(config.canary_upstream.trim()),
-            canary_upstream_id: AtomicU16::new(UNASSIGNED_UPSTREAM_ID),
+            canary_upstream_id,
             ratio: config.ratio,
             rules: config.rules.into_boxed_slice(),
             hash_headers: config.hash_headers.into_boxed_slice(),
         })
     }
 
-    /// Parses, validates, and constructs a [`CanaryPlugin`] from control-plane JSON.
-    pub fn from_config(config: &PluginConfig) -> Result<Self, PluginError> {
+    /// Parses, validates, and resolves `"canary_upstream"` directly against pre-loaded `upstream_ids`.
+    pub fn from_config(config: &PluginConfig, upstream_ids: &[&str]) -> Result<Self, PluginError> {
         let schema = validate_canary_config(&config.id, &config.config)?;
         let cfg = schema_to_config(schema)?;
-        Self::new(&config.id, cfg)
+        let pos = upstream_ids
+            .iter()
+            .position(|u| *u == cfg.canary_upstream)
+            .ok_or_else(|| {
+                PluginError::Config(format!(
+                    "Plugin '{}' targets canary_upstream '{}', which does not exist in upstreams",
+                    config.id, cfg.canary_upstream
+                ))
+            })?;
+        let dense_id = u16::try_from(pos).map_err(|_| {
+            PluginError::Config(format!(
+                "Upstream index for '{}' exceeds u16::MAX",
+                cfg.canary_upstream
+            ))
+        })?;
+        Self::new(&config.id, cfg, dense_id)
     }
 
     /// Evaluates whether the request should route to the canary upstream.
@@ -158,24 +160,10 @@ impl PreUpstreamPlugin for CanaryPlugin {
         0
     }
 
-    #[inline(always)]
-    fn canary_upstream_target(&self) -> Option<&str> {
-        Some(self.canary_upstream.as_ref())
-    }
-
-    #[inline(always)]
-    fn attach_canary_upstream(&self, upstream_id: u16) {
-        self.canary_upstream_id
-            .store(upstream_id, Ordering::Relaxed);
-    }
-
     #[inline]
     fn on_upstream_request(&self, req: &mut L7Request, target_upstream: &mut u16) -> Action {
         if self.should_route_to_canary(req) {
-            let cid = self.canary_upstream_id.load(Ordering::Relaxed);
-            if cid != UNASSIGNED_UPSTREAM_ID {
-                *target_upstream = cid;
-            }
+            *target_upstream = self.canary_upstream_id;
         }
         Action::Continue
     }
@@ -235,12 +223,11 @@ mod tests {
             ],
         };
 
-        let plugin = CanaryPlugin::new("canary-test", config).unwrap();
+        let plugin = CanaryPlugin::new("canary-test", config, 2).unwrap();
         assert_eq!(
             plugin.capability(),
             PluginCapability::header_only(AccessLevel::Read)
         );
-        plugin.attach_canary_upstream(2);
 
         let make_req = |pairs: &[(&'static str, &'static str)]| {
             let mut h = HeaderWorkspace::empty(4);
@@ -314,10 +301,8 @@ mod tests {
             hash_headers: config_low.hash_headers.clone(),
         };
 
-        let plugin_low = CanaryPlugin::new("canary-low", config_low).unwrap();
-        let plugin_high = CanaryPlugin::new("canary-high", config_high).unwrap();
-        plugin_low.attach_canary_upstream(1);
-        plugin_high.attach_canary_upstream(1);
+        let plugin_low = CanaryPlugin::new("canary-low", config_low, 1).unwrap();
+        let plugin_high = CanaryPlugin::new("canary-high", config_high, 1).unwrap();
 
         let mut canary_hits = 0u64;
         let total = 20_000u64;
@@ -354,7 +339,7 @@ mod tests {
     }
 
     #[test]
-    fn test_canary_validation_rejects_boundaries_and_wires_upstream() {
+    fn test_canary_validation_rejects_boundaries_and_resolves_upstream_id() {
         for bad_ratio in [0u32, 1000u32, 1001u32] {
             assert!(
                 validate_canary_config(
@@ -414,25 +399,22 @@ mod tests {
             .is_err()
         );
 
-        let plugin = Arc::new(
-            CanaryPlugin::from_config(&PluginConfig {
-                id: "canary_main".into(),
-                config: serde_json::json!({
-                    "canary_upstream": "orders-v2",
-                    "ratio": 999,
-                    "rules": [{ "name": "x-canary", "operator": "equals", "value": "true" }],
-                    "hash_headers": ["x-tenant-id", "cookie"]
-                }),
-            })
-            .unwrap(),
-        );
+        let cfg = PluginConfig {
+            id: "canary_main".into(),
+            config: serde_json::json!({
+                "canary_upstream": "orders-v2",
+                "ratio": 999,
+                "rules": [{ "name": "x-canary", "operator": "equals", "value": "true" }],
+                "hash_headers": ["x-tenant-id", "cookie"]
+            }),
+        };
 
-        let mut available = rustc_hash::FxHashMap::default();
-        available.insert(
-            "canary_main".to_string(),
-            crate::LoadedPlugin::PreUpstream(Arc::clone(&plugin) as Arc<dyn PreUpstreamPlugin>),
-        );
-        crate::wire_plugin_upstreams(&available, &["orders-v1", "auth", "orders-v2"]).unwrap();
+        // Missing target upstream is rejected directly at construction
+        assert!(CanaryPlugin::from_config(&cfg, &["orders-v1"]).is_err());
+
+        // Present target resolves directly to plain dense u16 index (2)
+        let plugin = CanaryPlugin::from_config(&cfg, &["orders-v1", "auth", "orders-v2"]).unwrap();
+        assert_eq!(plugin.canary_upstream_id, 2);
 
         let mut req = L7Request::new(
             Method::GET,
@@ -448,6 +430,5 @@ mod tests {
         let mut target = 0;
         plugin.on_upstream_request(&mut req, &mut target);
         assert_eq!(target, 2);
-        assert!(crate::wire_plugin_upstreams(&available, &["orders-v1"]).is_err());
     }
 }

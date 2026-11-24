@@ -707,8 +707,8 @@ async fn test_otlp_shared_etp_registry_wiring_and_reconnect_recovery() {
         }),
     };
 
-    let loaded_logs = instantiate_plugin(&logs_cfg).unwrap();
-    let loaded_metrics = instantiate_plugin(&metrics_cfg).unwrap();
+    let loaded_logs = instantiate_plugin(&logs_cfg, &[]).unwrap();
+    let loaded_metrics = instantiate_plugin(&metrics_cfg, &[]).unwrap();
     let mut available = FxHashMap::default();
     available.insert(loaded_logs.id().to_string(), loaded_logs);
     available.insert(loaded_metrics.id().to_string(), loaded_metrics.clone());
@@ -727,7 +727,7 @@ async fn test_otlp_shared_etp_registry_wiring_and_reconnect_recovery() {
     runner.await.unwrap().unwrap();
 
     // Missing ETP in registry produces an explicit PluginError
-    let missing_plugin = instantiate_plugin(&logs_cfg).unwrap();
+    let missing_plugin = instantiate_plugin(&logs_cfg, &[]).unwrap();
     let mut missing_map = FxHashMap::default();
     missing_map.insert(missing_plugin.id().to_string(), missing_plugin);
     assert!(wire_plugin_etps(&missing_map, &velda_etp::EtpRegistry::default()).is_err());
@@ -741,7 +741,7 @@ async fn test_otlp_shared_etp_registry_wiring_and_reconnect_recovery() {
         settings: serde_json::json!({ "endpoint": "http://127.0.0.1:3100" }),
     }])
     .unwrap();
-    let wrong_plugin = instantiate_plugin(&metrics_cfg).unwrap();
+    let wrong_plugin = instantiate_plugin(&metrics_cfg, &[]).unwrap();
     let mut wrong_map = FxHashMap::default();
     wrong_map.insert(wrong_plugin.id().to_string(), wrong_plugin);
     assert!(wire_plugin_etps(&wrong_map, &wrong_registry).is_err());
@@ -957,9 +957,9 @@ async fn test_all_three_otlp_plugins_share_single_etp() {
         }),
     };
 
-    let loaded_logs = instantiate_plugin(&logs_cfg).unwrap();
-    let loaded_metrics = instantiate_plugin(&metrics_cfg).unwrap();
-    let loaded_trace = instantiate_plugin(&trace_cfg).unwrap();
+    let loaded_logs = instantiate_plugin(&logs_cfg, &[]).unwrap();
+    let loaded_metrics = instantiate_plugin(&metrics_cfg, &[]).unwrap();
+    let loaded_trace = instantiate_plugin(&trace_cfg, &[]).unwrap();
     let mut available = FxHashMap::default();
     available.insert(loaded_logs.id().to_string(), loaded_logs.clone());
     available.insert(loaded_metrics.id().to_string(), loaded_metrics.clone());

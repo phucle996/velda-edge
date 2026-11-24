@@ -114,17 +114,6 @@ pub trait PreUpstreamPlugin: Send + Sync {
         Ok(())
     }
 
-    /// Optional target upstream identifier resolved to a dense `u16` index at startup/reload
-    /// (e.g. Canary secondary upstream switching).
-    #[inline]
-    fn canary_upstream_target(&self) -> Option<&str> {
-        None
-    }
-
-    /// Attaches the resolved dense `u16` upstream index for [`Self::canary_upstream_target`].
-    #[inline]
-    fn attach_canary_upstream(&self, _upstream_id: u16) {}
-
     /// Starts optional background workload daemon on the assigned Shadow Worker (`pbww() > 0`).
     #[inline]
     fn run_background(
@@ -203,13 +192,14 @@ pub fn owns_id(id: &str) -> bool {
 /// delegating config extraction and validation to the plugin's own `from_config` implementation.
 pub fn instantiate(
     config: &crate::config::PluginConfig,
+    upstream_ids: &[&str],
 ) -> Result<Arc<dyn PreUpstreamPlugin>, crate::error::PluginError> {
     match config.id.as_str() {
         "api_key_auth" => Ok(Arc::new(ApiKeyAuthPlugin::from_config(config)?)),
         "jwt_auth" => Ok(Arc::new(JwtAuthPlugin::from_config(config)?)),
         "rate_limit" => Ok(Arc::new(RateLimitPlugin::from_config(config)?)),
         "header_mutation" => Ok(Arc::new(HeaderMutationPlugin::from_config(config)?)),
-        "canary" => Ok(Arc::new(CanaryPlugin::from_config(config)?)),
+        "canary" => Ok(Arc::new(CanaryPlugin::from_config(config, upstream_ids)?)),
         "request_mirror" => Ok(Arc::new(RequestMirrorPlugin::from_config(config)?)),
         "url_rewrite" => Ok(Arc::new(UrlRewritePlugin::from_config(config)?)),
         "http_cache_lookup" => Ok(Arc::new(HttpCacheLookupPlugin::from_config(config)?)),

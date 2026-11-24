@@ -520,7 +520,7 @@ async fn test_loki_etp_registry_wiring_and_reconnect_recovery() {
             "request_timeout_ms": 2000
         }),
     };
-    let loaded = instantiate_plugin(&plugin_cfg).unwrap();
+    let loaded = instantiate_plugin(&plugin_cfg, &[]).unwrap();
     let mut available = FxHashMap::default();
     available.insert(loaded.id().to_string(), loaded.clone());
     wire_plugin_etps(&available, &registry).unwrap();
@@ -549,7 +549,7 @@ async fn test_loki_etp_registry_wiring_and_reconnect_recovery() {
     runner.await.unwrap().unwrap();
 
     // Missing ETP produces an explicit error
-    let err_plugin = instantiate_plugin(&plugin_cfg).unwrap();
+    let err_plugin = instantiate_plugin(&plugin_cfg, &[]).unwrap();
     let mut missing_map = FxHashMap::default();
     missing_map.insert(err_plugin.id().to_string(), err_plugin);
     assert!(wire_plugin_etps(&missing_map, &velda_etp::EtpRegistry::default()).is_err());

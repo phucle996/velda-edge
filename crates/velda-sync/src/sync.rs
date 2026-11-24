@@ -122,9 +122,14 @@ impl SyncComposition {
         let mut domain_bins = HashMap::with_capacity(num_files);
 
         // ====================================================================
-        // Phase 2: Delta & Revision Detection (Identify Changed Domains)
+        // Phase 2: Delta & Revision Detection (Core First, Ecosystem Last)
         // ====================================================================
-        for file_entry in &manifest.configuration.files {
+        // Always reconcile core infrastructure (listeners -> upstreams -> tls/etp -> routes)
+        // before ecosystem extensions (plugins) so cross-domain invariants resolve cleanly.
+        let mut ordered_files: Vec<_> = manifest.configuration.files.iter().collect();
+        ordered_files.sort_by_key(|f| domain_load_rank(&f.name));
+
+        for file_entry in ordered_files {
             let content = match self.stage.read_domain_file(&file_entry.path).await {
                 Ok(bytes) => bytes,
                 Err(err) => {
@@ -205,6 +210,15 @@ impl SyncComposition {
                     "upstreams" => {
                         let mut upstreams = post_sync::upstream::parse_upstreams(&content)?;
                         post_sync::upstream::validate_upstreams(&mut upstreams)?;
+
+                        let plugins = load_candidate_or_lkg_plugins(
+                            &self.stage,
+                            &self.storage_dir,
+                            &manifest,
+                        )
+                        .await?;
+                        validate_canary_upstream_references(&plugins, &upstreams)?;
+
                         let bin = post_sync::upstream::compile_upstreams_to_binary(
                             &upstreams, domain_rev, checksum,
                         )?;
@@ -213,6 +227,36 @@ impl SyncComposition {
                     "plugins" => {
                         let mut plugins = post_sync::plugin::parse_plugins(&content)?;
                         post_sync::plugin::validate_plugins(&mut plugins)?;
+
+                        // Validate cross-domain upstream targets (e.g. canary -> canary_upstream)
+                        // against already-reconciled manifest upstreams or LKG upstreams.bin.
+                        let upstreams = if let Some(up_entry) = manifest
+                            .configuration
+                            .files
+                            .iter()
+                            .find(|f| f.name == "upstreams")
+                        {
+                            if let Ok(up_bytes) = self.stage.read_domain_file(&up_entry.path).await
+                            {
+                                let mut parsed = post_sync::upstream::parse_upstreams(&up_bytes)?;
+                                post_sync::upstream::validate_upstreams(&mut parsed)?;
+                                parsed
+                            } else {
+                                Vec::new()
+                            }
+                        } else {
+                            let lkg_up = self.storage_dir.join("runtime/upstreams.bin");
+                            if lkg_up.exists()
+                                && let Ok(bytes) = std::fs::read(&lkg_up)
+                                && let Ok((_, parsed)) =
+                                    post_sync::upstream::unpack_upstreams_from_binary(&bytes)
+                            {
+                                parsed
+                            } else {
+                                Vec::new()
+                            }
+                        };
+                        validate_canary_upstream_references(&plugins, &upstreams)?;
 
                         // Validate cross-domain etp_id references against manifest's etp or LKG etp.bin
                         let etps = if let Some(etp_entry) = manifest
@@ -259,34 +303,12 @@ impl SyncComposition {
                         let etp_file = post_sync::etp::parse_etps(&content)?;
                         post_sync::etp::validate_etps(&etp_file)?;
 
-                        // Validate cross-domain etp_id references against manifest's plugins or LKG plugins.bin
-                        let plugins = if let Some(plugins_entry) = manifest
-                            .configuration
-                            .files
-                            .iter()
-                            .find(|f| f.name == "plugins")
-                        {
-                            if let Ok(plugin_bytes) =
-                                self.stage.read_domain_file(&plugins_entry.path).await
-                            {
-                                let mut parsed = post_sync::plugin::parse_plugins(&plugin_bytes)?;
-                                post_sync::plugin::validate_plugins(&mut parsed)?;
-                                parsed
-                            } else {
-                                Vec::new()
-                            }
-                        } else {
-                            let lkg_plugins = self.storage_dir.join("runtime/plugins.bin");
-                            if lkg_plugins.exists()
-                                && let Ok(bytes) = std::fs::read(&lkg_plugins)
-                                && let Ok((_, parsed)) =
-                                    post_sync::plugin::unpack_plugins_from_binary(&bytes)
-                            {
-                                parsed
-                            } else {
-                                Vec::new()
-                            }
-                        };
+                        let plugins = load_candidate_or_lkg_plugins(
+                            &self.stage,
+                            &self.storage_dir,
+                            &manifest,
+                        )
+                        .await?;
                         post_sync::etp::validate_plugin_etp_references(&plugins, &etp_file.etps)?;
 
                         let config_dir = self.storage_dir.join("config");
@@ -347,4 +369,67 @@ impl SyncComposition {
 
         Ok(SyncOutcome::Updated { changed_domains })
     }
+}
+
+#[inline]
+fn domain_load_rank(name: &str) -> u8 {
+    match name {
+        "listeners" => 0,
+        "upstreams" => 1,
+        "tls" => 2,
+        "etp" => 3,
+        "routes" => 4,
+        "plugins" => 6,
+        _ => 5,
+    }
+}
+
+async fn load_candidate_or_lkg_plugins(
+    stage: &PreSyncStage,
+    storage_dir: &Path,
+    manifest: &crate::ManifestConfig,
+) -> Result<Vec<post_sync::plugin::PluginConfig>, SyncError> {
+    if let Some(plugins_entry) = manifest
+        .configuration
+        .files
+        .iter()
+        .find(|f| f.name == "plugins")
+        && let Ok(plugin_bytes) = stage.read_domain_file(&plugins_entry.path).await
+    {
+        let mut parsed = post_sync::plugin::parse_plugins(&plugin_bytes)?;
+        post_sync::plugin::validate_plugins(&mut parsed)?;
+        return Ok(parsed);
+    }
+
+    let lkg_plugins = storage_dir.join("runtime/plugins.bin");
+    if lkg_plugins.exists()
+        && let Ok(bytes) = std::fs::read(&lkg_plugins)
+        && let Ok((_, parsed)) = post_sync::plugin::unpack_plugins_from_binary(&bytes)
+    {
+        return Ok(parsed);
+    }
+    Ok(Vec::new())
+}
+
+fn validate_canary_upstream_references(
+    plugins: &[post_sync::plugin::PluginConfig],
+    upstreams: &[post_sync::upstream::UpstreamConfig],
+) -> Result<(), SyncError> {
+    for p in plugins {
+        if p.id == "canary"
+            && let Some(target) = p.config.get("canary_upstream").and_then(|v| v.as_str())
+        {
+            let target = target.trim();
+            if !upstreams.iter().any(|u| u.id == target) {
+                return Err(SyncError::Validation {
+                    domain: "plugins".into(),
+                    reason: format!(
+                        "Plugin '{}' targets canary_upstream '{target}', which does not exist in upstreams",
+                        p.id
+                    ),
+                });
+            }
+        }
+    }
+    Ok(())
 }

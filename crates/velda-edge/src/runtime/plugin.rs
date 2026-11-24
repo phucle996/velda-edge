@@ -26,7 +26,7 @@ use rustc_hash::FxHashMap;
 use velda_core::{ProtocolFamily, StreamingMode};
 use velda_plugin::{
     LoadedPlugin, RoutePluginPlan, build_route_plugin_plan, instantiate_plugin,
-    wire_plugin_dependencies, wire_plugin_etps, wire_plugin_upstreams,
+    wire_plugin_dependencies, wire_plugin_etps,
 };
 use velda_sync::post_sync::listener::ListenerConfig;
 use velda_sync::post_sync::plugin::PluginConfig;
@@ -104,12 +104,15 @@ pub fn build_plugin_table(
     listeners: &[ListenerConfig],
     etp_registry: &velda_etp::EtpRegistry,
 ) -> Result<PluginTable, EdgeError> {
-    // 1. Instantiate all available plugins into typed LoadedPlugin instances
+    // 1. Instantiate all available plugins against pre-loaded core upstream table
+    let upstream_ids: Vec<&str> = upstreams.iter().map(|u| u.id.as_str()).collect();
     let mut available_plugins = FxHashMap::default();
     let mut background_plugins = Vec::new();
     for plugin_cfg in plugins {
-        let loaded = instantiate_plugin(plugin_cfg).map_err(|e| EdgeError::InvalidConfig {
-            detail: format!("Failed to instantiate plugin '{}': {e}", plugin_cfg.id),
+        let loaded = instantiate_plugin(plugin_cfg, &upstream_ids).map_err(|e| {
+            EdgeError::InvalidConfig {
+                detail: format!("Failed to instantiate plugin '{}': {e}", plugin_cfg.id),
+            }
         })?;
         let pbww = loaded.pbww();
         if pbww > 100 {
@@ -134,14 +137,6 @@ pub fn build_plugin_table(
     // 1c. Wire External Third-Party (velda-etp) pool instances into background plugins
     wire_plugin_etps(&available_plugins, etp_registry).map_err(|e| EdgeError::InvalidConfig {
         detail: format!("Failed to wire plugin ETPs: {e}"),
-    })?;
-
-    // 1d. Wire dense u16 upstream indices for plugins targeting alternate upstreams (e.g. canary)
-    let upstream_ids: Vec<&str> = upstreams.iter().map(|u| u.id.as_str()).collect();
-    wire_plugin_upstreams(&available_plugins, &upstream_ids).map_err(|e| {
-        EdgeError::InvalidConfig {
-            detail: format!("Failed to wire plugin target upstreams: {e}"),
-        }
     })?;
 
     // 2. Host Ingress Port Authority: register Traffic Ingress listeners with SocketManager

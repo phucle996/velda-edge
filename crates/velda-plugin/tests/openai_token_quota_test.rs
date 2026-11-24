@@ -310,7 +310,7 @@ async fn test_distributed_mode_leases_micro_quota_via_redis_etp() {
             "sync_interval_ms": 50
         }),
     };
-    let loaded = velda_plugin::instantiate_plugin(&cfg).unwrap();
+    let loaded = velda_plugin::instantiate_plugin(&cfg, &[]).unwrap();
     let mut map = rustc_hash::FxHashMap::default();
     map.insert("openai_token_quota".to_string(), loaded);
     velda_plugin::wire_plugin_etps(&map, &registry).unwrap();

@@ -202,7 +202,7 @@ fn test_kafka_factory_registration() {
 
     validate_plugin_config(&mut plugin_cfg).expect("Validation should pass");
 
-    let loaded = instantiate_plugin(&plugin_cfg).expect("Instantiation should succeed");
+    let loaded = instantiate_plugin(&plugin_cfg, &[]).expect("Instantiation should succeed");
     match loaded {
         LoadedPlugin::Background(bg) => {
             assert_eq!(bg.id(), "kafka_log_shipper");
@@ -222,7 +222,7 @@ fn test_kafka_attached_to_route_rejected() {
             "topic": "velda_logs"
         }),
     };
-    let loaded = instantiate_plugin(&plugin_cfg).expect("instantiation should succeed");
+    let loaded = instantiate_plugin(&plugin_cfg, &[]).expect("instantiation should succeed");
     let mut available = FxHashMap::default();
     available.insert("kafka_log_shipper".to_string(), loaded);
 
@@ -591,7 +591,7 @@ async fn test_kafka_etp_registry_wiring_and_reconnect_recovery() {
             "request_timeout_ms": 2000
         }),
     };
-    let loaded = instantiate_plugin(&plugin_cfg).unwrap();
+    let loaded = instantiate_plugin(&plugin_cfg, &[]).unwrap();
     let mut available = FxHashMap::default();
     available.insert(loaded.id().to_string(), loaded.clone());
     wire_plugin_etps(&available, &registry).unwrap();
@@ -617,7 +617,7 @@ async fn test_kafka_etp_registry_wiring_and_reconnect_recovery() {
     runner.await.unwrap().unwrap();
 
     // Missing ETP produces an explicit error
-    let err_plugin = instantiate_plugin(&plugin_cfg).unwrap();
+    let err_plugin = instantiate_plugin(&plugin_cfg, &[]).unwrap();
     let mut missing_map = FxHashMap::default();
     missing_map.insert(err_plugin.id().to_string(), err_plugin);
     assert!(wire_plugin_etps(&missing_map, &velda_etp::EtpRegistry::default()).is_err());
@@ -631,7 +631,7 @@ async fn test_kafka_etp_registry_wiring_and_reconnect_recovery() {
         settings: serde_json::json!({ "endpoint": "127.0.0.1:8125" }),
     }])
     .unwrap();
-    let wrong_plugin = instantiate_plugin(&plugin_cfg).unwrap();
+    let wrong_plugin = instantiate_plugin(&plugin_cfg, &[]).unwrap();
     let mut wrong_map = FxHashMap::default();
     wrong_map.insert(wrong_plugin.id().to_string(), wrong_plugin);
     assert!(wire_plugin_etps(&wrong_map, &wrong_registry).is_err());

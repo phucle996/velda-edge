@@ -421,7 +421,7 @@ async fn test_statsd_etp_registry_wiring_and_prefix_flavor_fallback() {
             "max_packet_size": 1432
         }),
     };
-    let loaded = instantiate_plugin(&plugin_cfg).unwrap();
+    let loaded = instantiate_plugin(&plugin_cfg, &[]).unwrap();
     let mut available = FxHashMap::default();
     available.insert(loaded.id().to_string(), loaded.clone());
     wire_plugin_etps(&available, &registry).unwrap();
@@ -452,7 +452,7 @@ async fn test_statsd_etp_registry_wiring_and_prefix_flavor_fallback() {
     runner.await.unwrap().unwrap();
 
     // Missing ETP produces an explicit error
-    let err_plugin = instantiate_plugin(&plugin_cfg).unwrap();
+    let err_plugin = instantiate_plugin(&plugin_cfg, &[]).unwrap();
     let mut missing_map = FxHashMap::default();
     missing_map.insert(err_plugin.id().to_string(), err_plugin);
     assert!(wire_plugin_etps(&missing_map, &velda_etp::EtpRegistry::default()).is_err());
@@ -466,7 +466,7 @@ async fn test_statsd_etp_registry_wiring_and_prefix_flavor_fallback() {
         settings: serde_json::json!({ "endpoint": "http://127.0.0.1:9000" }),
     }])
     .unwrap();
-    let wrong_plugin = instantiate_plugin(&plugin_cfg).unwrap();
+    let wrong_plugin = instantiate_plugin(&plugin_cfg, &[]).unwrap();
     let mut wrong_map = FxHashMap::default();
     wrong_map.insert(wrong_plugin.id().to_string(), wrong_plugin);
     assert!(wire_plugin_etps(&wrong_map, &wrong_registry).is_err());

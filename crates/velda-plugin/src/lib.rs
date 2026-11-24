@@ -31,7 +31,7 @@ pub use config::{OutboundTlsConfig, PluginConfig};
 pub use error::PluginError;
 pub use factory::{
     LoadedPlugin, build_route_plugin_plan, instantiate_plugin, wire_plugin_dependencies,
-    wire_plugin_etps, wire_plugin_upstreams,
+    wire_plugin_etps,
 };
 pub use hook::{ShadowTask, set_core_shadow_sender, try_dispatch_shadow};
 pub use plan::RoutePluginPlan;

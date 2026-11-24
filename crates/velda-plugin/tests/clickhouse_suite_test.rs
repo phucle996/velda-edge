@@ -281,7 +281,7 @@ fn test_clickhouse_factory() {
         }),
     };
 
-    let loaded = instantiate_plugin(&cfg).expect("factory instantiation must succeed");
+    let loaded = instantiate_plugin(&cfg, &[]).expect("factory instantiation must succeed");
     assert_eq!(loaded.id(), "clickhouse_log_shipper");
     assert!(matches!(loaded, LoadedPlugin::Background(_)));
 
@@ -625,7 +625,7 @@ async fn test_clickhouse_etp_registry_wiring_and_reconnect_recovery() {
             "request_timeout_ms": 2000
         }),
     };
-    let loaded = instantiate_plugin(&plugin_cfg).unwrap();
+    let loaded = instantiate_plugin(&plugin_cfg, &[]).unwrap();
     let mut available = FxHashMap::default();
     available.insert(loaded.id().to_string(), loaded.clone());
     wire_plugin_etps(&available, &registry).unwrap();
@@ -654,7 +654,7 @@ async fn test_clickhouse_etp_registry_wiring_and_reconnect_recovery() {
 
     if let LoadedPlugin::Background(bg) = loaded {
         // Also verify missing ETP produces an explicit PluginError
-        let err_plugin = instantiate_plugin(&plugin_cfg).unwrap();
+        let err_plugin = instantiate_plugin(&plugin_cfg, &[]).unwrap();
         let mut missing_map = FxHashMap::default();
         missing_map.insert(bg.id().to_string(), err_plugin);
         let empty_registry = velda_etp::EtpRegistry::default();

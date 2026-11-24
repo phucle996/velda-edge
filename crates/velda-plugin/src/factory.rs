@@ -93,12 +93,15 @@ impl LoadedPlugin {
 ///
 /// Each concrete plugin defines its own `from_config` constructor, enforcing strict module
 /// ownership and ensuring `factory.rs` never bloats as new plugins are added.
-pub fn instantiate_plugin(config: &PluginConfig) -> Result<LoadedPlugin, PluginError> {
+pub fn instantiate_plugin(
+    config: &PluginConfig,
+    upstream_ids: &[&str],
+) -> Result<LoadedPlugin, PluginError> {
     let id = config.id.as_str();
     if crate::pre_route::owns_id(id) {
         crate::pre_route::instantiate(config).map(LoadedPlugin::PreRoute)
     } else if crate::pre_upstream::owns_id(id) {
-        crate::pre_upstream::instantiate(config).map(LoadedPlugin::PreUpstream)
+        crate::pre_upstream::instantiate(config, upstream_ids).map(LoadedPlugin::PreUpstream)
     } else if crate::post_response::owns_id(id) {
         crate::post_response::instantiate(config).map(LoadedPlugin::PostResponse)
     } else if crate::background::owns_id(id) {
@@ -303,41 +306,6 @@ pub fn wire_plugin_etps(
     Ok(())
 }
 
-/// Resolves target upstream names declared by pre-upstream plugins (such as `canary`)
-/// into their dense `u16` runtime indices in `upstream_ids`.
-pub fn wire_plugin_upstreams(
-    available_plugins: &FxHashMap<String, LoadedPlugin>,
-    upstream_ids: &[&str],
-) -> Result<(), PluginError> {
-    for (id, plugin) in available_plugins {
-        if let LoadedPlugin::PreUpstream(pu) = plugin
-            && let Some(target_name) = pu.canary_upstream_target()
-        {
-            let pos = upstream_ids
-                .iter()
-                .position(|u| *u == target_name)
-                .ok_or_else(|| {
-                    PluginError::Config(format!(
-                        "Plugin '{id}' targets canary_upstream '{target_name}', which does not exist in upstreams"
-                    ))
-                })?;
-            let dense_id = u16::try_from(pos).map_err(|_| {
-                PluginError::Config(format!(
-                    "Upstream index for '{target_name}' exceeds u16::MAX"
-                ))
-            })?;
-            pu.attach_canary_upstream(dense_id);
-            tracing::info!(
-                plugin_id = %id,
-                canary_upstream = %target_name,
-                upstream_id = dense_id,
-                "Wired dense upstream index for canary plugin"
-            );
-        }
-    }
-    Ok(())
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -365,7 +333,7 @@ mod tests {
                 "negative_cache_ttl_secs": 10
             }),
         };
-        let p1 = instantiate_plugin(&cfg_jwt).expect("Should instantiate jwt");
+        let p1 = instantiate_plugin(&cfg_jwt, &[]).expect("Should instantiate jwt");
         assert_eq!(p1.id(), "jwt_auth");
         assert!(matches!(p1, LoadedPlugin::PreUpstream(_)));
 
@@ -381,7 +349,7 @@ mod tests {
                 "fallback_behavior": "memory"
             }),
         };
-        let p2 = instantiate_plugin(&cfg_rate).expect("Should instantiate rate_limit");
+        let p2 = instantiate_plugin(&cfg_rate, &[]).expect("Should instantiate rate_limit");
         assert_eq!(p2.id(), "rate_limit");
         assert!(matches!(p2, LoadedPlugin::PreUpstream(_)));
 
@@ -393,7 +361,7 @@ mod tests {
                 "expose_headers": []
             }),
         };
-        let p3 = instantiate_plugin(&cfg_cors).expect("Should instantiate cors");
+        let p3 = instantiate_plugin(&cfg_cors, &[]).expect("Should instantiate cors");
         assert_eq!(p3.id(), "cors");
         assert!(matches!(p3, LoadedPlugin::PostResponse(_)));
     }
@@ -425,7 +393,7 @@ mod tests {
         };
         available.insert(
             "jwt_auth".to_string(),
-            instantiate_plugin(&cfg_jwt).unwrap(),
+            instantiate_plugin(&cfg_jwt, &[]).unwrap(),
         );
 
         let cfg_ip = PluginConfig {
@@ -439,7 +407,7 @@ mod tests {
         };
         available.insert(
             "ip_filter".to_string(),
-            instantiate_plugin(&cfg_ip).unwrap(),
+            instantiate_plugin(&cfg_ip, &[]).unwrap(),
         );
 
         let cfg_cors = PluginConfig {
@@ -450,7 +418,10 @@ mod tests {
                 "expose_headers": []
             }),
         };
-        available.insert("cors".to_string(), instantiate_plugin(&cfg_cors).unwrap());
+        available.insert(
+            "cors".to_string(),
+            instantiate_plugin(&cfg_cors, &[]).unwrap(),
+        );
 
         // Declaration order: jwt_auth, ip_filter, cors
         let route_plugins = vec![
@@ -505,7 +476,7 @@ mod tests {
         };
         available.insert(
             "cors_preflight".to_string(),
-            instantiate_plugin(&cfg_cors_preflight).unwrap(),
+            instantiate_plugin(&cfg_cors_preflight, &[]).unwrap(),
         );
 
         let cfg_ip = PluginConfig {
@@ -519,7 +490,7 @@ mod tests {
         };
         available.insert(
             "ip_filter".to_string(),
-            instantiate_plugin(&cfg_ip).unwrap(),
+            instantiate_plugin(&cfg_ip, &[]).unwrap(),
         );
 
         // Order 1: cors_preflight before ip_filter
@@ -581,7 +552,10 @@ mod tests {
                 "expose_headers": []
             }),
         };
-        available.insert("cors".to_string(), instantiate_plugin(&cfg_cors).unwrap());
+        available.insert(
+            "cors".to_string(),
+            instantiate_plugin(&cfg_cors, &[]).unwrap(),
+        );
 
         // Attempting to attach HTTP-only CORS plugin to gRPC route!
         let route_plugins = vec!["cors".to_string()];
@@ -626,7 +600,7 @@ mod tests {
         };
         available.insert(
             "jwt_auth".to_string(),
-            instantiate_plugin(&cfg_jwt).unwrap(),
+            instantiate_plugin(&cfg_jwt, &[]).unwrap(),
         );
 
         let cfg_rotator = PluginConfig {
@@ -641,7 +615,7 @@ mod tests {
         };
         available.insert(
             "jwks_rotator".to_string(),
-            instantiate_plugin(&cfg_rotator).unwrap(),
+            instantiate_plugin(&cfg_rotator, &[]).unwrap(),
         );
 
         // Wire dependencies
@@ -665,7 +639,7 @@ mod tests {
         };
         available.insert(
             "jwks_rotator".to_string(),
-            instantiate_plugin(&cfg_rotator).unwrap(),
+            instantiate_plugin(&cfg_rotator, &[]).unwrap(),
         );
 
         // Wiring must fail because target 'jwt_auth' is absent from available_plugins
