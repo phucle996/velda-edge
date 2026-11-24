@@ -1,78 +1,58 @@
 # API Metering & Monetization Plugin (`api_metering`)
 
-High-performance, zero-float pre-upstream accounting engine designed for API monetization, multi-tier SLAs (`free`, `pro`, `enterprise`), prepaid wallet balance tracking, and monthly macro-quotas. Evaluated during the `pre_upstream` phase with authoritative rejection (`402 Payment Required` or `429 Too Many Requests`).
+Per-request multi-tier API monetization, prepaid micro-credit ($10^{-6}$) wallet deduction, and macro-quota enforcement (`FixedWindow`, `SlidingWindow`, `TokenBucket`) during the `pre_upstream` phase.
+
+```text
+Inbound L7Request
+  │
+  ├─► resolve_account_hash() : First non-empty match in `account_headers`
+  │                            (all missing/blank -> #[cold] 400 Bad Request, 0 locks)
+  ├─► resolve_tier()         : Zero-alloc ASCII case-insensitive match on `tier_header`
+  │                            (fallback: `default_tier`)
+  └─► ShardedMeteringState::evaluate_compiled()  [64 cache-aligned ShardArenas, k * 4096 B]
+        ├── Allowed        ─► Inject x-metering-tier, x-metering-balance (+ window headers if > 0) -> Continue
+        ├── OverageAllowed ─► #[cold] Inject x-metering-overage: true + negative balance         -> Continue
+        └── Exhausted      ─► #[cold] Reject402 (Action::Respond 402 JSON) or Reject429 (Bit-1 bypass)
+```
 
 ---
 
-## 1. Overview & Pipeline Specification
+## 1. What This Plugin Does
+
+- **Identity & Plan Resolution**: Identifies each tenant via the first non-empty header in `account_headers` (`x-tenant-id`, `x-org-id`, `x-account-id`) and resolves its SLA plan via `tier_header` (`x-plan-tier`).
+- **Integer Micro-Credit Wallet ($10^{-6}$)**: Charges `cost_per_req_micro_credits` per allowed request using exact 64-bit signed integers (`1 credit = 1,000,000 micro-credits`), preventing floating-point drift.
+- **Macro Quota Enforcement**: Evaluates up to `4` inline quota windows per tier (`FixedWindow`, `SlidingWindow`, `TokenBucket`) atomically before deducting wallet credits.
+- **Exhaustion Policies**: Supports `Reject402` (`402 Payment Required` JSON body), `Reject429` (`Action::Reject(RejectReason::TooManyRequests)` with Bit-1 bypass headers), and `Passthrough` (records negative overage debt while still advancing windows).
+- **Distributed Shadow Sync**: Optionally runs a background Redis `HINCRBY` pipeline (`run_shadow_metering_sync`) with `in_flight_delta` conservation so network failures revert uncommitted batches cleanly.
+
+---
+
+## 2. Where It Sits in Velda Edge
 
 | Property | Value |
 | :--- | :--- |
 | **Plugin ID** | `api_metering` |
-| **Canonical Phase** | `pre_upstream` |
-| **Execution Order** | Pre-upstream FIFO pipeline (evaluated after `jwt_auth` and before upstream dispatch) |
-| **Access Level** | `PluginCapability::header_only(AccessLevel::Read)` (or `Action::Respond` 402 on exhaustion) |
-| **Supported Protocols** | `ALL_L7` (HTTP/1.1, HTTP/2, HTTP/3, gRPC) |
-| **Hot-Path Overhead** | Nanosecond-level (~20 ns); 100% Zero-Float, integer micro-credits ($10^{-6}$) |
-| **Concurrency Model** | 64 cache-aligned stripes (`#[repr(align(64))]`), atomic CAS |
-| **Rejection Contract** | Returns structured JSON `402 Payment Required` or Bit-1 bypass `429 Too Many Requests` |
+| **Phase** | `pre_upstream` (`PreUpstreamPlugin`) |
+| **Worker Placement** | Hot path on Frontline Traffic Workers (`velda-worker-{i}`); optional Redis sync on Shadow Logistics Workers (`pbww: 1..=100`) |
+| **Capability** | `PluginCapability::header_only(AccessLevel::Write)` (injects `x-metering-*` headers, zero payload buffering) |
+| **Supported Protocols** | `SupportedProtocols::ALL_L7` (HTTP/1.1, HTTP/2, HTTP/3, gRPC) |
 
 ---
 
-## 2. Configuration Specification
+## 3. Requirements & Prerequisites
 
-| Field | Type | Required | Constraints / Default | Description |
-| :--- | :---: | :---: | :--- | :--- |
-| `account_headers` | Array of strings | No | `["x-tenant-id", "x-org-id", "x-account-id"]` | Ordered list of header names evaluated to resolve tenant account identity. |
-| `account_header` | String | No | Single string shortcut | Alternative single header format (e.g. `"x-tenant-id"`). |
-| `tier_header` | String | No | `"x-plan-tier"` | Header name specifying client service tier (e.g. `"pro"`). |
-| `default_tier` | String | No | `"free"` | Fallback tier when tier header is absent or unrecognized. |
-| `initial_balance_micro_credits` | i64 | No | `0` | Initial wallet balance credited to newly discovered tenant accounts. |
-| `tiers` | Object | **Yes** | Map of tier definitions | Service tier policies indexed by tier name. |
-
-### Tier Policy Object Schema
-
-| Field | Type | Required | Default | Description |
-| :--- | :---: | :---: | :--- | :--- |
-| `cost_per_req_micro_credits` | u64 | No | `0` | Base cost deducted per request in micro-credits ($1 \text{ credit} = 1,000,000 \mu\text{-credits}$). |
-| `exhausted_action` | String | No | `"402"` | Policy executed when quota or balance is depleted: `"402"`, `"429"`, or `"passthrough"`. |
-| `windows` | Array of objects | No | `[]` | Macro-level accounting windows (e.g. monthly 1,000,000 requests). Uses same window schema as `consumer_quota`. |
+- L7 listener (`http` or `grpc`) with `HeaderWorkspace`.
+- For multi-gateway wallet synchronization (`distributed.enabled = true`): reachable Redis instance over TCP supporting RESP2 `HINCRBY`.
 
 ---
 
-## 3. Supported Exhausted Actions
-
-1. **`"402"` / `"reject_402"` (Subscription or Wallet Exhausted)**:
-   - Immediately short-circuits with `Action::Respond` carrying HTTP status `402 Payment Required`.
-   - Returns standardized diagnostic JSON payload:
-     ```json
-     {
-       "error": "payment_required",
-       "message": "API tier quota or prepaid credit balance exhausted",
-       "tier": "free",
-       "window": "monthly_allowance",
-       "reset_seconds": 182340
-     }
-     ```
-   - Sets headers: `content-type: application/json; charset=utf-8`, `x-metering-tier`, and `retry-after`.
-2. **`"429"` / `"too_many_requests"` (Temporary Window Cooldown)**:
-   - Rejects with `Action::Reject(RejectReason::TooManyRequests)` and tags Bit-1 bypass headers (`x-metering-tier`, `x-metering-exhausted`, `Retry-After`).
-3. **`"passthrough"` / `"overage"` (Pay-as-you-go Debt Billing)**:
-   - Permits request through to upstream backend and records negative credit balance (`negative_balance`).
-   - Injects downstream telemetry header: `x-metering-overage: true` and `x-metering-balance: -100000`.
-
----
-
-## 4. Production Manifest Example (`plugins.json`)
+## 4. Quick Start Configuration
 
 ```json
 {
   "id": "api_metering",
   "config": {
-    "account_headers": [
-      "x-tenant-id",
-      "x-org-id"
-    ],
+    "account_headers": ["x-tenant-id", "x-org-id"],
     "tier_header": "x-plan-tier",
     "default_tier": "free",
     "initial_balance_micro_credits": 1000000,
@@ -88,23 +68,6 @@ High-performance, zero-float pre-upstream accounting engine designed for API mon
             "algorithm": "fixed_window"
           }
         ]
-      },
-      "pro": {
-        "cost_per_req_micro_credits": 100,
-        "exhausted_action": "429",
-        "windows": [
-          {
-            "name": "monthly_cap",
-            "window_seconds": 2592000,
-            "limit": 1000000,
-            "algorithm": "sliding_window"
-          }
-        ]
-      },
-      "enterprise": {
-        "cost_per_req_micro_credits": 100,
-        "exhausted_action": "passthrough",
-        "windows": []
       }
     }
   }
@@ -113,9 +76,9 @@ High-performance, zero-float pre-upstream accounting engine designed for API mon
 
 ---
 
-## 5. Telemetry & Upstream Forwarding Headers
+## 5. Documentation Directory
 
-- `x-metering-tier`: Canonical tier under which the request was authenticated (e.g. `pro`).
-- `x-metering-remaining`: Remaining quota requests available in current accounting cycle.
-- `x-metering-balance`: Current wallet balance in micro-credits (can be negative for overage).
-- `x-metering-overage`: Injected as `true` when request is permitted under overage debt contract.
+- [RUNBOOK.md](RUNBOOK.md) — Parameter reference, configuration recipes, observability signals, and incident triage.
+- [ARCHITECTURE.md](ARCHITECTURE.md) — `k * 4096`-byte `ShardArena` layout, `192B` `AccountState` geometry, and delta reconciliation proofs.
+- [BENCHMARK.md](BENCHMARK.md) — Benchmark matrix and verified `x86-64-v3` release assembly audit.
+- [TEST.md](TEST.md) — Automated integration and distributed sync verification results.
