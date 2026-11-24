@@ -15,9 +15,9 @@ use std::time::Instant;
 use bytes::BytesMut;
 use common::{CountingAllocator, FastRng, format_duration, format_throughput};
 use quinn_proto::ServerConfig;
-use velda_http3::Http3Engine;
-use velda_http3::frame::decode_frame;
-use velda_http3::qpack::decode_qpack;
+use velda_http3::proto::frame::decode_frame;
+use velda_http3::proto::qpack::decode_qpack;
+use velda_http3::server::connection::Http3Engine;
 
 #[global_allocator]
 static ALLOCATOR: CountingAllocator = CountingAllocator::new();

@@ -24,9 +24,22 @@ pub fn strip_port(host: &str) -> &str {
     }
 }
 
-/// Extracts effective SNI / Host from an outbound request or fallback target IP.
+/// Resolves the upstream TLS SNI / ServerName for an HTTP/3 outbound connection.
+///
+/// Precedence:
+/// 1. Explicit upstream configuration `explicit_sni` (e.g. from upstream TLS target_sni)
+/// 2. Request URI host (`req.uri.host()`)
+/// 3. Request `Host` header (stripping `:port` if present)
+/// 4. Target IP address string
 #[inline]
-pub fn extract_sni<'a>(req: &'a L7Request, target_ip: u128) -> std::borrow::Cow<'a, str> {
+pub fn resolve_sni<'a>(
+    req: &'a L7Request,
+    target_ip: u128,
+    explicit_sni: Option<&'a str>,
+) -> std::borrow::Cow<'a, str> {
+    if let Some(sni) = explicit_sni.filter(|s| !s.trim().is_empty()) {
+        return std::borrow::Cow::Borrowed(sni.trim());
+    }
     if let Some(host) = req.uri.host() {
         return std::borrow::Cow::Borrowed(host);
     }
@@ -43,29 +56,11 @@ pub fn extract_sni<'a>(req: &'a L7Request, target_ip: u128) -> std::borrow::Cow<
     std::borrow::Cow::Owned(String::from_utf8_lossy(&buf[..len]).into_owned())
 }
 
-/// Resolves the upstream TLS SNI / ServerName for an HTTP/3 outbound connection.
-///
-/// Precedence:
-/// 1. Explicit upstream configuration `explicit_sni` (e.g. from upstream TLS target_sni)
-/// 2. Request URI host (`req.uri.host()`)
-/// 3. Request `Host` header (stripping `:port` if present)
-/// 4. Target IP address string
-pub fn resolve_sni<'a>(
-    req: &'a L7Request,
-    target_ip: u128,
-    explicit_sni: Option<&'a str>,
-) -> std::borrow::Cow<'a, str> {
-    if let Some(sni) = explicit_sni.filter(|s| !s.trim().is_empty()) {
-        return std::borrow::Cow::Borrowed(sni.trim());
-    }
-    extract_sni(req, target_ip)
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
-    use http::{HeaderMap, Method, Uri, Version};
-    use velda_core::Body;
+    use http::{Method, Uri, Version};
+    use velda_core::{Body, HeaderWorkspace};
 
     #[test]
     fn test_strip_port() {
@@ -88,7 +83,7 @@ mod tests {
             "https://uri-host.internal/api".parse::<Uri>().unwrap(),
             Version::HTTP_3,
             {
-                let mut h = HeaderMap::new();
+                let mut h = HeaderWorkspace::empty(2);
                 h.insert(http::header::HOST, "header-host.com:8443".parse().unwrap());
                 h
             },
@@ -108,7 +103,7 @@ mod tests {
             "/api/v1/orders".parse::<Uri>().unwrap(),
             Version::HTTP_3,
             {
-                let mut h = HeaderMap::new();
+                let mut h = HeaderWorkspace::empty(2);
                 h.insert(
                     http::header::HOST,
                     "my-service.internal:9443".parse().unwrap(),
@@ -124,7 +119,7 @@ mod tests {
             Method::GET,
             "/health".parse::<Uri>().unwrap(),
             Version::HTTP_3,
-            HeaderMap::new(),
+            HeaderWorkspace::empty(0),
             Body::Empty,
         );
         assert_eq!(resolve_sni(&req3, target_ip, None), "10.0.0.1");

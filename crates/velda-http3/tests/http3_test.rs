@@ -6,8 +6,8 @@ use http::header::CONTENT_TYPE;
 use http::{Method, StatusCode, Uri};
 use quinn_proto::{ClientConfig, ServerConfig};
 use velda_core::{Body, L7Response};
-use velda_http3::Http3Engine;
-use velda_http3::frame::{Http3Frame, decode_frame, encode_frame};
+use velda_http3::proto::frame::{Http3Frame, decode_frame, encode_frame};
+use velda_http3::server::connection::Http3Engine;
 
 fn generate_test_crypto() -> (ServerConfig, ClientConfig) {
     let cert = rcgen::generate_simple_self_signed(vec!["localhost".into()]).unwrap();
@@ -95,8 +95,11 @@ async fn spawn_echo_server(
                         let path = req_event.request.uri.path();
                         let resp = match path {
                             "/head" => {
-                                let mut h = http::HeaderMap::new();
-                                h.insert("content-length", "1024".parse().unwrap());
+                                let mut h = velda_core::HeaderWorkspace::empty(2);
+                                h.insert(
+                                    http::header::CONTENT_LENGTH,
+                                    http::HeaderValue::from_static("1024"),
+                                );
                                 L7Response::new(StatusCode::OK, http::Version::HTTP_3, h, Body::Empty)
                             }
                             "/no-content" => {
@@ -111,7 +114,7 @@ async fn spawn_echo_server(
                                 L7Response::new(
                                     StatusCode::OK,
                                     http::Version::HTTP_3,
-                                    http::HeaderMap::new(),
+                                    velda_core::HeaderWorkspace::empty(0),
                                     Body::Bytes(body),
                                 )
                             }
@@ -177,7 +180,7 @@ async fn test_http3_roundtrip_requests() {
     let engine = Http3Engine::new(Arc::new(server_config));
     let (server_addr, shutdown_tx, server_task) = spawn_echo_server(engine).await;
 
-    let config = velda_http3::Http3Config::auto();
+    let config = velda_http3::config::Http3Config::auto();
     let (srv_ip, srv_port_be) = match server_addr {
         std::net::SocketAddr::V4(v4) => (
             velda_core::lut::ip::v4_to_u128(v4.ip().to_bits()),
@@ -185,12 +188,12 @@ async fn test_http3_roundtrip_requests() {
         ),
         std::net::SocketAddr::V6(v6) => (v6.ip().to_bits(), v6.port().to_be()),
     };
-    let client = velda_http3::connect(
+    let client = velda_http3::client::connector::connect(
         srv_ip,
         srv_port_be,
         "localhost",
         &config,
-        velda_http3::default_client_config().unwrap(),
+        velda_http3::client::connector::default_client_config().unwrap(),
     )
     .await
     .expect("Client failed to connect to HTTP/3 server");
@@ -214,8 +217,11 @@ async fn test_http3_roundtrip_requests() {
         "/upload".parse::<Uri>().unwrap(),
         http::Version::HTTP_3,
         {
-            let mut h = http::HeaderMap::new();
-            h.insert(CONTENT_TYPE, "application/octet-stream".parse().unwrap());
+            let mut h = velda_core::HeaderWorkspace::empty(2);
+            h.insert(
+                CONTENT_TYPE,
+                http::HeaderValue::from_static("application/octet-stream"),
+            );
             h
         },
         Body::Bytes(Bytes::from(payload.clone())),
@@ -285,12 +291,12 @@ async fn test_http3_roundtrip_requests() {
 #[tokio::test]
 async fn test_http3_payload_limit_enforced() {
     let (server_config, _) = generate_test_crypto();
-    let mut s_cfg = velda_http3::Http3Config::auto();
+    let mut s_cfg = velda_http3::config::Http3Config::auto();
     s_cfg.max_body_size = 512;
     let engine = Http3Engine::new_with_config(Arc::new(server_config), s_cfg);
     let (server_addr, shutdown_tx, server_task) = spawn_echo_server(engine).await;
 
-    let client_cfg = velda_http3::Http3Config::auto();
+    let client_cfg = velda_http3::config::Http3Config::auto();
     let (srv_ip, srv_port_be) = match server_addr {
         std::net::SocketAddr::V4(v4) => (
             velda_core::lut::ip::v4_to_u128(v4.ip().to_bits()),
@@ -298,12 +304,12 @@ async fn test_http3_payload_limit_enforced() {
         ),
         std::net::SocketAddr::V6(v6) => (v6.ip().to_bits(), v6.port().to_be()),
     };
-    let client = velda_http3::connect(
+    let client = velda_http3::client::connector::connect(
         srv_ip,
         srv_port_be,
         "localhost",
         &client_cfg,
-        velda_http3::default_client_config().unwrap(),
+        velda_http3::client::connector::default_client_config().unwrap(),
     )
     .await
     .expect("Client failed to connect to HTTP/3 server");

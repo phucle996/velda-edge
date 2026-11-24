@@ -6,11 +6,12 @@ use std::time::Instant;
 
 use bytes::{Bytes, BytesMut};
 use common::{CountingAllocator, format_bytes, format_duration, format_throughput};
+use http::StatusCode;
+use http::header::ACCEPT_ENCODING;
 use http::header::{CONTENT_TYPE, HeaderValue, USER_AGENT};
-use http::{HeaderMap, StatusCode};
-use velda_http3::frame::{Http3Frame, decode_frame, encode_frame};
-use velda_http3::qpack::{decode_qpack, encode_qpack_response};
-use velda_http3::server::build_edge_response_frames;
+use velda_http3::proto::frame::{Http3Frame, decode_frame, encode_frame};
+use velda_http3::proto::qpack::{decode_qpack, encode_qpack_response};
+use velda_http3::server::response::build_edge_response_frames;
 
 #[global_allocator]
 static ALLOCATOR: CountingAllocator = CountingAllocator::new();
@@ -32,11 +33,11 @@ async fn main() {
 fn bench_qpack_zero_leak(iterations: u64) {
     println!("### Testing QPACK Encode/Decode Heap Stability ({iterations} iterations)");
 
-    let mut headers = HeaderMap::new();
+    let mut headers = velda_core::HeaderWorkspace::empty(4);
     headers.insert(CONTENT_TYPE, HeaderValue::from_static("application/json"));
     headers.insert(USER_AGENT, HeaderValue::from_static("velda-h3-leak-tester"));
     headers.insert(
-        "accept-encoding",
+        ACCEPT_ENCODING,
         HeaderValue::from_static("gzip, deflate, br"),
     );
 

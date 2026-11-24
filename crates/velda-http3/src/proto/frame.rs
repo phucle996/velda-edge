@@ -223,9 +223,18 @@ pub fn decode_frame(buf: &mut BytesMut) -> Result<Option<Http3Frame>, Http3Error
     };
 
     let header_bytes = type_len + len_len;
-    let payload_len = length as usize;
+    let Ok(payload_len) = usize::try_from(length) else {
+        return Err(Http3Error::H3(
+            "HTTP/3 frame payload length exceeds address space".into(),
+        ));
+    };
+    let Some(total_len) = header_bytes.checked_add(payload_len) else {
+        return Err(Http3Error::H3(
+            "HTTP/3 frame total length overflows address space".into(),
+        ));
+    };
 
-    if buf.len() < header_bytes + payload_len {
+    if buf.len() < total_len {
         return Ok(None); // Need more payload bytes
     }
 

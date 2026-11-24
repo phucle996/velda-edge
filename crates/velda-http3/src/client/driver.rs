@@ -16,16 +16,18 @@ use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use bytes::BytesMut;
-use http::{HeaderMap, StatusCode, Version};
+use http::{StatusCode, Version};
 use quinn_proto::{Dir, Endpoint, Event, StreamEvent, StreamId};
 use tokio::net::UdpSocket;
 use tokio::sync::{mpsc, oneshot};
-use velda_core::{Body, L7Request, L7Response};
+use velda_core::{Body, HeaderWorkspace, L7Request, L7Response};
 
 use super::response::Http3StreamResponse;
 use crate::error::Http3Error;
-use crate::frame::{Http3Frame, decode_frame, encode_frame, encode_varint, error_code, frame_id};
-use crate::qpack::{decode_qpack, encode_qpack_request};
+use crate::proto::frame::{
+    Http3Frame, decode_frame, encode_frame, encode_varint, error_code, frame_id,
+};
+use crate::proto::qpack::{decode_qpack, encode_qpack_request};
 
 /// Return type for [`ClientCommand::OpenStream`].
 ///
@@ -62,7 +64,7 @@ pub(crate) enum ClientCommand {
     OpenStream {
         method: http::Method,
         uri: http::Uri,
-        headers: HeaderMap,
+        headers: HeaderWorkspace,
         initial_chunk: Option<bytes::Bytes>,
         is_fin: bool,
         reply_tx: oneshot::Sender<OpenStreamReply>,
@@ -103,7 +105,7 @@ enum StreamReply {
 struct ActiveStreamSlot {
     method: http::Method,
     reply: StreamReply,
-    headers: Option<(Option<StatusCode>, HeaderMap)>,
+    headers: Option<(Option<StatusCode>, HeaderWorkspace)>,
     /// Accumulates incoming wire bytes until complete HTTP/3 frames can be parsed.
     /// QUIC delivers stream fragments across arbitrary UDP datagram boundaries.
     raw_buf: BytesMut,
@@ -197,7 +199,7 @@ fn dispatch_open_command(
         ClientCommand::SendRequest { request, reply_tx } => {
             let req_method = request.method.clone();
 
-            // Encode QPACK request HEADERS frame
+            // Encode QPACK request HEADERS frame directly from HeaderWorkspace
             let mut header_buf = BytesMut::new();
             encode_qpack_request(
                 &request.method,
@@ -234,7 +236,7 @@ fn dispatch_open_command(
         ClientCommand::SendStreamRequest { request, reply_tx } => {
             let req_method = request.method.clone();
 
-            // Encode QPACK request HEADERS frame
+            // Encode QPACK request HEADERS frame directly from HeaderWorkspace
             let mut header_buf = BytesMut::new();
             encode_qpack_request(
                 &request.method,
@@ -722,11 +724,9 @@ pub(crate) async fn run_client_driver(
                         // A single QUIC read may yield partial frames or multiple concatenated frames.
                         while let Ok(Some(frame)) = decode_frame(&mut slot.raw_buf) {
                             match frame {
-                                Http3Frame::Headers(payload) => {
-                                    if let Ok(decoded) = decode_qpack(&payload) {
-                                        slot.headers =
-                                            Some((decoded.status, decoded.headers.clone()));
-                                        // For streaming responses, dispatch headers immediately to unblock downstream TTFB
+                                Http3Frame::Headers(header_payload) => {
+                                    if let Ok(decoded) = decode_qpack(&header_payload) {
+                                        // For streaming responses, move headers directly to unblock TTFB without cloning.
                                         if let StreamReply::Streaming {
                                             ref mut head_tx, ..
                                         } = slot.reply
@@ -738,6 +738,8 @@ pub(crate) async fn run_client_driver(
                                                 decoded.headers,
                                                 chunk_rx,
                                             )));
+                                        } else {
+                                            slot.headers = Some((decoded.status, decoded.headers));
                                         }
                                     }
                                 }
@@ -763,7 +765,7 @@ pub(crate) async fn run_client_driver(
                     if let Some(slot) = slot {
                         let (status, headers) = slot
                             .headers
-                            .unwrap_or((Some(StatusCode::OK), HeaderMap::new()));
+                            .unwrap_or_else(|| (Some(StatusCode::OK), HeaderWorkspace::empty(0)));
                         let status_code = status.unwrap_or(StatusCode::OK);
 
                         match slot.reply {

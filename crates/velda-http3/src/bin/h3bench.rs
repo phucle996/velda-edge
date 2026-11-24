@@ -11,8 +11,8 @@ use std::time::Instant;
 use http::header::HeaderValue;
 use serde::Serialize;
 use velda_core::{Body, L7Request};
-use velda_http3::Http3Config;
-use velda_http3::client::connect;
+use velda_http3::client::connector::{connect, default_client_config};
+use velda_http3::config::Http3Config;
 
 #[derive(Debug, Clone, Serialize)]
 struct BenchmarkResult {
@@ -201,7 +201,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             p_port_be,
             &effective_host,
             &config,
-            velda_http3::client::default_client_config()?,
+            default_client_config()?,
         )
         .await?;
         clients.push(client);

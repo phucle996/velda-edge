@@ -23,8 +23,6 @@ pub mod response;
 
 pub use connection::{Http3Engine, Http3RequestEvent, OutgoingDatagram};
 pub use early_response::{precompiled_early_response, precompiled_reject_response};
-pub use header::{enrich_headers, extract_host};
+pub use header::extract_host;
 pub use path::{is_clean_path, normalize_path};
-pub use response::{
-    Http3ServerResponse, Http3ServerResponseHead, build_edge_response_frames, send_response,
-};
+pub use response::{build_edge_response_frames, send_response};

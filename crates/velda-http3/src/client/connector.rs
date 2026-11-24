@@ -17,7 +17,7 @@ use super::driver::{ClientCommand, run_client_driver};
 use super::response::Http3StreamResponse;
 use crate::config::Http3Config;
 use crate::error::Http3Error;
-use crate::frame::{Http3Frame, encode_frame, encode_varint, settings_id, stream_type};
+use crate::proto::frame::{Http3Frame, encode_frame, encode_varint, settings_id, stream_type};
 
 /// Upstream HTTP/3 progressive request chunk streaming handle.
 #[derive(Clone)]
@@ -125,7 +125,7 @@ impl Http3Client {
         &self,
         method: http::Method,
         uri: http::Uri,
-        headers: http::HeaderMap,
+        headers: velda_core::HeaderWorkspace,
         initial_chunk: Option<bytes::Bytes>,
         is_fin: bool,
     ) -> Result<
@@ -149,31 +149,6 @@ impl Http3Client {
             .map_err(|_| Http3Error::ConnectionClosed)?;
 
         reply_rx.await.map_err(|_| Http3Error::ConnectionClosed)?
-    }
-
-    /// Dispatches an upstream [`Http3ClientRequest`] over a new multiplexed bidirectional stream on this connection.
-    pub async fn send_client_request(
-        &self,
-        req: super::request::Http3ClientRequest,
-    ) -> Result<super::response::Http3ClientResponse, Http3Error> {
-        let l7_req = req.into_l7();
-        let l7_resp = self.send_request(l7_req).await?;
-        Ok(super::response::Http3ClientResponse::from_l7(l7_resp))
-    }
-
-    /// Dispatches a borrowed [`L7Request`] by cloning it, useful when the caller retains ownership.
-    #[inline]
-    pub async fn send_request_ref(&self, req: &L7Request) -> Result<L7Response, Http3Error> {
-        self.send_request(req.clone()).await
-    }
-
-    /// Dispatches a borrowed [`L7Request`] for streaming response by cloning it.
-    #[inline]
-    pub async fn send_stream_request_ref(
-        &self,
-        req: &L7Request,
-    ) -> Result<Http3StreamResponse, Http3Error> {
-        self.send_stream_request(req.clone()).await
     }
 
     /// Returns the target physical `(ip: u128, port_be: u16)` of this client connection.
@@ -411,28 +386,7 @@ pub async fn connect(
     })
 }
 
-/// Forwards an HTTP/3 [`L7Request`] to the target backend endpoint over a dedicated HTTP/3 connection.
-///
-/// Convenience entrypoint for single-shot or non-pooled egress workflows.
-pub async fn forward_request(
-    req: &L7Request,
-    target_ip: u128,
-    target_port_be: u16,
-) -> Result<L7Response, Http3Error> {
-    let server_name = extract_sni(req, target_ip);
-    let config = Http3Config::auto();
-    let client = connect(
-        target_ip,
-        target_port_be,
-        &server_name,
-        &config,
-        default_client_config()?,
-    )
-    .await?;
-    client.send_request_ref(req).await
-}
-
-pub use super::header::{extract_sni, resolve_sni, strip_port};
+pub use super::header::{resolve_sni, strip_port};
 
 /// Builds default QUIC client configuration for HTTP/3 upstream.
 pub fn default_client_config() -> Result<ClientConfig, Http3Error> {

@@ -1,8 +1,8 @@
 use std::net::SocketAddr;
 use std::time::Instant;
 use velda_core::{Body, L7Request};
-use velda_http3::Http3Config;
-use velda_http3::client::connect;
+use velda_http3::client::connector::{connect, default_client_config};
+use velda_http3::config::Http3Config;
 
 #[tokio::main(flavor = "current_thread")]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
@@ -23,7 +23,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         t_port_be,
         "backend.local",
         &config,
-        velda_http3::client::default_client_config()?,
+        default_client_config()?,
     )
     .await?;
     println!("QUIC handshake completed in {:.2?}", start.elapsed());

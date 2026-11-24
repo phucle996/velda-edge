@@ -7,11 +7,11 @@ use std::time::Instant;
 use bytes::{Bytes, BytesMut};
 use common::{CountingAllocator, format_throughput};
 use http::header::{CONTENT_TYPE, HeaderValue, USER_AGENT};
-use http::{HeaderMap, Method, StatusCode, Uri};
-use velda_http3::frame::{Http3Frame, decode_frame, decode_varint_slice, encode_frame};
-use velda_http3::huffman::{decode_huffman, encode_huffman};
-use velda_http3::qpack::{decode_qpack, encode_qpack_request, encode_qpack_response};
-use velda_http3::server::build_edge_response_frames;
+use http::{Method, StatusCode, Uri};
+use velda_http3::proto::frame::{Http3Frame, decode_frame, decode_varint_slice, encode_frame};
+use velda_http3::proto::huffman::{decode_huffman, encode_huffman};
+use velda_http3::proto::qpack::{decode_qpack, encode_qpack_request, encode_qpack_response};
+use velda_http3::server::response::build_edge_response_frames;
 
 #[global_allocator]
 static ALLOCATOR: CountingAllocator = CountingAllocator::new();
@@ -120,15 +120,18 @@ fn bench_qpack_codec() {
     println!("| Operation | Headers Count | Latency / op | Allocs / op | Throughput |");
     println!("| :--- | :--- | :--- | :--- | :--- |");
 
-    let mut headers = HeaderMap::new();
+    let mut headers = velda_core::HeaderWorkspace::empty(8);
     headers.insert(CONTENT_TYPE, HeaderValue::from_static("application/json"));
     headers.insert(
         USER_AGENT,
         HeaderValue::from_static("velda-benchmark-agent/1.0"),
     );
-    headers.insert("x-request-id", HeaderValue::from_static("req-123456789"));
     headers.insert(
-        "accept-encoding",
+        http::header::HeaderName::from_static("x-request-id"),
+        HeaderValue::from_static("req-123456789"),
+    );
+    headers.insert(
+        http::header::ACCEPT_ENCODING,
         HeaderValue::from_static("gzip, deflate, br"),
     );
 

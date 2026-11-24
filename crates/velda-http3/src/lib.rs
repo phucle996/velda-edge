@@ -10,39 +10,37 @@
 //! - `pipe/`: Wire pipe modules for discrete streaming strategies (buffered, server stream, client stream, duplex).
 //! - `config`: Tunable parameters for QUIC transport, stream receive windows, and timeouts.
 //! - `error`: Strongly typed HTTP/3, frame, and QPACK errors.
-//! - `frame`: RFC 9114 HTTP/3 framing and RFC 9000 variable-length integer codecs.
-//! - `qpack`: RFC 9204 QPACK encoder/decoder with static table.
-//! - `huffman`: RFC 7541 / RFC 9204 canonical Huffman codec.
+//! - `proto/`: Sans-IO HTTP/3 protocol core (`frame`, `qpack`, `huffman`).
 
 pub mod client;
 pub mod config;
 pub mod error;
-pub mod frame;
 pub mod headers;
-pub mod huffman;
-pub mod qpack;
+pub mod proto;
 pub mod server;
 pub mod slot;
 pub mod strategy;
 
 pub use client::{
-    Http3Client, Http3ClientRequest, Http3ClientRequestHead, Http3ClientResponse,
-    Http3ClientResponseHead, Http3StreamResponse, Http3StreamSender, connect,
-    default_client_config, extract_sni, forward_request, resolve_sni, strip_port,
+    Http3Client, Http3StreamResponse, Http3StreamSender, connect, default_client_config,
+    resolve_sni, strip_port,
 };
 pub use config::Http3Config;
 pub use error::Http3Error;
-pub use frame::{
+pub use headers::sanitize_headers;
+pub use proto::frame::{
     FrameType, Http3Frame, decode_frame, decode_varint, decode_varint_slice, encode_frame,
     encode_varint, error_code, frame_id, settings_id, stream_type,
 };
-pub use headers::sanitize_headers;
-pub use huffman::{decode_huffman, encode_huffman};
-pub use qpack::{DecodedHeaders, decode_qpack, encode_qpack_request, encode_qpack_response};
+pub use proto::huffman::{decode_huffman, decode_huffman_bytes, encode_huffman};
+pub use proto::qpack::{
+    DecodedHeaders, H3ForwardingAddrs, H3IngressEnrich, decode_qpack, decode_qpack_ingress,
+    encode_qpack_request, encode_qpack_response,
+};
 pub use quinn_proto;
 pub use server::{
-    Http3Engine, Http3RequestEvent, Http3ServerResponse, Http3ServerResponseHead, OutgoingDatagram,
-    build_edge_response_frames, enrich_headers, extract_host, is_clean_path, normalize_path,
+    Http3Engine, Http3RequestEvent, OutgoingDatagram, build_edge_response_frames, extract_host,
+    is_clean_path, normalize_path, precompiled_early_response, precompiled_reject_response,
     send_response,
 };
 pub use slot::Http3HeaderSlot;

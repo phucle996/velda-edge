@@ -420,11 +420,11 @@ fn get_huffman_automaton() -> &'static HuffmanDecoderAutomaton {
     })
 }
 
-/// Decodes RFC 7541 / RFC 9204 Huffman encoded bytes into a String.
+/// Decodes RFC 7541 / RFC 9204 Huffman encoded bytes into raw octets.
 ///
 /// Uses a precomputed L1-cached 4-bit nibble automaton (2 transitions per byte instead of 8 bit-steps),
 /// cutting branch and memory lookup overhead by 4x.
-pub fn decode_huffman(input: &[u8]) -> Option<String> {
+pub fn decode_huffman_bytes(input: &[u8]) -> Option<Vec<u8>> {
     let automaton = get_huffman_automaton();
     let table = automaton.transitions.as_slice();
     // Huffman decompressed strings typically expand by ~1.3-1.5x. Pre-allocate 1.5x capacity to eliminate reallocs.
@@ -460,7 +460,12 @@ pub fn decode_huffman(input: &[u8]) -> Option<String> {
         return None;
     }
 
-    String::from_utf8(out).ok()
+    Some(out)
+}
+
+/// Decodes RFC 7541 / RFC 9204 Huffman encoded bytes into a UTF-8 String.
+pub fn decode_huffman(input: &[u8]) -> Option<String> {
+    decode_huffman_bytes(input).and_then(|out| String::from_utf8(out).ok())
 }
 
 #[cfg(test)]

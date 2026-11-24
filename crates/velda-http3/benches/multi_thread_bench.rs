@@ -7,10 +7,10 @@ use std::time::Instant;
 
 use bytes::BytesMut;
 use common::{CountingAllocator, format_throughput};
-use http::header::{CONTENT_TYPE, HeaderValue, USER_AGENT};
-use http::{HeaderMap, StatusCode};
-use velda_http3::qpack::{decode_qpack, encode_qpack_response};
-use velda_http3::server::build_edge_response_frames;
+use http::StatusCode;
+use http::header::{ACCEPT_ENCODING, CONTENT_TYPE, HeaderValue, USER_AGENT};
+use velda_http3::proto::qpack::{decode_qpack, encode_qpack_response};
+use velda_http3::server::response::build_edge_response_frames;
 
 #[global_allocator]
 static ALLOCATOR: CountingAllocator = CountingAllocator::new();
@@ -40,11 +40,11 @@ async fn bench_parallel_qpack_turnaround() {
     for &workers in &thread_counts {
         let iters_per_worker = TOTAL_REQUESTS / workers as u64;
 
-        let mut headers = HeaderMap::new();
+        let mut headers = velda_core::HeaderWorkspace::empty(4);
         headers.insert(CONTENT_TYPE, HeaderValue::from_static("application/json"));
         headers.insert(USER_AGENT, HeaderValue::from_static("velda-h3-bench/1.0"));
         headers.insert(
-            "accept-encoding",
+            ACCEPT_ENCODING,
             HeaderValue::from_static("gzip, deflate, br"),
         );
         let headers = Arc::new(headers);

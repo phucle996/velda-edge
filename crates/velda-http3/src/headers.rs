@@ -5,13 +5,13 @@
 //!   `Transfer-Encoding`, `Upgrade`).
 //! - Validates `TE` header: if present, MUST only contain `"trailers"`.
 
-use http::HeaderMap;
 use http::header::HeaderName;
+use velda_core::HeaderWorkspace;
 
 /// Sanitizes downstream or upstream headers in-place by removing prohibited
 /// connection-specific header fields according to RFC 9114 Section 4.2.
 #[inline]
-pub fn sanitize_headers(headers: &mut HeaderMap) {
+pub fn sanitize_headers(headers: &mut HeaderWorkspace) {
     static H3_PROHIBITED_NAMES: [HeaderName; 5] = [
         http::header::CONNECTION,
         HeaderName::from_static("keep-alive"),
@@ -26,32 +26,6 @@ pub fn sanitize_headers(headers: &mut HeaderMap) {
 
     // RFC 9114 §4.2: The only header field that is allowed to contain the name
     // of another header field is the TE header field, which may only contain "trailers".
-    if let Some(te_val) = headers.get(http::header::TE) {
-        let is_trailers = te_val
-            .to_str()
-            .is_ok_and(|s| s.trim().eq_ignore_ascii_case("trailers"));
-        if !is_trailers {
-            headers.remove(http::header::TE);
-        }
-    }
-}
-
-/// Sanitizes a [`velda_core::HeaderWorkspace`] in-place by removing prohibited
-/// connection-specific header fields according to RFC 9114 Section 4.2.
-#[inline]
-pub fn sanitize_header_workspace(headers: &mut velda_core::HeaderWorkspace) {
-    static H3_PROHIBITED_NAMES: [HeaderName; 5] = [
-        http::header::CONNECTION,
-        HeaderName::from_static("keep-alive"),
-        HeaderName::from_static("proxy-connection"),
-        http::header::TRANSFER_ENCODING,
-        http::header::UPGRADE,
-    ];
-
-    for name in &H3_PROHIBITED_NAMES {
-        headers.remove(name);
-    }
-
     if let Some(te_val) = headers.get(http::header::TE) {
         let is_trailers = te_val
             .to_str()
@@ -89,7 +63,7 @@ mod tests {
 
     #[test]
     fn test_removes_prohibited_h3_headers() {
-        let mut headers = HeaderMap::new();
+        let mut headers = HeaderWorkspace::empty(8);
         headers.insert(
             http::header::CONNECTION,
             HeaderValue::from_static("keep-alive"),
@@ -127,12 +101,12 @@ mod tests {
 
     #[test]
     fn test_te_trailers_preserved() {
-        let mut headers = HeaderMap::new();
+        let mut headers = HeaderWorkspace::empty(4);
         headers.insert(http::header::TE, HeaderValue::from_static("trailers"));
         sanitize_headers(&mut headers);
         assert_eq!(headers.get(http::header::TE).unwrap(), "trailers");
 
-        let mut invalid_headers = HeaderMap::new();
+        let mut invalid_headers = HeaderWorkspace::empty(4);
         invalid_headers.insert(http::header::TE, HeaderValue::from_static("gzip"));
         sanitize_headers(&mut invalid_headers);
         assert!(invalid_headers.get(http::header::TE).is_none());
