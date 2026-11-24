@@ -15,9 +15,11 @@ use std::time::Instant;
 use bytes::{Bytes, BytesMut};
 use common::{CountingAllocator, FastRng, format_bytes, format_duration};
 use http::header::CONTENT_TYPE;
-use http::{HeaderMap, HeaderValue, StatusCode};
-use velda_core::Body;
-use velda_http1::{Http1Config, Http1ServerResponse, decode_request, encode_response};
+use http::{HeaderValue, StatusCode};
+use velda_core::{Body, HeaderWorkspace};
+use velda_http1::config::Http1Config;
+use velda_http1::server::request::decode_request;
+use velda_http1::server::response::{Http1ServerResponse, encode_response};
 
 #[global_allocator]
 static ALLOCATOR: CountingAllocator = CountingAllocator::new();
@@ -98,7 +100,7 @@ fn bench_response_encoding_lifecycle() {
     println!("> Serializing 1,000,000 responses reusing a single BytesMut buffer...\n");
 
     let iters = 1_000_000;
-    let mut headers = HeaderMap::new();
+    let mut headers = HeaderWorkspace::empty(4);
     headers.insert(CONTENT_TYPE, HeaderValue::from_static("application/json"));
     let res = Http1ServerResponse::new(
         StatusCode::OK,

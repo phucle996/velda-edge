@@ -1,13 +1,10 @@
-//! Upstream HTTP/1.1 Header Sanitization, Hop-by-Hop Stripping, and SNI Resolution.
+//! Upstream HTTP/1.1 Header Sanitization and Hop-by-Hop Stripping.
 //!
 //! Enforces:
 //! - RFC 9112 Section 7.6.1 hop-by-hop header removal.
-//! - Upstream target SNI / Host extraction with proper port stripping.
 
-use std::borrow::Cow;
-
-use http::HeaderMap;
 use http::header::HeaderName;
+use velda_core::HeaderWorkspace;
 
 /// Standard hop-by-hop headers that must be stripped by intermediaries (RFC 9112 Section 7.6.1).
 pub const HOP_BY_HOP: &[&str] = &[
@@ -48,7 +45,7 @@ fn is_hop_by_hop(name: &HeaderName) -> bool {
 }
 
 /// Strips RFC 9112 hop-by-hop headers and any header nominated in the `Connection` header value.
-pub fn sanitize_headers(headers: &mut HeaderMap) {
+pub fn sanitize_headers(headers: &mut HeaderWorkspace) {
     if headers.is_empty() {
         return;
     }
@@ -84,85 +81,39 @@ pub fn sanitize_headers(headers: &mut HeaderMap) {
         }
     }
 
-    // Fast-path: Only inspect headers that are actually present in the map
-    // using O(1) header name pointer equality instead of string comparisons.
-    let mut to_remove_stack: [Option<HeaderName>; 8] = [const { None }; 8];
-    let mut to_remove_count = 0;
-    for (name, _) in headers.iter() {
-        if is_hop_by_hop(name) && to_remove_count < to_remove_stack.len() {
-            to_remove_stack[to_remove_count] = Some(name.clone());
-            to_remove_count += 1;
+    // Fast-path: Collect up to 8 hop-by-hop headers on stack per pass; loop only if > 8 are present.
+    loop {
+        let mut to_remove_stack: [Option<HeaderName>; 8] = [const { None }; 8];
+        let mut to_remove_count = 0usize;
+        let mut hit_cap = false;
+        for (name, _) in headers.iter() {
+            if is_hop_by_hop(name) {
+                if to_remove_count < to_remove_stack.len() {
+                    to_remove_stack[to_remove_count] = Some(name.clone());
+                    to_remove_count += 1;
+                } else {
+                    hit_cap = true;
+                    break;
+                }
+            }
         }
-    }
-    for name in to_remove_stack[..to_remove_count].iter().flatten() {
-        headers.remove(name);
+        for name in to_remove_stack[..to_remove_count].iter().flatten() {
+            headers.remove(name.as_str());
+        }
+        if !hit_cap {
+            break;
+        }
     }
 
     // Remove custom headers nominated by Connection header
     for name in custom_stack[..custom_count].iter().flatten() {
-        headers.remove(name);
+        headers.remove(name.as_str());
     }
     if let Some(heap) = custom_heap {
         for name in heap {
-            headers.remove(name);
+            headers.remove(name.as_str());
         }
     }
-}
-
-/// Strips the port component from a host string (e.g. `example.com:8080` -> `example.com`).
-#[inline]
-pub fn strip_port(host: &str) -> &str {
-    if let Some(stripped) = host.strip_prefix('[')
-        && let Some(end_bracket) = stripped.find(']')
-    {
-        return &stripped[..end_bracket];
-    }
-
-    if let Some(colon_idx) = host.rfind(':') {
-        if host[..colon_idx].contains(':') {
-            host
-        } else {
-            &host[..colon_idx]
-        }
-    } else {
-        host
-    }
-}
-
-/// Extracts upstream SNI / host string from headers or URI.
-pub fn extract_sni<'a>(
-    headers: &'a HeaderMap,
-    uri: &'a http::Uri,
-    target_ip: u128,
-) -> Cow<'a, str> {
-    if let Some(host) = uri.host().filter(|h| !h.trim().is_empty()) {
-        return Cow::Borrowed(host.trim());
-    }
-
-    if let Some(host_hdr) = headers
-        .get(http::header::HOST)
-        .and_then(|h| h.to_str().ok())
-        .map(|s| s.trim())
-        .filter(|s| !s.is_empty())
-    {
-        return Cow::Borrowed(strip_port(host_hdr));
-    }
-
-    let (buf, len) = velda_core::lut::ip::format_ip_bytes(target_ip);
-    Cow::Owned(String::from_utf8_lossy(&buf[..len]).into_owned())
-}
-
-/// Resolves the upstream TLS SNI / ServerName for an outbound connection.
-pub fn resolve_sni<'a>(
-    headers: &'a HeaderMap,
-    uri: &'a http::Uri,
-    target_ip: u128,
-    explicit_sni: Option<&'a str>,
-) -> Cow<'a, str> {
-    if let Some(sni) = explicit_sni.filter(|s| !s.trim().is_empty()) {
-        return Cow::Borrowed(sni.trim());
-    }
-    extract_sni(headers, uri, target_ip)
 }
 
 #[cfg(test)]
@@ -171,7 +122,7 @@ mod tests {
 
     #[test]
     fn test_sanitize_headers() {
-        let mut headers = HeaderMap::new();
+        let mut headers = HeaderWorkspace::empty(8);
         headers.insert(http::header::CONNECTION, "x-foo, close".parse().unwrap());
         headers.insert(http::header::UPGRADE, "websocket".parse().unwrap());
         headers.insert(HeaderName::from_static("x-foo"), "bar".parse().unwrap());
@@ -186,10 +137,27 @@ mod tests {
     }
 
     #[test]
-    fn test_strip_port() {
-        assert_eq!(strip_port("example.com:80"), "example.com");
-        assert_eq!(strip_port("example.com"), "example.com");
-        assert_eq!(strip_port("[::1]:8080"), "::1");
-        assert_eq!(strip_port("192.168.1.1:443"), "192.168.1.1");
+    fn test_sanitize_all_10_hop_by_hop_headers() {
+        let mut headers = HeaderWorkspace::empty(16);
+        for &name in HOP_BY_HOP {
+            headers.insert(
+                HeaderName::from_static(name),
+                http::HeaderValue::from_static("1"),
+            );
+        }
+        headers.insert(
+            http::header::HOST,
+            http::HeaderValue::from_static("example.com"),
+        );
+
+        sanitize_headers(&mut headers);
+
+        for &name in HOP_BY_HOP {
+            assert!(
+                !headers.contains_key(name),
+                "hop-by-hop header {name} must be stripped"
+            );
+        }
+        assert!(headers.contains_key(http::header::HOST));
     }
 }

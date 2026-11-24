@@ -62,7 +62,7 @@ impl Http1Config {
         Self {
             max_body_size: clamp_usize(max_chunk_size * 100, 10 * 1024 * 1024, 100 * 1024 * 1024),
             max_header_size,
-            max_headers: velda_core::buffer::MAX_WIRE_HEADERS,
+            max_headers: velda_core::buffer::header::MAX_WIRE_HEADERS,
             idle_timeout_ms: 30_000,
             max_keepalive_requests: 10_000_000,
             header_read_timeout_ms: 10_000,

@@ -6,7 +6,6 @@
 //! redundant duplicate implementations across `server` and `client`.
 
 use bytes::{BufMut, BytesMut};
-use http::HeaderMap;
 use tokio::io::{AsyncWrite, AsyncWriteExt};
 use velda_core::Body;
 
@@ -517,23 +516,6 @@ impl ProgressiveChunkDecoder {
                 }
             }
         }
-    }
-}
-
-/// Encodes HTTP headers into the destination buffer with a single capacity reservation.
-#[inline]
-pub fn encode_headers(headers: &HeaderMap, dst: &mut BytesMut) {
-    if headers.is_empty() {
-        return;
-    }
-    // Fast O(1) capacity estimation avoiding redundant pass over headers
-    dst.reserve(headers.len() * 48);
-
-    for (name, val) in headers {
-        dst.put_slice(name.as_str().as_bytes());
-        dst.put_slice(b": ");
-        dst.put_slice(val.as_bytes());
-        dst.put_slice(b"\r\n");
     }
 }
 

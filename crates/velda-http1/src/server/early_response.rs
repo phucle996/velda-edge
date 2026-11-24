@@ -20,76 +20,65 @@ use crate::error::Http1Error;
 /// Pre-compiles an HTTP/1.1 canonical early error [`L7Response`] with static slice body and minimal headers.
 ///
 /// Respects SRP by keeping HTTP/1.1 response pre-compilation strictly within `velda-http1`.
+#[cold]
 pub fn precompiled_early_response(
     status: StatusCode,
     request_id: Option<&HeaderValue>,
 ) -> L7Response {
-    let (body, len_str, status_code): (&'static [u8], &'static str, StatusCode) = match status {
-        StatusCode::BAD_REQUEST => (b"400 Bad Request\n", "16", StatusCode::BAD_REQUEST),
-        StatusCode::UNAUTHORIZED => (b"401 Unauthorized\n", "17", StatusCode::UNAUTHORIZED),
-        StatusCode::FORBIDDEN => (b"403 Forbidden\n", "14", StatusCode::FORBIDDEN),
-        StatusCode::NOT_FOUND => (b"404 Not Found\n", "14", StatusCode::NOT_FOUND),
-        StatusCode::METHOD_NOT_ALLOWED => (
-            b"405 Method Not Allowed\n",
-            "23",
-            StatusCode::METHOD_NOT_ALLOWED,
-        ),
-        StatusCode::REQUEST_TIMEOUT => {
-            (b"408 Request Timeout\n", "20", StatusCode::REQUEST_TIMEOUT)
+    let (body, status_code): (&'static [u8], StatusCode) = match status {
+        StatusCode::BAD_REQUEST => (b"400 Bad Request\n", StatusCode::BAD_REQUEST),
+        StatusCode::UNAUTHORIZED => (b"401 Unauthorized\n", StatusCode::UNAUTHORIZED),
+        StatusCode::FORBIDDEN => (b"403 Forbidden\n", StatusCode::FORBIDDEN),
+        StatusCode::NOT_FOUND => (b"404 Not Found\n", StatusCode::NOT_FOUND),
+        StatusCode::METHOD_NOT_ALLOWED => {
+            (b"405 Method Not Allowed\n", StatusCode::METHOD_NOT_ALLOWED)
         }
-        StatusCode::CONFLICT => (b"409 Conflict\n", "13", StatusCode::CONFLICT),
-        StatusCode::PAYLOAD_TOO_LARGE => (
-            b"413 Payload Too Large\n",
-            "22",
-            StatusCode::PAYLOAD_TOO_LARGE,
-        ),
-        StatusCode::URI_TOO_LONG => (b"414 URI Too Long\n", "17", StatusCode::URI_TOO_LONG),
+        StatusCode::REQUEST_TIMEOUT => (b"408 Request Timeout\n", StatusCode::REQUEST_TIMEOUT),
+        StatusCode::CONFLICT => (b"409 Conflict\n", StatusCode::CONFLICT),
+        StatusCode::PAYLOAD_TOO_LARGE => {
+            (b"413 Payload Too Large\n", StatusCode::PAYLOAD_TOO_LARGE)
+        }
+        StatusCode::URI_TOO_LONG => (b"414 URI Too Long\n", StatusCode::URI_TOO_LONG),
         StatusCode::UNSUPPORTED_MEDIA_TYPE => (
             b"415 Unsupported Media Type\n",
-            "27",
             StatusCode::UNSUPPORTED_MEDIA_TYPE,
         ),
-        StatusCode::TOO_MANY_REQUESTS => (
-            b"429 Too Many Requests\n",
-            "22",
-            StatusCode::TOO_MANY_REQUESTS,
-        ),
+        StatusCode::TOO_MANY_REQUESTS => {
+            (b"429 Too Many Requests\n", StatusCode::TOO_MANY_REQUESTS)
+        }
         StatusCode::REQUEST_HEADER_FIELDS_TOO_LARGE => (
             b"431 Request Header Fields Too Large\n",
-            "36",
             StatusCode::REQUEST_HEADER_FIELDS_TOO_LARGE,
         ),
         StatusCode::INTERNAL_SERVER_ERROR => (
             b"500 Internal Server Error\n",
-            "26",
             StatusCode::INTERNAL_SERVER_ERROR,
         ),
-        StatusCode::BAD_GATEWAY => (b"502 Bad Gateway\n", "16", StatusCode::BAD_GATEWAY),
+        StatusCode::BAD_GATEWAY => (b"502 Bad Gateway\n", StatusCode::BAD_GATEWAY),
         StatusCode::SERVICE_UNAVAILABLE => (
             b"503 Service Unavailable\n",
-            "24",
             StatusCode::SERVICE_UNAVAILABLE,
         ),
-        StatusCode::GATEWAY_TIMEOUT => {
-            (b"504 Gateway Timeout\n", "20", StatusCode::GATEWAY_TIMEOUT)
-        }
-        s if s.as_u16() == 499 => (b"499 Client Closed Request\n", "26", s),
+        StatusCode::GATEWAY_TIMEOUT => (b"504 Gateway Timeout\n", StatusCode::GATEWAY_TIMEOUT),
+        s if s.as_u16() == 499 => (b"499 Client Closed Request\n", s),
         _ => (
             b"500 Internal Server Error\n",
-            "26",
             StatusCode::INTERNAL_SERVER_ERROR,
         ),
     };
 
     let mut ws = match request_id {
         Some(req_id) => HeaderWorkspace::with_request_id(req_id.clone(), 5),
-        None => HeaderWorkspace::new(5),
+        None => HeaderWorkspace::empty(5),
     };
     ws.insert(
         CONTENT_TYPE,
         HeaderValue::from_static("text/plain; charset=utf-8"),
     );
-    ws.insert(CONTENT_LENGTH, HeaderValue::from_static(len_str));
+    ws.insert(
+        CONTENT_LENGTH,
+        velda_core::buffer::header::resolve_u64_header_value(body.len() as u64),
+    );
     // CPDoS defense: edge-generated errors depend on client-induced conditions (oversized URI,
     // header bombs, blocked origins) and must never be stored by shared caches/CDNs.
     ws.insert(CACHE_CONTROL, HeaderValue::from_static("no-store"));
@@ -105,19 +94,11 @@ pub fn precompiled_early_response(
     }
 }
 
-/// Pre-compiles an HTTP/1.1 canonical rejection response directly from protocol-agnostic [`velda_core::RejectReason`].
-pub fn precompiled_reject_response(
-    reason: velda_core::RejectReason,
-    request_id: Option<&HeaderValue>,
-) -> L7Response {
-    let meta = velda_core::lut::get_reject_meta(reason);
-    precompiled_early_response(meta.status, request_id)
-}
-
 /// Serializes a pre-compiled, zero-allocation canonical error response directly into the destination buffer.
 ///
 /// Directly formats the HTTP/1.1 ASCII status line, standard content headers, and optional `x-request-id`
 /// into `dst` without any dynamic `HeaderMap` construction or heap allocations (`.to_vec()`).
+#[cold]
 pub fn encode_early_error(
     status: StatusCode,
     dst: &mut BytesMut,

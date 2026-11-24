@@ -14,12 +14,13 @@ use std::time::Instant;
 use bytes::{Bytes, BytesMut};
 use common::{format_duration, format_throughput};
 use http::header::CONTENT_TYPE;
-use http::{HeaderMap, HeaderValue, StatusCode};
+use http::{HeaderValue, StatusCode};
 use tokio::io::{AsyncReadExt, AsyncWriteExt, duplex};
-use velda_core::Body;
-use velda_http1::{
-    Http1Config, Http1ServerConnection, Http1ServerResponse, decode_request, encode_response,
-};
+use velda_core::{Body, HeaderWorkspace};
+use velda_http1::config::Http1Config;
+use velda_http1::server::connection::Http1ServerConnection;
+use velda_http1::server::request::decode_request;
+use velda_http1::server::response::{Http1ServerResponse, encode_response};
 
 #[tokio::main]
 async fn main() {
@@ -153,7 +154,7 @@ fn bench_multi_thread_response_encoding_scaling() {
     let thread_counts = [1, (workers / 2).max(1), workers, workers * 2];
     let ops_per_thread = 500_000;
 
-    let mut headers = HeaderMap::new();
+    let mut headers = HeaderWorkspace::empty(4);
     headers.insert(CONTENT_TYPE, HeaderValue::from_static("application/json"));
     let res = Arc::new(Http1ServerResponse::new(
         StatusCode::OK,
@@ -249,7 +250,7 @@ async fn bench_concurrent_connection_storm() {
             let resp = Http1ServerResponse::new(
                 StatusCode::OK,
                 http::Version::HTTP_11,
-                HeaderMap::new(),
+                HeaderWorkspace::empty(0),
                 Body::Bytes(Bytes::from_static(b"OK")),
             );
 

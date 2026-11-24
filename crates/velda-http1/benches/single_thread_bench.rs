@@ -13,13 +13,15 @@ use std::time::Instant;
 use bytes::{Bytes, BytesMut};
 use common::{CountingAllocator, format_bytes, format_duration, format_throughput};
 use http::header::{CONTENT_TYPE, USER_AGENT};
-use http::{HeaderMap, HeaderValue, Method, StatusCode, Uri, Version};
+use http::{HeaderValue, Method, StatusCode, Uri, Version};
 use tokio::io::{AsyncReadExt, AsyncWriteExt, duplex};
-use velda_core::Body;
-use velda_http1::{
-    Http1Config, Http1ServerConnection, Http1ServerRequest, Http1ServerResponse, decode_request,
-    decode_response, encode_request, encode_response,
-};
+use velda_core::{Body, HeaderWorkspace};
+use velda_http1::client::request::encode_request_head;
+use velda_http1::client::response::decode_response;
+use velda_http1::config::Http1Config;
+use velda_http1::server::connection::Http1ServerConnection;
+use velda_http1::server::request::{Http1ServerRequest, decode_request};
+use velda_http1::server::response::{Http1ServerResponse, encode_response};
 
 #[global_allocator]
 static ALLOCATOR: CountingAllocator = CountingAllocator::new();
@@ -122,14 +124,14 @@ fn bench_response_encoding() {
         (
             "200 OK (Empty Body)",
             StatusCode::OK,
-            HeaderMap::new(),
+            HeaderWorkspace::empty(0),
             Body::Empty,
         ),
         (
             "200 OK (1KB JSON)",
             StatusCode::OK,
             {
-                let mut h = HeaderMap::new();
+                let mut h = HeaderWorkspace::empty(4);
                 h.insert(CONTENT_TYPE, HeaderValue::from_static("application/json"));
                 h
             },
@@ -139,7 +141,7 @@ fn bench_response_encoding() {
             "200 OK (64KB Binary)",
             StatusCode::OK,
             {
-                let mut h = HeaderMap::new();
+                let mut h = HeaderWorkspace::empty(4);
                 h.insert(
                     CONTENT_TYPE,
                     HeaderValue::from_static("application/octet-stream"),
@@ -152,7 +154,7 @@ fn bench_response_encoding() {
             "404 Not Found",
             StatusCode::NOT_FOUND,
             {
-                let mut h = HeaderMap::new();
+                let mut h = HeaderWorkspace::empty(4);
                 h.insert(CONTENT_TYPE, HeaderValue::from_static("text/plain"));
                 h
             },
@@ -208,7 +210,7 @@ fn bench_upstream_codec() {
 
     // 1. encode_request
     {
-        let mut headers = HeaderMap::new();
+        let mut headers = HeaderWorkspace::empty(4);
         headers.insert(
             USER_AGENT,
             HeaderValue::from_static("velda-edge-upstream/1.0"),
@@ -228,7 +230,14 @@ fn bench_upstream_codec() {
 
         for _ in 0..iters {
             buf.clear();
-            encode_request(&req, &mut buf);
+            encode_request_head(
+                &req.method,
+                &req.uri,
+                &req.headers,
+                Some(req.body.len()),
+                &mut buf,
+            );
+            buf.extend_from_slice(req.body.as_slice());
         }
 
         let elapsed = start.elapsed();
@@ -304,7 +313,7 @@ async fn bench_pipelined_connection() {
     let resp = Http1ServerResponse::new(
         StatusCode::OK,
         Version::HTTP_11,
-        HeaderMap::new(),
+        HeaderWorkspace::empty(0),
         Body::Bytes(Bytes::from_static(b"OK")),
     );
 

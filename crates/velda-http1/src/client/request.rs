@@ -1,153 +1,17 @@
-//! Upstream HTTP/1.1 Request Entity and Wire Serializer (RFC 9112).
+//! Upstream HTTP/1.1 Request Wire Serializer (RFC 9112).
 //!
 //! Architectural Perspective (Góc nhìn Ingress):
-//! Handles serializing outgoing HTTP/1.1 requests to upstream backend microservices.
-//! Translates [`Http1ClientRequest`] into wire framing over pre-established stream connections.
+//! Handles serializing outgoing HTTP/1.1 requests to upstream backend microservices
+//! over pre-established stream connections.
 
 use bytes::{BufMut, BytesMut};
 use http::header::CONTENT_LENGTH;
-use http::{HeaderMap, Method, Uri, Version};
-use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt};
-use velda_core::{Body, L7Request};
+use http::{Method, Uri};
+use tokio::io::{AsyncWrite, AsyncWriteExt};
+use velda_core::{Body, HeaderWorkspace};
 
-use crate::client::response::{Http1ClientResponse, decode_response};
-use crate::config::Http1Config;
 use crate::error::Http1Error;
-use crate::server::request::{Http1ServerRequest, Http1ServerRequestHead};
-
-/// HTTP/1.1 client request head metadata.
-#[derive(Debug, Clone)]
-pub struct Http1ClientRequestHead {
-    /// HTTP method.
-    pub method: Method,
-    /// Target URI / path and query.
-    pub uri: Uri,
-    /// Protocol version (default HTTP/1.1).
-    pub version: Version,
-    /// Outbound request headers.
-    pub headers: HeaderMap,
-}
-
-impl Http1ClientRequestHead {
-    /// Creates a new HTTP/1.1 client request head.
-    #[inline]
-    pub fn new(method: Method, uri: Uri, headers: HeaderMap) -> Self {
-        Self {
-            method,
-            uri,
-            version: Version::HTTP_11,
-            headers,
-        }
-    }
-
-    /// Constructs an upstream client request head from a downstream server request head.
-    #[inline]
-    pub fn from_server_head(head: &Http1ServerRequestHead) -> Self {
-        Self {
-            method: head.method.clone(),
-            uri: head.uri.clone(),
-            version: Version::HTTP_11,
-            headers: head.headers.clone(),
-        }
-    }
-}
-
-/// Upstream protocol-owned HTTP/1.1 client request.
-#[derive(Debug, Clone)]
-pub struct Http1ClientRequest {
-    /// HTTP method.
-    pub method: Method,
-    /// Request URI.
-    pub uri: Uri,
-    /// HTTP version (HTTP/1.1).
-    pub version: Version,
-    /// Outbound headers.
-    pub headers: HeaderMap,
-    /// Outbound payload body.
-    pub body: Body,
-}
-
-impl Http1ClientRequest {
-    /// Creates a new HTTP/1.1 client request.
-    #[inline]
-    pub fn new(method: Method, uri: Uri, version: Version, headers: HeaderMap, body: Body) -> Self {
-        Self {
-            method,
-            uri,
-            version,
-            headers,
-            body,
-        }
-    }
-
-    /// Constructs an upstream client request from a downstream server request.
-    #[inline]
-    pub fn from_server_request(req: &Http1ServerRequest) -> Self {
-        Self {
-            method: req.method.clone(),
-            uri: req.uri.clone(),
-            version: Version::HTTP_11,
-            headers: req.headers.clone(),
-            body: req.body.clone(),
-        }
-    }
-
-    /// Creates a client request from head metadata and body.
-    #[inline]
-    pub fn from_parts(head: Http1ClientRequestHead, body: Body) -> Self {
-        Self {
-            method: head.method,
-            uri: head.uri,
-            version: head.version,
-            headers: head.headers,
-            body,
-        }
-    }
-
-    /// Deconstructs request into head and body components.
-    #[inline]
-    pub fn into_parts(self) -> (Http1ClientRequestHead, Body) {
-        (
-            Http1ClientRequestHead {
-                method: self.method,
-                uri: self.uri,
-                version: self.version,
-                headers: self.headers,
-            },
-            self.body,
-        )
-    }
-
-    /// Converts into canonical [`L7Request`].
-    pub fn into_l7_request(self) -> L7Request {
-        L7Request::new(self.method, self.uri, self.version, self.headers, self.body)
-    }
-
-    /// Constructs from canonical [`L7Request`].
-    pub fn from_l7_request(req: L7Request) -> Self {
-        Self {
-            method: req.method,
-            uri: req.uri,
-            version: req.version,
-            headers: req.headers.into(),
-            body: req.body,
-        }
-    }
-
-    /// Serializes entire request into the destination buffer without heap cloning.
-    pub fn encode(&self, dst: &mut BytesMut) {
-        encode_request_head(
-            &self.method,
-            &self.uri,
-            &self.headers,
-            Some(self.body.len()),
-            dst,
-        );
-        if !self.body.is_empty() {
-            dst.extend_from_slice(self.body.as_slice());
-        }
-    }
-}
+use crate::server::request::Http1ServerRequestHead;
 
 /// Encodes an HTTP/1.1 request line (method, path and query, version).
 pub fn encode_request_line(method: &Method, uri: &Uri, dst: &mut BytesMut) {
@@ -166,7 +30,7 @@ pub fn encode_request_line(method: &Method, uri: &Uri, dst: &mut BytesMut) {
 pub fn encode_request_head(
     method: &Method,
     uri: &Uri,
-    headers: &HeaderMap,
+    headers: &HeaderWorkspace,
     body_len: Option<usize>,
     dst: &mut BytesMut,
 ) {
@@ -174,7 +38,7 @@ pub fn encode_request_head(
     dst.reserve(128 + headers.len() * 48);
 
     encode_request_line(method, uri, dst);
-    for (name, val) in headers {
+    for (name, val) in headers.iter() {
         if name.as_str().starts_with("x-velda-") {
             continue;
         }
@@ -196,28 +60,13 @@ pub fn encode_request_head(
     dst.put_slice(b"\r\n");
 }
 
-/// Serializes an entire HTTP/1.1 request (head + body) into destination buffer.
-pub fn encode_request(req: &Http1ServerRequest, dst: &mut BytesMut) {
-    let body_len = if req.body.is_empty() {
-        None
-    } else {
-        Some(req.body.len())
-    };
-
-    encode_request_head(&req.method, &req.uri, &req.headers, body_len, dst);
-
-    if !req.body.is_empty() {
-        dst.extend_from_slice(req.body.as_slice());
-    }
-}
-
 /// Serializes and writes request parts directly to upstream stream using vectored I/O.
 ///
 /// Eliminates user-space copying of body payload into `write_buf` and coalesces headers + body into a single syscall.
 pub async fn send_request_parts<IO>(
     method: &Method,
     uri: &Uri,
-    headers: &HeaderMap,
+    headers: &HeaderWorkspace,
     body: &Body,
     stream: &mut IO,
     write_buf: &mut BytesMut,
@@ -325,26 +174,6 @@ where
     Ok(())
 }
 
-/// Serializes and writes an entire HTTP/1.1 request to the upstream stream using provided write buffer.
-pub async fn send_request<IO>(
-    req: &Http1ServerRequest,
-    stream: &mut IO,
-    write_buf: &mut BytesMut,
-) -> Result<(), Http1Error>
-where
-    IO: AsyncRead + AsyncWrite + Unpin,
-{
-    send_request_parts(
-        &req.method,
-        &req.uri,
-        &req.headers,
-        &req.body,
-        stream,
-        write_buf,
-    )
-    .await
-}
-
 /// Serializes an HTTP/1.1 request head configured for chunked streaming into provided write buffer.
 #[inline]
 pub fn encode_request_head_chunked(head: &Http1ServerRequestHead, write_buf: &mut BytesMut) {
@@ -353,11 +182,11 @@ pub fn encode_request_head_chunked(head: &Http1ServerRequestHead, write_buf: &mu
     encode_request_line(&head.method, &head.uri, write_buf);
 
     let mut has_te = false;
-    for (name, val) in &head.headers {
-        if name == http::header::CONTENT_LENGTH {
+    for (name, val) in head.headers.iter() {
+        if *name == http::header::CONTENT_LENGTH {
             continue;
         }
-        if name == http::header::TRANSFER_ENCODING {
+        if *name == http::header::TRANSFER_ENCODING {
             has_te = true;
         }
         write_buf.put_slice(name.as_str().as_bytes());
@@ -369,47 +198,4 @@ pub fn encode_request_head_chunked(head: &Http1ServerRequestHead, write_buf: &mu
         write_buf.put_slice(b"transfer-encoding: chunked\r\n");
     }
     write_buf.put_slice(b"\r\n");
-}
-
-/// Serializes and writes an HTTP/1.1 request head configured for chunked streaming to upstream using provided write buffer.
-pub async fn send_request_head_chunked<IO>(
-    head: &Http1ServerRequestHead,
-    stream: &mut IO,
-    write_buf: &mut BytesMut,
-) -> Result<(), Http1Error>
-where
-    IO: AsyncWrite + Unpin,
-{
-    encode_request_head_chunked(head, write_buf);
-    stream.write_all(write_buf).await?;
-    Ok(())
-}
-
-/// Forwards an HTTP/1.1 request over an already-connected stream and decodes the incoming response.
-pub async fn forward_request<IO>(
-    req: &Http1ServerRequest,
-    stream: &mut IO,
-    config: &Http1Config,
-) -> Result<Http1ClientResponse, Http1Error>
-where
-    IO: AsyncRead + AsyncWrite + Unpin,
-{
-    let mut write_buf = BytesMut::with_capacity(1024);
-    send_request(req, stream, &mut write_buf).await?;
-
-    let mut read_buf = BytesMut::with_capacity(65_536);
-
-    loop {
-        let n = stream.read_buf(&mut read_buf).await?;
-        if n == 0 {
-            if let Some(resp) = decode_response(&mut read_buf, config)? {
-                return Ok(resp);
-            }
-            return Err(Http1Error::ConnectionClosed);
-        }
-
-        if let Some(resp) = decode_response(&mut read_buf, config)? {
-            return Ok(resp);
-        }
-    }
 }

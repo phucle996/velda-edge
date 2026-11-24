@@ -7,7 +7,7 @@
 use bytes::BytesMut;
 use http::StatusCode;
 use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt};
-use velda_core::Body;
+use velda_core::{Body, HeaderWorkspace};
 
 use super::request::{
     Http1BodyFraming, Http1ServerRequest, Http1ServerRequestHead, decode_body, decode_request,
@@ -15,9 +15,8 @@ use super::request::{
 };
 use super::response::{
     HeadEncodeOptions, Http1ServerResponse, Http1ServerResponseHead, encode_chunked_head,
-    encode_head, send_chunked_head, send_head_coalesced, send_parts, send_response,
+    encode_head, send_chunked_head, send_head_coalesced, send_parts,
 };
-use crate::client::response::{Http1ClientResponse, Http1ClientResponseHead};
 use crate::config::Http1Config;
 use crate::error::Http1Error;
 
@@ -64,12 +63,6 @@ where
         }
     }
 
-    /// Sets the Alt-Svc advertisement header for this connection.
-    #[inline]
-    pub fn set_alt_svc(&mut self, alt_svc: Option<http::header::HeaderValue>) {
-        self.alt_svc = alt_svc;
-    }
-
     /// Returns a reference to the active configuration used by this connection.
     #[inline]
     pub const fn config(&self) -> &Http1Config {
@@ -102,6 +95,7 @@ where
     /// headers and reject malicious or unauthorized requests before reading any body bytes.
     pub async fn next_request_head(
         &mut self,
+        enrich: Option<crate::simd::H1IngressEnrich<'_>>,
     ) -> Result<Option<(Http1ServerRequestHead, Http1BodyFraming)>, Http1Error> {
         self.current_request_id = None;
         if self.close_requested {
@@ -111,7 +105,9 @@ where
         self.compact_buffers();
 
         loop {
-            if let Some((head, framing)) = decode_request_head(&mut self.read_buf, &self.config)? {
+            if let Some((head, framing)) =
+                decode_request_head(&mut self.read_buf, &self.config, enrich)?
+            {
                 let is_http10 = head.version == http::Version::HTTP_10;
                 let conn_header = head
                     .headers
@@ -217,7 +213,7 @@ where
     pub async fn read_body_into_slab(
         &mut self,
         framing: Http1BodyFraming,
-        slab_pool: Option<&std::sync::Arc<velda_core::buffer::PayloadSlabPool>>,
+        slab_pool: Option<&std::sync::Arc<velda_core::buffer::slab::PayloadSlabPool>>,
     ) -> Result<Body, Http1Error> {
         if framing == Http1BodyFraming::Empty {
             return Ok(Body::Empty);
@@ -337,18 +333,6 @@ where
         }
     }
 
-    /// Sets the authoritative L7 Request ID for the currently active request transaction.
-    #[inline]
-    pub fn set_request_id(&mut self, request_id: Option<http::header::HeaderValue>) {
-        self.current_request_id = request_id;
-    }
-
-    /// Returns the authoritative L7 Request ID for the current request transaction, if any.
-    #[inline]
-    pub fn request_id(&self) -> Option<&http::header::HeaderValue> {
-        self.current_request_id.as_ref()
-    }
-
     /// Serializes response head into internal write_buf, automatically injecting the connection's
     /// authoritative L7 Request ID header if not already present in `headers`.
     #[inline]
@@ -356,7 +340,7 @@ where
         &mut self,
         version: http::Version,
         status: http::StatusCode,
-        headers: &http::HeaderMap,
+        headers: &HeaderWorkspace,
         body_len: Option<usize>,
         force_close: bool,
     ) {
@@ -377,19 +361,6 @@ where
         );
     }
 
-    /// Backward-compatibility alias for `encode_head`.
-    #[inline]
-    pub fn encode_response_head(
-        &mut self,
-        version: http::Version,
-        status: http::StatusCode,
-        headers: &http::HeaderMap,
-        body_len: Option<usize>,
-        force_close: bool,
-    ) {
-        self.encode_head(version, status, headers, body_len, force_close);
-    }
-
     /// Serializes chunked response head into internal write_buf, automatically injecting the
     /// connection's authoritative L7 Request ID header if not already present in `headers`.
     #[inline]
@@ -397,7 +368,7 @@ where
         &mut self,
         version: http::Version,
         status: http::StatusCode,
-        headers: &http::HeaderMap,
+        headers: &HeaderWorkspace,
         force_close: bool,
     ) {
         self.last_status = status.as_u16();
@@ -414,18 +385,6 @@ where
         );
     }
 
-    /// Backward-compatibility alias for `encode_chunked_head`.
-    #[inline]
-    pub fn encode_response_head_chunked(
-        &mut self,
-        version: http::Version,
-        status: http::StatusCode,
-        headers: &http::HeaderMap,
-        force_close: bool,
-    ) {
-        self.encode_chunked_head(version, status, headers, force_close);
-    }
-
     /// Serializes and flushes an HTTP/1.1 downstream response back to the client.
     ///
     /// Automatically streams the response body with zero-copy transmission and enforces
@@ -436,12 +395,18 @@ where
     ) -> Result<(), Http1Error> {
         self.last_status = response.status.as_u16();
         self.last_bytes_tx += response.body.len() as u64;
-        let close = send_response(
+        let close = send_parts(
             &mut self.stream,
             &mut self.write_buf,
-            response,
-            self.close_requested,
-            self.current_request_id.as_ref(),
+            response.version,
+            response.status,
+            &response.headers,
+            &response.body,
+            HeadEncodeOptions {
+                body_len: None,
+                force_close: self.close_requested,
+                request_id: self.current_request_id.as_ref(),
+            },
         )
         .await?;
 
@@ -469,20 +434,6 @@ where
         .await
     }
 
-    /// Serializes and flushes an upstream client response directly downstream.
-    pub async fn send_client_response(
-        &mut self,
-        response: &Http1ClientResponse,
-    ) -> Result<(), Http1Error> {
-        let server_resp = Http1ServerResponse::new(
-            response.status,
-            response.version,
-            response.headers.clone(),
-            response.body.clone(),
-        );
-        self.send_response(&server_resp).await
-    }
-
     /// Serializes and flushes response head and body separately with authoritative L7 request ID injection.
     pub async fn send_parts(
         &mut self,
@@ -494,10 +445,15 @@ where
         let close = send_parts(
             &mut self.stream,
             &mut self.write_buf,
-            head,
+            head.version,
+            head.status,
+            &head.headers,
             body,
-            self.close_requested,
-            self.current_request_id.as_ref(),
+            HeadEncodeOptions {
+                body_len: None,
+                force_close: self.close_requested,
+                request_id: self.current_request_id.as_ref(),
+            },
         )
         .await?;
 
@@ -506,16 +462,6 @@ where
         }
 
         Ok(())
-    }
-
-    /// Backward-compatibility alias for `send_parts`.
-    #[inline]
-    pub async fn send_response_parts(
-        &mut self,
-        head: &Http1ServerResponseHead,
-        body: &Body,
-    ) -> Result<(), Http1Error> {
-        self.send_parts(head, body).await
     }
 
     /// Sends the HTTP/1.1 response head configured for progressive chunked streaming.
@@ -546,25 +492,6 @@ where
         }
 
         Ok(())
-    }
-
-    /// Backward-compatibility alias for `send_chunked_head`.
-    #[inline]
-    pub async fn send_response_head_chunked(
-        &mut self,
-        head: &Http1ServerResponseHead,
-    ) -> Result<(), Http1Error> {
-        self.send_chunked_head(head).await
-    }
-
-    /// Sends the HTTP/1.1 response head configured for progressive chunked streaming from upstream client head.
-    pub async fn send_client_response_head_chunked(
-        &mut self,
-        head: &Http1ClientResponseHead,
-    ) -> Result<(), Http1Error> {
-        let server_head =
-            Http1ServerResponseHead::new(head.status, head.version, head.headers.clone());
-        self.send_chunked_head(&server_head).await
     }
 
     /// Serializes and flushes response head with chunked framing, optionally coalescing
@@ -598,18 +525,6 @@ where
         }
 
         Ok(close)
-    }
-
-    /// Backward-compatibility alias for `send_head_coalesced`.
-    #[inline]
-    pub async fn send_response_head_chunked_coalesced(
-        &mut self,
-        head: &Http1ServerResponseHead,
-        initial_chunk: Option<&[u8]>,
-        is_terminated: bool,
-    ) -> Result<bool, Http1Error> {
-        self.send_head_coalesced(head, initial_chunk, is_terminated)
-            .await
     }
 
     /// Transmits raw body bytes directly downstream without chunked framing (for HTTP/1.0 fallback).
@@ -672,18 +587,6 @@ where
         self.stream.write_all(HTTP_100_CONTINUE).await?;
         self.stream.flush().await?;
         Ok(())
-    }
-
-    /// Marks this connection to close cleanly after the current response is finished.
-    #[inline]
-    pub fn mark_close(&mut self) {
-        self.close_requested = true;
-    }
-
-    /// Returns whether this connection was flagged to close.
-    #[inline]
-    pub const fn is_closed(&self) -> bool {
-        self.close_requested
     }
 
     /// Performs a lingering close on downstream stream (RFC 9112 lingering close).

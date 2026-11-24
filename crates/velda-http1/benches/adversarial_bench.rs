@@ -12,7 +12,8 @@ use std::time::Instant;
 
 use bytes::BytesMut;
 use common::CountingAllocator;
-use velda_http1::{Http1Config, decode_request};
+use velda_http1::config::Http1Config;
+use velda_http1::server::request::decode_request;
 
 #[global_allocator]
 static ALLOCATOR: CountingAllocator = CountingAllocator::new();
@@ -128,9 +129,9 @@ fn bench_pathological_header_floods() {
 
     let iters = 100_000;
 
-    // 1. Header bomb: 1050 headers exceeding MAX_WIRE_HEADERS (1024)
+    // 1. Header bomb: headers exceeding MAX_WIRE_HEADERS (256)
     let mut header_bomb = Vec::from(&b"GET / HTTP/1.1\r\nHost: localhost\r\n"[..]);
-    for i in 0..1050 {
+    for i in 0..270 {
         header_bomb.extend_from_slice(format!("X-Header-{i:04}: value_{i:04}\r\n").as_bytes());
     }
     header_bomb.extend_from_slice(b"\r\n");
@@ -145,7 +146,7 @@ fn bench_pathological_header_floods() {
 
     let scenarios: [(&str, &[u8], &str); 3] = [
         (
-            "Header Bomb (>1024 Headers)",
+            "Header Bomb (>256 Headers)",
             &header_bomb,
             "Rejected / Bounded",
         ),

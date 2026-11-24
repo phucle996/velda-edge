@@ -1,13 +1,23 @@
 use bytes::BytesMut;
-use http::{HeaderMap, Method, StatusCode, Uri, Version};
+use http::{Method, StatusCode, Uri, Version};
 use tokio::io::{AsyncReadExt, AsyncWriteExt, duplex};
 use tokio::net::TcpListener;
-use velda_core::Body;
+use velda_core::{Body, HeaderWorkspace};
+use velda_http1::client::header::sanitize_headers;
+use velda_http1::client::request::send_request_parts;
+use velda_http1::client::response::{decode_response, decode_response_head};
+use velda_http1::config::Http1Config;
 use velda_http1::error::Http1Error;
-use velda_http1::{
-    Http1BodyFraming, Http1Config, Http1ServerConnection, Http1ServerRequest, Http1ServerResponse,
-    Http1ServerResponseHead, decode_body, decode_request, decode_request_head, decode_response,
-    decode_response_head, encode_response, forward_request,
+use velda_http1::server::connection::Http1ServerConnection;
+use velda_http1::server::header::enrich_headers;
+use velda_http1::server::request::{
+    Http1BodyFraming, Http1ServerRequest, decode_body, decode_request, decode_request_head,
+};
+use velda_http1::server::response::{
+    HeadEncodeOptions, Http1ServerResponse, Http1ServerResponseHead, encode_head, encode_response,
+};
+use velda_http1::wire::{
+    parse_chunked_body, parse_single_chunk, send_chunk, send_chunked_end, send_coalesced_chunks,
 };
 
 const TEST_CONFIG: Http1Config = Http1Config::from_hardware(4, 4 * 1024 * 1024 * 1024);
@@ -48,14 +58,30 @@ async fn test_http1_upstream_connector() {
         Method::GET,
         Uri::from_static("http://localhost/health"),
         Version::HTTP_11,
-        HeaderMap::new(),
+        HeaderWorkspace::empty(0),
         Body::Empty,
     );
 
     let mut stream = tokio::net::TcpStream::connect(backend_addr).await.unwrap();
-    let resp = forward_request(&req, &mut stream, &TEST_CONFIG)
-        .await
-        .unwrap();
+    let mut write_buf = BytesMut::with_capacity(1024);
+    send_request_parts(
+        &req.method,
+        &req.uri,
+        &req.headers,
+        &req.body,
+        &mut stream,
+        &mut write_buf,
+    )
+    .await
+    .unwrap();
+    let mut read_buf = BytesMut::with_capacity(4096);
+    let resp = loop {
+        let n = stream.read_buf(&mut read_buf).await.unwrap();
+        assert!(n > 0, "unexpected EOF waiting for response");
+        if let Some(resp) = decode_response(&mut read_buf, &TEST_CONFIG).unwrap() {
+            break resp;
+        }
+    };
     assert_eq!(resp.status, StatusCode::OK);
 }
 
@@ -183,7 +209,7 @@ fn test_too_many_headers_rejection() {
 
 #[test]
 fn test_two_tier_large_headers_spillover_success() {
-    let config = TEST_CONFIG.with_max_headers(velda_core::buffer::MAX_WIRE_HEADERS);
+    let config = TEST_CONFIG.with_max_headers(velda_core::buffer::header::MAX_WIRE_HEADERS);
     let mut raw = Vec::from(&b"GET /large HTTP/1.1\r\nHost: localhost\r\n"[..]);
     for i in 0..150 {
         raw.extend_from_slice(format!("X-Custom-{i:03}: value-{i}\r\n").as_bytes());
@@ -192,16 +218,16 @@ fn test_two_tier_large_headers_spillover_success() {
     let mut buf = BytesMut::from(&raw[..]);
 
     let req = decode_request(&mut buf, &config)
-        .expect("150 headers must succeed via Two-Tier spillover path")
+        .expect("150 headers must succeed via flat header workspace growth path")
         .expect("full request head parsed");
-    assert_eq!(req.head().headers.len(), 151); // Host + 150 headers
+    assert_eq!(req.headers.len(), 151); // Host + 150 headers
 }
 
 #[test]
-fn test_wire_ceiling_rejection_at_1024() {
-    let config = TEST_CONFIG.with_max_headers(velda_core::buffer::MAX_WIRE_HEADERS);
+fn test_wire_ceiling_rejection_at_max_headers() {
+    let config = TEST_CONFIG.with_max_headers(velda_core::buffer::header::MAX_WIRE_HEADERS);
     let mut raw = Vec::from(&b"GET /bomb HTTP/1.1\r\nHost: localhost\r\n"[..]);
-    for i in 0..1030 {
+    for i in 0..(velda_core::buffer::header::MAX_WIRE_HEADERS + 10) {
         raw.extend_from_slice(format!("X-Bomb-{i:04}: val\r\n").as_bytes());
     }
     raw.extend_from_slice(b"\r\n");
@@ -209,8 +235,8 @@ fn test_wire_ceiling_rejection_at_1024() {
 
     let err = decode_request(&mut buf, &config).unwrap_err();
     assert!(
-        matches!(err, Http1Error::TooManyHeaders(1024)),
-        "Must reject when header count exceeds 1024"
+        matches!(err, Http1Error::TooManyHeaders(n) if n == velda_core::buffer::header::MAX_WIRE_HEADERS),
+        "Must reject when header count exceeds MAX_WIRE_HEADERS"
     );
 }
 
@@ -230,8 +256,8 @@ async fn test_http10_close_by_default() {
     let req = conn.next_request().await.unwrap().unwrap();
     assert_eq!(req.version, Version::HTTP_10);
     assert!(
-        conn.is_closed(),
-        "HTTP/1.0 without keep-alive must set is_closed = true"
+        conn.close_requested,
+        "HTTP/1.0 without keep-alive must set close_requested = true"
     );
 }
 
@@ -251,7 +277,7 @@ async fn test_http10_keep_alive_negotiated() {
     let req = conn.next_request().await.unwrap().unwrap();
     assert_eq!(req.version, Version::HTTP_10);
     assert!(
-        !conn.is_closed(),
+        !conn.close_requested,
         "HTTP/1.0 with keep-alive must keep connection open"
     );
 }
@@ -261,7 +287,7 @@ fn test_http10_response_encoding() {
     let resp = Http1ServerResponse::new(
         StatusCode::OK,
         Version::HTTP_10,
-        HeaderMap::new(),
+        HeaderWorkspace::empty(0),
         Body::Bytes(bytes::Bytes::from_static(b"OK")),
     );
     let mut dst = BytesMut::new();
@@ -320,7 +346,7 @@ async fn test_phased_server_connection_head_and_body() {
     });
 
     // Phase 1: next_request_head
-    let (head, framing) = conn.next_request_head().await.unwrap().unwrap();
+    let (head, framing) = conn.next_request_head(None).await.unwrap().unwrap();
     assert_eq!(head.method, Method::POST);
     assert_eq!(head.uri.path(), "/api/v1/data");
     assert_eq!(framing, Http1BodyFraming::ContentLength(5));
@@ -331,11 +357,9 @@ async fn test_phased_server_connection_head_and_body() {
 
     // Egress: send response parts
     let resp_head =
-        Http1ServerResponseHead::new(StatusCode::OK, Version::HTTP_11, HeaderMap::new());
+        Http1ServerResponseHead::new(StatusCode::OK, Version::HTTP_11, HeaderWorkspace::empty(0));
     let resp_body = Body::Bytes(bytes::Bytes::from_static(b"WORLD"));
-    conn.send_response_parts(&resp_head, &resp_body)
-        .await
-        .unwrap();
+    conn.send_parts(&resp_head, &resp_body).await.unwrap();
 }
 
 #[test]
@@ -344,7 +368,7 @@ fn test_phased_decode_request_head_and_body() {
         &b"GET /search?q=rust HTTP/1.1\r\nHost: example.com\r\nContent-Length: 4\r\n\r\nTEST"[..],
     );
 
-    let (head, framing) = decode_request_head(&mut buf, &TEST_CONFIG)
+    let (head, framing) = decode_request_head(&mut buf, &TEST_CONFIG, None)
         .unwrap()
         .unwrap();
     assert_eq!(head.method, Method::GET);
@@ -371,22 +395,23 @@ async fn test_progressive_chunked_server_streaming() {
     let mut conn = Http1ServerConnection::new(server, TEST_CONFIG);
 
     tokio::spawn(async move {
-        let (head, _framing) = conn.next_request_head().await.unwrap().unwrap();
+        let (head, _framing) = conn.next_request_head(None).await.unwrap().unwrap();
         assert_eq!(head.method, Method::GET);
 
-        let resp_head =
-            Http1ServerResponseHead::new(StatusCode::OK, Version::HTTP_11, HeaderMap::new());
-        conn.send_response_head_chunked(&resp_head).await.unwrap();
+        let resp_head = Http1ServerResponseHead::new(
+            StatusCode::OK,
+            Version::HTTP_11,
+            HeaderWorkspace::empty(0),
+        );
+        conn.send_chunked_head(&resp_head).await.unwrap();
 
-        velda_http1::send_chunk(&mut conn.stream, b"data: first token\n\n")
+        send_chunk(&mut conn.stream, b"data: first token\n\n")
             .await
             .unwrap();
-        velda_http1::send_chunk(&mut conn.stream, b"data: second token\n\n")
+        send_chunk(&mut conn.stream, b"data: second token\n\n")
             .await
             .unwrap();
-        velda_http1::send_chunked_end(&mut conn.stream)
-            .await
-            .unwrap();
+        send_chunked_end(&mut conn.stream).await.unwrap();
     });
 
     client
@@ -408,7 +433,7 @@ async fn test_progressive_chunked_server_streaming() {
 
     // Read first chunk
     let chunk1 = loop {
-        if let Some(chunk) = velda_http1::parse_single_chunk(&read_buf).unwrap() {
+        if let Some(chunk) = parse_single_chunk(&read_buf).unwrap() {
             let (wire_len, payload, is_term) = chunk;
             assert!(!is_term);
             let data = bytes::Bytes::copy_from_slice(payload);
@@ -423,7 +448,7 @@ async fn test_progressive_chunked_server_streaming() {
 
     // Read second chunk
     let chunk2 = loop {
-        if let Some(chunk) = velda_http1::parse_single_chunk(&read_buf).unwrap() {
+        if let Some(chunk) = parse_single_chunk(&read_buf).unwrap() {
             let (wire_len, payload, is_term) = chunk;
             assert!(!is_term);
             let data = bytes::Bytes::copy_from_slice(payload);
@@ -438,7 +463,7 @@ async fn test_progressive_chunked_server_streaming() {
 
     // Read terminal chunk
     let is_done = loop {
-        if let Some(chunk) = velda_http1::parse_single_chunk(&read_buf).unwrap() {
+        if let Some(chunk) = parse_single_chunk(&read_buf).unwrap() {
             let (wire_len, _, is_term) = chunk;
             assert!(is_term);
             use bytes::Buf;
@@ -473,7 +498,7 @@ async fn test_progressive_chunked_client_upload() {
         client.write_all(b"0\r\n\r\n").await.unwrap();
     });
 
-    let (head, framing) = conn.next_request_head().await.unwrap().unwrap();
+    let (head, framing) = conn.next_request_head(None).await.unwrap().unwrap();
     assert_eq!(head.method, Method::POST);
     assert_eq!(framing, Http1BodyFraming::Chunked);
 
@@ -491,7 +516,7 @@ async fn test_progressive_chunked_client_upload() {
 fn test_chunked_body_with_trailers() {
     let raw =
         b"5\r\nhello\r\n0\r\nExpires: Wed, 21 Oct 2026 07:28:00 GMT\r\nX-Checksum: 1234\r\n\r\n";
-    let (wire_len, body) = velda_http1::parse_chunked_body(raw, 1024).unwrap().unwrap();
+    let (wire_len, body) = parse_chunked_body(raw, 1024).unwrap().unwrap();
     assert_eq!(wire_len, raw.len());
     let bytes = match body {
         velda_core::Body::Bytes(b) => b,
@@ -501,7 +526,7 @@ fn test_chunked_body_with_trailers() {
 
     // Also test progressive parsing of terminal chunk with trailers
     let term_raw = b"0\r\nExpires: Wed, 21 Oct 2026 07:28:00 GMT\r\n\r\n";
-    let (term_len, payload, is_term) = velda_http1::parse_single_chunk(term_raw).unwrap().unwrap();
+    let (term_len, payload, is_term) = parse_single_chunk(term_raw).unwrap().unwrap();
     assert!(is_term);
     assert_eq!(payload.len(), 0);
     assert_eq!(term_len, term_raw.len());
@@ -517,7 +542,7 @@ async fn test_http1_missing_and_duplicate_host_validation() {
         .write_all(b"GET /index.html HTTP/1.1\r\nUser-Agent: test\r\n\r\n")
         .await
         .unwrap();
-    let res = conn.next_request_head().await;
+    let res = conn.next_request_head(None).await;
     assert!(res.is_err());
 
     // 2. Duplicate Host header in HTTP/1.1 MUST be rejected as smuggling attempt
@@ -527,7 +552,7 @@ async fn test_http1_missing_and_duplicate_host_validation() {
         .write_all(b"GET /index.html HTTP/1.1\r\nHost: legitimate.com\r\nHost: evil.com\r\n\r\n")
         .await
         .unwrap();
-    let res2 = conn2.next_request_head().await;
+    let res2 = conn2.next_request_head(None).await;
     assert!(res2.is_err());
 }
 
@@ -535,13 +560,13 @@ async fn test_http1_missing_and_duplicate_host_validation() {
 fn test_chunk_size_inner_whitespace_rejected() {
     // Inner whitespace in chunk size must be rejected (RFC 9112 Section 7.1)
     let raw = b"1 0\r\n1234567890123456\r\n0\r\n\r\n";
-    let res = velda_http1::parse_chunked_body(raw, 1024);
+    let res = parse_chunked_body(raw, 1024);
     assert!(res.is_err());
 }
 
 #[test]
 fn test_sanitize_proxy_connection_and_unlimited_nominated() {
-    let mut headers = http::HeaderMap::new();
+    let mut headers = HeaderWorkspace::empty(16);
     headers.insert(
         http::header::HeaderName::from_static("proxy-connection"),
         http::HeaderValue::from_static("keep-alive"),
@@ -559,7 +584,7 @@ fn test_sanitize_proxy_connection_and_unlimited_nominated() {
         headers.insert(name, http::HeaderValue::from_static("secret"));
     }
 
-    velda_http1::sanitize_headers(&mut headers);
+    sanitize_headers(&mut headers);
     assert!(!headers.contains_key("proxy-connection"));
     assert!(!headers.contains_key("connection"));
     for i in 1..=10 {
@@ -582,14 +607,15 @@ fn test_decode_response_skips_1xx_informational() {
 
 #[test]
 fn test_encode_response_head_force_close() {
-    let headers = HeaderMap::new();
+    let headers = HeaderWorkspace::empty(0);
     let mut dst = BytesMut::new();
-    velda_http1::encode_response_head(
+    encode_head(
         Version::HTTP_11,
         StatusCode::OK,
         &headers,
-        Some(10),
-        true,
+        HeadEncodeOptions::new()
+            .with_body_len(Some(10))
+            .with_force_close(true),
         &mut dst,
     );
     let str_val = std::str::from_utf8(&dst).unwrap();
@@ -601,7 +627,7 @@ fn test_encode_response_head_force_close() {
 fn test_expect_100_continue_detection() {
     let raw = b"POST /upload HTTP/1.1\r\nHost: example.com\r\nExpect: 100-continue\r\nContent-Length: 10\r\n\r\n";
     let mut buf = BytesMut::from(&raw[..]);
-    let (head, framing) = decode_request_head(&mut buf, &TEST_CONFIG)
+    let (head, framing) = decode_request_head(&mut buf, &TEST_CONFIG, None)
         .unwrap()
         .unwrap();
     assert!(head.is_expect_100_continue());
@@ -626,7 +652,7 @@ fn test_chunk_header_line_exceeding_4kb_rejected() {
 
 #[test]
 fn test_enrich_headers_overwrites_forwarded_headers() {
-    let mut headers = HeaderMap::new();
+    let mut headers = HeaderWorkspace::empty(8);
     let uri = http::Uri::from_static("http://example.com/api");
     let peer: std::net::SocketAddr = "1.2.3.4:12345".parse().unwrap();
     let local: std::net::SocketAddr = "10.0.0.1:80".parse().unwrap();
@@ -644,7 +670,34 @@ fn test_enrich_headers_overwrites_forwarded_headers() {
         http::HeaderValue::from_static("fake-proto"),
     );
 
-    velda_http1::enrich_headers(
+    let client_ip = http::HeaderValue::from_static("198.51.100.42");
+    let listener_port = http::HeaderValue::from_static("8443");
+    let raw = b"GET /v1/items HTTP/1.1\r\nHost: api.example.com\r\nX-Real-IP: 9.9.9.9\r\nX-Forwarded-Host: evil.example\r\nX-Forwarded-For: 10.0.0.5\r\n\r\n";
+    let mut buf = BytesMut::from(&raw[..]);
+    let (head, _framing) = decode_request_head(
+        &mut buf,
+        &TEST_CONFIG,
+        Some(velda_http1::simd::H1IngressEnrich {
+            client_ip: &client_ip,
+            listener_port: &listener_port,
+            is_tls: true,
+        }),
+    )
+    .unwrap()
+    .unwrap();
+    assert_eq!(head.headers.get("x-real-ip").unwrap(), "198.51.100.42");
+    assert_eq!(
+        head.headers.get("x-forwarded-for").unwrap(),
+        "10.0.0.5, 198.51.100.42"
+    );
+    assert_eq!(head.headers.get("x-forwarded-proto").unwrap(), "https");
+    assert_eq!(head.headers.get("x-forwarded-port").unwrap(), "8443");
+    assert_eq!(
+        head.headers.get("x-forwarded-host").unwrap(),
+        "api.example.com"
+    );
+
+    enrich_headers(
         &mut headers,
         &uri,
         velda_core::lut::ip::v4_to_u128(0x0102_0304),
@@ -663,7 +716,6 @@ fn test_enrich_headers_overwrites_forwarded_headers() {
 #[tokio::test]
 async fn test_send_coalesced_chunks_single_wire_block() {
     use tokio::io::duplex;
-    use velda_http1::send_coalesced_chunks;
 
     let (mut reader, mut writer) = duplex(4096);
     let chunks = vec![
@@ -684,7 +736,7 @@ async fn test_send_coalesced_chunks_single_wire_block() {
 
 #[tokio::test]
 async fn test_http1_read_body_into_slab_pool_lifecycle() {
-    use velda_core::buffer::{PayloadSlabPool, SlabClass};
+    use velda_core::buffer::slab::{PayloadSlabPool, SlabClass};
 
     let (mut client, server) = duplex(4096);
     let mut conn = Http1ServerConnection::new(server, TEST_CONFIG);
@@ -701,7 +753,7 @@ async fn test_http1_read_body_into_slab_pool_lifecycle() {
         client.write_all(payload).await.unwrap();
     });
 
-    let (_head, framing) = conn.next_request_head().await.unwrap().unwrap();
+    let (_head, framing) = conn.next_request_head(None).await.unwrap().unwrap();
     assert_eq!(framing, Http1BodyFraming::ContentLength(payload_len));
 
     // Initially 0 active leases
