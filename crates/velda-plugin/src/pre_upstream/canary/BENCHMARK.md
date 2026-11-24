@@ -1,430 +1,76 @@
-# Performance Benchmark Report: Canary Traffic Shifting & Routing Plugin (`canary`)
+# Canary Plugin Benchmark Report
 
-Performance benchmark specification and evaluation framework for the `canary` plugin across **Velda Edge**, **Kong Gateway 3.9**, **Apache APISIX 3.10**, and **Envoy Proxy 1.31**.
-
----
-
-## 1. Test Environment & Measurement Methodology
-
-### 1.1 Production-Grade Hardware & Network Testbed
-
-*[TBD]*
+All live proxy measurements were executed in an isolated dual-node KVM environment under identical hardware constraints (`velda-gw` ↔ `velda-obs`). Clean macro throughput runs had no profilers attached; hardware PMU (`perf stat`) and CPU symbol sampling (`perf record`) were collected in separate steady-state runs.
 
 ---
 
-### 1.2 Standardized 5-Tier Metric Taxonomy
+## 1. Testbed Specification
 
-All benchmark scenarios are evaluated across five standardized, non-abbreviated metric tiers:
-
-1. **Tier 1: Macro Network, L7 & Canary Routing Delivery Metrics**:
-   - **Duration (seconds)**: Continuous execution duration of the benchmark session (standard 15.00 seconds).
-   - **Total Requests**: Total downstream requests successfully served.
-   - **Throughput (requests/second)**: Processing throughput rate.
-   - **Wire Bandwidth (Megabytes/second)**: Aggregate data transfer rate across the network interface.
-   - **Total Requests Routed**: Total downstream requests evaluated against canary shifting rules.
-   - **Canary Traffic Split Ratio (%)**: Actual percentage of traffic routed to canary upstream vs baseline.
-   - **Upstream Retargeting Rate (requests/second)**: Rate of dynamic upstream destination rewrites.
-   - **Mean Latency (milliseconds)**: Average time from request receipt to response completion.
-   - **Min Latency (milliseconds)**: Minimum recorded latency.
-   - **Median Latency P50 (milliseconds)**: 50th percentile response latency.
-   - **P75 Latency (milliseconds)**: 75th percentile response latency.
-   - **P90 Latency (milliseconds)**: 90th percentile response latency.
-   - **P99 Tail Latency (milliseconds)**: 99th percentile response latency.
-   - **P99.9 Tail Latency (milliseconds)**: 99.9th percentile deep tail latency.
-   - **Max Latency (milliseconds)**: Maximum recorded response latency.
-   - **Latency Standard Deviation (milliseconds)**: Jitter and dispersion of response latency.
-   - **Connect Time Average (milliseconds)**: Downstream connection handshake duration.
-   - **HTTP Status Code Distribution (2xx / 4xx / 5xx)**: Proportional breakdown of response status codes.
-   - **Success Rate (%)**: Percentage of requests successfully completed without connection resets or drops.
-2. **Tier 2: System Resource Footprint**:
-   - **Total CPU Utilization (% CPU)**: Normalized aggregate CPU utilization across all allocated processor cores.
-   - **User CPU (% User CPU)**: CPU time spent in userspace logic.
-   - **System / Kernel CPU (% System / Kernel CPU)**: CPU time spent in kernel syscalls and socket I/O.
-   - **SoftIRQ CPU (% SoftIRQ CPU)**: CPU time spent processing network interrupt handlers.
-   - **Frontline Worker 0 CPU (%)**: Core 0 request-serving worker CPU load.
-   - **Frontline Worker 1 CPU (%)**: Core 1 request-serving worker CPU load.
-   - **Shadow Logistics Worker CPU (%)**: Dedicated background worker CPU load running under `SCHED_IDLE`.
-   - **Peak Resident Set Size (Megabytes)**: Maximum non-swapped physical memory footprint (`VmHWM`).
-   - **RAM Usage (%)**: Percentage of total system memory consumed.
-   - **Heap Allocations per Request (Bytes / Count)**: Dynamic memory allocation rate on the serving hot-path.
-   - **Memory Leak Rate (Megabytes / minute)**: Long-term memory drift over sustained execution.
-3. **Tier 3: Micro Linux Kernel & OS Telemetry via `perf stat` & tracepoints**:
-   - **System Calls per Request (System Calls / Request)**: Average syscall overhead per request.
-   - **Context Switches per Request (Context Switches / Request)**: Average thread/process context switch rate.
-   - **Total System Calls**: Aggregate transitions into the Linux kernel.
-   - **Total Context Switches**: Aggregate involuntary and voluntary scheduler context switches.
-   - **Kernel Time (seconds)**: Total cumulative time spent inside the Linux kernel.
-   - **Futex Calls**: Number of user-space locking and synchronization sleep/wake syscalls.
-   - **Futex Percentage of Total System Calls (%)**: Ratio of futex contention syscalls to total syscalls.
-4. **Tier 4: Micro High-Performance Computing & CPU Hardware Counters via `perf stat`**:
-   - **Total CPU Instructions**: Aggregate retired machine instructions executed by the CPU.
-   - **Instructions per Request (Instructions / Request)**: Average retired instructions per request.
-   - **Total CPU Cycles**: Aggregate unhalted hardware clock cycles consumed.
-   - **Cycles per Request (Cycles / Request)**: Average CPU clock cycles consumed per request.
-   - **Instructions Per Cycle (IPC)**: Hardware instruction pipeline execution efficiency.
-   - **Total Branches**: Aggregate hardware conditional and unconditional branch instructions.
-   - **Branches per Request (Branches / Request)**: Average branch instructions per request.
-   - **Branch Mispredictions**: Hardware branch prediction misses.
-   - **Branch Misprediction Rate (%)**: Ratio of branch misses to total branches.
-   - **L1 Data Cache Miss Rate (%)**: Level 1 data cache miss ratio.
-   - **Last Level Cache Miss Rate (%)**: Level 3 (LLC) cache miss ratio.
-5. **Tier 5: Plugin-Specific Mechanics & Wire Efficiency**:
-   - **Canary Routing Rule Evaluation Latency (nanoseconds)**: CPU cost to evaluate request attributes against canary rules.
-   - **Pseudo-Random / Hash Ring Split Calculation Duration (nanoseconds)**: Time to compute random weight partition or consistent hash value.
-   - **Canary Target Upstream Re-Targeting Overhead (nanoseconds)**: Overhead to swap upstream target endpoint pointer in RequestContext.
-   - **Sticky Cookie / Header Extraction Latency (nanoseconds)**: Duration to extract and hash affinity tokens from headers or cookies.
-   - **Upstream Destination Pointer Swap Latency (nanoseconds)**: Time required to update target endpoint reference without copying.
-   - **Canary Match Zero-Allocation Memory Efficiency (%)**: Percentage of canary evaluations executed with zero dynamic memory allocations.
-   - **Route Resolution Decision Consistency Under High Concurrency (%)**: Statistical accuracy of traffic split ratio relative to configured target percentage.
+| Component | Node / VM | Hardware & Software Spec | Role |
+| :--- | :--- | :--- | :--- |
+| **Gateway Proxy** | `velda-gw` (`192.168.122.10`) | 2 vCPUs (11th Gen Intel Core i5-11400H @ 2.70GHz, SMT off), 1.9 GB RAM, Linux 6.8.0 (`x86_64`, `x86-64-v3`) | Velda Edge (`2` pinned workers), Nginx `1.24.0` (`2` workers), Envoy `1.31.4` (`--concurrency 2`) |
+| **Load Gen + Backends** | `velda-obs` (`192.168.122.20`) | 4 vCPUs, 4 GB RAM, Linux 6.8.0; `wrk 4.x` (`-t4 -c128 -d10s --latency`) | Rotating `4,096`-user Lua request generator + symmetric HTTP/1.1 backends (`base` on `:18081`, `canary` on `:18091`) |
+| **Canary Ruleset** | N/A | `ratio: 200` (`20.0%`), `3` header rules (`equals`, `prefix`, `exists`) | Baseline S2 (`Priority`: `x-user-id`, `x-real-ip`), S3 (`Composite`: `x-tenant-id`, `x-user-id`), S4 (`Rule Hit`: `X-Canary: true`) |
 
 ---
 
-## 2. Focused Benchmark Scenarios
+## 2. Micro-Architectural Release ASM Audit (`x86-64-v3`)
 
-To focus directly on essential operational requirements, the evaluation framework defines five targeted scenarios:
-- **Scenario 01: Baseline Weighted Split (90% Main / 10% Canary, 5,000 req/s)** — Measure added baseline latency overhead when evaluating random weight partitions under light load.
-- **Scenario 02: Nominal Production Load with Header-Based Canary Rules (40,000 req/s)** — Evaluate sustained serving stability, tail latency, and resource footprint when matching headers (e.g. `X-Canary: true`).
-- **Scenario 03: Peak Traffic Saturation Under Random / Hashed Splitting (100,000+ req/s)** — Extreme stress testing to verify random split throughput and confirm non-blocking frontline worker guarantees.
-- **Scenario 04: Cookie-Based Sticky Session Affinity Hash Evaluation** — Evaluate hash calculation overhead when routing clients based on consistent hashing of sticky session cookies.
-- **Scenario 05: Dynamic Canary Weight Shift (Zero-Downtime Rule Reconfiguration)** — Simulate live weight shifts (e.g. 10% -> 50% -> 100%) during active traffic to verify zero dropped connections.
+Audited via `audit_asm.py` on release assembly (`target/release/deps/velda_plugin-e12321c47c0fe0f9.s`, compiled with `-C target-cpu=x86-64-v3`):
 
----
-
-## 3. Detailed Benchmark Results
+| Function Symbol | Total Insts | Heap Allocs (`alloc::*`) | Unaligned Vector Stores | Jump Tables (`jmpq *%reg`) | Atomic Bus Locks (`lock *`) | `divq` / `ud2` Traps | Fixed-Point Lowering |
+| :--- | :---: | :---: | :---: | :---: | :---: | :---: | :--- |
+| **`CanaryPlugin::on_upstream_request`** | `545` | **0** | **0** | `1` (`RuleOperator` 5-arm match) | **0** | **0 / 0** | `mulxq %rax, %rax, %rax` (`$1000`) |
+| **`extract_header_bytes`** | `172` | **0** | **0** | **0** | **0** | **0 / 0** | Inline linear workspace slice |
+| **`swar_hash64`** | Inlined | **0** | **0** | **0** | **0** | **0 / 0** | `as_chunks::<8>()` + SplitMix64 |
 
 ---
 
-### Scenario 01: Baseline Weighted Split (90% Main / 10% Canary, 5,000 req/s)
-- **Objective**: Determine baseline latency addition and CPU footprint when shifting traffic under low concurrency.
-- **Execution Command**: `oha -z 15s -q 5000 -c 50 http://<gateway_host>:<port>/api/v1/ping`
+## 3. Macro Throughput, Latency & Split Accuracy (Clean Runs)
 
-| Detailed Measurement Metric | **Velda Edge** (Rust 2024) | **Kong Gateway 3.9** (LuaJIT) | **Apache APISIX 3.10** (LuaJIT) | **Envoy Proxy 1.31** (C++) |
-| :--- | :---: | :---: | :---: | :---: |
-| **Duration (seconds)** | **15.00** | **15.00** | **15.00** | **15.00** |
-| **Total Requests** | *[TBD]* | *[TBD]* | *[TBD]* | *[TBD]* |
-| **Throughput (requests/second)** | *[TBD]* | *[TBD]* | *[TBD]* | *[TBD]* |
-| **Wire Bandwidth (Megabytes/second)** | *[TBD]* | *[TBD]* | *[TBD]* | *[TBD]* |
-| **Total Requests Routed** | *[TBD]* | *[TBD]* | *[TBD]* | *[TBD]* |
-| **Canary Traffic Split Ratio (%)** | *[TBD]* | *[TBD]* | *[TBD]* | *[TBD]* |
-| **Upstream Retargeting Rate (requests/second)** | *[TBD]* | *[TBD]* | *[TBD]* | *[TBD]* |
-| **Mean Latency (milliseconds)** | *[TBD]* | *[TBD]* | *[TBD]* | *[TBD]* |
-| **Min Latency (milliseconds)** | *[TBD]* | *[TBD]* | *[TBD]* | *[TBD]* |
-| **Median Latency P50 (milliseconds)** | *[TBD]* | *[TBD]* | *[TBD]* | *[TBD]* |
-| **P75 Latency (milliseconds)** | *[TBD]* | *[TBD]* | *[TBD]* | *[TBD]* |
-| **P90 Latency (milliseconds)** | *[TBD]* | *[TBD]* | *[TBD]* | *[TBD]* |
-| **P99 Tail Latency (milliseconds)** | *[TBD]* | *[TBD]* | *[TBD]* | *[TBD]* |
-| **P99.9 Tail Latency (milliseconds)** | *[TBD]* | *[TBD]* | *[TBD]* | *[TBD]* |
-| **Max Latency (milliseconds)** | *[TBD]* | *[TBD]* | *[TBD]* | *[TBD]* |
-| **Latency Standard Deviation (milliseconds)** | *[TBD]* | *[TBD]* | *[TBD]* | *[TBD]* |
-| **Connect Time Average (milliseconds)** | *[TBD]* | *[TBD]* | *[TBD]* | *[TBD]* |
-| **HTTP Status Code Distribution (2xx / 4xx / 5xx)** | *[TBD]* | *[TBD]* | *[TBD]* | *[TBD]* |
-| **Success Rate (%)** | *[TBD]* | *[TBD]* | *[TBD]* | *[TBD]* |
-| **Total CPU Utilization (% CPU)** | *[TBD]* | *[TBD]* | *[TBD]* | *[TBD]* |
-| **User CPU (% User CPU)** | *[TBD]* | *[TBD]* | *[TBD]* | *[TBD]* |
-| **System / Kernel CPU (% System / Kernel CPU)** | *[TBD]* | *[TBD]* | *[TBD]* | *[TBD]* |
-| **SoftIRQ CPU (% SoftIRQ CPU)** | *[TBD]* | *[TBD]* | *[TBD]* | *[TBD]* |
-| **Frontline Worker 0 CPU (%)** | *[TBD]* | *[TBD]* | *[TBD]* | *[TBD]* |
-| **Frontline Worker 1 CPU (%)** | *[TBD]* | *[TBD]* | *[TBD]* | *[TBD]* |
-| **Shadow Logistics Worker CPU (%)** | *[TBD]* | N/A | N/A | N/A |
-| **Peak Resident Set Size (Megabytes)** | *[TBD]* | *[TBD]* | *[TBD]* | *[TBD]* |
-| **RAM Usage (%)** | *[TBD]* | *[TBD]* | *[TBD]* | *[TBD]* |
-| **Heap Allocations per Request (Bytes / Count)** | *[TBD]* | *[TBD]* | *[TBD]* | *[TBD]* |
-| **Memory Leak Rate (Megabytes / minute)** | *[TBD]* | *[TBD]* | *[TBD]* | *[TBD]* |
-| **System Calls per Request (System Calls / Request)** | *[TBD]* | *[TBD]* | *[TBD]* | *[TBD]* |
-| **Context Switches per Request (Context Switches / Request)** | *[TBD]* | *[TBD]* | *[TBD]* | *[TBD]* |
-| **Total System Calls** | *[TBD]* | *[TBD]* | *[TBD]* | *[TBD]* |
-| **Total Context Switches** | *[TBD]* | *[TBD]* | *[TBD]* | *[TBD]* |
-| **Kernel Time (seconds)** | *[TBD]* | *[TBD]* | *[TBD]* | *[TBD]* |
-| **Futex Calls** | *[TBD]* | *[TBD]* | *[TBD]* | *[TBD]* |
-| **Futex Percentage of Total System Calls (%)** | *[TBD]* | *[TBD]* | *[TBD]* | *[TBD]* |
-| **Total CPU Instructions** | *[TBD]* | *[TBD]* | *[TBD]* | *[TBD]* |
-| **Instructions per Request (Instructions / Request)** | *[TBD]* | *[TBD]* | *[TBD]* | *[TBD]* |
-| **Total CPU Cycles** | *[TBD]* | *[TBD]* | *[TBD]* | *[TBD]* |
-| **Cycles per Request (Cycles / Request)** | *[TBD]* | *[TBD]* | *[TBD]* | *[TBD]* |
-| **Instructions Per Cycle (IPC)** | *[TBD]* | *[TBD]* | *[TBD]* | *[TBD]* |
-| **Total Branches** | *[TBD]* | *[TBD]* | *[TBD]* | *[TBD]* |
-| **Branches per Request (Branches / Request)** | *[TBD]* | *[TBD]* | *[TBD]* | *[TBD]* |
-| **Branch Mispredictions** | *[TBD]* | *[TBD]* | *[TBD]* | *[TBD]* |
-| **Branch Misprediction Rate (%)** | *[TBD]* | *[TBD]* | *[TBD]* | *[TBD]* |
-| **L1 Data Cache Miss Rate (%)** | *[TBD]* | *[TBD]* | *[TBD]* | *[TBD]* |
-| **Last Level Cache Miss Rate (%)** | *[TBD]* | *[TBD]* | *[TBD]* | *[TBD]* |
-| **Canary Routing Rule Evaluation Latency (nanoseconds)** | *[TBD]* | *[TBD]* | *[TBD]* | *[TBD]* |
-| **Pseudo-Random / Hash Ring Split Calculation Duration (nanoseconds)** | *[TBD]* | *[TBD]* | *[TBD]* | *[TBD]* |
-| **Canary Target Upstream Re-Targeting Overhead (nanoseconds)** | *[TBD]* | *[TBD]* | *[TBD]* | *[TBD]* |
-| **Sticky Cookie / Header Extraction Latency (nanoseconds)** | *[TBD]* | *[TBD]* | *[TBD]* | *[TBD]* |
-| **Upstream Destination Pointer Swap Latency (nanoseconds)** | *[TBD]* | *[TBD]* | *[TBD]* | *[TBD]* |
-| **Canary Match Zero-Allocation Memory Efficiency (%)** | *[TBD]* | *[TBD]* | *[TBD]* | *[TBD]* |
-| **Route Resolution Decision Consistency Under High Concurrency (%)** | *[TBD]* | *[TBD]* | *[TBD]* | *[TBD]* |
+All proxies target the identical `192.168.122.20:18081` (`base`) and `:18091` (`canary`) backends across 4,096 distinct rotating `X-User-Id` / `X-Tenant-Id` headers (`-t4 -c128 -d10s --latency` after a 2s warmup):
+
+| Scenario | Throughput (RPS) | Avg | P50 | P90 | P99 | Max | Stdev | Base Hits | Canary Hits | Empirical Ratio |
+| :--- | :---: | :---: | :---: | :---: | :---: | :---: | :---: | :---: | :---: | :---: |
+| **S1: Velda Raw Proxy (Baseline)** | **60,439.36** | 2.14ms | 1.83ms | 3.93ms | 6.39ms | 14.44ms | 1.29ms | 604,898 | 0 | 0.00‰ |
+| **S2: Velda Canary (`Priority`, 200‰)** | **61,482.83** | 2.10ms | 1.82ms | 3.67ms | 6.20ms | 17.27ms | 1.19ms | 494,634 | 120,775 | **196.25‰** |
+| **S3: Velda Canary (`Composite`, 200‰)** | **56,843.00** | 2.28ms | 1.94ms | 4.15ms | 6.82ms | 16.16ms | 1.36ms | 452,768 | 116,426 | **204.55‰** |
+| **S4: Velda Canary (`Rule Hit`, `x-canary: true`)** | **56,120.26** | 2.31ms | 1.96ms | 4.26ms | 7.13ms | 13.60ms | 1.41ms | 0 | 562,242 | **1000.00‰** |
+| **S5: Nginx 1.24.0 (`split_clients` + `map`)** | **58,824.57** | 2.19ms | 1.89ms | 3.91ms | 6.54ms | 17.98ms | 1.30ms | 475,709 | 118,511 | **199.44‰** |
+| **S6: Envoy 1.31.4 (`weighted_clusters 80/20`)** | **22,740.42** | 5.60ms | 5.44ms | 7.07ms | 8.96ms | 15.39ms | 1.13ms | 183,984 | 45,791 | **199.29‰** |
+
+### Key Quantitative Observations
+- **+4.5% faster than native C Nginx (`split_clients`)** on identical 2-vCPU KVM hardware (`61,482.83` vs `58,824.57` RPS) and lower P99 latency (`6.20ms` vs `6.54ms`), while executing 3 ordered header rules and multi-header `Priority` fallback.
+- **2.70× higher throughput than Envoy 1.31.4** (`61,482.83` vs `22,740.42` RPS) with **2.99× lower P50 latency** (`1.82ms` vs `5.44ms`).
+- **`Priority` matches Raw Proxy Baseline**: S2 maintains parity within KVM run-to-run variance against S1 (`61,482.83` vs `60,439.36` RPS), demonstrating negligible per-request cost compared to network stack traversal.
 
 ---
 
-### Scenario 02: Nominal Production Load with Header-Based Canary Rules (40,000 req/s)
-- **Objective**: Measure sustained throughput, latency profile, and resource consumption under header-based canary rules.
-- **Execution Command**: `oha -z 15s -q 40000 -c 100 -H "X-Canary: true" http://<gateway_host>:<port>/api/v1/ping`
+## 4. Hardware PMU Counters (10s Steady-State `perf stat`)
 
-| Detailed Measurement Metric | **Velda Edge** (Rust 2024) | **Kong Gateway 3.9** (LuaJIT) | **Apache APISIX 3.10** (LuaJIT) | **Envoy Proxy 1.31** (C++) |
-| :--- | :---: | :---: | :---: | :---: |
-| **Duration (seconds)** | **15.00** | **15.00** | **15.00** | **15.00** |
-| **Total Requests** | *[TBD]* | *[TBD]* | *[TBD]* | *[TBD]* |
-| **Throughput (requests/second)** | *[TBD]* | *[TBD]* | *[TBD]* | *[TBD]* |
-| **Wire Bandwidth (Megabytes/second)** | *[TBD]* | *[TBD]* | *[TBD]* | *[TBD]* |
-| **Total Requests Routed** | *[TBD]* | *[TBD]* | *[TBD]* | *[TBD]* |
-| **Canary Traffic Split Ratio (%)** | *[TBD]* | *[TBD]* | *[TBD]* | *[TBD]* |
-| **Upstream Retargeting Rate (requests/second)** | *[TBD]* | *[TBD]* | *[TBD]* | *[TBD]* |
-| **Mean Latency (milliseconds)** | *[TBD]* | *[TBD]* | *[TBD]* | *[TBD]* |
-| **Min Latency (milliseconds)** | *[TBD]* | *[TBD]* | *[TBD]* | *[TBD]* |
-| **Median Latency P50 (milliseconds)** | *[TBD]* | *[TBD]* | *[TBD]* | *[TBD]* |
-| **P75 Latency (milliseconds)** | *[TBD]* | *[TBD]* | *[TBD]* | *[TBD]* |
-| **P90 Latency (milliseconds)** | *[TBD]* | *[TBD]* | *[TBD]* | *[TBD]* |
-| **P99 Tail Latency (milliseconds)** | *[TBD]* | *[TBD]* | *[TBD]* | *[TBD]* |
-| **P99.9 Tail Latency (milliseconds)** | *[TBD]* | *[TBD]* | *[TBD]* | *[TBD]* |
-| **Max Latency (milliseconds)** | *[TBD]* | *[TBD]* | *[TBD]* | *[TBD]* |
-| **Latency Standard Deviation (milliseconds)** | *[TBD]* | *[TBD]* | *[TBD]* | *[TBD]* |
-| **Connect Time Average (milliseconds)** | *[TBD]* | *[TBD]* | *[TBD]* | *[TBD]* |
-| **HTTP Status Code Distribution (2xx / 4xx / 5xx)** | *[TBD]* | *[TBD]* | *[TBD]* | *[TBD]* |
-| **Success Rate (%)** | *[TBD]* | *[TBD]* | *[TBD]* | *[TBD]* |
-| **Total CPU Utilization (% CPU)** | *[TBD]* | *[TBD]* | *[TBD]* | *[TBD]* |
-| **User CPU (% User CPU)** | *[TBD]* | *[TBD]* | *[TBD]* | *[TBD]* |
-| **System / Kernel CPU (% System / Kernel CPU)** | *[TBD]* | *[TBD]* | *[TBD]* | *[TBD]* |
-| **SoftIRQ CPU (% SoftIRQ CPU)** | *[TBD]* | *[TBD]* | *[TBD]* | *[TBD]* |
-| **Frontline Worker 0 CPU (%)** | *[TBD]* | *[TBD]* | *[TBD]* | *[TBD]* |
-| **Frontline Worker 1 CPU (%)** | *[TBD]* | *[TBD]* | *[TBD]* | *[TBD]* |
-| **Shadow Logistics Worker CPU (%)** | *[TBD]* | N/A | N/A | N/A |
-| **Peak Resident Set Size (Megabytes)** | *[TBD]* | *[TBD]* | *[TBD]* | *[TBD]* |
-| **RAM Usage (%)** | *[TBD]* | *[TBD]* | *[TBD]* | *[TBD]* |
-| **Heap Allocations per Request (Bytes / Count)** | *[TBD]* | *[TBD]* | *[TBD]* | *[TBD]* |
-| **Memory Leak Rate (Megabytes / minute)** | *[TBD]* | *[TBD]* | *[TBD]* | *[TBD]* |
-| **System Calls per Request (System Calls / Request)** | *[TBD]* | *[TBD]* | *[TBD]* | *[TBD]* |
-| **Context Switches per Request (Context Switches / Request)** | *[TBD]* | *[TBD]* | *[TBD]* | *[TBD]* |
-| **Total System Calls** | *[TBD]* | *[TBD]* | *[TBD]* | *[TBD]* |
-| **Total Context Switches** | *[TBD]* | *[TBD]* | *[TBD]* | *[TBD]* |
-| **Kernel Time (seconds)** | *[TBD]* | *[TBD]* | *[TBD]* | *[TBD]* |
-| **Futex Calls** | *[TBD]* | *[TBD]* | *[TBD]* | *[TBD]* |
-| **Futex Percentage of Total System Calls (%)** | *[TBD]* | *[TBD]* | *[TBD]* | *[TBD]* |
-| **Total CPU Instructions** | *[TBD]* | *[TBD]* | *[TBD]* | *[TBD]* |
-| **Instructions per Request (Instructions / Request)** | *[TBD]* | *[TBD]* | *[TBD]* | *[TBD]* |
-| **Total CPU Cycles** | *[TBD]* | *[TBD]* | *[TBD]* | *[TBD]* |
-| **Cycles per Request (Cycles / Request)** | *[TBD]* | *[TBD]* | *[TBD]* | *[TBD]* |
-| **Instructions Per Cycle (IPC)** | *[TBD]* | *[TBD]* | *[TBD]* | *[TBD]* |
-| **Total Branches** | *[TBD]* | *[TBD]* | *[TBD]* | *[TBD]* |
-| **Branches per Request (Branches / Request)** | *[TBD]* | *[TBD]* | *[TBD]* | *[TBD]* |
-| **Branch Mispredictions** | *[TBD]* | *[TBD]* | *[TBD]* | *[TBD]* |
-| **Branch Misprediction Rate (%)** | *[TBD]* | *[TBD]* | *[TBD]* | *[TBD]* |
-| **L1 Data Cache Miss Rate (%)** | *[TBD]* | *[TBD]* | *[TBD]* | *[TBD]* |
-| **Last Level Cache Miss Rate (%)** | *[TBD]* | *[TBD]* | *[TBD]* | *[TBD]* |
-| **Canary Routing Rule Evaluation Latency (nanoseconds)** | *[TBD]* | *[TBD]* | *[TBD]* | *[TBD]* |
-| **Pseudo-Random / Hash Ring Split Calculation Duration (nanoseconds)** | *[TBD]* | *[TBD]* | *[TBD]* | *[TBD]* |
-| **Canary Target Upstream Re-Targeting Overhead (nanoseconds)** | *[TBD]* | *[TBD]* | *[TBD]* | *[TBD]* |
-| **Sticky Cookie / Header Extraction Latency (nanoseconds)** | *[TBD]* | *[TBD]* | *[TBD]* | *[TBD]* |
-| **Upstream Destination Pointer Swap Latency (nanoseconds)** | *[TBD]* | *[TBD]* | *[TBD]* | *[TBD]* |
-| **Canary Match Zero-Allocation Memory Efficiency (%)** | *[TBD]* | *[TBD]* | *[TBD]* | *[TBD]* |
-| **Route Resolution Decision Consistency Under High Concurrency (%)** | *[TBD]* | *[TBD]* | *[TBD]* | *[TBD]* |
+Measured over 10s steady-state under concurrent `wrk -t4 -c128` load:
+
+| Scenario | PMU Window RPS* | Cycles (B) | Instructions (B) | IPC | Inst / Req | Branch Miss (%) | L1d Load Miss (%) | LLC Miss (%) | Context Switches | Futex Calls |
+| :--- | :---: | :---: | :---: | :---: | :---: | :---: | :---: | :---: | :---: | :---: |
+| **S1: Velda Raw Baseline** | 46,077.64 | 33.14 | 30.10 | `0.91` | `65,329` | `0.92%` | `10.41%` | `24.64%` | 9,400 | `4` |
+| **S2: Velda Canary Priority** | 45,717.34 | 32.93 | 31.44 | `0.95` | `68,781` | `0.89%` | `10.22%` | `24.48%` | 9,500 | **`0`** |
+| **S3: Velda Canary Composite** | 43,102.23 | 32.44 | 29.39 | `0.91` | `68,181` | `0.90%` | `10.46%` | `25.71%` | 8,699 | **`0`** |
+| **S4: Velda Canary Rule Hit** | 42,015.06 | 31.02 | 28.21 | `0.91` | `67,146` | `0.92%` | `10.29%` | `25.84%` | 8,619 | **`0`** |
+| **S5: Nginx 1.24.0 (`split_clients`)** | 39,919.13* | 31.88 | 29.69 | `0.93` | `74,366` | `1.01%` | `9.28%` | `21.06%` | 8,052 | `0` |
+| **S6: Envoy 1.31.4** | 16,121.45* | 49.42 | 40.96 | `0.83` | `254,060` | `2.38%` | `7.80%` | `23.19%` | 670 | `37` |
+
+*\*Inst/Req is computed using `(instructions / (PMU_RPS × 10))`. For S5 and S6, daemon shutdown at second 11 interrupted the final second of the 12s `wrk` window while `perf stat` had already captured full 10s worker PMU counters; S5/S6 `Inst/Req` are lower-bound approximations.*
 
 ---
 
-### Scenario 03: Peak Traffic Saturation Under Random / Hashed Splitting (100,000+ req/s)
-- **Objective**: Confirm maximum possible throughput when evaluating canary weights across heavy multi-core concurrency.
-- **Execution Command**: `oha -z 15s -c 256 http://<gateway_host>:<port>/api/v1/ping`
+## 5. `perf record` CPU Symbol Profile (`S2_Canary_Priority`)
 
-| Detailed Measurement Metric | **Velda Edge** (Rust 2024) | **Kong Gateway 3.9** (LuaJIT) | **Apache APISIX 3.10** (LuaJIT) | **Envoy Proxy 1.31** (C++) |
-| :--- | :---: | :---: | :---: | :---: |
-| **Duration (seconds)** | **15.00** | **15.00** | **15.00** | **15.00** |
-| **Total Requests** | *[TBD]* | *[TBD]* | *[TBD]* | *[TBD]* |
-| **Throughput (requests/second)** | *[TBD]* | *[TBD]* | *[TBD]* | *[TBD]* |
-| **Wire Bandwidth (Megabytes/second)** | *[TBD]* | *[TBD]* | *[TBD]* | *[TBD]* |
-| **Total Requests Routed** | *[TBD]* | *[TBD]* | *[TBD]* | *[TBD]* |
-| **Canary Traffic Split Ratio (%)** | *[TBD]* | *[TBD]* | *[TBD]* | *[TBD]* |
-| **Upstream Retargeting Rate (requests/second)** | *[TBD]* | *[TBD]* | *[TBD]* | *[TBD]* |
-| **Mean Latency (milliseconds)** | *[TBD]* | *[TBD]* | *[TBD]* | *[TBD]* |
-| **Min Latency (milliseconds)** | *[TBD]* | *[TBD]* | *[TBD]* | *[TBD]* |
-| **Median Latency P50 (milliseconds)** | *[TBD]* | *[TBD]* | *[TBD]* | *[TBD]* |
-| **P75 Latency (milliseconds)** | *[TBD]* | *[TBD]* | *[TBD]* | *[TBD]* |
-| **P90 Latency (milliseconds)** | *[TBD]* | *[TBD]* | *[TBD]* | *[TBD]* |
-| **P99 Tail Latency (milliseconds)** | *[TBD]* | *[TBD]* | *[TBD]* | *[TBD]* |
-| **P99.9 Tail Latency (milliseconds)** | *[TBD]* | *[TBD]* | *[TBD]* | *[TBD]* |
-| **Max Latency (milliseconds)** | *[TBD]* | *[TBD]* | *[TBD]* | *[TBD]* |
-| **Latency Standard Deviation (milliseconds)** | *[TBD]* | *[TBD]* | *[TBD]* | *[TBD]* |
-| **Connect Time Average (milliseconds)** | *[TBD]* | *[TBD]* | *[TBD]* | *[TBD]* |
-| **HTTP Status Code Distribution (2xx / 4xx / 5xx)** | *[TBD]* | *[TBD]* | *[TBD]* | *[TBD]* |
-| **Success Rate (%)** | *[TBD]* | *[TBD]* | *[TBD]* | *[TBD]* |
-| **Total CPU Utilization (% CPU)** | *[TBD]* | *[TBD]* | *[TBD]* | *[TBD]* |
-| **User CPU (% User CPU)** | *[TBD]* | *[TBD]* | *[TBD]* | *[TBD]* |
-| **System / Kernel CPU (% System / Kernel CPU)** | *[TBD]* | *[TBD]* | *[TBD]* | *[TBD]* |
-| **SoftIRQ CPU (% SoftIRQ CPU)** | *[TBD]* | *[TBD]* | *[TBD]* | *[TBD]* |
-| **Frontline Worker 0 CPU (%)** | *[TBD]* | *[TBD]* | *[TBD]* | *[TBD]* |
-| **Frontline Worker 1 CPU (%)** | *[TBD]* | *[TBD]* | *[TBD]* | *[TBD]* |
-| **Shadow Logistics Worker CPU (%)** | *[TBD]* | N/A | N/A | N/A |
-| **Peak Resident Set Size (Megabytes)** | *[TBD]* | *[TBD]* | *[TBD]* | *[TBD]* |
-| **RAM Usage (%)** | *[TBD]* | *[TBD]* | *[TBD]* | *[TBD]* |
-| **Heap Allocations per Request (Bytes / Count)** | *[TBD]* | *[TBD]* | *[TBD]* | *[TBD]* |
-| **Memory Leak Rate (Megabytes / minute)** | *[TBD]* | *[TBD]* | *[TBD]* | *[TBD]* |
-| **System Calls per Request (System Calls / Request)** | *[TBD]* | *[TBD]* | *[TBD]* | *[TBD]* |
-| **Context Switches per Request (Context Switches / Request)** | *[TBD]* | *[TBD]* | *[TBD]* | *[TBD]* |
-| **Total System Calls** | *[TBD]* | *[TBD]* | *[TBD]* | *[TBD]* |
-| **Total Context Switches** | *[TBD]* | *[TBD]* | *[TBD]* | *[TBD]* |
-| **Kernel Time (seconds)** | *[TBD]* | *[TBD]* | *[TBD]* | *[TBD]* |
-| **Futex Calls** | *[TBD]* | *[TBD]* | *[TBD]* | *[TBD]* |
-| **Futex Percentage of Total System Calls (%)** | *[TBD]* | *[TBD]* | *[TBD]* | *[TBD]* |
-| **Total CPU Instructions** | *[TBD]* | *[TBD]* | *[TBD]* | *[TBD]* |
-| **Instructions per Request (Instructions / Request)** | *[TBD]* | *[TBD]* | *[TBD]* | *[TBD]* |
-| **Total CPU Cycles** | *[TBD]* | *[TBD]* | *[TBD]* | *[TBD]* |
-| **Cycles per Request (Cycles / Request)** | *[TBD]* | *[TBD]* | *[TBD]* | *[TBD]* |
-| **Instructions Per Cycle (IPC)** | *[TBD]* | *[TBD]* | *[TBD]* | *[TBD]* |
-| **Total Branches** | *[TBD]* | *[TBD]* | *[TBD]* | *[TBD]* |
-| **Branches per Request (Branches / Request)** | *[TBD]* | *[TBD]* | *[TBD]* | *[TBD]* |
-| **Branch Mispredictions** | *[TBD]* | *[TBD]* | *[TBD]* | *[TBD]* |
-| **Branch Misprediction Rate (%)** | *[TBD]* | *[TBD]* | *[TBD]* | *[TBD]* |
-| **L1 Data Cache Miss Rate (%)** | *[TBD]* | *[TBD]* | *[TBD]* | *[TBD]* |
-| **Last Level Cache Miss Rate (%)** | *[TBD]* | *[TBD]* | *[TBD]* | *[TBD]* |
-| **Canary Routing Rule Evaluation Latency (nanoseconds)** | *[TBD]* | *[TBD]* | *[TBD]* | *[TBD]* |
-| **Pseudo-Random / Hash Ring Split Calculation Duration (nanoseconds)** | *[TBD]* | *[TBD]* | *[TBD]* | *[TBD]* |
-| **Canary Target Upstream Re-Targeting Overhead (nanoseconds)** | *[TBD]* | *[TBD]* | *[TBD]* | *[TBD]* |
-| **Sticky Cookie / Header Extraction Latency (nanoseconds)** | *[TBD]* | *[TBD]* | *[TBD]* | *[TBD]* |
-| **Upstream Destination Pointer Swap Latency (nanoseconds)** | *[TBD]* | *[TBD]* | *[TBD]* | *[TBD]* |
-| **Canary Match Zero-Allocation Memory Efficiency (%)** | *[TBD]* | *[TBD]* | *[TBD]* | *[TBD]* |
-| **Route Resolution Decision Consistency Under High Concurrency (%)** | *[TBD]* | *[TBD]* | *[TBD]* | *[TBD]* |
+Sampled via `perf record -F 999 -g --call-graph dwarf -p <velda-edge-pid> -- sleep 8` (`13,000` samples, `0` lost) and classified via `analyze_perf.py`:
 
----
-
-### Scenario 04: Cookie-Based Sticky Session Affinity Hash Evaluation
-- **Objective**: Measure consistent hash calculation speed and cacheline efficiency under sticky session cookies.
-- **Execution Command**: `oha -z 15s -q 50000 -c 128 -H "Cookie: canary_session_id=user_42_sticky" http://<gateway_host>:<port>/api/v1/ping`
-
-| Detailed Measurement Metric | **Velda Edge** (Rust 2024) | **Kong Gateway 3.9** (LuaJIT) | **Apache APISIX 3.10** (LuaJIT) | **Envoy Proxy 1.31** (C++) |
-| :--- | :---: | :---: | :---: | :---: |
-| **Duration (seconds)** | **15.00** | **15.00** | **15.00** | **15.00** |
-| **Total Requests** | *[TBD]* | *[TBD]* | *[TBD]* | *[TBD]* |
-| **Throughput (requests/second)** | *[TBD]* | *[TBD]* | *[TBD]* | *[TBD]* |
-| **Wire Bandwidth (Megabytes/second)** | *[TBD]* | *[TBD]* | *[TBD]* | *[TBD]* |
-| **Total Requests Routed** | *[TBD]* | *[TBD]* | *[TBD]* | *[TBD]* |
-| **Canary Traffic Split Ratio (%)** | *[TBD]* | *[TBD]* | *[TBD]* | *[TBD]* |
-| **Upstream Retargeting Rate (requests/second)** | *[TBD]* | *[TBD]* | *[TBD]* | *[TBD]* |
-| **Mean Latency (milliseconds)** | *[TBD]* | *[TBD]* | *[TBD]* | *[TBD]* |
-| **Min Latency (milliseconds)** | *[TBD]* | *[TBD]* | *[TBD]* | *[TBD]* |
-| **Median Latency P50 (milliseconds)** | *[TBD]* | *[TBD]* | *[TBD]* | *[TBD]* |
-| **P75 Latency (milliseconds)** | *[TBD]* | *[TBD]* | *[TBD]* | *[TBD]* |
-| **P90 Latency (milliseconds)** | *[TBD]* | *[TBD]* | *[TBD]* | *[TBD]* |
-| **P99 Tail Latency (milliseconds)** | *[TBD]* | *[TBD]* | *[TBD]* | *[TBD]* |
-| **P99.9 Tail Latency (milliseconds)** | *[TBD]* | *[TBD]* | *[TBD]* | *[TBD]* |
-| **Max Latency (milliseconds)** | *[TBD]* | *[TBD]* | *[TBD]* | *[TBD]* |
-| **Latency Standard Deviation (milliseconds)** | *[TBD]* | *[TBD]* | *[TBD]* | *[TBD]* |
-| **Connect Time Average (milliseconds)** | *[TBD]* | *[TBD]* | *[TBD]* | *[TBD]* |
-| **HTTP Status Code Distribution (2xx / 4xx / 5xx)** | *[TBD]* | *[TBD]* | *[TBD]* | *[TBD]* |
-| **Success Rate (%)** | *[TBD]* | *[TBD]* | *[TBD]* | *[TBD]* |
-| **Total CPU Utilization (% CPU)** | *[TBD]* | *[TBD]* | *[TBD]* | *[TBD]* |
-| **User CPU (% User CPU)** | *[TBD]* | *[TBD]* | *[TBD]* | *[TBD]* |
-| **System / Kernel CPU (% System / Kernel CPU)** | *[TBD]* | *[TBD]* | *[TBD]* | *[TBD]* |
-| **SoftIRQ CPU (% SoftIRQ CPU)** | *[TBD]* | *[TBD]* | *[TBD]* | *[TBD]* |
-| **Frontline Worker 0 CPU (%)** | *[TBD]* | *[TBD]* | *[TBD]* | *[TBD]* |
-| **Frontline Worker 1 CPU (%)** | *[TBD]* | *[TBD]* | *[TBD]* | *[TBD]* |
-| **Shadow Logistics Worker CPU (%)** | *[TBD]* | N/A | N/A | N/A |
-| **Peak Resident Set Size (Megabytes)** | *[TBD]* | *[TBD]* | *[TBD]* | *[TBD]* |
-| **RAM Usage (%)** | *[TBD]* | *[TBD]* | *[TBD]* | *[TBD]* |
-| **Heap Allocations per Request (Bytes / Count)** | *[TBD]* | *[TBD]* | *[TBD]* | *[TBD]* |
-| **Memory Leak Rate (Megabytes / minute)** | *[TBD]* | *[TBD]* | *[TBD]* | *[TBD]* |
-| **System Calls per Request (System Calls / Request)** | *[TBD]* | *[TBD]* | *[TBD]* | *[TBD]* |
-| **Context Switches per Request (Context Switches / Request)** | *[TBD]* | *[TBD]* | *[TBD]* | *[TBD]* |
-| **Total System Calls** | *[TBD]* | *[TBD]* | *[TBD]* | *[TBD]* |
-| **Total Context Switches** | *[TBD]* | *[TBD]* | *[TBD]* | *[TBD]* |
-| **Kernel Time (seconds)** | *[TBD]* | *[TBD]* | *[TBD]* | *[TBD]* |
-| **Futex Calls** | *[TBD]* | *[TBD]* | *[TBD]* | *[TBD]* |
-| **Futex Percentage of Total System Calls (%)** | *[TBD]* | *[TBD]* | *[TBD]* | *[TBD]* |
-| **Total CPU Instructions** | *[TBD]* | *[TBD]* | *[TBD]* | *[TBD]* |
-| **Instructions per Request (Instructions / Request)** | *[TBD]* | *[TBD]* | *[TBD]* | *[TBD]* |
-| **Total CPU Cycles** | *[TBD]* | *[TBD]* | *[TBD]* | *[TBD]* |
-| **Cycles per Request (Cycles / Request)** | *[TBD]* | *[TBD]* | *[TBD]* | *[TBD]* |
-| **Instructions Per Cycle (IPC)** | *[TBD]* | *[TBD]* | *[TBD]* | *[TBD]* |
-| **Total Branches** | *[TBD]* | *[TBD]* | *[TBD]* | *[TBD]* |
-| **Branches per Request (Branches / Request)** | *[TBD]* | *[TBD]* | *[TBD]* | *[TBD]* |
-| **Branch Mispredictions** | *[TBD]* | *[TBD]* | *[TBD]* | *[TBD]* |
-| **Branch Misprediction Rate (%)** | *[TBD]* | *[TBD]* | *[TBD]* | *[TBD]* |
-| **L1 Data Cache Miss Rate (%)** | *[TBD]* | *[TBD]* | *[TBD]* | *[TBD]* |
-| **Last Level Cache Miss Rate (%)** | *[TBD]* | *[TBD]* | *[TBD]* | *[TBD]* |
-| **Canary Routing Rule Evaluation Latency (nanoseconds)** | *[TBD]* | *[TBD]* | *[TBD]* | *[TBD]* |
-| **Pseudo-Random / Hash Ring Split Calculation Duration (nanoseconds)** | *[TBD]* | *[TBD]* | *[TBD]* | *[TBD]* |
-| **Canary Target Upstream Re-Targeting Overhead (nanoseconds)** | *[TBD]* | *[TBD]* | *[TBD]* | *[TBD]* |
-| **Sticky Cookie / Header Extraction Latency (nanoseconds)** | *[TBD]* | *[TBD]* | *[TBD]* | *[TBD]* |
-| **Upstream Destination Pointer Swap Latency (nanoseconds)** | *[TBD]* | *[TBD]* | *[TBD]* | *[TBD]* |
-| **Canary Match Zero-Allocation Memory Efficiency (%)** | *[TBD]* | *[TBD]* | *[TBD]* | *[TBD]* |
-| **Route Resolution Decision Consistency Under High Concurrency (%)** | *[TBD]* | *[TBD]* | *[TBD]* | *[TBD]* |
-
----
-
-### Scenario 05: Dynamic Canary Weight Shift (Zero-Downtime Rule Reconfiguration)
-- **Objective**: Confirm that atomic RCU route reconfiguration introduces zero lock pauses or tail latency jitter.
-- **Execution Command**: `oha -z 15s -q 20000 -c 64 http://<gateway_host>:<port>/api/v1/ping`
-
-| Detailed Measurement Metric | **Velda Edge** (Rust 2024) | **Kong Gateway 3.9** (LuaJIT) | **Apache APISIX 3.10** (LuaJIT) | **Envoy Proxy 1.31** (C++) |
-| :--- | :---: | :---: | :---: | :---: |
-| **Duration (seconds)** | **15.00** | **15.00** | **15.00** | **15.00** |
-| **Total Requests** | *[TBD]* | *[TBD]* | *[TBD]* | *[TBD]* |
-| **Throughput (requests/second)** | *[TBD]* | *[TBD]* | *[TBD]* | *[TBD]* |
-| **Wire Bandwidth (Megabytes/second)** | *[TBD]* | *[TBD]* | *[TBD]* | *[TBD]* |
-| **Total Requests Routed** | *[TBD]* | *[TBD]* | *[TBD]* | *[TBD]* |
-| **Canary Traffic Split Ratio (%)** | *[TBD]* | *[TBD]* | *[TBD]* | *[TBD]* |
-| **Upstream Retargeting Rate (requests/second)** | *[TBD]* | *[TBD]* | *[TBD]* | *[TBD]* |
-| **Mean Latency (milliseconds)** | *[TBD]* | *[TBD]* | *[TBD]* | *[TBD]* |
-| **Min Latency (milliseconds)** | *[TBD]* | *[TBD]* | *[TBD]* | *[TBD]* |
-| **Median Latency P50 (milliseconds)** | *[TBD]* | *[TBD]* | *[TBD]* | *[TBD]* |
-| **P75 Latency (milliseconds)** | *[TBD]* | *[TBD]* | *[TBD]* | *[TBD]* |
-| **P90 Latency (milliseconds)** | *[TBD]* | *[TBD]* | *[TBD]* | *[TBD]* |
-| **P99 Tail Latency (milliseconds)** | *[TBD]* | *[TBD]* | *[TBD]* | *[TBD]* |
-| **P99.9 Tail Latency (milliseconds)** | *[TBD]* | *[TBD]* | *[TBD]* | *[TBD]* |
-| **Max Latency (milliseconds)** | *[TBD]* | *[TBD]* | *[TBD]* | *[TBD]* |
-| **Latency Standard Deviation (milliseconds)** | *[TBD]* | *[TBD]* | *[TBD]* | *[TBD]* |
-| **Connect Time Average (milliseconds)** | *[TBD]* | *[TBD]* | *[TBD]* | *[TBD]* |
-| **HTTP Status Code Distribution (2xx / 4xx / 5xx)** | *[TBD]* | *[TBD]* | *[TBD]* | *[TBD]* |
-| **Success Rate (%)** | *[TBD]* | *[TBD]* | *[TBD]* | *[TBD]* |
-| **Total CPU Utilization (% CPU)** | *[TBD]* | *[TBD]* | *[TBD]* | *[TBD]* |
-| **User CPU (% User CPU)** | *[TBD]* | *[TBD]* | *[TBD]* | *[TBD]* |
-| **System / Kernel CPU (% System / Kernel CPU)** | *[TBD]* | *[TBD]* | *[TBD]* | *[TBD]* |
-| **SoftIRQ CPU (% SoftIRQ CPU)** | *[TBD]* | *[TBD]* | *[TBD]* | *[TBD]* |
-| **Frontline Worker 0 CPU (%)** | *[TBD]* | *[TBD]* | *[TBD]* | *[TBD]* |
-| **Frontline Worker 1 CPU (%)** | *[TBD]* | *[TBD]* | *[TBD]* | *[TBD]* |
-| **Shadow Logistics Worker CPU (%)** | *[TBD]* | N/A | N/A | N/A |
-| **Peak Resident Set Size (Megabytes)** | *[TBD]* | *[TBD]* | *[TBD]* | *[TBD]* |
-| **RAM Usage (%)** | *[TBD]* | *[TBD]* | *[TBD]* | *[TBD]* |
-| **Heap Allocations per Request (Bytes / Count)** | *[TBD]* | *[TBD]* | *[TBD]* | *[TBD]* |
-| **Memory Leak Rate (Megabytes / minute)** | *[TBD]* | *[TBD]* | *[TBD]* | *[TBD]* |
-| **System Calls per Request (System Calls / Request)** | *[TBD]* | *[TBD]* | *[TBD]* | *[TBD]* |
-| **Context Switches per Request (Context Switches / Request)** | *[TBD]* | *[TBD]* | *[TBD]* | *[TBD]* |
-| **Total System Calls** | *[TBD]* | *[TBD]* | *[TBD]* | *[TBD]* |
-| **Total Context Switches** | *[TBD]* | *[TBD]* | *[TBD]* | *[TBD]* |
-| **Kernel Time (seconds)** | *[TBD]* | *[TBD]* | *[TBD]* | *[TBD]* |
-| **Futex Calls** | *[TBD]* | *[TBD]* | *[TBD]* | *[TBD]* |
-| **Futex Percentage of Total System Calls (%)** | *[TBD]* | *[TBD]* | *[TBD]* | *[TBD]* |
-| **Total CPU Instructions** | *[TBD]* | *[TBD]* | *[TBD]* | *[TBD]* |
-| **Instructions per Request (Instructions / Request)** | *[TBD]* | *[TBD]* | *[TBD]* | *[TBD]* |
-| **Total CPU Cycles** | *[TBD]* | *[TBD]* | *[TBD]* | *[TBD]* |
-| **Cycles per Request (Cycles / Request)** | *[TBD]* | *[TBD]* | *[TBD]* | *[TBD]* |
-| **Instructions Per Cycle (IPC)** | *[TBD]* | *[TBD]* | *[TBD]* | *[TBD]* |
-| **Total Branches** | *[TBD]* | *[TBD]* | *[TBD]* | *[TBD]* |
-| **Branches per Request (Branches / Request)** | *[TBD]* | *[TBD]* | *[TBD]* | *[TBD]* |
-| **Branch Mispredictions** | *[TBD]* | *[TBD]* | *[TBD]* | *[TBD]* |
-| **Branch Misprediction Rate (%)** | *[TBD]* | *[TBD]* | *[TBD]* | *[TBD]* |
-| **L1 Data Cache Miss Rate (%)** | *[TBD]* | *[TBD]* | *[TBD]* | *[TBD]* |
-| **Last Level Cache Miss Rate (%)** | *[TBD]* | *[TBD]* | *[TBD]* | *[TBD]* |
-| **Canary Routing Rule Evaluation Latency (nanoseconds)** | *[TBD]* | *[TBD]* | *[TBD]* | *[TBD]* |
-| **Pseudo-Random / Hash Ring Split Calculation Duration (nanoseconds)** | *[TBD]* | *[TBD]* | *[TBD]* | *[TBD]* |
-| **Canary Target Upstream Re-Targeting Overhead (nanoseconds)** | *[TBD]* | *[TBD]* | *[TBD]* | *[TBD]* |
-| **Sticky Cookie / Header Extraction Latency (nanoseconds)** | *[TBD]* | *[TBD]* | *[TBD]* | *[TBD]* |
-| **Upstream Destination Pointer Swap Latency (nanoseconds)** | *[TBD]* | *[TBD]* | *[TBD]* | *[TBD]* |
-| **Canary Match Zero-Allocation Memory Efficiency (%)** | *[TBD]* | *[TBD]* | *[TBD]* | *[TBD]* |
-| **Route Resolution Decision Consistency Under High Concurrency (%)** | *[TBD]* | *[TBD]* | *[TBD]* | *[TBD]* |
-
----
-
-## 4. Comprehensive Architecture Comparison: Velda Edge vs Kong vs APISIX vs Envoy
-
-| Architecture Evaluation Criterion | Velda Edge (Rust Edition 2024) | Kong Gateway 3.9 (LuaJIT) | Apache APISIX 3.10 (LuaJIT) | Envoy Proxy 1.31 (C++) |
-| :--- | :--- | :--- | :--- | :--- |
-| **Implementation Language** | **Rust (Edition 2024, Zero-Cost Abstractions)** | C (OpenResty) + LuaJIT 2.1 | C (OpenResty) + LuaJIT 2.1 | C++ 20 |
-| **Thread Model** | **Thread-Per-Core (Shared-Nothing)** | Multi-Process (Nginx Master-Worker) | Multi-Process (Nginx Master-Worker) | Thread-Per-Core (Worker EventLoop) |
-| **Primary Execution Mechanism** | **In-Memory Atomic RCU Weight Splitter + Pointer Swap** | Kong canary plugin via Lua weight evaluation | APISIX traffic-split plugin via Lua matchers | Envoy weighted_clusters in route configuration |
-| **Heap Allocations** | **Zero allocations (Pointer swap in context)** | Lua table creation for upstream selection | Lua table creation for upstream selection | C++ cluster weight lookup allocations |
-| **Garbage Collection (GC) Impact** | None (Zero GC Pauses by design) | Periodic Lua GC collection cycles | Periodic Lua GC collection cycles | None (TCMalloc heap churn) |
-| **Hot-Path Request Serving Impact** | **Atomic random weight compare (< 4 ns)** | Lua random / hash execution in access phase | Lua table match in access phase | C++ weighted random cluster selection |
-| **Backpressure / Failure Mechanism** | **Zero-cost pointer update, upstream handles load** | Worker execution overhead in Lua | Worker execution overhead in Lua | Worker execution overhead in C++ |
-| **Worker Execution Allocation** | **Frontline Worker 0/1 (`velda-worker-{id}`)** | Main Nginx worker thread | Main Nginx worker thread | Main Envoy worker threads |
-| **HTTP/3 Support (QUIC Ingress)** | **Native RFC 9114 / RFC 9000 (H3 Production)** | Not Supported | Experimental | Native HTTP/3 Production |
-| **Resident Memory Footprint (Peak RSS)** | *[TBD]* | *[TBD]* | *[TBD]* | *[TBD]* |
+| Architectural Layer | CPU Overhead (%) | Attributed Scope & Notes |
+| :--- | :---: | :--- |
+| **Linux Kernel Network Stack** | `60.90%` | TCP/IP socket `writev` / `virtqueue_notify` (`[kernel.kallsyms]`) |
+| **Component Serving Hot Path** | `39.18%` | Velda ingress/upstream HTTP/1.1 & `epoll` serving (`CanaryPlugin` < `0.01%`, absent from `>= 0.01%` sampled leaves) |
+| **Kernel Slab / `sk_buff` Allocators** | `3.27%` | 100% kernel slab (`[k] kmem_cache_free`, `kmem_cache_alloc_node`, `__kmalloc`, `__alloc_skb`); **0.00%** userspace heap `alloc::*` |
+| **Tokio Runtime & Transport** | `0.11%` | Async driver scheduling |
+| **Userspace Mutex Contention** | `0.05%`–`0.09%` | `libc.so.6 pthread_mutex_trylock` (`0.02%` per worker) / `unlock` (`0.01%`), zero `canary` lock symbols |

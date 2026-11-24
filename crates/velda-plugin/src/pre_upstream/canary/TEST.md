@@ -1,71 +1,49 @@
-# Canary Traffic Splitting Plugin (`canary`) — Verification & Test Matrix
+# Canary Plugin Verification & Test Matrix
 
-This document details the test matrix, security edge case validations, and unit test coverage for the **`canary`** plugin.
+## 1. Unit & Static Analysis Tests
+
+| Scope | Location | Verified Invariants | Command |
+| :--- | :--- | :--- | :--- |
+| **Plugin Behavior (3 tests)** | `crates/velda-plugin/src/pre_upstream/canary/plugin.rs` | 1. Rule override forces `selected_upstream = Some(id)` even at `ratio = 0`.<br>2. Sticky `Priority` determinism across 50 identical requests + `hash_to_permille` distribution.<br>3. `AccessLevel::Read` leaves `HeaderWorkspace` 100% unmodified + `u16::MAX` sentinel safety. | `cargo test -p velda-plugin --lib canary` |
+| **Schema Validation (138 tests)** | `crates/velda-plugin/src/pre_upstream/canary/validation.rs` & `validation` module | Rejects `ratio > 1000`, invalid HTTP header names (`HeaderName::from_bytes`), empty rule values for value-matching operators, empty `canary_upstream`, missing `hash_headers` on `priority`/`composite`, and unknown extra JSON fields. | `cargo test -p velda-plugin --lib validation` |
+| **Hot-Path ASM Invariant** | `target/release/deps/velda_plugin-*.s` | Confirms `0` `alloc::*` heap calls, `0` `divq`, `0` `ud2`, `0` `lock *`, and BMI2 `mulxq $1000` in `CanaryPlugin::on_upstream_request`. | `audit_asm.py <file.s> --symbol ...` |
 
 ---
 
-## 1. Unit Test Coverage Matrix
+## 2. Control Plane Sync & Upstream Wiring Verification
 
-| Test Suite / Function | Verification Focus | Expected Result |
+| Test Case | Verified Component | Result |
 | :--- | :--- | :--- |
-| `test_canary_rule_based_override_and_operators` | Evaluates all 5 byte-level operators: `Equals`, `Suffix`, `Prefix`, `Contains`, `Exists`. | All matching conditions route to canary upstream (`payments-v2`). |
-| `test_canary_rule_based_override_and_operators` (Spoof Sanitization) | Non-matching request with client-supplied `x-velda-canary: true` routed to baseline. | Canary header is stripped (`req.headers.remove`). |
-| `test_priority_hash_sources_user_defined` | Evaluates Priority Fallback order: Header $\to$ Cookie $\to$ Query $\to$ Client IP. | Consistent deterministic percentage returned for each layer without dropping stickiness. |
-| `test_composite_hash_consistency` | Compound key evaluation (`header:x-tenant-id` + `client_ip`). | Deterministic, reproducible percentage on identical request attributes. |
-| `test_canary_from_config_multi_sources` | Deserialization and validation from raw `PluginConfig`. | Pre-compiles headers and operators cleanly. |
-| `test_valid_canary_config_multi_sources` (`velda-sync`) | Verifies valid configuration schema with multi-source list. | Passes validation (`Ok(cfg)`). |
-| `test_bare_header_rejected_to_prevent_hardcoded_defaults` (`velda-sync`) | Attempting to pass bare `"header"` or `"cookie"` without target name. | Rejected with explicit error (`SyncError::Validation`). |
-| `test_control_character_in_header_value_rejected` (`velda-sync`) | Header value with `\r\n` CRLF injection characters. | Rejected with control character validation error. |
+| **`canary` Canonical ID Rejection** | `velda-sync` (`plugins.json`) | Rejected non-canonical `"id": "canary_main"` safely while preserving LKG state (`Validation error in plugins: Unknown plugin ID 'canary_main'`). |
+| **Dense `u16` Index Resolution** | `velda-plugin::wire_plugin_upstreams` + `velda-edge/src/runtime/plugin.rs` | Resolved `backend-canary` -> `upstream_id=1` at boot (`revision=1`) when placed second in `upstreams.json`. |
+| **Adversarial Hot-Reload Re-Index** | `velda-edge/src/reload.rs` | Reordered `upstreams.json` placing `backend-canary` at index `0` and `backend-base` at index `1` (`revision=3`). Edge reloaded atomically, logged `upstream_id=0`, and routed rule-miss -> `:18081` (`base`) and rule-hit -> `:18091` (`canary`). |
 
 ---
 
-## 2. Security Test Scenarios
+## 3. Isolated Dual-Node KVM End-to-End Test Matrix
 
-### Scenario A: Canary Marker Header Spoofing Prevention
-```rust
-let mut req_spoof = L7Request::new(
-    Method::GET,
-    Uri::from_static("/v1/pay"),
-    Version::HTTP_11,
-    {
-        let mut h = HeaderMap::new();
-        h.insert("x-velda-canary", HeaderValue::from_static("true"));
-        h
-    },
-    Body::Empty,
-);
-let mut target_base = Arc::from("payments-v1");
-plugin.on_upstream_request(&mut req_spoof, &mut target_base);
-assert_eq!(target_base.as_ref(), "payments-v1");
-assert!(
-    !req_spoof.headers.contains_key("x-velda-canary"),
-    "Spoofed canary marker must be stripped on baseline path!"
-);
-```
+Executed live between `velda-obs` (`wrk` / `curl` -> `velda-gw:18080`) and dual symmetric HTTP/1.1 backends (`base` on `192.168.122.20:18081`, `canary` on `192.168.122.20:18091`):
 
-### Scenario B: Anti-Spoofing Client IP Resolution
-```rust
-// Verified that leftmost XFF manipulation does not control hash when x-real-ip is authoritative
-let mut headers = HeaderMap::new();
-headers.insert("x-forwarded-for", HeaderValue::from_static("spoofed.ip, 192.168.1.10"));
-headers.insert("x-real-ip", HeaderValue::from_static("10.0.0.1"));
-let req = L7Request::new(Method::GET, Uri::from_static("/"), Version::HTTP_11, headers, Body::Empty);
-assert_eq!(extract_authoritative_client_ip(&req), Some("10.0.0.1"));
-```
+| Test Case | Setup | Assertion | Measured Result |
+| :--- | :--- | :--- | :--- |
+| **Baseline Miss** | `ratio: 0`, no rule headers | Requests route to `backend-base`. | `200 base` |
+| **5 Rule Operators** | `ratio: 0`, matching `equals`, `prefix`, `suffix`, `contains`, `exists` headers | All 5 matchers route `100%` to `backend-canary`. | `equals: canary`, `prefix: canary`, `suffix: canary`, `contains: canary`, `exists: canary` |
+| **Zero Header Mutation** | `GET /inspect` with `X-Canary-Eq: true`, `X-User-Id: alice-99` | Upstream receives exact headers without proxy-injected canary headers. | Backend reflected exact client headers on `upstream: "canary"` |
+| **2,000-User Split Accuracy** | `ratio: 200`, `hash_strategy: "priority"`, `2,000` distinct `X-User-Id`s (`prod-user-00000..01999`) | Distribution converges near `200‰` (`20.0%`). | `base=1566`, `canary=434` (`217.00‰`); under `wrk` 615k reqs: **`196.25‰`** |
+| **Session Stickiness** | `20` repeated requests each for `prod-user-00000` (base) and `prod-user-00001` (canary) | Zero cross-upstream drift for identical key. | `prod-user-00000 -> {'base'}`, `prod-user-00001 -> {'canary'}` |
+| **Composite Split Accuracy** | `ratio: 200`, `hash_strategy: "composite"`, `["x-tenant-id", "x-user-id"]`, `569k` reqs | Composite fold across multiple headers matches target ratio. | `base=452768`, `canary=116426` (**`204.55‰`**) |
 
 ---
 
-## 3. Test Execution Verification
+## 4. Reproducing Checks Locally
 
 ```bash
-# Plugin Unit Tests
-cargo test -p velda-plugin canary -- --nocapture
+# Formatting & Strict Lints
+cargo fmt --all --check
+cargo clippy -p velda-plugin -p velda-sync -p velda-edge --all-targets --all-features -- -D warnings
 
-# Config & Schema Validation Tests
-cargo test -p velda-sync canary -- --nocapture
-
-# Monorepo Clean Build & Test Verification
-cargo clippy --all-targets --all-features -- -D warnings
-cargo test
+# Unit & Integration Tests
+cargo test -p velda-plugin --lib canary
+cargo test -p velda-plugin --lib validation
+cargo test -p velda-edge --lib runtime::plugin
 ```
-All **1,074** monorepo tests pass with **0 warnings**.

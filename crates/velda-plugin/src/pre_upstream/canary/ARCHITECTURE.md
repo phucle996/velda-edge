@@ -1,120 +1,111 @@
-# Canary Traffic Splitting Plugin (`canary`) — Architectural Specification
+# Canary Architecture & Mathematical Design
 
-This document details the internal architecture, memory layout, anti-spoofing security guarantees, and execution pipeline of the hardened **`canary`** plugin in Velda Edge.
+The `canary` plugin lives inside the `pre_upstream` pipeline stage (`crates/velda-plugin/src/pre_upstream/canary/`). It selects a target upstream index (`u16`) purely from downstream request headers without touching heap memory or mutating HTTP headers.
 
 ---
 
-## 1. Architectural Philosophy & Invariants
-
-The `canary` plugin executes during the **`pre_upstream`** pipeline phase, immediately prior to upstream connection leasing. It steers traffic between the baseline upstream and the canary upstream using three complementary mechanisms:
+## 1. Execution & Data-Flow Pipeline
 
 ```mermaid
-flowchart TD
-    Req["Incoming L7Request"] --> Rules["Step 1: Header Override Rules\n(Byte-Slice Equals / Prefix / Suffix / Contains / Exists)"]
-    Rules -->|Rule Match True| ForceCanary["Route to Canary Upstream"]
-    Rules -->|Rule Match False| CheckWeight{"Step 2: Weight Guard\n(weight == 0 or >= 100)"}
-    
-    CheckWeight -->|weight == 0| Base["Route to Baseline Upstream"]
-    CheckWeight -->|weight >= 100| ForceCanary
-    CheckWeight -->|0 < weight < 100| Hash{"Step 3: Session Hash / Distribution\n(Priority / Composite / Random)"}
-    
-    Hash -->|pct < weight| ForceCanary
-    Hash -->|pct >= weight| Base
-    
-    ForceCanary --> InjectMarker["Inject canary_header: canary_header_value\n(if configured != 'none')"]
-    InjectMarker --> SwitchUpstream["*target_upstream = Arc::clone(&canary_upstream)"]
-    SwitchUpstream --> Continue1["Action::Continue"]
-    
-    Base --> StripMarker["Sanitize canary_header\n(req.headers.remove to prevent spoofing)"]
-    StripMarker --> Continue2["Action::Continue"]
+flowchart LR
+    A["RequestState.headers (HeaderWorkspace Read)"] --> B{"Evaluate rules in order"}
+    B -- "Rule match hit" --> S["selected_upstream = Some(canary_id)"]
+    B -- "All rules miss" --> C{"ratio check"}
+    C -- "ratio == 0" --> P["Action::Continue (keep default route upstream)"]
+    C -- "ratio >= 1000" --> S
+    C -- "1..999" --> D{"hash_strategy"}
+    D -- "priority" --> E1["Scan hash_headers -> first non-empty -> swar_hash64"]
+    D -- "composite" --> E2["Fold all present hash_headers (0xFF sep) -> swar_hash64"]
+    D -- "random" --> E3["fast_prng_u64()"]
+    E1 --> F{"Key found?"}
+    F -- "Yes" --> G["hash_to_permille(hash) < ratio ?"]
+    F -- "No" --> E3
+    E2 --> F2{"Any header hashed?"}
+    F2 -- "Yes" --> G
+    F2 -- "No" --> E3
+    E3 --> G
+    G -- "True" --> S
+    G -- "False" --> P
 ```
-
-### Core Invariants:
-1. **100% User-Defined & Zero Hardcoded Defaults**: All header, cookie, and query parameter names are explicitly configured by the operator. No implicit defaults (`x-user-id`, `session_id`) exist in the codebase.
-2. **Byte-Level Fast Evaluation (Zero Regex DFA/NFA overhead)**: Header override rules evaluate directly on raw byte slices (`&[u8]`) using ASCII case-insensitive comparisons, avoiding both UTF-8 validation and regular expression state-machine overhead.
-3. **Lock-Free Pseudo-Random Distribution**: Uniform percentage calculation utilizes thread-local Xorshift64* PRNG, eliminating global atomic cache-line bouncing (`lock xadd` MESI invalidation) across multi-core CPU workers.
-4. **Anti-Spoofing Canary Marker Sanitation**: When traffic is routed to the baseline upstream, any client-supplied canary marker header (`canary_header`) is stripped from the request, preventing malicious clients from spoofing canary feature flags or sandbox modes on production systems.
-5. **Authoritative Client IP Extraction**: Client IP hashing prioritizes `x-real-ip` (set by the Gateway's transport listener from verified socket peer) and rightmost `x-forwarded-for`, defending against client-controlled leftmost XFF spoofing.
 
 ---
 
-## 2. Memory Layout & Data Structures
+## 2. Cold-Path Wiring vs Hot-Path Isolation
 
 ```mermaid
-classDiagram
-    class CanaryPlugin {
-        +String id
-        +Arc~str~ canary_upstream
-        +u32 weight
-        +Vec~HeaderRule~ rules
-        +HashStrategy hash_strategy
-        +Vec~HashSource~ hash_sources
-        +Option~(HeaderName, HeaderValue)~ canary_marker
-    }
+sequenceDiagram
+    participant Sync as "velda-sync (LKG Binary Compiler)"
+    participant Reload as "velda-edge reload.rs (Cold Control Path)"
+    participant Table as "PluginTable / CanaryPlugin (AtomicU16)"
+    participant Worker as "velda-worker (Hot Path)"
 
-    class HeaderRule {
-        +HeaderName header
-        +RuleOperator operator
-    }
-
-    class RuleOperator {
-        <<enumeration>>
-        Equals(Box~[u8]~)
-        Prefix(Box~[u8]~)
-        Suffix(Box~[u8]~)
-        Contains(Box~[u8]~)
-        Exists
-    }
-
-    class HashStrategy {
-        <<enumeration>>
-        Priority
-        Composite
-        Random
-    }
-
-    class HashSource {
-        <<enumeration>>
-        ClientIp
-        UriPath
-        Header(HeaderName)
-        Cookie(Box~str~)
-        Query(Box~str~)
-    }
-
-    CanaryPlugin *-- HeaderRule
-    HeaderRule *-- RuleOperator
-    CanaryPlugin *-- HashStrategy
-    CanaryPlugin *-- HashSource
+    Sync->>Reload: Notify runtime update (upstreams.bin / plugins.bin)
+    Reload->>Table: build_plugin_table(&plugins, &upstreams)
+    Reload->>Table: wire_plugin_upstreams() resolves "backend-canary" -> index u16
+    Table-->>Reload: AtomicU16::store(id, Ordering::Release)
+    Note over Reload,Worker: Zero locks on hot path via atomic PluginTable swap
+    Worker->>Table: on_upstream_request(&state)
+    Table-->>Worker: canary_upstream_id.load(Ordering::Relaxed)
+    Worker->>Worker: Set state.selected_upstream = Some(id) and return Action::Continue
 ```
 
-### Data Structure Details:
-- **`canary_marker`**: Pre-compiled `Option<(HeaderName, HeaderValue)>`. When configured as `"none"`, memory footprint and header mutation overhead are completely eliminated.
-- **`HeaderRule.header`**: Pre-compiled `http::header::HeaderName` allowing $O(1)$ pre-hashed header map lookups instead of parsing string tokens on every request.
-- **`HashSource::Header`**: Pre-compiled `HeaderName` for fast key extraction.
+### Sentinel Safety (`u16::MAX`)
+`CanaryPlugin::new` initializes `canary_upstream_id` to `u16::MAX` (`65535`). During `on_upstream_request`, if the stored index equals `u16::MAX` (indicating an unwired or misconfigured target string), `canary` returns `Action::Continue` immediately without modifying `state.selected_upstream`, preserving default baseline routing safely.
 
 ---
 
-## 3. Hashing Pipeline & Algorithms
+## 3. Division-Free Permille Arithmetic & Overflow Proof
 
-### Strategy 1: Priority Fallback (`HashStrategy::Priority`)
-Iterates sequentially through `hash_sources`. The first source yielding a non-empty byte slice is hashed via `rustc_hash::FxHasher`:
-$$\text{pct} = \text{FxHasher}(\text{bytes}) \pmod{100}$$
-If no configured source matches (e.g. anonymous user without header, cookie, or query), execution falls back to `fast_prng_percent()`.
+Hardware 64-bit division (`divq`) costs 35–80+ cycles and stalls execution pipelines. Conversely, monotonic request counters risk wrapping around or distorting ratios when distributed across lockless worker threads.
 
-### Strategy 2: Composite Key (`HashStrategy::Composite`)
-Feed bytes from all configured sources into `FxHasher` separated by delimiters without intermediate heap allocation (`String::format` or `Vec<String>`):
-$$\text{FxHasher}(\text{src}_1 \mathbin{\Vert} \text{sep} \mathbin{\Vert} \text{src}_2 \mathbin{\Vert} \dots) \pmod{100}$$
+`canary` maps any uniformly distributed 64-bit hash $H \in [0, 2^{64} - 1]$ onto permille interval $[0, 999]$ via Lemire fixed-point multiplication:
 
-### Strategy 3: Random (`HashStrategy::Random`)
-Generates high-entropy pseudo-random numbers in $\sim 1\ \text{ns}$ using thread-local Xorshift64*:
-$$x \leftarrow x \oplus (x \gg 12); \quad x \leftarrow x \oplus (x \ll 25); \quad x \leftarrow x \oplus (x \gg 27)$$
-$$\text{pct} = (x \times 0x2545f4914f6cdd1d) \pmod{100}$$
+$$\text{permille}(H) = \left\lfloor \frac{H \times 1000}{2^{64}} \right\rfloor = \text{hi64}\!\left((H \text{ as u128}) \times 1000\right)$$
+
+In Rust (`crates/velda-plugin/src/pre_upstream/canary/hash.rs`):
+
+```rust
+pub const fn hash_to_permille(hash: u64) -> u32 {
+    (((hash as u128).wrapping_mul(1000)) >> 64) as u32
+}
+```
+
+### Mathematical Properties
+1. **Strict Overflow Immunity**:
+   $H_{\max} \times 1000 = (2^{64} - 1) \times 1000 < 1000 \times 2^{64} < 2^{74} \ll 2^{128}$.
+   Shifting right by 64 yields maximum quotient $999$, fitting safely in `u32` ($0 \le \text{permille}(H) \le 999$).
+2. **Exact Range Comparison**:
+   `hash_to_permille(hash) < ratio`:
+   - For `ratio = 0`: always `false` ($0 \le \text{permille}$).
+   - For `ratio = 1000`: always `true` ($\text{permille} \le 999 < 1000$).
+   - Plus explicit `ratio == 0` / `ratio >= 1000` short-circuits skip header hashing completely.
+3. **Negligible Modulo Bias**:
+   $2^{64} \equiv 616 \pmod{1000}$. Exactly 616 of the 1,000 buckets have $\lfloor 2^{64}/1000 \rfloor + 1$ preimages and 384 buckets have $\lfloor 2^{64}/1000 \rfloor$ preimages. Maximum per-bucket probability deviation from $0.001$ is bounded by:
+   $$\Delta p \le \frac{1}{2^{64}} \approx 5.42 \times 10^{-20} \quad (\text{aggregate across } R \le 1000 \text{ buckets}: < 3.3 \times 10^{-17})$$
+4. **Hardware Lowering (`x86-64-v3`)**:
+   LLVM compiles `hash_to_permille` to a single BMI2 unsigned multiply instruction without flags (`mulxq %rax, %rax, %rax`), taking **~3 cycles latency** with **zero `divq` and zero `ud2` trap instructions**.
 
 ---
 
-## 4. Multi-Value Header & Cookie Handling
+## 4. SWAR Key Extraction & Hashing (`swar_hash64`)
 
-In HTTP/2 (RFC 9113 §8.2.3), headers like `Cookie` or custom tagging headers can arrive as multiple lines.
-- **`rules` matching**: Evaluates all lines via `req.headers.get_all(&self.header)`.
-- **`extract_cookie_value`**: Iterates across all `COOKIE` headers and splits by `;`, extracting the targeted cookie name case-insensitively.
+Instead of calling per-byte hash traits (`std::hash::Hasher` with per-byte SipHash loops) or copying headers into scratch buffers:
+
+1. **8-Byte SWAR Chunking**: `slice::as_chunks::<8>()` consumes 64-bit aligned/unaligned little-endian words (`u64::from_le_bytes`), mixing each word via XOR and an odd Weyl-ratio multiplier (`0x9E37_79B9_7F4A_7C15`), followed by single-cycle bit rotation (`rotate_left(27)`).
+2. **Tail Folding**: Remaining 0–7 bytes are shifted into a single `u64` register (`tail_word`) and mixed identically without branching per tail byte.
+3. **SplitMix64 Avalanche**: Ensures single-bit differences in short keys (e.g., `"user-0001"` vs `"user-0002"`) flip ~50% of all 64 output bits before `hash_to_permille`:
+   - `z ^= z >> 30; z = z.wrapping_mul(0xBF58_476D_1CE4_E5B9);`
+   - `z ^= z >> 27; z = z.wrapping_mul(0x94D0_49BB_1331_11EB);`
+   - `z ^ (z >> 31)`
+
+---
+
+## 5. Module Ownership Boundaries
+
+| File | Responsibility |
+| :--- | :--- |
+| `mod.rs` | Public API exports for `canary` subsystem. |
+| `validation.rs` | Strict JSON schema (`CanarySchemaConfig`), `HeaderName::from_bytes` syntax checks, `ratio <= 1000` check. |
+| `config.rs` | Zero-allocation runtime representation (`CanaryConfig`, `HeaderRule`, `RuleOperator`, `HashStrategy`). |
+| `hash.rs` | Pure `#[inline(always)]` `swar_hash64`, `hash_to_permille`, `fast_prng_u64`, and `evaluate_permille`. |
+| `plugin.rs` | `CanaryPlugin` state (`AtomicU16`), `HeaderWorkspace` read extraction, `PreUpstreamPlugin` hot-path execution. |
