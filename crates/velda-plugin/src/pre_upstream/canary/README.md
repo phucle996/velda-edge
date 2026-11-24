@@ -8,8 +8,8 @@ The `canary` plugin executes deterministic, header-only traffic splitting in the
 
 1. **Header-Only Workspace (`AccessLevel::Read`)**:
    Reads exclusively from the downstream request `HeaderWorkspace`. It never modifies, injects, or strips headers on the wire (`x-user-id`, `x-tenant-id`, `x-canary`, etc. arrive unmodified at the selected upstream).
-2. **Dense `u16` Upstream Switch**:
-   At bootstrap and hot-reload (`velda-edge`), `wire_plugin_upstreams()` resolves `"canary_upstream"` string IDs to their dense `u16` index in the compiled `upstreams` table (`AtomicU16` with `Ordering::Relaxed`). Request execution requires a single atomic register load.
+2. **Direct Dense `u16` Upstream Index**:
+   Core domains (`listeners`, `upstreams`, `etp`/`tls`, `routes`) are compiled and loaded before ecosystem plugins. `CanaryPlugin::from_config()` resolves `"canary_upstream"` directly into an immutable plain `u16` index (`canary_upstream_id: u16`) at instantiation — zero runtime string lookups, zero `AtomicU16`, and zero sentinel checks on the hot path.
 3. **Strict Multi-Header Hashing with Zero Random Fallback**:
    Folds all configured `hash_headers` together in order using 8-byte SWAR chunks (`slice::as_chunks::<8>()`) and SplitMix64. If **any** configured header is missing or whitespace-only (and no override rule matches), the request **stays safely on the baseline upstream** — there is zero hidden PRNG fallback, so a user never flips between versions across requests.
 4. **Division-Free Permille Scaling (`1..=999`)**:

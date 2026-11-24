@@ -24,23 +24,21 @@ flowchart LR
 
 ```mermaid
 sequenceDiagram
-    participant Sync as "velda-sync (LKG Binary Compiler)"
-    participant Reload as "velda-edge reload.rs (Cold Control Path)"
-    participant Table as "PluginTable / CanaryPlugin (AtomicU16)"
+    participant Sync as "velda-sync (Core First, Plugins Last)"
+    participant Reload as "velda-edge reload.rs (Core Tables Ready)"
+    participant Table as "PluginTable / CanaryPlugin (u16)"
     participant Worker as "velda-worker (Hot Path)"
 
-    Sync->>Reload: Notify runtime update (upstreams.bin / plugins.bin)
-    Reload->>Table: build_plugin_table(&plugins, &upstreams)
-    Reload->>Table: wire_plugin_upstreams() resolves "backend-canary" -> index u16
-    Table-->>Reload: AtomicU16::store(id, Ordering::Release)
-    Note over Reload,Worker: Zero locks & zero thread-local RNG on hot path
-    Worker->>Table: on_upstream_request(&state)
-    Table-->>Worker: canary_upstream_id.load(Ordering::Relaxed)
-    Worker->>Worker: Set state.selected_upstream = Some(id) and return Action::Continue
+    Sync->>Reload: Reconcile listeners -> upstreams -> tls/etp -> routes -> plugins
+    Reload->>Table: build_plugin_table(&plugins, ..., &upstreams)
+    Table->>Table: CanaryPlugin::from_config(&cfg, &upstream_ids) -> canary_upstream_id: u16
+    Note over Reload,Worker: Zero strings, zero Atomics, zero TLS on hot path
+    Worker->>Table: on_upstream_request(&req, &mut target_upstream)
+    Worker->>Worker: *target_upstream = self.canary_upstream_id and Action::Continue
 ```
 
-### Fail-Safe Sentinel (`u16::MAX`) & Strict Missing-Header Safety
-- `CanaryPlugin::new` initializes `canary_upstream_id` to `u16::MAX` (`UNASSIGNED_UPSTREAM_ID`). If unwired, `on_upstream_request` leaves `*target_upstream` untouched.
+### Core-First Construction & Fail-Safe Missing-Header Policy
+- Because `velda-sync` and `velda-edge` load core `upstreams` before ecosystem `plugins`, `CanaryPlugin` resolves `"canary_upstream"` straight into an immutable `u16` (`canary_upstream_id`) at instantiation — no `Arc<str>`, no `AtomicU16`, and no `u16::MAX` runtime guard.
 - If **any** header in `hash_headers` is absent or whitespace-only when rules miss, `evaluate_permille()` returns `None` immediately via `?`, leaving the request on its default baseline upstream (`*target_upstream` unchanged). Because no PRNG fallback exists, anomalous or unauthenticated requests never leak randomly into canary.
 
 ---
@@ -94,4 +92,4 @@ pub const fn hash_to_permille(hash: u64) -> u32 {
 | `validation.rs` | Strict JSON schema (`CanarySchemaConfig` with `#[serde(deny_unknown_fields)]`), `ratio` in `1..=999`, non-empty `hash_headers` + RFC 9110 `HeaderName` validation. |
 | `config.rs` | Zero-allocation runtime representation (`CanaryConfig`, `HeaderRule`, `RuleOperator`). |
 | `hash.rs` | Pure stateless `swar_hash64`, `hash_to_permille`, and fail-safe `evaluate_permille` (`Option<u32>`). |
-| `plugin.rs` | `CanaryPlugin` state (`AtomicU16`), `HeaderWorkspace` read matching, `PreUpstreamPlugin` hot-path execution. |
+| `plugin.rs` | `CanaryPlugin` immutable `canary_upstream_id: u16`, `HeaderWorkspace` read matching, `PreUpstreamPlugin` hot-path execution. |

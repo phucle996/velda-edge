@@ -4,7 +4,7 @@
 
 | Scope | Location | Verified Invariants | Command |
 | :--- | :--- | :--- | :--- |
-| **Plugin Behavior & Strict Boundaries (3 tests)** | `crates/velda-plugin/src/pre_upstream/canary/plugin.rs` | 1. All 5 header rules force canary even when `hash_headers` are absent; missing/partial/blank `hash_headers` stay 100% deterministically on baseline (`0` PRNG fallback); `AccessLevel::Read` preserves headers verbatim.<br>2. Multi-header (`["x-tenant-id", "x-user-id"]`) 20,000-pair distribution matches `125‰`, and increasing `ratio` `125 -> 350` keeps 100% of prior canary users pinned.<br>3. Rejects `ratio: 0`, `ratio: 1000`, `ratio: 1001`, empty `hash_headers: []`, unknown legacy field (`hash_strategy`), and whitespace rule values; verifies `wire_plugin_upstreams()` resolution. | `cargo test -p velda-plugin --lib canary` |
+| **Plugin Behavior & Strict Boundaries (3 tests)** | `crates/velda-plugin/src/pre_upstream/canary/plugin.rs` | 1. All 5 header rules force canary even when `hash_headers` are absent; missing/partial/blank `hash_headers` stay 100% deterministically on baseline (`0` PRNG fallback); `AccessLevel::Read` preserves headers verbatim.<br>2. Multi-header (`["x-tenant-id", "x-user-id"]`) 20,000-pair distribution matches `125‰`, and increasing `ratio` `125 -> 350` keeps 100% of prior canary users pinned.<br>3. Rejects `ratio: 0`, `ratio: 1000`, `ratio: 1001`, empty `hash_headers: []`, unknown legacy field (`hash_strategy`), and whitespace rule values; rejects missing target upstream and resolves dense `u16` index directly inside `CanaryPlugin::from_config`. | `cargo test -p velda-plugin --lib canary` |
 | **Schema Validation (138 tests)** | `crates/velda-plugin/src/pre_upstream/canary/validation.rs` & `validation` module | Full pre-sync config validation suite (`CanarySchemaConfig` with `#[serde(deny_unknown_fields)]`). | `cargo test -p velda-plugin --lib validation` |
 | **Edge Runtime Wiring (3 tests)** | `crates/velda-edge/src/runtime/plugin.rs` | Plugin table assembly and upstream wiring invariants. | `cargo test -p velda-edge --lib runtime::plugin` |
 | **Hot-Path ASM Invariant** | `target/release/deps/velda_plugin-*.s` | Confirms `0` `alloc::*` heap calls, `0` `divq`, `0` `ud2`, `0` `lock *`, `0` TLS lookups (`__tls_get_addr`), and BMI2 `mulxq $1000` in `CanaryPlugin::on_upstream_request`. | `audit_asm.py <file.s> --symbol ...` |
@@ -16,8 +16,8 @@
 | Test Case | Verified Component | Result |
 | :--- | :--- | :--- |
 | **Canary Canonical ID Rejection** | `velda-sync` (`plugins.json`) | Rejected non-canonical `"id": "canary_main"` safely while preserving LKG state (`Unknown plugin ID 'canary_main'`). |
-| **Dense `u16` Index Resolution** | `velda-plugin::wire_plugin_upstreams` + `velda-edge/src/runtime/plugin.rs` | Resolved `backend-canary` -> `upstream_id=1` at boot (`revision=1`) when placed second in `upstreams.json`. |
-| **Adversarial Hot-Reload Re-Index** | `velda-edge/src/reload.rs` | Reordered `upstreams.json` placing `backend-canary` at index `0` and `backend-base` at index `1` (`revision=3`). Edge reloaded atomically, logged `upstream_id=0`, and routed rule-miss -> `:18081` (`base`) and rule-hit -> `:18091` (`canary`). |
+| **Dense `u16` Direct Construction** | `velda-plugin::instantiate_plugin` + `velda-edge/src/runtime/plugin.rs` | Resolved `backend-canary` -> plain `canary_upstream_id: u16` directly at `CanaryPlugin::from_config` after core `upstreams` load. |
+| **Core-First Sync Validation** | `velda-sync/src/sync.rs` | Reconciles `listeners -> upstreams -> tls/etp -> routes -> plugins` and rejects orphan `canary_upstream` references in `velda-sync` before publication. |
 
 ---
 

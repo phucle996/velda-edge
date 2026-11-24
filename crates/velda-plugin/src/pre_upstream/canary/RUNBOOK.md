@@ -32,15 +32,9 @@ Increment `manifest.json` `revision` alongside `plugins.json` updates so `velda-
 
 ## 3. Verifying Live Activation & Wiring
 
-### Inspect Edge Logs
-On startup or reload of `plugins` or `upstreams`, `velda-edge` logs dense upstream index resolution:
+On startup or reload of `plugins` or `upstreams`, `velda-edge` resolves `canary_upstream` directly against the already-loaded `upstreams` core table inside `build_plugin_table()` and logs the atomic runtime swap (`successfully reloaded runtime state via atomic swap ... changed_domains=["plugins"]`). If `upstreams.json` is reordered, `velda-edge` rebuilds `PluginTable` with the updated `u16` index automatically.
 
-```text
-INFO Wired dense upstream index for canary plugin plugin_id=canary canary_upstream=backend-canary upstream_id=1
-INFO Successfully reloaded runtime state via atomic swap revision=2 changed_domains=["plugins"] listeners_changed=false
-```
-
-Notice `upstream_id` tracks the position of `canary_upstream` in `upstreams.json`. If `upstreams.json` is reordered (`backend-canary` moved to index `0`), `velda-edge` automatically rebuilds `PluginTable` and re-wires `upstream_id=0`.
+Cross-domain existence of `canary_upstream` is also validated before publication inside `velda-sync` (`sync.rs` reconciles core domains `listeners -> upstreams -> tls/etp -> routes` prior to `plugins`), preserving LKG if a canary rule references an unknown upstream ID.
 
 ### Probe Deterministic, Rule & Missing-Header Safety
 ```bash
@@ -64,5 +58,5 @@ done
 | :--- | :--- | :--- |
 | **`ratio (0)` or `ratio (1000) must be between 1 and 999`** in `velda-sync` | `ratio` set outside `1..=999`. | Use `1..=999` for active canary, or disable plugin / remove `"canary"` from `route.plugins` for `0%`, or update `route.upstream` directly for `100%`. LKG keeps running safely. |
 | **`hash_headers cannot be empty`** or **`unknown field 'hash_strategy'`** | Legacy schema or empty `hash_headers`. | Supply non-empty `hash_headers` (e.g., `["x-user-id"]`) and remove legacy `hash_strategy`. |
-| **Traffic stays 100% on baseline despite `ratio > 0`** | Requests are missing one of the configured `hash_headers`, or `canary_upstream` ID does not exist in `upstreams.json` (`u16::MAX` sentinel). | Check client / JWT claim headers arrive in `HeaderWorkspace` and verify `Wired dense upstream index` log entry in `edge.log`. |
+| **Canary fails sync/edge validation with `does not exist in upstreams`** | `canary_upstream` ID does not match any entry in `upstreams.json`. | Verify exact string match against `upstreams[].id`; `velda-sync` and `velda-edge` reject invalid references while preserving LKG. |
 | **Elevated 5xx or latency from canary backend** | Regression in canary deployment. | **Instant Rollback**: Set `"enabled": false` in `plugins.json` or remove `"canary"` from `route.plugins`. Atomic LKG swap routes 100% back to baseline without dropping active connections. |

@@ -20,7 +20,7 @@ Audited via `audit_asm.py` on release assembly (`target/release/deps/velda_plugi
 
 | Function Symbol | Total Insts | Heap Allocs (`alloc::*`) | Unaligned Vector Stores | Jump Tables (`jmpq *%reg`) | Atomic Bus Locks (`lock *`) | `divq` / `ud2` / TLS | Fixed-Point Lowering |
 | :--- | :---: | :---: | :---: | :---: | :---: | :---: | :--- |
-| **`CanaryPlugin::on_upstream_request`** (inlined `evaluate_permille`) | `582` | **0** | **0** | `1` (`RuleOperator` 5-arm match) | **0** | **0 / 0 / 0** | `mulxq %rax, %rax, %rax` (`$1000`) |
+| **`CanaryPlugin::on_upstream_request`** (inlined `evaluate_permille`) | `580` | **0** | **0** | `1` (`RuleOperator` 5-arm match) | **0** | **0 / 0 / 0** | `mulxq %rax, %rax, %rax` (`$1000`) |
 
 ---
 
