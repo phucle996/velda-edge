@@ -9,8 +9,9 @@ use std::sync::Arc;
 use http::StatusCode;
 use http::header::{CONTENT_TYPE, HeaderValue};
 use velda_core::{L7Request, L7Response};
-use velda_http2::server::{Http2Responder, Http2ServerRequestHead, Http2StreamReceiver};
-use velda_http3::sanitize_headers;
+use velda_http2::server::request::{Http2ServerRequestHead, Http2StreamReceiver};
+use velda_http2::server::response::Http2Responder;
+use velda_http3::headers::sanitize_headers;
 
 use crate::pipeline::{DownstreamMeta, PipeOutcome};
 use crate::upstream::Http3Upstream;
@@ -39,14 +40,14 @@ pub async fn serve(
             let _ = responder.send_response(&err_resp);
             return PipeOutcome::http(
                 responder.last_status,
-                receiver.bytes_received() as u64,
+                receiver.bytes_received as u64,
                 responder.last_bytes_tx,
                 None,
                 velda_core::CompletionReason::Rejected,
             );
         }
     };
-    let bytes_rx = receiver.bytes_received() as u64;
+    let bytes_rx = receiver.bytes_received as u64;
 
     // 2. Sanitize connection-specific headers forbidden by RFC 9114 §4.2
     sanitize_headers(&mut req_head.headers);
@@ -90,7 +91,7 @@ pub async fn serve(
     let mut upstream_addr = Some(client.target());
 
     // 5. Send request directly with self-healing on connection close
-    let mut pipe_res = client.send_request_ref(&l7_req).await;
+    let mut pipe_res = client.send_request(l7_req.clone()).await;
     let mut _fresh_lease_guard = None;
     if pipe_res
         .as_ref()

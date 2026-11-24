@@ -9,8 +9,8 @@ use tokio::io::{AsyncReadExt, AsyncWriteExt};
 
 use velda_connection_pool::{PoolConfig, PoolManager, PoolableResource};
 use velda_core::StreamingMode;
-use velda_http1::Http1PipeStrategy;
-pub use velda_http1::UpstreamHttp1Stream;
+pub use velda_http1::client::connector::UpstreamHttp1Stream;
+use velda_http1::strategy::Http1PipeStrategy;
 use velda_tls::TlsClientEngine;
 
 use crate::error::EdgeError;
@@ -390,7 +390,7 @@ impl Http1Upstream {
                     ));
                 }
 
-                let stream = velda_http1::client::connect(
+                let stream = velda_http1::client::connector::connect(
                     endpoint.0,
                     endpoint.1,
                     tls,
@@ -437,7 +437,7 @@ impl Http1Upstream {
         let (stream, endpoint) = self
             .inner
             .execute(|endpoint| async move {
-                let stream = velda_http1::client::connect(
+                let stream = velda_http1::client::connector::connect(
                     endpoint.0,
                     endpoint.1,
                     tls,
@@ -497,7 +497,7 @@ impl Http1Upstream {
                         .map(|(engine, sni)| (engine.as_ref(), sni.as_ref()));
                     let connect_timeout = self.inner.timeouts().connect;
 
-                    match velda_http1::client::connect(
+                    match velda_http1::client::connector::connect(
                         addr.0,
                         addr.1,
                         tls_ref,
@@ -576,8 +576,13 @@ impl Http1Upstream {
                     Some(res) => (res.stream, true),
                     None => {
                         let tls_ref = self.tls.as_ref().map(|(e, s)| (e.as_ref(), s.as_ref()));
-                        match velda_http1::client::connect(addr.0, addr.1, tls_ref, Some(timeout))
-                            .await
+                        match velda_http1::client::connector::connect(
+                            addr.0,
+                            addr.1,
+                            tls_ref,
+                            Some(timeout),
+                        )
+                        .await
                         {
                             Ok(s) => (s, false),
                             Err(_) => {

@@ -183,8 +183,8 @@ impl HttpUpstream {
     #[inline]
     pub fn is_streaming(&self) -> bool {
         match self {
-            Self::Http1(u) => u.strategy != velda_http1::Http1PipeStrategy::Buffered,
-            Self::Http2(u) => u.strategy != velda_http2::Http2PipeStrategy::Buffered,
+            Self::Http1(u) => u.strategy != velda_http1::strategy::Http1PipeStrategy::Buffered,
+            Self::Http2(u) => u.strategy != velda_http2::strategy::Http2PipeStrategy::Buffered,
             Self::Http3(_) => false,
         }
     }
@@ -297,15 +297,15 @@ impl UpstreamTable {
         for grpc_up in self.grpc.values() {
             match grpc_up.as_ref() {
                 GrpcUpstream::Tcp(u) => {
-                    let cfg = velda_grpc::GrpcConfig::default();
+                    let cfg = velda_grpc::config::GrpcConfig::default();
                     u.prewarm_lane(lane, &cfg).await;
                 }
                 GrpcUpstream::Udp(u) => {
-                    let cfg = velda_grpc::GrpcConfig::default();
+                    let cfg = velda_grpc::config::GrpcConfig::default();
                     u.prewarm_lane(lane, &cfg).await;
                 }
                 GrpcUpstream::Rdma(u) => {
-                    let cfg = velda_grpc::GrpcConfig::default();
+                    let cfg = velda_grpc::config::GrpcConfig::default();
                     u.prewarm_lane(lane, &cfg).await;
                 }
             }

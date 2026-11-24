@@ -14,14 +14,6 @@ use crate::pipeline::PipeOutcome;
 use crate::pipeline::http3::engine::Http3Responder;
 use crate::upstream::Http2Upstream;
 
-/// Minimum batching threshold for HTTP/2 WINDOW_UPDATE frame emission (32 KB).
-/// Prevents micro-frame thrashing on small response chunk reads.
-const MIN_H2_WINDOW_UPDATE_BATCH: usize = 32 * 1024;
-
-/// Maximum batching threshold for HTTP/2 WINDOW_UPDATE frame emission (256 KB).
-/// Ensures upstream HTTP/2 connection credit is returned in time to prevent pipe stall.
-const MAX_H2_WINDOW_UPDATE_BATCH: usize = 256 * 1024;
-
 /// Serves a full-duplex HTTP/3 downstream request bridged to an HTTP/2 backend.
 pub async fn serve(
     req: &L7Request,
@@ -29,10 +21,7 @@ pub async fn serve(
     upstream: &Arc<Http2Upstream>,
     plan: &Arc<RoutePluginPlan>,
 ) -> PipeOutcome {
-    let mut headers = req.headers.clone().into_inner();
-    velda_http2::client::sanitize_h2_headers(&mut headers);
-
-    let (mut client, lease) = match upstream.acquire(&upstream.config).await {
+    let (client, lease) = match upstream.acquire(&upstream.config).await {
         Ok(c) => c,
         Err(e) => {
             tracing::warn!(
@@ -61,18 +50,19 @@ pub async fn serve(
     let mut upstream_addr = Some(lease.endpoint);
     let mut lease = Some(lease);
 
-    let mut h2_req = http::Request::builder()
-        .method(req.method.clone())
-        .uri(req.uri.clone())
-        .version(Version::HTTP_2);
-    *h2_req.headers_mut().unwrap() = headers.clone();
-    let h2_req = h2_req.body(()).unwrap();
-
     let has_body = !req.body.is_empty();
 
-    let (response_fut, mut send_stream) = match client.send_request(h2_req, !has_body) {
+    let (response_fut, mut send_stream) = match client
+        .send_request(
+            req.method.clone(),
+            req.uri.clone(),
+            req.headers.clone(),
+            !has_body,
+        )
+        .await
+    {
         Ok(res) => res,
-        Err(e) if is_h2_refused_or_goaway(&e) => {
+        Err(e) if e.is_refused_or_goaway() => {
             if let Some(l) = lease.take() {
                 l.mark_goaway();
             }
@@ -81,17 +71,18 @@ pub async fn serve(
                 "HTTP/2 stream refused; self-healing with fresh connection"
             );
             match upstream.acquire_fresh(&upstream.config).await {
-                Ok((mut fresh_client, fresh_lease)) => {
+                Ok((fresh_client, fresh_lease)) => {
                     upstream_addr = Some(fresh_lease.endpoint);
                     lease = Some(fresh_lease);
-                    let mut fresh_req = http::Request::builder()
-                        .method(req.method.clone())
-                        .uri(req.uri.clone())
-                        .version(Version::HTTP_2);
-                    *fresh_req.headers_mut().unwrap() = headers;
-                    let fresh_req = fresh_req.body(()).unwrap();
-
-                    match fresh_client.send_request(fresh_req, !has_body) {
+                    match fresh_client
+                        .send_request(
+                            req.method.clone(),
+                            req.uri.clone(),
+                            req.headers.clone(),
+                            !has_body,
+                        )
+                        .await
+                    {
                         Ok(res) => res,
                         Err(e) => {
                             tracing::warn!(
@@ -166,7 +157,7 @@ pub async fn serve(
         let _ = send_stream.send_data(req.body.to_bytes(), true);
     }
 
-    let response = match response_fut.await {
+    let mut response = match response_fut.await {
         Ok(r) => r,
         Err(e) => {
             if let Some(l) = lease.as_mut() {
@@ -196,26 +187,24 @@ pub async fn serve(
         }
     };
 
-    let (mut parts, mut body_stream) = response.into_parts();
-
+    let mut resp_ws = response.headers;
     if let Some(post_hooks) = &plan.post_response_hooks {
-        let mut l7_resp =
-            L7Response::new(parts.status, Version::HTTP_3, parts.headers, Body::Empty);
+        let mut l7_resp = L7Response::new(response.status, Version::HTTP_3, resp_ws, Body::Empty);
         velda_plugin::run_post_response_plugins(post_hooks, &req.headers, &mut l7_resp);
-        parts.status = l7_resp.status;
-        parts.headers = l7_resp.headers.into();
+        response.status = l7_resp.status;
+        resp_ws = l7_resp.headers;
     }
 
     let is_head = req.method == http::Method::HEAD;
-    let is_no_body = parts.status.is_informational()
-        || parts.status == StatusCode::NO_CONTENT
-        || parts.status == StatusCode::NOT_MODIFIED;
+    let is_no_body = response.status.is_informational()
+        || response.status == StatusCode::NO_CONTENT
+        || response.status == StatusCode::NOT_MODIFIED;
 
     if is_head || is_no_body {
-        let resp = L7Response::new(parts.status, Version::HTTP_3, parts.headers, Body::Empty);
+        let resp = L7Response::new(response.status, Version::HTTP_3, resp_ws, Body::Empty);
         let _ = responder.send_response(resp).await;
         return PipeOutcome::http(
-            parts.status.as_u16(),
+            response.status.as_u16(),
             req.body.len() as u64,
             0,
             upstream_addr,
@@ -224,7 +213,7 @@ pub async fn serve(
     }
 
     let mut stream_sender = match responder
-        .send_stream_response(parts.status, &parts.headers)
+        .send_stream_response(response.status, &resp_ws)
         .await
     {
         Ok(s) => s,
@@ -235,7 +224,7 @@ pub async fn serve(
                 "Failed to initiate downstream HTTP/3 streaming response for duplex bridge"
             );
             return PipeOutcome::http(
-                parts.status.as_u16(),
+                response.status.as_u16(),
                 req.body.len() as u64,
                 0,
                 upstream_addr,
@@ -244,55 +233,28 @@ pub async fn serve(
         }
     };
 
-    // RFC 9113 §5.2.2: Batch WINDOW_UPDATE frames at 1/4th of initial stream window size.
-    let batch_threshold = (upstream.config.initial_stream_window_size as usize / 4)
-        .clamp(MIN_H2_WINDOW_UPDATE_BATCH, MAX_H2_WINDOW_UPDATE_BATCH);
-    let mut unreleased_bytes = 0;
     let mut failed = false;
-
-    while let Some(chunk) = body_stream.data().await {
-        let data = match chunk {
+    while let Some(chunk_res) = response.body.recv_chunk().await.transpose() {
+        let data = match chunk_res {
             Ok(d) => d,
             Err(e) => {
                 tracing::warn!(error = %e, "HTTP/2 upstream body stream error in duplex bridge");
-                let _ = body_stream
-                    .flow_control()
-                    .release_capacity(unreleased_bytes);
                 failed = true;
                 break;
             }
         };
 
-        let len = data.len();
-        unreleased_bytes += len;
-
         if stream_sender.send_chunk(data).await.is_err() {
             tracing::debug!("Downstream client disconnected during H3 duplex streaming");
-            let _ = body_stream
-                .flow_control()
-                .release_capacity(unreleased_bytes);
             failed = true;
             break;
         }
-
-        if unreleased_bytes >= batch_threshold {
-            let _ = body_stream
-                .flow_control()
-                .release_capacity(unreleased_bytes);
-            unreleased_bytes = 0;
-        }
-    }
-
-    if unreleased_bytes > 0 {
-        let _ = body_stream
-            .flow_control()
-            .release_capacity(unreleased_bytes);
     }
 
     let bytes_tx = stream_sender.bytes_sent();
     let _ = stream_sender.finish().await;
     PipeOutcome::http(
-        parts.status.as_u16(),
+        response.status.as_u16(),
         req.body.len() as u64,
         bytes_tx,
         upstream_addr,
@@ -302,9 +264,4 @@ pub async fn serve(
             velda_core::CompletionReason::Complete
         },
     )
-}
-
-#[inline]
-fn is_h2_refused_or_goaway(err: &h2::Error) -> bool {
-    (err.is_reset() && err.reason() == Some(h2::Reason::REFUSED_STREAM)) || err.is_go_away()
 }

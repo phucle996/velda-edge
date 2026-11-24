@@ -2352,7 +2352,6 @@ name = "velda-grpc"
 version = "0.1.0"
 dependencies = [
  "bytes",
- "h2",
  "http",
  "libc",
  "quinn-proto",
@@ -2361,6 +2360,7 @@ dependencies = [
  "tokio",
  "tracing",
  "velda-core",
+ "velda-http2",
  "velda-sock",
  "velda-tls",
 ]
@@ -2371,7 +2371,6 @@ version = "0.1.0"
 dependencies = [
  "bytes",
  "http",
- "httparse",
  "itoa",
  "libc",
  "memchr",
@@ -2391,6 +2390,7 @@ dependencies = [
  "h2",
  "http",
  "libc",
+ "memchr",
  "thiserror",
  "tokio",
  "tracing",

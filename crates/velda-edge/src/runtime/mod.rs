@@ -105,7 +105,7 @@ pub struct Runtime {
     /// Thread-safe resource saturation and overload circuit breaker.
     pub overload: Arc<OverloadTracker>,
     /// Pre-warmed sharded user-space buffer and object pool for zero-allocation serving.
-    pub buffer_pool: Arc<velda_core::buffer::ShardedBufferPool>,
+    pub buffer_pool: Arc<velda_core::buffer::pool::ShardedBufferPool>,
     /// External Third-Party (ETP) connection pool registry with Make-Before-Break reload.
     pub etp_table: Arc<velda_etp::EtpRegistry>,
 }

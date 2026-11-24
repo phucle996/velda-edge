@@ -222,7 +222,7 @@ fn test_lkg_json_fallback_on_old_compiler_version() {
 async fn test_http1_unified_log_trace_sampling_and_exact_metrics() {
     use tokio::io::{AsyncReadExt, AsyncWriteExt};
     use velda_core::StreamingMode;
-    use velda_http1::Http1Config;
+    use velda_http1::config::Http1Config;
     use velda_observability::sampling::http::HttpSampling;
     use velda_observability::{global_metrics, global_telemetry_store, set_current_worker_lane};
     use velda_sock::Connection;
@@ -252,16 +252,18 @@ async fn test_http1_unified_log_trace_sampling_and_exact_metrics() {
     let rt_shared = velda_edge::runtime::new_shared_runtime(velda_edge::Runtime::empty());
 
     let drop_sampling = HttpSampling::from_rates(0.0, 0.0, 0.0, 0.0, 1.0, Some(0.0));
-    let server_task = tokio::spawn(velda_edge::pipeline::http1::handle_http1_stream(
-        conn_drop,
-        "test-drop".into(),
-        Http1Config::default(),
-        false,
-        StreamingMode::DISABLED,
-        None,
-        drop_sampling,
-        rt_shared.clone(),
-    ));
+    let server_task = tokio::spawn(
+        velda_edge::pipeline::http1::downstream::handle_http1_stream(
+            conn_drop,
+            "test-drop".into(),
+            Http1Config::default(),
+            false,
+            StreamingMode::DISABLED,
+            None,
+            drop_sampling,
+            rt_shared.clone(),
+        ),
+    );
 
     client
         .write_all(b"GET /unmatched HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n\r\n")
@@ -294,16 +296,18 @@ async fn test_http1_unified_log_trace_sampling_and_exact_metrics() {
     let mut client2 = client_res2.unwrap();
     let (server_keep, _) = accept_res2.unwrap();
     let conn_keep = Connection::from_stream(server_keep).unwrap();
-    let server_task2 = tokio::spawn(velda_edge::pipeline::http1::handle_http1_stream(
-        conn_keep,
-        "test-keep".into(),
-        Http1Config::default(),
-        false,
-        StreamingMode::DISABLED,
-        None,
-        HttpSampling::keep_all(),
-        rt_shared,
-    ));
+    let server_task2 = tokio::spawn(
+        velda_edge::pipeline::http1::downstream::handle_http1_stream(
+            conn_keep,
+            "test-keep".into(),
+            Http1Config::default(),
+            false,
+            StreamingMode::DISABLED,
+            None,
+            HttpSampling::keep_all(),
+            rt_shared,
+        ),
+    );
 
     client2
         .write_all(b"GET /unmatched HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n\r\n")

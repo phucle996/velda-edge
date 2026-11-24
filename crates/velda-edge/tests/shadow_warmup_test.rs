@@ -167,7 +167,7 @@ async fn test_http2_shadow_worker_warmup_end_to_end() {
 
     let h2_upstream = Http2Upstream::new(edge_upstream, None, StreamingMode::DISABLED, 4, 4, 100);
 
-    let config = velda_http2::Http2Config::auto();
+    let config = velda_http2::config::Http2Config::auto();
 
     // Initial state: lane 0 has 0 multiplexed connections
     assert_eq!(

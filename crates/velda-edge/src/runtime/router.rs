@@ -123,13 +123,16 @@ pub fn build_router(
                                 route.id, route.listener
                             ),
                         })?;
-                    match listener.application.protocol.to_ascii_lowercase().as_str() {
-                        "http" => "http",
-                        "http1" => "http1",
-                        "http2" => "http2",
-                        "http3" => "http3",
-                        "grpc" => "grpc",
-                        other => {
+                    match (
+                        listener.transport.protocol.to_ascii_lowercase().as_str(),
+                        listener.application.protocol.to_ascii_lowercase().as_str(),
+                    ) {
+                        ("udp", "http") | (_, "http3") => "http3",
+                        (_, "http") => "http",
+                        (_, "http1") => "http1",
+                        (_, "http2") => "http2",
+                        (_, "grpc") => "grpc",
+                        (_, other) => {
                             return Err(EdgeError::InvalidConfig {
                                 detail: format!(
                                     "route '{}': listener '{}' has non-L7 protocol '{}'",
@@ -530,5 +533,75 @@ mod tests {
                 .route_udp(velda_core::fnv1a_hash_32("unknown"))
                 .is_none()
         );
+    }
+
+    #[test]
+    fn test_udp_http_listener_registers_http3_route() {
+        let listeners = vec![ListenerConfig {
+            id: "h3-in".into(),
+            address: "0.0.0.0:8444".into(),
+            transport: ListenerTransportConfig {
+                protocol: "udp".into(),
+            },
+            application: ListenerApplicationConfig {
+                protocol: "http".into(),
+                version: None,
+                streaming: velda_sync::StreamingMode::DISABLED,
+            },
+            tls: ListenerTlsConfig { enabled: true },
+            http1: None,
+            http2: None,
+            grpc: None,
+            http3: None,
+            raw: None,
+            observability: None,
+        }];
+        let routes = vec![RouteConfig {
+            id: "h3-default".into(),
+            kind: "l7".into(),
+            listener: "h3-in".into(),
+            match_rule: RouteMatch {
+                path_prefix: Some("/".into()),
+                ..Default::default()
+            },
+            upstream: "backend-http1".into(),
+            plugins: vec![],
+            timeouts: RouteTimeouts::default(),
+            session_affinity: None,
+        }];
+        let upstreams = vec![UpstreamConfig {
+            id: "backend-http1".into(),
+            mode: "endpoints".into(),
+            protocol: UpstreamProtocolConfig {
+                transport: "tcp".into(),
+                application: "http1".into(),
+                streaming: velda_sync::StreamingMode::DISABLED,
+            },
+            target: None,
+            resolver: None,
+            endpoints: vec![EndpointConfig {
+                address: "127.0.0.1:8081".into(),
+                weight: 100,
+            }],
+            load_balancer: LoadBalancerConfig {
+                algorithm: "round_robin".into(),
+            },
+            timeouts: UpstreamTimeouts {
+                connect_ms: 500,
+                idle_ms: 30000,
+                request_ms: Some(5000),
+            },
+            health_check: None,
+            tls: None,
+            pool: None,
+            buffer: None,
+        }];
+
+        let router = build_router(&routes, &upstreams, &listeners).unwrap();
+        let req = velda_router::Http3RouteRequest::new("/api/v1/health");
+        let matched = router
+            .route_http3(velda_core::fnv1a_hash_32("h3-in"), &req)
+            .expect("UDP http listener must register into Http3Router");
+        assert_eq!(matched.id, 0);
     }
 }

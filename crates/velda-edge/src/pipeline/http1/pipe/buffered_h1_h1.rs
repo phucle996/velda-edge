@@ -31,11 +31,13 @@ use std::sync::Arc;
 use http::StatusCode;
 use http::header::{CONTENT_TYPE, HeaderValue};
 use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt};
-use velda_http1::{
-    Http1BodyFraming, Http1Error, Http1ServerConnection, Http1ServerRequest,
-    Http1ServerRequestHead, Http1ServerResponse, is_connection_close, read_response_head,
-    sanitize_headers, send_request,
-};
+use velda_http1::client::header::sanitize_headers;
+use velda_http1::client::request::send_request_parts;
+use velda_http1::client::response::read_response_head;
+use velda_http1::error::Http1Error;
+use velda_http1::server::connection::Http1ServerConnection;
+use velda_http1::server::request::{Http1BodyFraming, Http1ServerRequest, Http1ServerRequestHead};
+use velda_http1::server::response::{Http1ServerResponse, is_connection_close};
 
 use crate::pipeline::DownstreamMeta;
 use crate::upstream::{Http1Upstream, LeaseGuard};
@@ -76,7 +78,7 @@ where
                 CONTENT_TYPE,
                 HeaderValue::from_static("text/plain; charset=utf-8"),
             );
-            conn.mark_close();
+            conn.close_requested = true;
             let _ = conn.send_response(&err_resp).await;
             return Err(Http1Error::Timeout);
         }
@@ -89,7 +91,7 @@ where
                 CONTENT_TYPE,
                 HeaderValue::from_static("text/plain; charset=utf-8"),
             );
-            conn.mark_close();
+            conn.close_requested = true;
             let _ = conn.send_response(&err_resp).await;
             return Err(e);
         }
@@ -112,7 +114,7 @@ where
                 CONTENT_TYPE,
                 HeaderValue::from_static("text/plain; charset=utf-8"),
             );
-            conn.mark_close();
+            conn.close_requested = true;
             let _ = conn.send_response(&err_resp).await;
             return Err(Http1Error::ConnectionClosed);
         }
@@ -122,7 +124,13 @@ where
 
     let cfg = *conn.config();
     let req_timeout = upstream.request_timeout();
-    let mut req = Http1ServerRequest::from_parts(req_head, body);
+    let mut req = Http1ServerRequest {
+        method: req_head.method,
+        uri: req_head.uri,
+        version: req_head.version,
+        headers: req_head.headers,
+        body,
+    };
     sanitize_headers(&mut req.headers);
 
     // 5. Execute full Upstream transaction guarded by an authoritative end-to-end deadline
@@ -132,7 +140,15 @@ where
         // Send request and read response head with self-healing retry on stale pooled connection
         let (mut resp_head, resp_framing) = {
             let attempt = async {
-                send_request(&req, &mut *lease_guard, &mut conn.upstream_write_buf).await?;
+                send_request_parts(
+                    &req.method,
+                    &req.uri,
+                    &req.headers,
+                    &req.body,
+                    &mut *lease_guard,
+                    &mut conn.upstream_write_buf,
+                )
+                .await?;
                 read_response_head(&mut *lease_guard, &mut conn.upstream_read_buf, &cfg).await
             };
 
@@ -148,8 +164,15 @@ where
                         Ok(mut fresh_lease) => {
                             fresh_endpoint = Some(fresh_lease.endpoint);
                             let retry_attempt = async {
-                                send_request(&req, &mut *fresh_lease, &mut conn.upstream_write_buf)
-                                    .await?;
+                                send_request_parts(
+                                    &req.method,
+                                    &req.uri,
+                                    &req.headers,
+                                    &req.body,
+                                    &mut *fresh_lease,
+                                    &mut conn.upstream_write_buf,
+                                )
+                                .await?;
                                 read_response_head(
                                     &mut *fresh_lease,
                                     &mut conn.upstream_read_buf,
@@ -272,7 +295,7 @@ where
                 CONTENT_TYPE,
                 HeaderValue::from_static("text/plain; charset=utf-8"),
             );
-            conn.mark_close();
+            conn.close_requested = true;
             let _ = conn.send_response(&err_resp).await;
             return Err(Http1Error::Timeout);
         }
@@ -317,12 +340,9 @@ where
             std::mem::take(&mut resp_head.headers),
             initial_body,
         );
-        // Fast-path guard: Bypasses HeaderWorkspace instantiation & plugin dispatch if route has no hooks.
-        // HeaderMap::clone() clones atomic pointer handles (Bytes) in O(1) without copying string payloads.
-        let req_ws = velda_core::HeaderWorkspace::from_headers(req.headers.clone());
-        velda_plugin::run_post_response_plugins(post_hooks, &req_ws, &mut l7_resp);
+        velda_plugin::run_post_response_plugins(post_hooks, &req.headers, &mut l7_resp);
         resp_head.status = l7_resp.status;
-        resp_head.headers = l7_resp.headers.into();
+        resp_head.headers = l7_resp.headers;
         if l7_resp.body.is_empty() {
             None
         } else {
@@ -342,11 +362,11 @@ where
     } else {
         body_len
     };
-    let force_close = conn.is_closed() || is_connection_close(&resp_head.headers);
+    let force_close = conn.close_requested || is_connection_close(&resp_head.headers);
 
     // 9. Encode response head into downstream write_buf with authoritative request ID invariant
     conn.write_buf.clear();
-    conn.encode_response_head(
+    conn.encode_head(
         resp_head.version,
         resp_head.status,
         &resp_head.headers,
@@ -393,7 +413,7 @@ where
     conn.write_buf.clear();
 
     if force_close {
-        conn.mark_close();
+        conn.close_requested = true;
     }
 
     Ok(())

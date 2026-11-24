@@ -21,12 +21,9 @@ pub async fn serve(
     Option<(u128, u16)>,
     velda_core::CompletionReason,
 ) {
-    let mut headers = req.headers.clone().into_inner();
-    velda_http2::client::sanitize_h2_headers(&mut headers);
-
     let body_bytes = req.body.to_bytes();
 
-    let (mut client, lease) = match upstream.acquire(&upstream.config).await {
+    let (client, lease) = match upstream.acquire(&upstream.config).await {
         Ok(c) => c,
         Err(e) => {
             tracing::warn!(
@@ -50,10 +47,10 @@ pub async fn serve(
     };
     let mut upstream_addr = Some(lease.endpoint);
 
-    let mut pipe_res = send_h2_buffered(&mut client, req, &headers, &body_bytes).await;
+    let mut pipe_res = send_h2_buffered(&client, req, &body_bytes).await;
     let mut _fresh_lease_guard = None;
     if let Err(ref e) = pipe_res
-        && is_h2_refused_or_goaway(e)
+        && e.is_refused_or_goaway()
     {
         lease.mark_goaway();
         drop(lease);
@@ -61,10 +58,9 @@ pub async fn serve(
             upstream = %upstream.id(),
             "HTTP/2 stream refused or connection closed; self-healing with fresh connection"
         );
-        if let Ok((mut fresh_client, fresh_lease)) = upstream.acquire_fresh(&upstream.config).await
-        {
+        if let Ok((fresh_client, fresh_lease)) = upstream.acquire_fresh(&upstream.config).await {
             upstream_addr = Some(fresh_lease.endpoint);
-            pipe_res = send_h2_buffered(&mut fresh_client, req, &headers, &body_bytes).await;
+            pipe_res = send_h2_buffered(&fresh_client, req, &body_bytes).await;
             if pipe_res.is_err() {
                 fresh_lease.mark_goaway();
             }
@@ -97,49 +93,40 @@ pub async fn serve(
 }
 
 async fn send_h2_buffered(
-    client: &mut h2::client::SendRequest<bytes::Bytes>,
+    client: &velda_http2::client::connection::Http2Client,
     req: &L7Request,
-    headers: &http::HeaderMap,
     body: &bytes::Bytes,
-) -> Result<L7Response, h2::Error> {
-    let mut h2_req = http::Request::builder()
-        .method(req.method.clone())
-        .uri(req.uri.clone())
-        .version(http::Version::HTTP_2);
-    *h2_req.headers_mut().unwrap() = headers.clone();
-    let h2_req = h2_req.body(()).unwrap();
-
+) -> Result<L7Response, velda_http2::error::Http2Error> {
     let has_body = !body.is_empty();
-    let (response_future, mut send_stream) = client.send_request(h2_req, !has_body)?;
+    let (response_future, mut send_stream) = client
+        .send_request(
+            req.method.clone(),
+            req.uri.clone(),
+            req.headers.clone(),
+            !has_body,
+        )
+        .await?;
     if has_body {
         send_stream.send_data(body.clone(), true)?;
     }
 
-    let response = response_future.await?;
-    let (parts, mut body_stream) = response.into_parts();
+    let mut response = response_future.await?;
 
-    let content_len = parts
+    let content_len = response
         .headers
         .get(http::header::CONTENT_LENGTH)
         .and_then(|v| v.to_str().ok())
         .and_then(|v| v.parse::<usize>().ok())
         .unwrap_or(4096);
     let mut resp_body = BytesMut::with_capacity(content_len.min(65536));
-    while let Some(chunk) = body_stream.data().await {
-        let chunk = chunk?;
-        body_stream.flow_control().release_capacity(chunk.len())?;
+    while let Some(chunk) = response.body.recv_chunk().await? {
         resp_body.extend_from_slice(&chunk);
     }
 
     Ok(L7Response::new(
-        parts.status,
+        response.status,
         http::Version::HTTP_3,
-        parts.headers,
+        response.headers,
         velda_core::Body::Bytes(resp_body.freeze()),
     ))
-}
-
-#[inline]
-fn is_h2_refused_or_goaway(err: &h2::Error) -> bool {
-    (err.is_reset() && err.reason() == Some(h2::Reason::REFUSED_STREAM)) || err.is_go_away()
 }

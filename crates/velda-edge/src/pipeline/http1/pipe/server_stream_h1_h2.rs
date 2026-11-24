@@ -31,32 +31,15 @@ use std::sync::Arc;
 use http::StatusCode;
 use http::header::{CONTENT_TYPE, HeaderValue};
 use tokio::io::{AsyncRead, AsyncWrite};
-use velda_http1::server::response::Http1ServerResponseHead;
+use velda_http1::error::Http1Error;
+use velda_http1::server::connection::Http1ServerConnection;
+use velda_http1::server::request::{Http1BodyFraming, Http1ServerRequestHead};
+use velda_http1::server::response::{Http1ServerResponse, Http1ServerResponseHead};
 use velda_http1::wire::{send_chunk, send_chunked_end, send_coalesced_chunks};
-use velda_http1::{
-    Http1BodyFraming, Http1Error, Http1ServerConnection, Http1ServerRequestHead,
-    Http1ServerResponse,
-};
-use velda_http2::Http2Config;
+use velda_http2::config::Http2Config;
 
 use crate::pipeline::DownstreamMeta;
 use crate::upstream::Http2Upstream;
-
-/// Opportunistically checks if the next HTTP/2 DATA frame is already ready in memory.
-#[inline]
-fn poll_ready_chunk(
-    body_stream: &mut h2::RecvStream,
-) -> Option<Option<Result<bytes::Bytes, h2::Error>>> {
-    let waker = std::task::Waker::noop();
-    let mut cx = std::task::Context::from_waker(waker);
-    let mut fut = body_stream.data();
-    // SAFETY: fut is pinned to stack and dropped before exiting function
-    let mut pinned = unsafe { std::pin::Pin::new_unchecked(&mut fut) };
-    match pinned.as_mut().poll(&mut cx) {
-        std::task::Poll::Ready(res) => Some(res),
-        std::task::Poll::Pending => None,
-    }
-}
 
 /// Serves a server-streaming HTTP/1.1 downstream request bridged to an HTTP/2 backend.
 pub async fn serve<IO>(
@@ -91,7 +74,7 @@ where
                 CONTENT_TYPE,
                 HeaderValue::from_static("text/plain; charset=utf-8"),
             );
-            conn.mark_close();
+            conn.close_requested = true;
             let _ = conn.send_response(&err_resp).await;
             return Err(Http1Error::Timeout);
         }
@@ -104,7 +87,7 @@ where
                 CONTENT_TYPE,
                 HeaderValue::from_static("text/plain; charset=utf-8"),
             );
-            conn.mark_close();
+            conn.close_requested = true;
             let _ = conn.send_response(&err_resp).await;
             return Err(e);
         }
@@ -112,13 +95,10 @@ where
 
     let body_bytes = body.to_bytes();
 
-    // 4. Sanitize headers disallowed by RFC 9113 for HTTP/2
-    velda_http2::client::sanitize_h2_headers(&mut req_head.headers);
-
     let h2_config = Http2Config::auto();
 
     // 5. Acquire upstream multiplexed connection
-    let (mut client, lease) = match upstream.acquire(&h2_config).await {
+    let (client, lease) = match upstream.acquire(&h2_config).await {
         Ok(res) => res,
         Err(e) => {
             tracing::warn!(
@@ -134,7 +114,7 @@ where
                 CONTENT_TYPE,
                 HeaderValue::from_static("text/plain; charset=utf-8"),
             );
-            conn.mark_close();
+            conn.close_requested = true;
             let _ = conn.send_response(&err_resp).await;
             return Err(Http1Error::ConnectionClosed);
         }
@@ -162,15 +142,16 @@ where
         .build()
         .unwrap_or_else(|_| req_head.uri.clone());
 
-    let mut req = http::Request::builder()
-        .method(req_head.method.clone())
-        .uri(uri)
-        .version(http::Version::HTTP_2);
-    *req.headers_mut().unwrap() = req_head.headers.clone();
-    let req = req.body(()).unwrap();
-
     let has_body = !body_bytes.is_empty();
-    let (response_future, mut send_stream) = match client.send_request(req, !has_body) {
+    let (response_future, mut send_stream) = match client
+        .send_request(
+            req_head.method.clone(),
+            uri,
+            req_head.headers.clone(),
+            !has_body,
+        )
+        .await
+    {
         Ok(parts) => parts,
         Err(e) => {
             tracing::warn!(
@@ -186,7 +167,7 @@ where
                 CONTENT_TYPE,
                 HeaderValue::from_static("text/plain; charset=utf-8"),
             );
-            conn.mark_close();
+            conn.close_requested = true;
             let _ = conn.send_response(&err_resp).await;
             return Err(Http1Error::ConnectionClosed);
         }
@@ -198,12 +179,12 @@ where
             StatusCode::BAD_GATEWAY,
             b"502 Bad Gateway: failed to transmit body\n".to_vec(),
         );
-        conn.mark_close();
+        conn.close_requested = true;
         let _ = conn.send_response(&err_resp).await;
         return Err(Http1Error::ConnectionClosed);
     }
 
-    let response = match response_future.await {
+    let mut response = match response_future.await {
         Ok(r) => r,
         Err(e) => {
             tracing::warn!(error = %e, "Upstream HTTP/2 response header read failed");
@@ -211,45 +192,38 @@ where
                 StatusCode::BAD_GATEWAY,
                 format!("502 Bad Gateway: {e}\n").into_bytes(),
             );
-            conn.mark_close();
+            conn.close_requested = true;
             let _ = conn.send_response(&err_resp).await;
             return Err(Http1Error::ConnectionClosed);
         }
     };
 
-    let (parts, mut body_stream) = response.into_parts();
-
     // 7. Send chunked response head downstream with opportunistic chunk coalescing
-    let mut headers = parts.headers;
+    let mut headers = response.headers;
     if let Some(req_id) = req_head.headers.get(&crate::pipeline::X_REQUEST_ID) {
-        headers.insert(crate::pipeline::X_REQUEST_ID, req_id.clone());
+        headers.insert_bypass(crate::pipeline::X_REQUEST_ID, req_id.clone());
     }
-    let mut status = parts.status;
-    // Fast-path guard: Bypasses HeaderWorkspace instantiation & plugin dispatch if route has no hooks.
-    // req_head reaches end of life here -> mem::take transfers ownership with zero allocations.
+    let mut status = response.status;
     if let Some(post_hooks) = &plan.post_response_hooks {
         let mut l7_resp = velda_core::L7Response::new(
             status,
             http::Version::HTTP_11,
-            std::mem::take(&mut headers),
+            headers,
             velda_core::Body::Empty,
         );
-        let req_ws =
-            velda_core::HeaderWorkspace::from_headers(std::mem::take(&mut req_head.headers));
-        velda_plugin::run_post_response_plugins(post_hooks, &req_ws, &mut l7_resp);
+        velda_plugin::run_post_response_plugins(post_hooks, &req_head.headers, &mut l7_resp);
         status = l7_resp.status;
-        headers = l7_resp.headers.into();
+        headers = l7_resp.headers;
     }
     meta.inject_response_headers(&mut headers);
     let resp_head = Http1ServerResponseHead::new(status, http::Version::HTTP_11, headers);
 
-    let first_chunk_opt = match body_stream.data().await {
-        Some(Ok(c)) => Some(c),
-        Some(Err(e)) => {
+    let first_chunk_opt = match response.body.recv_chunk().await {
+        Ok(opt) => opt,
+        Err(e) => {
             tracing::debug!(error = %e, "Error reading HTTP/2 response stream chunk");
             return Err(Http1Error::ConnectionClosed);
         }
-        None => None,
     };
 
     match first_chunk_opt {
@@ -258,12 +232,8 @@ where
             return Ok(());
         }
         Some(first_chunk) => {
-            let _ = body_stream
-                .flow_control()
-                .release_capacity(first_chunk.len());
-
-            let is_terminated = body_stream.is_end_stream()
-                || matches!(poll_ready_chunk(&mut body_stream), Some(None));
+            let is_terminated = response.body.is_end_stream()
+                || matches!(response.body.try_recv_chunk(), Ok(Some(None)));
 
             let _close = conn
                 .send_head_coalesced(&resp_head, Some(&first_chunk), is_terminated)
@@ -278,43 +248,37 @@ where
     let mut chunk_batch: [bytes::Bytes; 16] = Default::default();
 
     loop {
-        let first_chunk = match body_stream.data().await {
-            Some(Ok(c)) => c,
-            Some(Err(e)) => {
+        let first_chunk = match response.body.recv_chunk().await {
+            Ok(Some(c)) => c,
+            Ok(None) => break,
+            Err(e) => {
                 tracing::debug!(error = %e, "Error reading HTTP/2 response stream chunk");
                 return Err(Http1Error::ConnectionClosed);
             }
-            None => break,
         };
 
         chunk_batch[0] = first_chunk;
         let mut count = 1;
         let mut batch_bytes = chunk_batch[0].len();
-        let mut reached_eof = body_stream.is_end_stream();
+        let mut reached_eof = response.body.is_end_stream();
 
-        // Opportunistically drain ready chunks already buffered in H2 connection driver
         while !reached_eof && count < 16 && batch_bytes < 131_072 {
-            match poll_ready_chunk(&mut body_stream) {
-                Some(Some(Ok(next_chunk))) => {
+            match response.body.try_recv_chunk() {
+                Ok(Some(Some(next_chunk))) => {
                     batch_bytes += next_chunk.len();
                     chunk_batch[count] = next_chunk;
                     count += 1;
                 }
-                Some(None) => {
+                Ok(Some(None)) => {
                     reached_eof = true;
                     break;
                 }
-                Some(Some(Err(e))) => {
+                Ok(None) => break,
+                Err(e) => {
                     tracing::debug!(error = %e, "Error reading opportunistic HTTP/2 chunk");
                     return Err(Http1Error::ConnectionClosed);
                 }
-                None => break,
             }
-        }
-
-        // Release flow control capacity for all drained chunks in a single call
-        if let Err(e) = body_stream.flow_control().release_capacity(batch_bytes) {
-            tracing::debug!(error = %e, "Failed to release HTTP/2 flow control capacity");
         }
 
         let send_res = if count == 1 {

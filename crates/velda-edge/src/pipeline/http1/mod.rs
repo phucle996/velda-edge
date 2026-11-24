@@ -8,5 +8,3 @@
 
 pub mod downstream;
 pub mod pipe;
-
-pub use downstream::{handle_http1_stream, run_http1_loop};

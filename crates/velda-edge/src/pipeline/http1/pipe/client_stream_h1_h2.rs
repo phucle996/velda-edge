@@ -32,11 +32,12 @@ use bytes::{Bytes, BytesMut};
 use http::StatusCode;
 use http::header::{CONTENT_TYPE, HeaderValue};
 use tokio::io::{AsyncRead, AsyncWrite};
-use velda_http1::{
-    Http1BodyFraming, Http1Error, Http1ServerConnection, Http1ServerRequestHead,
-    Http1ServerResponse, ProgressiveChunkDecoder,
-};
-use velda_http2::Http2Config;
+use velda_http1::error::Http1Error;
+use velda_http1::server::connection::Http1ServerConnection;
+use velda_http1::server::request::{Http1BodyFraming, Http1ServerRequestHead};
+use velda_http1::server::response::Http1ServerResponse;
+use velda_http1::wire::ProgressiveChunkDecoder;
+use velda_http2::config::Http2Config;
 
 use crate::pipeline::DownstreamMeta;
 use crate::upstream::Http2Upstream;
@@ -62,13 +63,10 @@ where
         req_head.headers.remove(http::header::EXPECT);
     }
 
-    // 3. Sanitize headers disallowed by RFC 9113 for HTTP/2
-    velda_http2::client::sanitize_h2_headers(&mut req_head.headers);
-
     let h2_config = Http2Config::auto();
 
     // 4. Acquire upstream multiplexed connection before upload begins
-    let (mut client, lease) = match upstream.acquire(&h2_config).await {
+    let (client, lease) = match upstream.acquire(&h2_config).await {
         Ok(res) => res,
         Err(e) => {
             tracing::warn!(
@@ -84,7 +82,7 @@ where
                 CONTENT_TYPE,
                 HeaderValue::from_static("text/plain; charset=utf-8"),
             );
-            conn.mark_close();
+            conn.close_requested = true;
             let _ = conn.send_response(&err_resp).await;
             return Err(Http1Error::ConnectionClosed);
         }
@@ -112,14 +110,15 @@ where
         .build()
         .unwrap_or_else(|_| req_head.uri.clone());
 
-    let mut req = http::Request::builder()
-        .method(req_head.method.clone())
-        .uri(uri)
-        .version(http::Version::HTTP_2);
-    *req.headers_mut().unwrap() = req_head.headers.clone();
-    let req = req.body(()).unwrap();
-
-    let (response_future, mut send_stream) = match client.send_request(req, false) {
+    let (response_future, mut send_stream) = match client
+        .send_request(
+            req_head.method.clone(),
+            uri,
+            req_head.headers.clone(),
+            false,
+        )
+        .await
+    {
         Ok(parts) => parts,
         Err(e) => {
             tracing::warn!(error = %e, "Failed to initiate HTTP/2 stream for upload");
@@ -127,7 +126,7 @@ where
                 StatusCode::BAD_GATEWAY,
                 format!("502 Bad Gateway: {e}\n").into_bytes(),
             );
-            conn.mark_close();
+            conn.close_requested = true;
             let _ = conn.send_response(&err_resp).await;
             return Err(Http1Error::ConnectionClosed);
         }
@@ -141,9 +140,9 @@ where
             loop {
                 while let Some(chunk) = decoder.decode_step(&mut conn.read_buf)? {
                     conn.last_bytes_rx += chunk.len() as u64;
-                    send_stream.reserve_capacity(chunk.len());
                     send_stream
-                        .send_data(chunk, false)
+                        .send_chunk(chunk, false)
+                        .await
                         .map_err(|_| Http1Error::ConnectionClosed)?;
                 }
 
@@ -176,9 +175,9 @@ where
                     let chunk = conn.read_buf.split_to(chunk_len).freeze();
                     remaining = remaining.saturating_sub(chunk_len);
                     conn.last_bytes_rx += chunk_len as u64;
-                    send_stream.reserve_capacity(chunk_len);
                     send_stream
-                        .send_data(chunk, false)
+                        .send_chunk(chunk, false)
+                        .await
                         .map_err(|_| Http1Error::ConnectionClosed)?;
                     continue;
                 }
@@ -195,9 +194,9 @@ where
                 let chunk = conn.read_buf.split_to(chunk_len).freeze();
                 remaining = remaining.saturating_sub(chunk_len);
                 conn.last_bytes_rx += chunk_len as u64;
-                send_stream.reserve_capacity(chunk_len);
                 send_stream
-                    .send_data(chunk, false)
+                    .send_chunk(chunk, false)
+                    .await
                     .map_err(|_| Http1Error::ConnectionClosed)?;
             }
         }
@@ -208,13 +207,12 @@ where
     let _ = send_stream.send_data(Bytes::new(), true);
 
     // 7. Await response and return to downstream
-    let response = response_future
+    let mut response = response_future
         .await
         .map_err(|_| Http1Error::ConnectionClosed)?;
-    let (parts, mut body_stream) = response.into_parts();
 
     let max_body_size = conn.config().max_body_size;
-    let expected_len = parts
+    let expected_len = response
         .headers
         .get(http::header::CONTENT_LENGTH)
         .and_then(|v| velda_http1::wire::parse_ascii_digits(v.as_bytes()).ok())
@@ -224,32 +222,30 @@ where
             StatusCode::PAYLOAD_TOO_LARGE,
             b"413 Payload Too Large\n".to_vec(),
         );
-        conn.mark_close();
+        conn.close_requested = true;
         conn.send_response(&err_resp).await?;
         return Ok(());
     }
     let mut resp_body = BytesMut::with_capacity(expected_len.min(max_body_size));
-    while let Some(chunk) = body_stream.data().await {
-        let chunk = chunk.map_err(|_| Http1Error::ConnectionClosed)?;
+    while let Some(chunk) = response
+        .body
+        .recv_chunk()
+        .await
+        .map_err(|_| Http1Error::ConnectionClosed)?
+    {
         if resp_body.len() + chunk.len() > max_body_size {
-            let _ = body_stream.flow_control().release_capacity(chunk.len());
             let err_resp = Http1ServerResponse::from_bytes(
                 StatusCode::PAYLOAD_TOO_LARGE,
                 b"413 Payload Too Large\n".to_vec(),
             );
-            conn.mark_close();
+            conn.close_requested = true;
             conn.send_response(&err_resp).await?;
             return Ok(());
         }
-        let _ = body_stream.flow_control().release_capacity(chunk.len());
         resp_body.extend_from_slice(&chunk);
     }
 
-    let mut headers = parts.headers;
-    if let Some(req_id) = req_head.headers.get(&crate::pipeline::X_REQUEST_ID) {
-        headers.insert(crate::pipeline::X_REQUEST_ID, req_id.clone());
-    }
-    let mut status = parts.status;
+    let mut status = response.status;
     let frozen_body = resp_body.freeze();
     let initial_body = if plan.is_response_payload_passthrough() {
         velda_core::Body::Empty
@@ -258,26 +254,23 @@ where
     };
     let mut final_body = velda_core::Body::Bytes(frozen_body);
 
-    // Fast-path guard: Bypasses HeaderWorkspace instantiation & plugin dispatch if route has no hooks.
-    // req_head reaches end of life here -> mem::take transfers ownership with zero allocations.
+    let mut h1_headers = response.headers;
+    if let Some(req_id) = req_head.headers.get(&crate::pipeline::X_REQUEST_ID) {
+        h1_headers.insert_bypass(crate::pipeline::X_REQUEST_ID, req_id.clone());
+    }
     if let Some(post_hooks) = &plan.post_response_hooks {
-        let mut l7_resp = velda_core::L7Response::new(
-            status,
-            http::Version::HTTP_11,
-            std::mem::take(&mut headers),
-            initial_body,
-        );
-        let req_ws =
-            velda_core::HeaderWorkspace::from_headers(std::mem::take(&mut req_head.headers));
-        velda_plugin::run_post_response_plugins(post_hooks, &req_ws, &mut l7_resp);
+        let mut l7_resp =
+            velda_core::L7Response::new(status, http::Version::HTTP_11, h1_headers, initial_body);
+        velda_plugin::run_post_response_plugins(post_hooks, &req_head.headers, &mut l7_resp);
         status = l7_resp.status;
-        headers = l7_resp.headers.into();
+        h1_headers = l7_resp.headers;
         if !matches!(l7_resp.body, velda_core::Body::Empty) {
             final_body = l7_resp.body;
         }
     }
-    meta.inject_response_headers(&mut headers);
-    let server_resp = Http1ServerResponse::new(status, http::Version::HTTP_11, headers, final_body);
+    meta.inject_response_headers(&mut h1_headers);
+    let server_resp =
+        Http1ServerResponse::new(status, http::Version::HTTP_11, h1_headers, final_body);
     conn.send_response(&server_resp).await?;
 
     Ok(())

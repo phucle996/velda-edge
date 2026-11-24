@@ -34,11 +34,14 @@ use http::StatusCode;
 use http::header::{CONTENT_TYPE, HeaderValue};
 use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt};
 use velda_core::Body;
-use velda_http1::{
-    Http1BodyFraming, Http1Error, Http1ServerConnection, Http1ServerRequestHead,
-    Http1ServerResponse, ProgressiveChunkDecoder, encode_chunk, read_response_head,
-    sanitize_headers, send_chunk, send_chunked_end, send_request,
-};
+use velda_http1::client::header::sanitize_headers;
+use velda_http1::client::request::send_request_parts;
+use velda_http1::client::response::read_response_head;
+use velda_http1::error::Http1Error;
+use velda_http1::server::connection::Http1ServerConnection;
+use velda_http1::server::request::{Http1BodyFraming, Http1ServerRequestHead};
+use velda_http1::server::response::Http1ServerResponse;
+use velda_http1::wire::{ProgressiveChunkDecoder, encode_chunk, send_chunk, send_chunked_end};
 
 use crate::pipeline::DownstreamMeta;
 use crate::upstream::Http1Upstream;
@@ -81,7 +84,7 @@ where
                 CONTENT_TYPE,
                 HeaderValue::from_static("text/plain; charset=utf-8"),
             );
-            conn.mark_close();
+            conn.close_requested = true;
             let _ = conn.send_response(&err_resp).await;
             return Err(Http1Error::ConnectionClosed);
         }
@@ -98,7 +101,7 @@ where
 
     // 4. If request has no body (e.g. GET, HEAD), forward directly without chunked stream
     if framing == Http1BodyFraming::Empty {
-        let req = velda_http1::Http1ServerRequest::new(
+        let req = velda_http1::server::request::Http1ServerRequest::new(
             req_head.method,
             req_head.uri,
             req_head.version,
@@ -107,7 +110,15 @@ where
         );
 
         let res = async {
-            send_request(&req, &mut *upstream_lease, &mut conn.upstream_write_buf).await?;
+            send_request_parts(
+                &req.method,
+                &req.uri,
+                &req.headers,
+                &req.body,
+                &mut *upstream_lease,
+                &mut conn.upstream_write_buf,
+            )
+            .await?;
             let (mut resp_head, resp_framing) = read_response_head(
                 &mut *upstream_lease,
                 &mut conn.upstream_read_buf,
@@ -128,12 +139,9 @@ where
                     std::mem::take(&mut resp_head.headers),
                     velda_core::Body::Empty,
                 );
-                // Fast-path guard: Bypasses HeaderWorkspace instantiation & plugin dispatch if route has no hooks.
-                // HeaderMap::clone() clones atomic pointer handles (Bytes) in O(1) without copying string payloads.
-                let req_ws = velda_core::HeaderWorkspace::from_headers(req.headers.clone());
-                velda_plugin::run_post_response_plugins(post_hooks, &req_ws, &mut l7_resp);
+                velda_plugin::run_post_response_plugins(post_hooks, &req.headers, &mut l7_resp);
                 resp_head.status = l7_resp.status;
-                resp_head.headers = l7_resp.headers.into();
+                resp_head.headers = l7_resp.headers;
             }
             meta.inject_response_headers(&mut resp_head.headers);
 
@@ -144,7 +152,7 @@ where
 
             if is_head || is_no_body_status {
                 conn.write_buf.clear();
-                conn.encode_response_head(
+                conn.encode_head(
                     resp_head.version,
                     resp_head.status,
                     &resp_head.headers,
@@ -166,7 +174,7 @@ where
             match resp_framing {
                 Http1BodyFraming::Empty => {
                     conn.write_buf.clear();
-                    conn.encode_response_head(
+                    conn.encode_head(
                         resp_head.version,
                         resp_head.status,
                         &resp_head.headers,
@@ -202,7 +210,7 @@ where
                         }
                     }
                     conn.write_buf.clear();
-                    conn.encode_response_head(
+                    conn.encode_head(
                         resp_head.version,
                         resp_head.status,
                         &resp_head.headers,
@@ -243,7 +251,10 @@ where
     // 5. Pipe streaming upload chunks to upstream
     let pipe_res = async {
         // Encode chunked request head into upstream_write_buf
-        velda_http1::encode_request_head_chunked(&req_head, &mut conn.upstream_write_buf);
+        velda_http1::client::request::encode_request_head_chunked(
+            &req_head,
+            &mut conn.upstream_write_buf,
+        );
 
         let mut total_body_bytes = 0usize;
         let idle_timeout = Duration::from_millis(cfg.idle_timeout_ms);
@@ -264,7 +275,7 @@ where
         }
 
         if decoder.is_done() {
-            velda_http1::encode_chunked_end(&mut conn.upstream_write_buf);
+            velda_http1::wire::encode_chunked_end(&mut conn.upstream_write_buf);
             sent_terminal = true;
         }
         conn.last_bytes_rx += total_body_bytes as u64;
@@ -348,12 +359,9 @@ where
                 std::mem::take(&mut resp_head.headers),
                 velda_core::Body::Empty,
             );
-            // Fast-path guard: Bypasses HeaderWorkspace instantiation & plugin dispatch if route has no hooks.
-            // HeaderMap::clone() clones atomic pointer handles (Bytes) in O(1) without copying string payloads.
-            let req_ws = velda_core::HeaderWorkspace::from_headers(req_head.headers.clone());
-            velda_plugin::run_post_response_plugins(post_hooks, &req_ws, &mut l7_resp);
+            velda_plugin::run_post_response_plugins(post_hooks, &req_head.headers, &mut l7_resp);
             resp_head.status = l7_resp.status;
-            resp_head.headers = l7_resp.headers.into();
+            resp_head.headers = l7_resp.headers;
         }
         meta.inject_response_headers(&mut resp_head.headers);
 
@@ -371,7 +379,7 @@ where
 
         if is_head || is_no_body_status {
             conn.write_buf.clear();
-            conn.encode_response_head(
+            conn.encode_head(
                 resp_head.version,
                 resp_head.status,
                 &resp_head.headers,
@@ -393,7 +401,7 @@ where
         match resp_framing {
             Http1BodyFraming::Empty => {
                 conn.write_buf.clear();
-                conn.encode_response_head(
+                conn.encode_head(
                     resp_head.version,
                     resp_head.status,
                     &resp_head.headers,
@@ -429,7 +437,7 @@ where
                     }
                 }
                 conn.write_buf.clear();
-                conn.encode_response_head(
+                conn.encode_head(
                     resp_head.version,
                     resp_head.status,
                     &resp_head.headers,

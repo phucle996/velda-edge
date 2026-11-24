@@ -9,8 +9,9 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use velda_core::{L7Request, L7Response};
-use velda_grpc::udp::client::GrpcUdpClient;
-use velda_grpc::{GrpcConfig, GrpcError};
+use velda_grpc::config::GrpcConfig;
+use velda_grpc::error::GrpcError;
+use velda_grpc::udp::client::connector::GrpcUdpClient;
 
 use crate::upstream::GrpcUdpUpstream;
 
@@ -38,7 +39,7 @@ async fn pipe_buffered_wire(
         }
 
         // Step 2: Dispatch through multiplexed QUIC client
-        let resp = client.send_request_ref(req).await?;
+        let resp = client.send_request(req.clone()).await?;
 
         // Step 3: Validate upstream response LPM frame if body present
         let b = resp.body.as_slice();

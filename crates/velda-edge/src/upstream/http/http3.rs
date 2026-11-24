@@ -5,10 +5,10 @@ use std::sync::atomic::{AtomicU64, Ordering};
 
 use velda_connection_pool::{MultiplexedPool, PoolableResource};
 use velda_core::StreamingMode;
-use velda_http3::Http3Config;
-use velda_http3::Http3PipeStrategy;
-use velda_http3::client::Http3Client;
+use velda_http3::client::connector::Http3Client;
+use velda_http3::config::Http3Config;
 use velda_http3::quinn_proto;
+use velda_http3::strategy::Http3PipeStrategy;
 
 use crate::error::EdgeError;
 use crate::upstream::lb::EdgeUpstream;
@@ -163,7 +163,7 @@ impl Http3Upstream {
                         return Ok::<_, String>(((lease.client.clone(), lease), endpoint));
                     }
 
-                    let client = velda_http3::client::connect(
+                    let client = velda_http3::client::connector::connect(
                         endpoint.0,
                         endpoint.1,
                         &sni,
@@ -214,7 +214,7 @@ impl Http3Upstream {
                         return Ok::<_, String>(((lease.client.clone(), lease), endpoint));
                     }
 
-                    let client = velda_http3::client::connect(
+                    let client = velda_http3::client::connector::connect(
                         endpoint.0,
                         endpoint.1,
                         &sni,
@@ -262,7 +262,7 @@ impl Http3Upstream {
                 let sni = Arc::clone(&self.target_sni);
                 let quic_tls = Arc::clone(&self.quic_config);
 
-                match velda_http3::client::connect(
+                match velda_http3::client::connector::connect(
                     addr.0,
                     addr.1,
                     &sni,
@@ -330,7 +330,7 @@ impl Http3Upstream {
                 let quic_tls = Arc::clone(&self.quic_config);
                 match tokio::time::timeout(
                     timeout,
-                    velda_http3::client::connect(
+                    velda_http3::client::connector::connect(
                         addr.0,
                         addr.1,
                         &sni,

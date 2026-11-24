@@ -5,9 +5,9 @@ use std::sync::atomic::{AtomicU64, Ordering};
 
 use velda_connection_pool::{MultiplexedPool, PoolableResource};
 use velda_core::StreamingMode;
-use velda_grpc::GrpcConfig;
-use velda_grpc::tcp::GrpcPipeStrategy;
-use velda_grpc::tcp::client::GrpcUpstreamConnector;
+use velda_grpc::config::GrpcConfig;
+use velda_grpc::tcp::client::connector::GrpcUpstreamConnector;
+use velda_grpc::tcp::strategy::GrpcPipeStrategy;
 use velda_tls::TlsClientEngine;
 
 use super::super::lb::EdgeUpstream;
@@ -21,7 +21,7 @@ pub struct GrpcTcpClientResource {
 
 impl PoolableResource for GrpcTcpClientResource {
     fn is_healthy(&self) -> bool {
-        true
+        self.client.is_healthy()
     }
 
     fn close(&mut self) {}

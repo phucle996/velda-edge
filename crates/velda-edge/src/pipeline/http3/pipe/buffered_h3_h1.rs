@@ -16,8 +16,8 @@ use http::StatusCode;
 use http::header::{CONTENT_TYPE, HeaderValue};
 use tokio::io::AsyncReadExt;
 use velda_core::{L7Request, L7Response};
-use velda_http1::is_connection_close;
 use velda_http1::server::request::Http1BodyFraming;
+use velda_http1::server::response::is_connection_close;
 
 use crate::upstream::Http1Upstream;
 
@@ -70,7 +70,7 @@ pub async fn serve(
         write_buf.clear();
 
         let attempt = async {
-            velda_http1::client::send_request_parts(
+            velda_http1::client::request::send_request_parts(
                 &req.method,
                 &req.uri,
                 &headers,
@@ -79,7 +79,8 @@ pub async fn serve(
                 write_buf,
             )
             .await?;
-            velda_http1::client::read_response_head(stream, read_buf, &upstream.config).await
+            velda_http1::client::response::read_response_head(stream, read_buf, &upstream.config)
+                .await
         };
 
         match attempt.await {
@@ -96,7 +97,7 @@ pub async fn serve(
                         let (f_stream, f_read_buf, f_write_buf) = fresh_lease.split_all();
                         f_write_buf.clear();
                         let retry_res = async {
-                            velda_http1::client::send_request_parts(
+                            velda_http1::client::request::send_request_parts(
                                 &req.method,
                                 &req.uri,
                                 &headers,
@@ -105,7 +106,7 @@ pub async fn serve(
                                 f_write_buf,
                             )
                             .await?;
-                            velda_http1::client::read_response_head(
+                            velda_http1::client::response::read_response_head(
                                 f_stream,
                                 f_read_buf,
                                 &upstream.config,
@@ -254,7 +255,7 @@ pub async fn serve(
         Http1BodyFraming::Chunked => {
             let mut chunked_body = BytesMut::with_capacity(4096);
             loop {
-                match velda_http1::client::read_next_chunk(stream, read_buf).await {
+                match velda_http1::client::response::read_next_chunk(stream, read_buf).await {
                     Ok(Some(chunk)) => {
                         if chunked_body.len() + chunk.len() > upstream.config.max_body_size {
                             lease.mark_closed();

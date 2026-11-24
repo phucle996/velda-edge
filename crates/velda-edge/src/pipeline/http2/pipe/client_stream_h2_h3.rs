@@ -10,8 +10,9 @@ use bytes::BytesMut;
 use http::StatusCode;
 use http::header::{CONTENT_TYPE, HeaderValue};
 use velda_core::L7Response;
-use velda_http2::server::{Http2Responder, Http2ServerRequestHead, Http2StreamReceiver};
-use velda_http3::sanitize_headers;
+use velda_http2::server::request::{Http2ServerRequestHead, Http2StreamReceiver};
+use velda_http2::server::response::Http2Responder;
+use velda_http3::headers::sanitize_headers;
 
 use crate::pipeline::{DownstreamMeta, PipeOutcome};
 use crate::upstream::Http3Upstream;
@@ -27,17 +28,6 @@ pub async fn serve(
 ) -> PipeOutcome {
     // 1. Sanitize connection-specific headers forbidden by RFC 9114 §4.2
     sanitize_headers(&mut req_head.headers);
-
-    // Fast-path guard: Only snapshot request headers into a HeaderWorkspace if post-response
-    // hooks are configured on this route. HeaderMap::clone() clones atomic pointer handles
-    // (Bytes) in O(1) without copying string payloads.
-    let req_headers_ref = if plan.post_response_hooks.is_some() {
-        Some(velda_core::HeaderWorkspace::from_headers(
-            req_head.headers.clone(),
-        ))
-    } else {
-        None
-    };
 
     // 3. Acquire pooled HTTP/3 client
     let (client, _lease) = match upstream.acquire(&upstream.config).await {
@@ -59,7 +49,7 @@ pub async fn serve(
             let _ = responder.send_response(&err_resp);
             return PipeOutcome::http(
                 responder.last_status,
-                receiver.bytes_received() as u64,
+                receiver.bytes_received as u64,
                 responder.last_bytes_tx,
                 None,
                 velda_core::CompletionReason::UpstreamError,
@@ -86,7 +76,7 @@ pub async fn serve(
             let _ = responder.send_response(&err_resp);
             return PipeOutcome::http(
                 responder.last_status,
-                receiver.bytes_received() as u64,
+                receiver.bytes_received as u64,
                 responder.last_bytes_tx,
                 upstream_addr,
                 velda_core::CompletionReason::Rejected,
@@ -95,11 +85,16 @@ pub async fn serve(
     };
 
     // Open progressive HTTP/3 stream with fused initial chunk and optional FIN
+    let h3_req_headers = if plan.post_response_hooks.is_some() {
+        req_head.headers.clone()
+    } else {
+        std::mem::take(&mut req_head.headers)
+    };
     let (sender, response_rx) = match client
         .open_stream(
             req_head.method,
             req_head.uri,
-            req_head.headers,
+            h3_req_headers,
             first_chunk,
             is_fin,
         )
@@ -119,7 +114,7 @@ pub async fn serve(
             let _ = responder.send_response(&err_resp);
             return PipeOutcome::http(
                 responder.last_status,
-                receiver.bytes_received() as u64,
+                receiver.bytes_received as u64,
                 responder.last_bytes_tx,
                 upstream_addr,
                 velda_core::CompletionReason::UpstreamError,
@@ -152,7 +147,7 @@ pub async fn serve(
                                 let _ = responder.send_response(&err_resp);
                                 return PipeOutcome::http(
                                     responder.last_status,
-                                    receiver.bytes_received() as u64,
+                                    receiver.bytes_received as u64,
                                     responder.last_bytes_tx,
                                     upstream_addr,
                                     velda_core::CompletionReason::UpstreamError,
@@ -167,7 +162,7 @@ pub async fn serve(
                         Err(_) => {
                             return PipeOutcome::http(
                                 responder.last_status,
-                                receiver.bytes_received() as u64,
+                                receiver.bytes_received as u64,
                                 responder.last_bytes_tx,
                                 upstream_addr,
                                 velda_core::CompletionReason::ClientCancel,
@@ -195,7 +190,7 @@ pub async fn serve(
                 let _ = responder.send_response(&err_resp);
                 return PipeOutcome::http(
                     responder.last_status,
-                    receiver.bytes_received() as u64,
+                    receiver.bytes_received as u64,
                     responder.last_bytes_tx,
                     upstream_addr,
                     velda_core::CompletionReason::UpstreamError,
@@ -209,7 +204,7 @@ pub async fn serve(
                 let _ = responder.send_response(&err_resp);
                 return PipeOutcome::http(
                     responder.last_status,
-                    receiver.bytes_received() as u64,
+                    receiver.bytes_received as u64,
                     responder.last_bytes_tx,
                     upstream_addr,
                     velda_core::CompletionReason::UpstreamError,
@@ -227,7 +222,7 @@ pub async fn serve(
                 let _ = responder.send_response(&err_resp);
                 return PipeOutcome::http(
                     responder.last_status,
-                    receiver.bytes_received() as u64,
+                    receiver.bytes_received as u64,
                     responder.last_bytes_tx,
                     upstream_addr,
                     velda_core::CompletionReason::UpstreamError,
@@ -241,7 +236,7 @@ pub async fn serve(
                 let _ = responder.send_response(&err_resp);
                 return PipeOutcome::http(
                     responder.last_status,
-                    receiver.bytes_received() as u64,
+                    receiver.bytes_received as u64,
                     responder.last_bytes_tx,
                     upstream_addr,
                     velda_core::CompletionReason::UpstreamError,
@@ -265,7 +260,7 @@ pub async fn serve(
                     let _ = responder.send_response(&err_resp);
                     return PipeOutcome::http(
                         responder.last_status,
-                        receiver.bytes_received() as u64,
+                        receiver.bytes_received as u64,
                         responder.last_bytes_tx,
                         upstream_addr,
                         velda_core::CompletionReason::UpstreamError,
@@ -282,7 +277,7 @@ pub async fn serve(
                 let _ = responder.send_response(&err_resp);
                 return PipeOutcome::http(
                     responder.last_status,
-                    receiver.bytes_received() as u64,
+                    receiver.bytes_received as u64,
                     responder.last_bytes_tx,
                     upstream_addr,
                     velda_core::CompletionReason::UpstreamError,
@@ -303,14 +298,12 @@ pub async fn serve(
         resp_stream.headers,
         body,
     );
-    if let Some(post_hooks) = &plan.post_response_hooks
-        && let Some(ref req_headers) = req_headers_ref
-    {
-        velda_plugin::run_post_response_plugins(post_hooks, req_headers, &mut resp);
+    if let Some(post_hooks) = &plan.post_response_hooks {
+        velda_plugin::run_post_response_plugins(post_hooks, &req_head.headers, &mut resp);
     }
     meta.inject_response_headers(&mut resp.headers);
     let _ = responder.send_response(&resp);
-    let bytes_rx = receiver.bytes_received() as u64;
+    let bytes_rx = receiver.bytes_received as u64;
     if !receiver.is_end_stream() {
         tokio::spawn(async move { while let Ok(Some(_)) = receiver.recv_chunk().await {} });
     }

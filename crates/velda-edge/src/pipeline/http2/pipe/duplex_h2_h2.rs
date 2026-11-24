@@ -13,16 +13,17 @@ use bytes::Bytes;
 use http::header::{CONTENT_TYPE, HeaderValue};
 use http::{StatusCode, Version};
 use velda_core::{Body, L7Response};
-use velda_http2::Http2Error;
 use velda_http2::config::Http2Config;
-use velda_http2::server::{Http2Responder, Http2ServerRequestHead, Http2StreamReceiver};
+use velda_http2::error::Http2Error;
+use velda_http2::server::request::{Http2ServerRequestHead, Http2StreamReceiver};
+use velda_http2::server::response::Http2Responder;
 
 use crate::pipeline::{DownstreamMeta, PipeOutcome};
 use crate::upstream::Http2Upstream;
 
 /// Serves a full-duplex bidirectional HTTP/2 downstream stream forwarded to an HTTP/2 upstream backend.
 pub async fn serve(
-    mut req_head: Http2ServerRequestHead,
+    req_head: Http2ServerRequestHead,
     mut receiver: Http2StreamReceiver,
     responder: Http2Responder,
     meta: Arc<DownstreamMeta>,
@@ -31,7 +32,7 @@ pub async fn serve(
     plan: &velda_plugin::RoutePluginPlan,
 ) -> PipeOutcome {
     // 1. Fail-fast: Acquire upstream multiplexed connection before duplex loop
-    let (mut client, lease) = match upstream.acquire(&config).await {
+    let (client, lease) = match upstream.acquire(&config).await {
         Ok(res) => res,
         Err(e) => {
             tracing::warn!(
@@ -55,7 +56,7 @@ pub async fn serve(
             }
             return PipeOutcome::http(
                 responder.last_status,
-                receiver.bytes_received() as u64,
+                receiver.bytes_received as u64,
                 responder.last_bytes_tx,
                 None,
                 velda_core::CompletionReason::UpstreamError,
@@ -67,20 +68,15 @@ pub async fn serve(
     // 3. Pipe duplex frames concurrently
     let duplex_res = async {
         let is_head = req_head.method == http::Method::HEAD;
-        // Fast-path guard: Only snapshot request headers into a HeaderWorkspace if post-response
-        // hooks are configured on this route. HeaderMap::clone() clones atomic pointer handles
-        // (Bytes) in O(1) without copying string payloads.
-        let req_headers_ref = if plan.post_response_hooks.is_some() {
-            Some(velda_core::HeaderWorkspace::from_headers(
-                req_head.headers.clone(),
-            ))
-        } else {
-            None
-        };
-        velda_http2::headers::sanitize_h2_headers(&mut req_head.headers);
-        let http_req = req_head.into_http_request();
         let is_empty_upload = receiver.is_end_stream();
-        let (response_fut, mut send_stream) = client.send_request(http_req, is_empty_upload)?;
+        let (response_fut, mut send_stream) = client
+            .send_request(
+                req_head.method.clone(),
+                req_head.uri.clone(),
+                req_head.headers.clone(),
+                is_empty_upload,
+            )
+            .await?;
 
         let upload_coalesce = 65_536;
 
@@ -90,7 +86,7 @@ pub async fn serve(
             }
             let mut sent_end_stream = false;
             while !receiver.is_end_stream() {
-                let Some(mut chunk) = receiver.recv_coalesced_chunk(upload_coalesce).await? else {
+                let Some(chunk) = receiver.recv_coalesced_chunk(upload_coalesce).await? else {
                     break;
                 };
                 if chunk.is_empty() {
@@ -99,117 +95,64 @@ pub async fn serve(
                     }
                     continue;
                 }
-                let avail = send_stream.capacity();
-                if avail < chunk.len() {
-                    send_stream.reserve_capacity(chunk.len() - avail);
+                let is_last = receiver.is_end_stream();
+                if send_stream.send_chunk(chunk, is_last).await.is_err() {
+                    return Ok(receiver.bytes_received as u64);
                 }
-                while !chunk.is_empty() {
-                    let available = send_stream.capacity();
-                    if available == 0 {
-                        match std::future::poll_fn(|cx| send_stream.poll_capacity(cx)).await {
-                            Some(Ok(_)) => {}
-                            Some(Err(err)) => return Err(err.into()),
-                            None => return Ok(receiver.bytes_received() as u64),
-                        }
-                        if send_stream.capacity() == 0 {
-                            return Ok(receiver.bytes_received() as u64);
-                        }
-                        continue;
-                    }
-
-                    let to_send = chunk.len().min(available);
-                    let is_last = receiver.is_end_stream() && to_send == chunk.len();
-                    let slice = chunk.split_to(to_send);
-                    if send_stream.send_data(slice, is_last).is_err() {
-                        return Ok(receiver.bytes_received() as u64);
-                    }
-                    if is_last {
-                        sent_end_stream = true;
-                        break;
-                    }
-                }
-                if sent_end_stream {
+                if is_last {
+                    sent_end_stream = true;
                     break;
                 }
             }
             if !sent_end_stream {
                 let _ = send_stream.send_data(Bytes::new(), true);
             }
-            Ok::<u64, Http2Error>(receiver.bytes_received() as u64)
+            Ok::<u64, Http2Error>(receiver.bytes_received as u64)
         };
 
         let config_max_body = config.max_body_size;
         let mut responder = responder;
         let download_task = async move {
-            let response = response_fut.await?;
-            let (mut parts, mut body_stream) = response.into_parts();
-
-            if let Some(post_hooks) = &plan.post_response_hooks
-                && let Some(ref req_headers) = req_headers_ref
-            {
+            let mut response = response_fut.await?;
+            let mut resp_ws = response.headers;
+            if let Some(post_hooks) = &plan.post_response_hooks {
                 let mut l7_resp =
-                    L7Response::new(parts.status, Version::HTTP_2, parts.headers, Body::Empty);
-                velda_plugin::run_post_response_plugins(post_hooks, req_headers, &mut l7_resp);
-                parts.status = l7_resp.status;
-                parts.headers = l7_resp.headers.into();
+                    L7Response::new(response.status, Version::HTTP_2, resp_ws, Body::Empty);
+                velda_plugin::run_post_response_plugins(
+                    post_hooks,
+                    &req_head.headers,
+                    &mut l7_resp,
+                );
+                response.status = l7_resp.status;
+                resp_ws = l7_resp.headers;
             }
-            meta.inject_response_headers(&mut parts.headers);
+            meta.inject_response_headers(&mut resp_ws);
 
-            let is_no_body_status = parts.status.is_informational()
-                || parts.status == StatusCode::NO_CONTENT
-                || parts.status == StatusCode::NOT_MODIFIED;
+            let is_no_body_status = response.status.is_informational()
+                || response.status == StatusCode::NO_CONTENT
+                || response.status == StatusCode::NOT_MODIFIED;
 
             if is_head || is_no_body_status {
-                let resp =
-                    L7Response::new(parts.status, Version::HTTP_2, parts.headers, Body::Empty);
+                let resp = L7Response::new(response.status, Version::HTTP_2, resp_ws, Body::Empty);
                 responder.send_response_and_cancel_upload(&resp)?;
                 return Ok::<(u16, u64), Http2Error>((responder.last_status, 0));
             }
 
-            let mut sender = responder.send_stream_response(parts.status, &parts.headers)?;
-
-            let batch_threshold = 65_536;
+            let mut sender = responder.send_stream_response(response.status, &resp_ws)?;
             let mut total_bytes = 0;
-            let mut unreleased_bytes = 0;
 
-            while let Some(chunk) = body_stream.data().await {
-                let data = chunk?;
-                let len = data.len();
-                total_bytes += len;
-                unreleased_bytes += len;
-
+            while let Some(data) = response.body.recv_chunk().await? {
+                total_bytes += data.len();
                 if total_bytes > config_max_body {
-                    let _ = body_stream
-                        .flow_control()
-                        .release_capacity(unreleased_bytes);
                     return Err(Http2Error::PayloadTooLarge(total_bytes));
                 }
-
-                if unreleased_bytes >= batch_threshold {
-                    let _ = body_stream
-                        .flow_control()
-                        .release_capacity(unreleased_bytes);
-                    unreleased_bytes = 0;
-                }
-
                 if !data.is_empty() && sender.send_chunk(data).await.is_err() {
                     tracing::debug!("Downstream client disconnected during H2 duplex streaming");
-                    if unreleased_bytes > 0 {
-                        let _ = body_stream
-                            .flow_control()
-                            .release_capacity(unreleased_bytes);
-                    }
-                    return Ok((responder.last_status, sender.bytes_sent()));
+                    return Ok((responder.last_status, sender.bytes_sent));
                 }
             }
 
-            if unreleased_bytes > 0 {
-                let _ = body_stream
-                    .flow_control()
-                    .release_capacity(unreleased_bytes);
-            }
-
-            let tx = sender.bytes_sent();
+            let tx = sender.bytes_sent;
             let _ = sender.finish();
             Ok((responder.last_status, tx))
         };

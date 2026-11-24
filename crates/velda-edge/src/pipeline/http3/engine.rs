@@ -13,8 +13,8 @@ use arc_swap::ArcSwapOption;
 use parking_lot::Mutex;
 use rustc_hash::FxHashMap;
 use velda_core::L7Response;
-use velda_http3::Http3Engine;
 use velda_http3::quinn_proto::{ConnectionHandle, StreamId};
+use velda_http3::server::connection::Http3Engine;
 use velda_sock::UdpSocket;
 use velda_tls::TlsServerEngine;
 
@@ -62,7 +62,7 @@ pub enum Http3ResponseMsg {
         handle: ConnectionHandle,
         stream_id: StreamId,
         status: http::StatusCode,
-        headers: http::HeaderMap,
+        headers: velda_core::HeaderWorkspace,
     },
     /// Progressive response DATA chunk.
     Chunk {
@@ -129,7 +129,7 @@ impl Http3Responder {
     pub async fn send_stream_response(
         self,
         status: http::StatusCode,
-        headers: &http::HeaderMap,
+        headers: &velda_core::HeaderWorkspace,
     ) -> Result<Http3StreamSender, EdgeError> {
         let mut final_headers = headers.clone();
         if let Some(ref req_id) = self.request_id {
@@ -234,7 +234,7 @@ impl Http3Worker {
     pub fn new(
         worker_id: usize,
         quic_cfg: Arc<velda_http3::quinn_proto::ServerConfig>,
-        h3_config: velda_http3::Http3Config,
+        h3_config: velda_http3::config::Http3Config,
     ) -> Arc<Self> {
         let engine = Http3Engine::new_with_config(quic_cfg, h3_config);
         let (response_tx, rx) = tokio::sync::mpsc::channel(WORKER_RESPONSE_QUEUE_CAPACITY);
@@ -458,7 +458,7 @@ impl Http3WorkerPool {
     /// Creates a per-core worker pool sized to an explicit worker count.
     pub fn with_worker_count(
         quic_cfg: Arc<velda_http3::quinn_proto::ServerConfig>,
-        h3_config: velda_http3::Http3Config,
+        h3_config: velda_http3::config::Http3Config,
         count: usize,
     ) -> Self {
         let count = count.max(1);
@@ -474,7 +474,7 @@ impl Http3WorkerPool {
     /// Creates a per-core worker pool sized 1:1 with hardware CPU cores.
     pub fn new(
         quic_cfg: Arc<velda_http3::quinn_proto::ServerConfig>,
-        h3_config: velda_http3::Http3Config,
+        h3_config: velda_http3::config::Http3Config,
     ) -> Self {
         let cores = std::thread::available_parallelism()
             .map(|n| n.get())
@@ -504,7 +504,7 @@ fn engines_table() -> &'static RwLock<FxHashMap<String, Http3WorkerPool>> {
 /// ensuring zero-downtime and zero connection drop during configuration reloads!
 pub fn init_h3_engine(listener_id: &str, tls_server: &TlsServerEngine) -> Result<(), EdgeError> {
     let mut quic_cfg = tls_server.build_quic_config().map_err(EdgeError::Tls)?;
-    let h3_config = velda_http3::Http3Config::auto();
+    let h3_config = velda_http3::config::Http3Config::auto();
     quic_cfg.transport = Arc::new(h3_config.build_transport_config());
 
     let table = engines_table();

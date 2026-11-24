@@ -18,14 +18,14 @@
 //!
 //! Self-contained pipeline adhering to the Hourglass Architecture & Flat Workflow.
 
-use bytes::Bytes;
-use http::Version;
 use std::sync::Arc;
 use std::time::Duration;
 
+use bytes::Bytes;
 use velda_core::GrpcStatus;
-use velda_grpc::tcp::server::GrpcServerStream;
-use velda_grpc::{GrpcConfig, GrpcError};
+use velda_grpc::config::GrpcConfig;
+use velda_grpc::error::GrpcError;
+use velda_grpc::tcp::server::stream::GrpcServerStream;
 
 use crate::pipeline::PipeOutcome;
 use crate::upstream::grpc::GrpcRdmaUpstream;
@@ -36,15 +36,15 @@ pub async fn serve(
     upstream: &Arc<GrpcRdmaUpstream>,
     config: &GrpcConfig,
 ) -> PipeOutcome {
-    // Step 1: Deconstruct downstream stream into request parts, receive body stream, and response handle.
+    // Step 1: Deconstruct downstream stream into request head, receive body stream, and response handle.
     let GrpcServerStream {
-        parts,
-        mut recv_stream,
+        head,
+        mut receiver,
         mut respond,
     } = server_stream;
 
-    // Step 2: Lease pre-warmed RDMA connection handle from worker core lane shard without cross-thread lock contention.
-    let mut client = match upstream.acquire(config).await {
+    // Step 2: Lease pre-warmed RDMA connection handle from worker core lane shard.
+    let client = match upstream.acquire(config).await {
         Ok(c) => c,
         Err(e) => {
             tracing::warn!(
@@ -70,65 +70,35 @@ pub async fn serve(
 
     // Step 3: Execute concurrent bidirectional streaming workflow bounded by max_call_duration_ms.
     let workflow = async {
-        // Step 4: Synthesize outbound HTTP/2 request frame with finalized ingress headers.
-        let mut req_builder = http::Request::builder()
-            .method(parts.method)
-            .uri(parts.uri)
-            .version(Version::HTTP_2);
+        // Step 4: Open bidirectional HTTP/2 stream over RDMA directly from HeaderWorkspace.
+        let (upstream_resp_fut, mut upstream_send_stream) = client
+            .open_stream(head.method, head.uri, head.headers, false)
+            .await?;
 
-        for (name, val) in &parts.headers {
-            req_builder = req_builder.header(name, val);
-        }
-
-        let upstream_req = req_builder.body(()).map_err(GrpcError::Http)?;
-        // Step 5: Open bidirectional HTTP/2 stream over RDMA (end_stream=false).
-        let (upstream_resp_fut, mut upstream_send_stream) =
-            client.open_stream(upstream_req, false)?;
-
-        // Step 6: Task A (Client-to-Upstream Pump) - Forwards client streaming frames to RDMA.
+        // Step 5: Task A (Client-to-Upstream Pump) - Forwards client streaming frames to RDMA.
         let upstream_forward = async {
             let mut bytes_rx: u64 = 0;
-            while let Some(chunk) = recv_stream.data().await {
-                let data = chunk.map_err(GrpcError::H2)?;
-                let len = data.len();
-                bytes_rx += len as u64;
-                let is_last = recv_stream.is_end_stream();
-                upstream_send_stream
-                    .send_data(data, is_last)
-                    .map_err(GrpcError::H2)?;
-                let _ = recv_stream.flow_control().release_capacity(len);
-                if is_last {
-                    return Ok::<u64, GrpcError>(bytes_rx);
+            if !receiver.is_end_stream() {
+                while let Some(data) = receiver.recv_chunk().await? {
+                    bytes_rx += data.len() as u64;
+                    upstream_send_stream.send_chunk(data, false).await?;
                 }
-            }
-            if let Some(trailers) = recv_stream.trailers().await.map_err(GrpcError::H2)? {
-                upstream_send_stream
-                    .send_trailers(trailers)
-                    .map_err(GrpcError::H2)?;
+                if let Some(trailers) = receiver.take_trailers() {
+                    upstream_send_stream.send_trailers(trailers)?;
+                } else {
+                    upstream_send_stream.send_chunk(Bytes::new(), true).await?;
+                }
             } else {
-                upstream_send_stream
-                    .send_data(Bytes::new(), true)
-                    .map_err(GrpcError::H2)?;
+                upstream_send_stream.send_chunk(Bytes::new(), true).await?;
             }
             Ok::<u64, GrpcError>(bytes_rx)
         };
 
-        // Step 7: Task B (Upstream-to-Client Pump) - Awaits headers and streams RDMA responses downstream.
+        // Step 6: Task B (Upstream-to-Client Pump) - Awaits headers and streams RDMA responses downstream.
         let downstream_forward = async {
-            let response = upstream_resp_fut.await.map_err(GrpcError::H2)?;
-            let (mut resp_parts, mut upstream_recv_stream) = response.into_parts();
+            let mut response = upstream_resp_fut.await?;
 
-            let mut resp_builder = http::Response::builder()
-                .status(resp_parts.status)
-                .version(Version::HTTP_2);
-
-            for (name, val) in resp_parts.headers.drain() {
-                if let Some(name) = name {
-                    resp_builder = resp_builder.header(name, val);
-                }
-            }
-
-            let mut grpc_status = resp_parts
+            let mut grpc_status = response
                 .headers
                 .get("grpc-status")
                 .and_then(|v| v.to_str().ok())
@@ -136,56 +106,51 @@ pub async fn serve(
                 .map(velda_core::GrpcStatus::from_u8)
                 .unwrap_or(velda_core::GrpcStatus::Ok);
 
-            let is_end_of_stream = upstream_recv_stream.is_end_stream();
-            let resp = resp_builder.body(()).map_err(GrpcError::Http)?;
-            let mut downstream_send_stream = respond
-                .send_response(resp, is_end_of_stream)
-                .map_err(GrpcError::H2)?;
+            let is_end_of_stream = response.body.is_end_stream();
+            let Some(mut downstream_send_stream) = respond.send_response_headers(
+                response.status,
+                &response.headers,
+                is_end_of_stream,
+            )?
+            else {
+                return Ok((0, grpc_status));
+            };
 
             let mut bytes_tx: u64 = 0;
+            let mut has_trailers = false;
 
-            if !is_end_of_stream {
-                while let Some(chunk) = upstream_recv_stream.data().await {
-                    let data = chunk.map_err(GrpcError::H2)?;
-                    let len = data.len();
-                    bytes_tx += len as u64;
-                    let is_last = upstream_recv_stream.is_end_stream();
-                    downstream_send_stream
-                        .send_data(data, is_last)
-                        .map_err(GrpcError::H2)?;
-                    let _ = upstream_recv_stream.flow_control().release_capacity(len);
-                    if is_last {
-                        break;
-                    }
-                }
-                if let Some(trailers) = upstream_recv_stream
-                    .trailers()
-                    .await
-                    .map_err(GrpcError::H2)?
-                {
-                    if let Some(code) = trailers
-                        .get("grpc-status")
-                        .and_then(|v| v.to_str().ok())
-                        .and_then(|s| s.parse::<u8>().ok())
-                        .map(velda_core::GrpcStatus::from_u8)
-                    {
-                        grpc_status = code;
-                    }
-                    downstream_send_stream
-                        .send_trailers(trailers)
-                        .map_err(GrpcError::H2)?;
-                }
+            while let Some(data) = response.body.recv_chunk().await? {
+                bytes_tx += data.len() as u64;
+                downstream_send_stream.send_chunk(data).await?;
             }
+
+            if let Some(trailers) = response.body.trailers().await? {
+                if let Some(code) = trailers
+                    .get("grpc-status")
+                    .and_then(|v| v.to_str().ok())
+                    .and_then(|s| s.parse::<u8>().ok())
+                    .map(velda_core::GrpcStatus::from_u8)
+                {
+                    grpc_status = code;
+                }
+                downstream_send_stream.send_trailers(trailers)?;
+                has_trailers = true;
+            }
+
+            if !has_trailers {
+                downstream_send_stream.finish()?;
+            }
+
             Ok::<(u64, velda_core::GrpcStatus), GrpcError>((bytes_tx, grpc_status))
         };
 
-        // Step 8: Concurrently join both pump tasks; abort if either fails.
+        // Step 7: Concurrently join both pump tasks; abort if either fails.
         let (bytes_rx, (bytes_tx, grpc_status)) =
             tokio::try_join!(upstream_forward, downstream_forward)?;
         Ok::<_, GrpcError>((bytes_rx, bytes_tx, grpc_status))
     };
 
-    // Step 9: Catch deadline expiration and emit canonical DeadlineExceeded trailer.
+    // Step 8: Catch deadline expiration and emit canonical DeadlineExceeded trailer.
     match tokio::time::timeout(timeout, workflow).await {
         Ok(Ok((rx, tx, status))) => PipeOutcome::grpc(
             200,

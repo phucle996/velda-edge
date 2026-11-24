@@ -7,10 +7,10 @@
 use rustc_hash::FxHashMap;
 
 use velda_core::{ProtocolFamily, StreamingMode};
-use velda_grpc::GrpcConfig;
-use velda_http1::Http1Config;
-use velda_http2::Http2Config;
-use velda_http3::Http3Config;
+use velda_grpc::config::GrpcConfig;
+use velda_http1::config::Http1Config;
+use velda_http2::config::Http2Config;
+use velda_http3::config::Http3Config;
 use velda_observability::sampling::grpc::GrpcSampling;
 use velda_observability::sampling::http::HttpSampling;
 use velda_sync::post_sync::listener::ListenerConfig;

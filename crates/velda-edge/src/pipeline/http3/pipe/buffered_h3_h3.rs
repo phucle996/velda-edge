@@ -11,7 +11,9 @@ use std::sync::Arc;
 use http::StatusCode;
 use http::header::{CONTENT_TYPE, HeaderValue};
 use velda_core::{Body, L7Request, L7Response};
-use velda_http3::{Http3Client, Http3Config, Http3Error};
+use velda_http3::client::connector::Http3Client;
+use velda_http3::config::Http3Config;
+use velda_http3::error::Http3Error;
 
 use crate::upstream::Http3Upstream;
 
@@ -27,7 +29,7 @@ async fn forward_buffered(
     }
 
     let is_head = req.method == http::Method::HEAD;
-    let resp = client.send_request_ref(req).await?;
+    let resp = client.send_request(req.clone()).await?;
 
     if let Some(content_type) = resp.headers.get(http::header::CONTENT_TYPE)
         && content_type

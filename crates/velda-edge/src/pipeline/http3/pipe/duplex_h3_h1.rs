@@ -9,8 +9,8 @@ use std::sync::Arc;
 use http::StatusCode;
 use http::header::{CONTENT_TYPE, HeaderValue};
 use velda_core::{Body, L7Request, L7Response};
-use velda_http1::is_connection_close;
 use velda_http1::server::request::Http1BodyFraming;
+use velda_http1::server::response::is_connection_close;
 
 use velda_plugin::RoutePluginPlan;
 
@@ -73,7 +73,7 @@ pub async fn serve(
     lease.write_buf.clear();
     let mut send_res = {
         let (stream, write_buf) = lease.split_write();
-        velda_http1::client::send_request_parts(
+        velda_http1::client::request::send_request_parts(
             &req.method,
             &req.uri,
             &headers,
@@ -95,7 +95,7 @@ pub async fn serve(
             upstream_addr = Some(fresh_lease.endpoint);
             fresh_lease.write_buf.clear();
             let (stream, write_buf) = fresh_lease.split_write();
-            send_res = velda_http1::client::send_request_parts(
+            send_res = velda_http1::client::request::send_request_parts(
                 &req.method,
                 &req.uri,
                 &headers,
@@ -141,7 +141,9 @@ pub async fn serve(
     lease.read_buf.clear();
     let (resp_head, framing) = {
         let (stream, read_buf) = lease.split_read();
-        match velda_http1::client::read_response_head(stream, read_buf, &upstream.config).await {
+        match velda_http1::client::response::read_response_head(stream, read_buf, &upstream.config)
+            .await
+        {
             Ok(parts) => parts,
             Err(e) => {
                 lease.mark_closed();
@@ -174,7 +176,7 @@ pub async fn serve(
 
     // Strip hop-by-hop headers before sending over HTTP/3
     let mut clean_headers = resp_head.headers;
-    velda_http1::client::sanitize_headers(&mut clean_headers);
+    velda_http1::client::header::sanitize_headers(&mut clean_headers);
 
     let mut status = resp_head.status;
     if let Some(post_hooks) = &plan.post_response_hooks {
@@ -182,7 +184,7 @@ pub async fn serve(
             L7Response::new(status, http::Version::HTTP_3, clean_headers, Body::Empty);
         velda_plugin::run_post_response_plugins(post_hooks, &req.headers, &mut l7_resp);
         status = l7_resp.status;
-        clean_headers = l7_resp.headers.into();
+        clean_headers = l7_resp.headers;
     }
 
     // Handle responses with no body (HEAD, 1xx, 204, 304)
@@ -233,7 +235,7 @@ pub async fn serve(
         match framing {
             Http1BodyFraming::Empty => Ok(()),
             Http1BodyFraming::Chunked => loop {
-                match velda_http1::client::read_next_chunk(stream, read_buf).await {
+                match velda_http1::client::response::read_next_chunk(stream, read_buf).await {
                     Ok(Some(chunk)) => {
                         if let Err(e) = stream_sender.send_chunk(chunk).await {
                             break Err(e);
@@ -255,7 +257,9 @@ pub async fn serve(
                     .clamp(MIN_STREAMING_CHUNK_SIZE, MAX_STREAMING_CHUNK_SIZE);
                 while remaining > 0 {
                     let to_read = remaining.min(chunk_limit);
-                    match velda_http1::client::read_chunk_sized(stream, read_buf, to_read).await {
+                    match velda_http1::client::response::read_chunk_sized(stream, read_buf, to_read)
+                        .await
+                    {
                         Ok(Some(chunk)) => {
                             remaining = remaining.saturating_sub(chunk.len());
                             if stream_sender.send_chunk(chunk).await.is_err() {

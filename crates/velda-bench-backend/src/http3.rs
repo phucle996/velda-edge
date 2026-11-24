@@ -3,15 +3,15 @@
 //! Serves all 8 canonical routes over HTTP/3 QUIC streams using pure packet-driven state machine.
 
 use bytes::Bytes;
-use http::{HeaderMap, StatusCode, Version};
+use http::{StatusCode, Version};
 use std::net::SocketAddr;
 use std::sync::Arc;
 use std::time::Instant;
 use tokio::net::UdpSocket;
 use tokio::time::{Duration, interval};
-use velda_core::{Body, L7Response};
-use velda_http3::Http3Engine;
+use velda_core::{Body, HeaderWorkspace, L7Response};
 use velda_http3::quinn_proto::ServerConfig;
+use velda_http3::server::connection::Http3Engine;
 
 pub struct Http3Router;
 
@@ -77,41 +77,41 @@ impl Http3Router {
                             // PIPE 3: ClientStream (Upload) — 100% Real body consumption
                             let body_bytes = req_event.request.body.len();
                             let json = format!("{{\"status\":\"ok\",\"pipe\":\"client_stream_h3\",\"received_bytes\":{}}}\n", body_bytes);
-                            let mut headers = HeaderMap::new();
+                            let mut headers = HeaderWorkspace::empty(1);
                             headers.insert(http::header::CONTENT_TYPE, "application/json".parse().unwrap());
                             L7Response::new(StatusCode::OK, Version::HTTP_3, headers, Body::Bytes(Bytes::from(json)))
                         } else if method == http::Method::POST && (path.contains("duplex") || path.contains("echo")) {
                             // PIPE 4: Duplex (Echo)
-                            let mut headers = HeaderMap::new();
+                            let mut headers = HeaderWorkspace::empty(1);
                             headers.insert(http::header::CONTENT_TYPE, "application/octet-stream".parse().unwrap());
                             L7Response::new(StatusCode::OK, Version::HTTP_3, headers, req_event.request.body)
                         } else if path.contains("stream") || path.contains("sse") {
                             // PIPE 2: ServerStream
                             if path.ends_with("sse-ping") || path.ends_with("sse") {
-                                let mut headers = HeaderMap::new();
+                                let mut headers = HeaderWorkspace::empty(1);
                                 headers.insert(http::header::CONTENT_TYPE, "text/event-stream".parse().unwrap());
                                 L7Response::new(StatusCode::OK, Version::HTTP_3, headers, Body::Bytes(sse_bytes.clone()))
                             } else if path.ends_with("64kb") {
-                                let mut headers = HeaderMap::new();
+                                let mut headers = HeaderWorkspace::empty(1);
                                 headers.insert(http::header::CONTENT_TYPE, "application/octet-stream".parse().unwrap());
                                 L7Response::new(StatusCode::OK, Version::HTTP_3, headers, Body::Bytes(payload_64kb.clone()))
                             } else {
-                                let mut headers = HeaderMap::new();
+                                let mut headers = HeaderWorkspace::empty(1);
                                 headers.insert(http::header::CONTENT_TYPE, "application/octet-stream".parse().unwrap());
                                 L7Response::new(StatusCode::OK, Version::HTTP_3, headers, Body::Bytes(payload_10mb.clone()))
                             }
                         } else {
                             // PIPE 1: Buffered
                             if path.ends_with("12kb") {
-                                let mut headers = HeaderMap::new();
+                                let mut headers = HeaderWorkspace::empty(1);
                                 headers.insert(http::header::CONTENT_TYPE, "application/json".parse().unwrap());
                                 L7Response::new(StatusCode::OK, Version::HTTP_3, headers, Body::Bytes(payload_12kb.clone()))
                             } else if path.ends_with("1mb") {
-                                let mut headers = HeaderMap::new();
+                                let mut headers = HeaderWorkspace::empty(1);
                                 headers.insert(http::header::CONTENT_TYPE, "application/octet-stream".parse().unwrap());
                                 L7Response::new(StatusCode::OK, Version::HTTP_3, headers, Body::Bytes(payload_1mb.clone()))
                             } else {
-                                let mut headers = HeaderMap::new();
+                                let mut headers = HeaderWorkspace::empty(1);
                                 headers.insert(http::header::CONTENT_TYPE, "text/plain".parse().unwrap());
                                 L7Response::new(StatusCode::OK, Version::HTTP_3, headers, Body::Bytes(pong_bytes.clone()))
                             }

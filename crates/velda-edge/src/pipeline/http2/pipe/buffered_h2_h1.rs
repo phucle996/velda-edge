@@ -12,8 +12,9 @@ use http::StatusCode;
 use http::header::{CONTENT_TYPE, HeaderValue};
 use tokio::io::AsyncReadExt;
 use velda_core::L7Response;
-use velda_http1::is_connection_close;
-use velda_http2::server::{Http2Responder, Http2ServerRequestHead, Http2StreamReceiver};
+use velda_http1::server::response::is_connection_close;
+use velda_http2::server::request::{Http2ServerRequestHead, Http2StreamReceiver};
+use velda_http2::server::response::Http2Responder;
 
 use crate::pipeline::{DownstreamMeta, PipeOutcome};
 use crate::upstream::Http1Upstream;
@@ -42,19 +43,19 @@ pub async fn serve(
             let _ = responder.send_response(&err_resp);
             return PipeOutcome::http(
                 responder.last_status,
-                receiver.bytes_received() as u64,
+                receiver.bytes_received as u64,
                 responder.last_bytes_tx,
                 None,
                 velda_core::CompletionReason::Rejected,
             );
         }
     };
-    let bytes_rx = receiver.bytes_received() as u64;
+    let bytes_rx = receiver.bytes_received as u64;
 
     // 2. Ensure RFC 9112 §7.1 mandatory Host header for HTTP/1.1
     if !req_head.headers.contains_key(http::header::HOST)
         && let Some(host) =
-            velda_http2::server::header::extract_host(&req_head.headers, &req_head.uri)
+            velda_http2::server::request::extract_host(&req_head.headers, &req_head.uri)
         && let Ok(hv) = HeaderValue::from_str(host)
     {
         req_head.headers.insert(http::header::HOST, hv);
@@ -90,11 +91,12 @@ pub async fn serve(
     let upstream_addr = Some(lease.endpoint);
 
     // 5. Serialize & send HTTP/1.1 request using pre-allocated pooled lease.write_buf
+    let h1_req_headers = &req_head.headers;
     let (stream, write_buf) = lease.split_write();
-    let send_res = velda_http1::client::send_request_parts(
+    let send_res = velda_http1::client::request::send_request_parts(
         &req_head.method,
         &req_head.uri,
-        &req_head.headers,
+        h1_req_headers,
         &body,
         stream,
         write_buf,
@@ -129,7 +131,9 @@ pub async fn serve(
     // 6. Read and decode HTTP/1.1 response using pre-allocated pooled lease.read_buf (zero heap allocations)
     let (stream, read_buf) = lease.split_read();
     let (resp_head, framing) =
-        match velda_http1::client::read_response_head(stream, read_buf, &upstream.config).await {
+        match velda_http1::client::response::read_response_head(stream, read_buf, &upstream.config)
+            .await
+        {
             Ok(res) => res,
             Err(e) => {
                 lease.mark_closed();
@@ -216,7 +220,7 @@ pub async fn serve(
             {
                 let (stream, read_buf) = lease.split_read();
                 loop {
-                    match velda_http1::client::read_next_chunk(stream, read_buf).await {
+                    match velda_http1::client::response::read_next_chunk(stream, read_buf).await {
                         Ok(Some(chunk)) => {
                             if chunked_body.len() + chunk.len() > upstream.config.max_body_size {
                                 failed = true;
@@ -271,9 +275,7 @@ pub async fn serve(
     // Fast-path guard: Bypasses HeaderWorkspace instantiation & plugin dispatch if route has no hooks.
     // req_head reaches end of life here -> mem::take transfers ownership with zero allocations.
     if let Some(post_hooks) = &plan.post_response_hooks {
-        let req_ws =
-            velda_core::HeaderWorkspace::from_headers(std::mem::take(&mut req_head.headers));
-        velda_plugin::run_post_response_plugins(post_hooks, &req_ws, &mut l7_resp);
+        velda_plugin::run_post_response_plugins(post_hooks, h1_req_headers, &mut l7_resp);
     }
     meta.inject_response_headers(&mut l7_resp.headers);
     let _ = responder.send_response_owned(l7_resp);

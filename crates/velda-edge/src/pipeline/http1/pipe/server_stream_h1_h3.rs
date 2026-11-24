@@ -32,12 +32,13 @@ use http::StatusCode;
 use http::header::{CONTENT_TYPE, HeaderValue};
 use tokio::io::{AsyncRead, AsyncWrite, AsyncWriteExt};
 use velda_core::L7Request;
-use velda_http1::{
-    Http1BodyFraming, Http1Error, Http1ServerConnection, Http1ServerRequestHead,
-    Http1ServerResponse,
-};
+use velda_http1::error::Http1Error;
+use velda_http1::server::connection::Http1ServerConnection;
+use velda_http1::server::request::{Http1BodyFraming, Http1ServerRequestHead};
+use velda_http1::server::response::Http1ServerResponse;
+use velda_http3::config::Http3Config;
 use velda_http3::error::Http3Error;
-use velda_http3::{Http3Config, sanitize_headers};
+use velda_http3::headers::sanitize_headers;
 
 use crate::pipeline::DownstreamMeta;
 use crate::upstream::Http3Upstream;
@@ -75,7 +76,7 @@ where
                 CONTENT_TYPE,
                 HeaderValue::from_static("text/plain; charset=utf-8"),
             );
-            conn.mark_close();
+            conn.close_requested = true;
             let _ = conn.send_response(&err_resp).await;
             return Err(Http1Error::Timeout);
         }
@@ -88,7 +89,7 @@ where
                 CONTENT_TYPE,
                 HeaderValue::from_static("text/plain; charset=utf-8"),
             );
-            conn.mark_close();
+            conn.close_requested = true;
             let _ = conn.send_response(&err_resp).await;
             return Err(e);
         }
@@ -131,7 +132,7 @@ where
                 CONTENT_TYPE,
                 HeaderValue::from_static("text/plain; charset=utf-8"),
             );
-            conn.mark_close();
+            conn.close_requested = true;
             let _ = conn.send_response(&err_resp).await;
             return Err(Http1Error::ConnectionClosed);
         }
@@ -171,43 +172,42 @@ where
                 CONTENT_TYPE,
                 HeaderValue::from_static("text/plain; charset=utf-8"),
             );
-            conn.mark_close();
+            conn.close_requested = true;
             let _ = conn.send_response(&err_resp).await;
             return Err(Http1Error::ConnectionClosed);
         }
     };
 
+    let mut resp_headers = std::mem::take(&mut h3_resp.headers);
     if let Some(ref req_id) = req_id {
-        h3_resp
-            .headers
-            .insert(crate::pipeline::X_REQUEST_ID, req_id.clone());
+        resp_headers.insert_bypass(crate::pipeline::X_REQUEST_ID, req_id.clone());
     }
 
-    // Fast-path guard: Bypasses post-response plugin chain if route has no hooks.
+    let mut resp_status = h3_resp.status;
     if let Some(post_hooks) = &plan.post_response_hooks {
         let mut l7_resp = velda_core::L7Response::new(
-            h3_resp.status,
+            resp_status,
             http::Version::HTTP_11,
-            std::mem::take(&mut h3_resp.headers),
+            resp_headers,
             velda_core::Body::Empty,
         );
         velda_plugin::run_post_response_plugins(post_hooks, &l7_req.headers, &mut l7_resp);
-        h3_resp.status = l7_resp.status;
-        h3_resp.headers = l7_resp.headers.into();
+        resp_status = l7_resp.status;
+        resp_headers = l7_resp.headers;
     }
-    meta.inject_response_headers(&mut h3_resp.headers);
+    meta.inject_response_headers(&mut resp_headers);
 
     // 7. Check if response has no body (RFC 9110: HEAD, 1xx, 204, 304)
     let is_head = req_method == http::Method::HEAD;
-    let is_no_body = h3_resp.status.is_informational()
-        || h3_resp.status == StatusCode::NO_CONTENT
-        || h3_resp.status == StatusCode::NOT_MODIFIED;
+    let is_no_body = resp_status.is_informational()
+        || resp_status == StatusCode::NO_CONTENT
+        || resp_status == StatusCode::NOT_MODIFIED;
 
     if is_head || is_no_body {
         let server_resp = Http1ServerResponse::new(
-            h3_resp.status,
+            resp_status,
             http::Version::HTTP_11,
-            h3_resp.headers,
+            resp_headers,
             velda_core::Body::Empty,
         );
         conn.send_response(&server_resp).await?;
@@ -216,11 +216,11 @@ where
 
     // 8. Immediately send chunked response head downstream!
     let resp_head = velda_http1::server::response::Http1ServerResponseHead::new(
-        h3_resp.status,
+        resp_status,
         http::Version::HTTP_11,
-        std::mem::take(&mut h3_resp.headers),
+        resp_headers,
     );
-    conn.send_response_head_chunked(&resp_head).await?;
+    conn.send_chunked_head(&resp_head).await?;
 
     // 9. Stream response chunks downstream with batch coalescing and client disconnect propagation
     let mut chunk_batch: [bytes::Bytes; 16] = Default::default();

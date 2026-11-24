@@ -10,10 +10,12 @@ use crate::pipeline::X_REQUEST_ID;
 use http::StatusCode;
 use http::header::HeaderValue;
 use tokio::io::{AsyncRead, AsyncWrite};
-use velda_http1::{
-    Http1BodyFraming, Http1Config, Http1Error, Http1PipeStrategy, Http1ServerConnection,
-    Http1ServerResponse,
-};
+use velda_http1::config::Http1Config;
+use velda_http1::error::Http1Error;
+use velda_http1::server::connection::Http1ServerConnection;
+use velda_http1::server::request::Http1BodyFraming;
+use velda_http1::server::response::Http1ServerResponse;
+use velda_http1::strategy::Http1PipeStrategy;
 use velda_router::Http1RouteRequest;
 use velda_sock::Connection;
 use velda_tls::TlsServerEngine;
@@ -23,8 +25,8 @@ use crate::pipeline::DownstreamMeta;
 use crate::runtime::SharedRuntime;
 use crate::upstream::HttpUpstream;
 use velda_core::{Action, L7Request, PipeKind};
-use velda_http2::Http2PipeStrategy;
-use velda_http3::Http3PipeStrategy;
+use velda_http2::strategy::Http2PipeStrategy;
+use velda_http3::strategy::Http3PipeStrategy;
 use velda_observability::sampling::http::HttpSampling;
 use velda_observability::{StreamCompletion, global_metrics};
 
@@ -134,7 +136,7 @@ pub async fn run_http1_loop<IO>(
     IO: AsyncRead + AsyncWrite + Unpin + Send + 'static,
 {
     let mut conn = Http1ServerConnection::new(stream, config);
-    conn.set_alt_svc(meta.alt_svc_header.clone());
+    conn.alt_svc = meta.alt_svc_header.clone();
     let mut requests_served: u32 = 0;
 
     loop {
@@ -144,8 +146,13 @@ pub async fn run_http1_loop<IO>(
         conn.last_upstream_ip = 0;
         conn.last_upstream_port_be = 0;
 
-        // Phase 1: decode request head (fail-fast, header inspection, Slowloris protection)
-        let (req_head, framing) = match conn.next_request_head().await {
+        // Phase 1: decode request head + 1-pass authoritative proxy header pre-seeding
+        let enrich = velda_http1::simd::H1IngressEnrich {
+            client_ip: &meta.client_ip_header,
+            listener_port: &meta.listener_port_header,
+            is_tls: meta.is_tls,
+        };
+        let (req_head, framing) = match conn.next_request_head(Some(enrich)).await {
             Ok(Some(parts)) => parts,
             Ok(None) => break,
             Err(Http1Error::Timeout) => {
@@ -157,8 +164,8 @@ pub async fn run_http1_loop<IO>(
                 let ingress_nanos = velda_core::clock::now_unix_nanos();
                 let (req_id, req_id_header) =
                     velda_core::request_id::next_request_id(ingress_nanos);
-                conn.set_request_id(Some(req_id_header));
-                conn.mark_close();
+                conn.current_request_id = Some(req_id_header);
+                conn.close_requested = true;
                 let _ = conn.send_early_error(StatusCode::REQUEST_TIMEOUT).await;
                 let timeout_ns = config.header_read_timeout_ms.saturating_mul(1_000_000);
                 global_metrics().record_early_completion(
@@ -201,8 +208,8 @@ pub async fn run_http1_loop<IO>(
                 let ingress_nanos = velda_core::clock::now_unix_nanos();
                 let (req_id, req_id_header) =
                     velda_core::request_id::next_request_id(ingress_nanos);
-                conn.set_request_id(Some(req_id_header));
-                conn.mark_close();
+                conn.current_request_id = Some(req_id_header);
+                conn.close_requested = true;
                 let _ = conn.send_early_error(status).await;
                 let duration_ns = velda_core::clock::now_unix_nanos().saturating_sub(ingress_nanos);
                 global_metrics().record_early_completion(
@@ -232,18 +239,22 @@ pub async fn run_http1_loop<IO>(
         requests_served += 1;
         let reach_max_keepalive = requests_served >= config.max_keepalive_requests;
         if reach_max_keepalive {
-            conn.mark_close();
+            conn.close_requested = true;
         }
         let rt = runtime.load();
         let ingress_nanos = velda_core::clock::now_unix_nanos();
 
         // [INGRESS W3C REQUEST ID GENERATION]
-        // Authoritatively generate W3C Request ID from thread-local pool.
-        // Overwrite any client-supplied x-request-id to enforce zero-trust Edge boundary.
+        // Authoritatively generate W3C Request ID from thread-local pool and append
+        // directly (client-spoofed x-request-id was already dropped in 1-pass decode).
         let (request_id, req_id_header) = velda_core::request_id::next_request_id(ingress_nanos);
-        conn.set_request_id(Some(req_id_header.clone()));
+        conn.current_request_id = Some(req_id_header.clone());
         let mut req_head = req_head;
-        req_head.headers.insert(X_REQUEST_ID, req_id_header.clone());
+        req_head.headers.push_prehashed_bypass(
+            velda_http1::simd::KEY_X_REQUEST_ID,
+            X_REQUEST_ID,
+            req_id_header.clone(),
+        );
 
         let log_method = velda_core::HttpMethod::from_bytes(req_head.method.as_str().as_bytes());
         let (ua_family, ua_os, ua_major_version) = req_head
@@ -268,7 +279,7 @@ pub async fn run_http1_loop<IO>(
                 listener = %meta.listener_id,
                 "Rejecting chunked request: streaming upload is disabled on this listener"
             );
-            conn.mark_close();
+            conn.close_requested = true;
             let _ = conn.send_early_error(StatusCode::FORBIDDEN).await;
             let duration_ns = velda_core::clock::now_unix_nanos().saturating_sub(ingress_nanos);
             global_metrics().record_early_completion(
@@ -313,7 +324,7 @@ pub async fn run_http1_loop<IO>(
                 path = %req_head.uri.path(),
                 "Rejecting HTTP/1.1 request with unsafe URI path"
             );
-            conn.mark_close();
+            conn.close_requested = true;
             let _ = conn.send_early_error(StatusCode::BAD_REQUEST).await;
             let duration_ns = velda_core::clock::now_unix_nanos().saturating_sub(ingress_nanos);
             global_metrics().record_early_completion(
@@ -351,16 +362,6 @@ pub async fn run_http1_loop<IO>(
             break;
         }
 
-        // Authoritatively enrich proxy forwarding headers (x-forwarded-*, x-real-ip)
-        // directly from downstream connection metadata BEFORE route matching and pre_route plugins.
-        velda_http1::server::header::enrich_headers_cached(
-            &mut req_head.headers,
-            &req_head.uri,
-            &meta.client_ip_header,
-            &meta.listener_port_header,
-            meta.is_tls,
-        );
-
         // ========================================================================
         // [PHASE 3: Narrow Waist Router Lookup]
         // Zero-IO in-memory route matching: (listener_id, req_head) -> upstream_id
@@ -384,7 +385,7 @@ pub async fn run_http1_loop<IO>(
                 method = %req_head.method,
                 "No HTTP/1.1 route matched"
             );
-            conn.mark_close();
+            conn.close_requested = true;
             let _ = conn.send_early_error(StatusCode::NOT_FOUND).await;
             let duration_ns = velda_core::clock::now_unix_nanos().saturating_sub(ingress_nanos);
             global_metrics().record_early_completion(
@@ -438,7 +439,7 @@ pub async fn run_http1_loop<IO>(
                     method,
                     uri,
                     req_head.version,
-                    velda_core::HeaderWorkspace::from_headers(headers),
+                    headers,
                     velda_core::Body::Empty,
                 );
                 l7_req.state.request_id = request_id;
@@ -481,7 +482,7 @@ pub async fn run_http1_loop<IO>(
                             let keep_open =
                                 framing == Http1BodyFraming::Empty && !conn.close_requested;
                             if !keep_open {
-                                conn.mark_close();
+                                conn.close_requested = true;
                             }
                             let _ = conn.send_response(&server_resp).await;
                             let duration_ns =
@@ -571,7 +572,7 @@ pub async fn run_http1_loop<IO>(
                             let keep_open =
                                 framing == Http1BodyFraming::Empty && !conn.close_requested;
                             if !keep_open {
-                                conn.mark_close();
+                                conn.close_requested = true;
                             }
                             let _ = conn.send_response(&server_resp).await;
                             let duration_ns =
@@ -641,7 +642,7 @@ pub async fn run_http1_loop<IO>(
                     let status = server_resp.status.as_u16();
                     let keep_open = framing == Http1BodyFraming::Empty && !conn.close_requested;
                     if !keep_open {
-                        conn.mark_close();
+                        conn.close_requested = true;
                     }
                     let _ = conn.send_response(&server_resp).await;
                     let duration_ns =
@@ -680,7 +681,7 @@ pub async fn run_http1_loop<IO>(
                     }
                 }
 
-                req_head.headers = l7_req.headers.into();
+                req_head.headers = l7_req.headers;
                 req_head.uri = l7_req.uri;
                 req_head.method = l7_req.method;
                 let (re_len, re_bytes) = {
@@ -705,7 +706,7 @@ pub async fn run_http1_loop<IO>(
                 upstream = %target_upstream,
                 "No HTTP upstream configured"
             );
-            conn.mark_close();
+            conn.close_requested = true;
             let _ = conn.send_early_error(StatusCode::SERVICE_UNAVAILABLE).await;
             let duration_ns = velda_core::clock::now_unix_nanos().saturating_sub(ingress_nanos);
             global_metrics().record_early_completion(
@@ -754,7 +755,7 @@ pub async fn run_http1_loop<IO>(
                 overload = ?overload_lvl,
                 "Shedding HTTP/1.1 request due to memory saturation"
             );
-            conn.mark_close();
+            conn.close_requested = true;
             let _ = conn.send_early_error(StatusCode::TOO_MANY_REQUESTS).await;
             let duration_ns = velda_core::clock::now_unix_nanos().saturating_sub(ingress_nanos);
             global_metrics().record_early_completion(
@@ -957,7 +958,7 @@ pub async fn run_http1_loop<IO>(
                 upstream = %target_upstream,
                 "HTTP/1.1 upstream stream pipe failed"
             );
-            conn.mark_close();
+            conn.close_requested = true;
             if conn.last_status == 0 {
                 let _ = conn.send_early_error(StatusCode::BAD_GATEWAY).await;
             }
@@ -1032,7 +1033,7 @@ pub async fn run_http1_loop<IO>(
             break;
         }
 
-        if reach_max_keepalive || conn.is_closed() {
+        if reach_max_keepalive || conn.close_requested {
             tracing::debug!(
                 listener = %meta.listener_id,
                 requests_served,
@@ -1048,12 +1049,12 @@ pub async fn run_http1_loop<IO>(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use http::HeaderMap;
-    use velda_http1::Http1ServerRequestHead;
+    use velda_core::HeaderWorkspace;
+    use velda_http1::server::request::Http1ServerRequestHead;
 
     #[test]
     fn test_enrich_forwarded_headers() {
-        let mut headers = HeaderMap::new();
+        let mut headers = HeaderWorkspace::empty(8);
         headers.insert("x-forwarded-for", "203.0.113.195".parse().unwrap());
         headers.insert("x-real-ip", "203.0.113.195".parse().unwrap());
         headers.insert("x-forwarded-host", "evil.attacker.com".parse().unwrap());
@@ -1073,7 +1074,14 @@ mod tests {
             http::Version::HTTP_11,
             headers,
         );
-        head.enrich_forwarded_headers(peer_ip, local_ip, local_port_be, false);
+        velda_http1::server::header::enrich_headers(
+            &mut head.headers,
+            &head.uri,
+            peer_ip,
+            local_ip,
+            local_port_be,
+            false,
+        );
         let headers = head.headers;
 
         assert_eq!(
@@ -1092,31 +1100,31 @@ mod tests {
 
     #[test]
     fn test_stale_connection_detection() {
-        assert!(velda_http1::Http1Error::ConnectionClosed.is_stale_connection());
+        assert!(Http1Error::ConnectionClosed.is_stale_connection());
         assert!(
-            velda_http1::Http1Error::Io(std::io::Error::new(
+            Http1Error::Io(std::io::Error::new(
                 std::io::ErrorKind::BrokenPipe,
                 "broken pipe"
             ))
             .is_stale_connection()
         );
         assert!(
-            velda_http1::Http1Error::Io(std::io::Error::new(
+            Http1Error::Io(std::io::Error::new(
                 std::io::ErrorKind::ConnectionReset,
                 "connection reset by peer"
             ))
             .is_stale_connection()
         );
         assert!(
-            velda_http1::Http1Error::Io(std::io::Error::new(
+            Http1Error::Io(std::io::Error::new(
                 std::io::ErrorKind::UnexpectedEof,
                 "unexpected eof"
             ))
             .is_stale_connection()
         );
 
-        assert!(!velda_http1::Http1Error::InvalidMethod("FOO".into()).is_stale_connection());
-        assert!(!velda_http1::Http1Error::PayloadTooLarge(100).is_stale_connection());
+        assert!(!Http1Error::InvalidMethod("FOO".into()).is_stale_connection());
+        assert!(!Http1Error::PayloadTooLarge(100).is_stale_connection());
     }
 
     #[test]

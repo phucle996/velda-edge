@@ -33,11 +33,15 @@ use http::StatusCode;
 use http::header::{CONTENT_TYPE, HeaderValue};
 use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt};
 use velda_core::Body;
-use velda_http1::{
-    HeadEncodeOptions, Http1BodyFraming, Http1Error, Http1ServerConnection, Http1ServerRequestHead,
-    Http1ServerResponse, Http1ServerResponseHead, parse_single_chunk, read_chunk_sized,
-    read_next_chunk, read_response_head, sanitize_headers, send_chunk, send_chunked_end,
+use velda_http1::client::header::sanitize_headers;
+use velda_http1::client::response::{read_chunk_sized, read_next_chunk, read_response_head};
+use velda_http1::error::Http1Error;
+use velda_http1::server::connection::Http1ServerConnection;
+use velda_http1::server::request::{Http1BodyFraming, Http1ServerRequestHead};
+use velda_http1::server::response::{
+    HeadEncodeOptions, Http1ServerResponse, Http1ServerResponseHead,
 };
+use velda_http1::wire::{parse_single_chunk, send_chunk, send_chunked_end};
 
 use crate::pipeline::DownstreamMeta;
 use crate::upstream::Http1Upstream;
@@ -80,7 +84,7 @@ where
                 CONTENT_TYPE,
                 HeaderValue::from_static("text/plain; charset=utf-8"),
             );
-            conn.mark_close();
+            conn.close_requested = true;
             let _ = conn.send_response(&err_resp).await;
             return Err(Http1Error::ConnectionClosed);
         }
@@ -129,7 +133,7 @@ where
     if is_fully_buffered_request {
         match framing {
             Http1BodyFraming::Empty => {
-                velda_http1::encode_request_head(
+                velda_http1::client::request::encode_request_head(
                     &req_head.method,
                     &req_head.uri,
                     &req_head.headers,
@@ -138,7 +142,7 @@ where
                 );
             }
             Http1BodyFraming::ContentLength(total_len) => {
-                velda_http1::encode_request_head(
+                velda_http1::client::request::encode_request_head(
                     &req_head.method,
                     &req_head.uri,
                     &req_head.headers,
@@ -153,7 +157,10 @@ where
                 }
             }
             Http1BodyFraming::Chunked => {
-                velda_http1::encode_request_head_chunked(&req_head, &mut conn.upstream_write_buf);
+                velda_http1::client::request::encode_request_head_chunked(
+                    &req_head,
+                    &mut conn.upstream_write_buf,
+                );
                 if chunked_coalesced_wire_len > 0 {
                     conn.upstream_write_buf
                         .extend_from_slice(&conn.read_buf[..chunked_coalesced_wire_len]);
@@ -175,8 +182,6 @@ where
                 .insert(crate::pipeline::X_REQUEST_ID, req_id.clone());
         }
 
-        // Fast-path guard: Bypasses HeaderWorkspace instantiation & plugin dispatch if route has no hooks.
-        // HeaderMap::clone() clones atomic pointer handles (Bytes) in O(1) without copying string payloads.
         if let Some(post_hooks) = &plan.post_response_hooks {
             let mut l7_resp = velda_core::L7Response::new(
                 resp_head.status,
@@ -184,10 +189,9 @@ where
                 std::mem::take(&mut resp_head.headers),
                 velda_core::Body::Empty,
             );
-            let req_ws = velda_core::HeaderWorkspace::from_headers(req_head.headers.clone());
-            velda_plugin::run_post_response_plugins(post_hooks, &req_ws, &mut l7_resp);
+            velda_plugin::run_post_response_plugins(post_hooks, &req_head.headers, &mut l7_resp);
             resp_head.status = l7_resp.status;
-            resp_head.headers = l7_resp.headers.into();
+            resp_head.headers = l7_resp.headers;
         }
         meta.inject_response_headers(&mut resp_head.headers);
 
@@ -202,12 +206,18 @@ where
         conn.last_status = server_head.status.as_u16();
 
         if is_no_body {
-            let close = velda_http1::server::response::send_response_parts(
+            let close = velda_http1::server::response::send_parts(
                 &mut conn.stream,
                 &mut conn.write_buf,
-                &server_head,
+                server_head.version,
+                server_head.status,
+                &server_head.headers,
                 &Body::Empty,
-                conn.close_requested,
+                HeadEncodeOptions {
+                    body_len: None,
+                    force_close: conn.close_requested,
+                    request_id: conn.current_request_id.as_ref(),
+                },
             )
             .await?;
             if close {
@@ -239,8 +249,8 @@ where
                     drop(upstream_lease);
 
                     conn.write_buf.clear();
-                    let force_close = conn.is_closed() || conn.close_requested;
-                    conn.encode_response_head(
+                    let force_close = conn.close_requested;
+                    conn.encode_head(
                         server_head.version,
                         server_head.status,
                         &server_head.headers,
@@ -256,7 +266,7 @@ where
                             let bufs_slice = if b1.is_empty() { &bufs[1..] } else { &bufs[..] };
                             let n = conn.stream.write_vectored(bufs_slice).await?;
                             if n == 0 {
-                                return Err(velda_http1::Http1Error::ConnectionClosed);
+                                return Err(Http1Error::ConnectionClosed);
                             }
                             if n < b1.len() {
                                 b1 = &b1[n..];
@@ -278,7 +288,7 @@ where
                     return Ok(());
                 }
 
-                conn.send_response_head_chunked(&server_head).await?;
+                conn.send_chunked_head(&server_head).await?;
                 if available > 0 {
                     let first_chunk = conn.upstream_read_buf.split_to(available).freeze();
                     send_chunk(&mut conn.stream, &first_chunk).await?;
@@ -310,24 +320,22 @@ where
             }
             Http1BodyFraming::Chunked => {
                 if let Some((wire1, payload1, is_term1)) =
-                    velda_http1::parse_single_chunk(&conn.upstream_read_buf)?
+                    parse_single_chunk(&conn.upstream_read_buf)?
                 {
                     if is_term1 {
                         conn.upstream_read_buf.advance(wire1);
-                        let _close = conn
-                            .send_response_head_chunked_coalesced(&server_head, None, true)
-                            .await?;
+                        let _close = conn.send_head_coalesced(&server_head, None, true).await?;
                         return Ok(());
                     }
 
                     let (is_terminated, total_wire) =
-                        match velda_http1::parse_single_chunk(&conn.upstream_read_buf[wire1..])? {
+                        match parse_single_chunk(&conn.upstream_read_buf[wire1..])? {
                             Some((wire2, _, true)) => (true, wire1 + wire2),
                             _ => (false, wire1),
                         };
 
                     conn.last_bytes_tx += payload1.len() as u64;
-                    let close = velda_http1::send_head_coalesced(
+                    let close = velda_http1::server::response::send_head_coalesced(
                         &mut conn.stream,
                         &mut conn.write_buf,
                         &server_head,
@@ -350,7 +358,7 @@ where
                     }
                 }
 
-                conn.send_response_head_chunked(&server_head).await?;
+                conn.send_chunked_head(&server_head).await?;
                 while let Some(chunk) =
                     read_next_chunk(&mut *upstream_lease, &mut conn.upstream_read_buf).await?
                 {
@@ -361,12 +369,18 @@ where
                 return Ok(());
             }
             Http1BodyFraming::Empty => {
-                let close = velda_http1::server::response::send_response_parts(
+                let close = velda_http1::server::response::send_parts(
                     &mut conn.stream,
                     &mut conn.write_buf,
-                    &server_head,
+                    server_head.version,
+                    server_head.status,
+                    &server_head.headers,
                     &Body::Empty,
-                    conn.close_requested,
+                    HeadEncodeOptions {
+                        body_len: None,
+                        force_close: conn.close_requested,
+                        request_id: conn.current_request_id.as_ref(),
+                    },
                 )
                 .await?;
                 if close {
@@ -407,7 +421,10 @@ where
         match framing {
             Http1BodyFraming::Chunked => {
                 // Encode chunked request head into upstream_write_buf
-                velda_http1::encode_request_head_chunked(&req_head, upstream_write_buf);
+                velda_http1::client::request::encode_request_head_chunked(
+                    &req_head,
+                    upstream_write_buf,
+                );
 
                 let mut total_req_bytes = 0usize;
                 let mut sent_terminal = false;
@@ -555,7 +572,7 @@ where
                 }
             }
             Http1BodyFraming::ContentLength(total_len) => {
-                velda_http1::encode_request_head(
+                velda_http1::client::request::encode_request_head(
                     &req_head.method,
                     &req_head.uri,
                     &req_head.headers,
@@ -637,7 +654,7 @@ where
                 }
             }
             Http1BodyFraming::Empty => {
-                velda_http1::encode_request_head(
+                velda_http1::client::request::encode_request_head(
                     &req_head.method,
                     &req_head.uri,
                     &req_head.headers,
@@ -664,8 +681,6 @@ where
                 .insert(crate::pipeline::X_REQUEST_ID, rid.clone());
         }
 
-        // Fast-path guard: Bypasses HeaderWorkspace instantiation & plugin dispatch if route has no hooks.
-        // HeaderMap::clone() clones atomic pointer handles (Bytes) in O(1) without copying string payloads.
         if let Some(post_hooks) = &plan.post_response_hooks {
             let mut l7_resp = velda_core::L7Response::new(
                 resp_head.status,
@@ -673,10 +688,9 @@ where
                 std::mem::take(&mut resp_head.headers),
                 velda_core::Body::Empty,
             );
-            let req_ws = velda_core::HeaderWorkspace::from_headers(req_head.headers.clone());
-            velda_plugin::run_post_response_plugins(post_hooks, &req_ws, &mut l7_resp);
+            velda_plugin::run_post_response_plugins(post_hooks, &req_head.headers, &mut l7_resp);
             resp_head.status = l7_resp.status;
-            resp_head.headers = l7_resp.headers.into();
+            resp_head.headers = l7_resp.headers;
         }
         meta.inject_response_headers(&mut resp_head.headers);
 
@@ -687,17 +701,18 @@ where
 
         if is_head || is_no_body_status {
             *last_status = resp_head.status.as_u16();
-            let server_head = Http1ServerResponseHead::new(
-                resp_head.status,
-                resp_head.version,
-                resp_head.headers,
-            );
-            let close = velda_http1::server::response::send_response_parts(
+            let close = velda_http1::server::response::send_parts(
                 &mut down_write,
                 write_buf,
-                &server_head,
+                resp_head.version,
+                resp_head.status,
+                &resp_head.headers,
                 &Body::Empty,
-                *close_requested,
+                HeadEncodeOptions {
+                    body_len: None,
+                    force_close: *close_requested,
+                    request_id: req_id.as_ref(),
+                },
             )
             .await?;
             if close {
@@ -721,16 +736,17 @@ where
                     } else {
                         None
                     };
-                    let close =
-                        velda_http1::server::response::send_response_head_chunked_coalesced(
-                            &mut down_write,
-                            write_buf,
-                            &server_head,
-                            body_slice,
-                            true,
-                            *close_requested,
-                        )
-                        .await?;
+                    let close = velda_http1::server::response::send_head_coalesced(
+                        &mut down_write,
+                        write_buf,
+                        &server_head,
+                        body_slice,
+                        true,
+                        HeadEncodeOptions::new()
+                            .with_force_close(*close_requested)
+                            .with_request_id(req_id.as_ref()),
+                    )
+                    .await?;
                     if close {
                         *close_requested = true;
                     }
@@ -742,13 +758,15 @@ where
                     return Ok(());
                 }
 
-                let close = velda_http1::server::response::send_response_head_chunked(
+                let close = velda_http1::server::response::send_chunked_head(
                     &mut down_write,
                     write_buf,
                     server_head.version,
                     server_head.status,
                     &server_head.headers,
-                    *close_requested,
+                    HeadEncodeOptions::new()
+                        .with_force_close(*close_requested)
+                        .with_request_id(req_id.as_ref()),
                 )
                 .await?;
                 if close {
@@ -780,22 +798,21 @@ where
             }
             Http1BodyFraming::Chunked => {
                 let mut sent_via_coalesced = false;
-                if let Some((wire1, payload1, is_term1)) =
-                    velda_http1::parse_single_chunk(upstream_read_buf)?
-                {
+                if let Some((wire1, payload1, is_term1)) = parse_single_chunk(upstream_read_buf)? {
                     sent_via_coalesced = true;
                     if is_term1 {
                         upstream_read_buf.advance(wire1);
-                        let close =
-                            velda_http1::server::response::send_response_head_chunked_coalesced(
-                                &mut down_write,
-                                write_buf,
-                                &server_head,
-                                None,
-                                true,
-                                *close_requested,
-                            )
-                            .await?;
+                        let close = velda_http1::server::response::send_head_coalesced(
+                            &mut down_write,
+                            write_buf,
+                            &server_head,
+                            None,
+                            true,
+                            HeadEncodeOptions::new()
+                                .with_force_close(*close_requested)
+                                .with_request_id(req_id.as_ref()),
+                        )
+                        .await?;
                         if close {
                             *close_requested = true;
                         }
@@ -804,22 +821,23 @@ where
                     }
 
                     let (is_terminated, total_wire) =
-                        match velda_http1::parse_single_chunk(&upstream_read_buf[wire1..])? {
+                        match parse_single_chunk(&upstream_read_buf[wire1..])? {
                             Some((wire2, _, true)) => (true, wire1 + wire2),
                             _ => (false, wire1),
                         };
 
                     *last_bytes_tx += payload1.len() as u64;
-                    let close =
-                        velda_http1::server::response::send_response_head_chunked_coalesced(
-                            &mut down_write,
-                            write_buf,
-                            &server_head,
-                            Some(payload1),
-                            is_terminated,
-                            *close_requested,
-                        )
-                        .await?;
+                    let close = velda_http1::server::response::send_head_coalesced(
+                        &mut down_write,
+                        write_buf,
+                        &server_head,
+                        Some(payload1),
+                        is_terminated,
+                        HeadEncodeOptions::new()
+                            .with_force_close(*close_requested)
+                            .with_request_id(req_id.as_ref()),
+                    )
+                    .await?;
                     if close {
                         *close_requested = true;
                     }
@@ -832,13 +850,15 @@ where
                 }
 
                 if !sent_via_coalesced {
-                    let close = velda_http1::server::response::send_response_head_chunked(
+                    let close = velda_http1::server::response::send_chunked_head(
                         &mut down_write,
                         write_buf,
                         server_head.version,
                         server_head.status,
                         &server_head.headers,
-                        *close_requested,
+                        HeadEncodeOptions::new()
+                            .with_force_close(*close_requested)
+                            .with_request_id(req_id.as_ref()),
                     )
                     .await?;
                     if close {
@@ -852,13 +872,15 @@ where
                 }
             }
             Http1BodyFraming::Empty => {
-                let close = velda_http1::server::response::send_response_head_chunked(
+                let close = velda_http1::server::response::send_chunked_head(
                     &mut down_write,
                     write_buf,
                     server_head.version,
                     server_head.status,
                     &server_head.headers,
-                    *close_requested,
+                    HeadEncodeOptions::new()
+                        .with_force_close(*close_requested)
+                        .with_request_id(req_id.as_ref()),
                 )
                 .await?;
                 if close {
@@ -875,7 +897,7 @@ where
 
     let duplex_res = tokio::try_join!(upload_task, download_task);
     if !upload_finished.load(std::sync::atomic::Ordering::Acquire) {
-        conn.mark_close();
+        conn.close_requested = true;
     }
     match duplex_res {
         Ok((early_response, ())) => {

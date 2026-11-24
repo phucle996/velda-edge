@@ -9,8 +9,9 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use velda_core::{L7Request, L7Response};
-use velda_grpc::udp::client::GrpcUdpClient;
-use velda_grpc::{GrpcConfig, GrpcError};
+use velda_grpc::config::GrpcConfig;
+use velda_grpc::error::GrpcError;
+use velda_grpc::udp::client::connector::GrpcUdpClient;
 
 use crate::upstream::GrpcUdpUpstream;
 
@@ -33,7 +34,7 @@ async fn pipe_server_stream_wire(
         }
 
         // Step 2: Dispatch request and await streaming response
-        client.send_request_ref(req).await
+        client.send_request(req.clone()).await
     };
 
     tokio::time::timeout(timeout, workflow)

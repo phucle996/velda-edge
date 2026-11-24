@@ -9,7 +9,7 @@ pub mod l4;
 pub use l4::{tcp, udp};
 
 /// Canonical request correlation ID header propagated across downstream pipelines.
-pub use velda_core::buffer::X_REQUEST_ID;
+pub use velda_core::buffer::header::X_REQUEST_ID;
 
 /// Zero-allocation scalar transfer summary returned on stack by isolated protocol pipes
 /// to their `downstream.rs` workflow owner for metrics and access log emission.
@@ -109,36 +109,7 @@ pub struct DownstreamMeta {
     pub client_ip_header: http::HeaderValue,
     pub listener_port_header: http::HeaderValue,
     pub alt_svc_header: Option<http::HeaderValue>,
-    pub slab_pool: Arc<velda_core::buffer::PayloadSlabPool>,
-}
-
-/// Trait abstraction allowing in-place injection of connection-level headers
-/// into both native [`http::HeaderMap`] and Edge-authoritative [`velda_core::HeaderWorkspace`].
-pub trait HeaderContainer {
-    fn contains_key(&self, key: &http::header::HeaderName) -> bool;
-    fn insert(&mut self, key: http::header::HeaderName, value: http::header::HeaderValue);
-}
-
-impl HeaderContainer for http::HeaderMap {
-    #[inline(always)]
-    fn contains_key(&self, key: &http::header::HeaderName) -> bool {
-        self.contains_key(key)
-    }
-    #[inline(always)]
-    fn insert(&mut self, key: http::header::HeaderName, value: http::header::HeaderValue) {
-        self.insert(key, value);
-    }
-}
-
-impl HeaderContainer for velda_core::HeaderWorkspace {
-    #[inline(always)]
-    fn contains_key(&self, key: &http::header::HeaderName) -> bool {
-        velda_core::HeaderWorkspace::contains_key(self, key)
-    }
-    #[inline(always)]
-    fn insert(&mut self, key: http::header::HeaderName, value: http::header::HeaderValue) {
-        self.insert_bypass(key, value);
-    }
+    pub slab_pool: Arc<velda_core::buffer::slab::PayloadSlabPool>,
 }
 
 impl DownstreamMeta {
@@ -149,7 +120,7 @@ impl DownstreamMeta {
         local_addr: SocketAddr,
         is_tls: bool,
         alt_svc_header: Option<http::HeaderValue>,
-        buffer_pool: &velda_core::buffer::ShardedBufferPool,
+        buffer_pool: &velda_core::buffer::pool::ShardedBufferPool,
     ) -> Self {
         let (peer_ip, peer_port_be) = velda_sock::socket_addr_to_raw(peer);
         let (local_ip, local_port_be) = velda_sock::socket_addr_to_raw(local_addr);
@@ -197,11 +168,11 @@ impl DownstreamMeta {
 
     /// Injects downstream connection-level headers (e.g. Alt-Svc) into response headers if not already present.
     #[inline]
-    pub fn inject_response_headers<H: HeaderContainer>(&self, headers: &mut H) {
+    pub fn inject_response_headers(&self, headers: &mut velda_core::HeaderWorkspace) {
         if let Some(ref alt_svc) = self.alt_svc_header
             && !headers.contains_key(&http::header::ALT_SVC)
         {
-            headers.insert(http::header::ALT_SVC, alt_svc.clone());
+            headers.insert_bypass(http::header::ALT_SVC, alt_svc.clone());
         }
     }
 }
@@ -244,7 +215,7 @@ pub fn build_tcp_pipeline_runner(listener_id: &str, runtime: SharedRuntime) -> D
                 let lid = Arc::clone(&lid);
                 let alt_svc = alt_svc.clone();
                 Box::pin(async move {
-                    http1::handle_http1_stream(
+                    http1::downstream::handle_http1_stream(
                         connection,
                         lid,
                         config,
@@ -437,8 +408,8 @@ pub fn build_udp_pipeline_runner(listener_id: &str, runtime: SharedRuntime) -> D
 /// Internal configuration bundle for the unified HTTP auto stream worker.
 #[derive(Clone)]
 struct HttpAutoConfig {
-    http1_config: velda_http1::Http1Config,
-    http2_config: velda_http2::Http2Config,
+    http1_config: velda_http1::config::Http1Config,
+    http2_config: velda_http2::config::Http2Config,
     tls_enabled: bool,
     streaming: velda_core::StreamingMode,
     alt_svc: Option<http::HeaderValue>,
@@ -456,7 +427,7 @@ async fn handle_http_auto_stream(
     runtime: SharedRuntime,
 ) {
     if !config.tls_enabled {
-        http1::handle_http1_stream(
+        http1::downstream::handle_http1_stream(
             connection,
             listener_id,
             config.http1_config,
@@ -525,7 +496,7 @@ async fn handle_http_auto_stream(
                     .await;
                 }
                 None | Some("http/1.1") => {
-                    http1::run_http1_loop(
+                    http1::downstream::run_http1_loop(
                         tls_stream,
                         meta,
                         config.streaming,

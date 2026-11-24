@@ -18,22 +18,24 @@
 //!
 //! Self-contained pipeline adhering to the Hourglass Architecture & Flat Workflow.
 
-use bytes::{Bytes, BytesMut};
-use http::Version;
 use std::sync::Arc;
 use std::time::Duration;
 
+use bytes::{Bytes, BytesMut};
 use velda_core::GrpcStatus;
-use velda_grpc::tcp::client::GrpcUpstreamConnector;
-use velda_grpc::tcp::server::{GrpcResponder, GrpcServerStream};
-use velda_grpc::{GrpcConfig, GrpcError};
+use velda_grpc::config::GrpcConfig;
+use velda_grpc::error::GrpcError;
+use velda_grpc::tcp::client::connector::GrpcUpstreamConnector;
+use velda_grpc::tcp::server::responder::GrpcResponder;
+use velda_grpc::tcp::server::stream::GrpcServerStream;
+use velda_http2::server::request::Http2ServerRequestHead;
 
 use crate::pipeline::PipeOutcome;
 use crate::upstream::grpc::GrpcRdmaUpstream;
 
 /// Pipes a Unary (non-streaming) gRPC call over RDMA between downstream responder and upstream connector.
 async fn pipe_buffered_wire(
-    parts: &http::request::Parts,
+    head: &Http2ServerRequestHead,
     req_data: &Bytes,
     respond: &mut GrpcResponder,
     connector: &mut GrpcUpstreamConnector,
@@ -42,45 +44,28 @@ async fn pipe_buffered_wire(
     let timeout = Duration::from_millis(config.max_call_duration_ms);
 
     let workflow = async {
-        // Step 1: Synthesize outbound HTTP/2 request frame from downstream parts.
+        // Step 1: Open HTTP/2 stream over RDMA directly from HeaderWorkspace.
         // Ingress headers were finalized authoritatively at ingress (AGENTS.md Sec 2.10).
-        let mut req_builder = http::Request::builder()
-            .method(&parts.method)
-            .uri(&parts.uri)
-            .version(Version::HTTP_2);
-
-        for (name, val) in &parts.headers {
-            req_builder = req_builder.header(name, val);
-        }
-
-        let upstream_req = req_builder.body(()).map_err(GrpcError::Http)?;
         let has_body = !req_data.is_empty();
-
-        // Step 2: Open an HTTP/2 stream over RDMA and transmit unary payload.
-        let (upstream_resp_fut, mut upstream_send_stream) =
-            connector.open_stream(upstream_req, !has_body)?;
+        let (upstream_resp_fut, mut upstream_send_stream) = connector
+            .open_stream(
+                head.method.clone(),
+                head.uri.clone(),
+                head.headers.clone(),
+                !has_body,
+            )
+            .await?;
 
         if has_body {
             upstream_send_stream
-                .send_data(req_data.clone(), true)
-                .map_err(GrpcError::H2)?;
+                .send_chunk(req_data.clone(), true)
+                .await?;
         }
 
-        // Step 3: Await upstream response headers over kernel-bypass RDMA link.
-        let response = upstream_resp_fut.await.map_err(GrpcError::H2)?;
-        let (mut resp_parts, mut upstream_recv_stream) = response.into_parts();
+        // Step 2: Await upstream response headers over kernel-bypass RDMA link.
+        let mut response = upstream_resp_fut.await?;
 
-        let mut resp_builder = http::Response::builder()
-            .status(resp_parts.status)
-            .version(Version::HTTP_2);
-
-        for (name, val) in resp_parts.headers.drain() {
-            if let Some(name) = name {
-                resp_builder = resp_builder.header(name, val);
-            }
-        }
-
-        let mut grpc_status = resp_parts
+        let mut grpc_status = response
             .headers
             .get("grpc-status")
             .and_then(|v| v.to_str().ok())
@@ -88,84 +73,70 @@ async fn pipe_buffered_wire(
             .map(velda_core::GrpcStatus::from_u8)
             .unwrap_or(velda_core::GrpcStatus::Ok);
 
-        let is_end_of_stream = upstream_recv_stream.is_end_stream();
-        let resp = resp_builder.body(()).map_err(GrpcError::Http)?;
-        let mut downstream_send_stream = respond
-            .send_response(resp, is_end_of_stream)
-            .map_err(GrpcError::H2)?;
+        let is_end_of_stream = response.body.is_end_stream();
+        let Some(mut downstream_send_stream) =
+            respond.send_response_headers(response.status, &response.headers, is_end_of_stream)?
+        else {
+            return Ok((0, grpc_status));
+        };
 
         let mut resp_len = 0;
 
-        // Step 4: Stream response chunks from RDMA memory directly downstream.
-        if !is_end_of_stream {
-            let mut has_trailers = false;
-            let mut checked_resp_lpm = false;
-            let mut resp_head = BytesMut::new();
+        // Step 3: Stream response chunks from RDMA memory directly downstream.
+        let mut has_trailers = false;
+        let mut checked_resp_lpm = false;
+        let mut resp_head = BytesMut::new();
 
-            while let Some(chunk_res) = upstream_recv_stream.data().await {
-                let chunk = chunk_res.map_err(GrpcError::H2)?;
-                let len = chunk.len();
-                resp_len += len;
+        while let Some(chunk) = response.body.recv_chunk().await? {
+            let len = chunk.len();
+            resp_len += len;
 
-                // Validate the 5-byte Length-Prefixed Message (LPM) header.
-                if !checked_resp_lpm {
-                    resp_head.extend_from_slice(&chunk);
-                    if resp_head.len() >= 5 {
-                        let declared_len = u32::from_be_bytes([
-                            resp_head[1],
-                            resp_head[2],
-                            resp_head[3],
-                            resp_head[4],
-                        ]) as usize;
-                        if declared_len > config.max_message_size {
-                            return Err(GrpcError::PayloadTooLarge(declared_len));
-                        }
-                        checked_resp_lpm = true;
+            // Validate the 5-byte Length-Prefixed Message (LPM) header.
+            if !checked_resp_lpm {
+                resp_head.extend_from_slice(&chunk);
+                if resp_head.len() >= 5 {
+                    let declared_len = u32::from_be_bytes([
+                        resp_head[1],
+                        resp_head[2],
+                        resp_head[3],
+                        resp_head[4],
+                    ]) as usize;
+                    if declared_len > config.max_message_size {
+                        return Err(GrpcError::PayloadTooLarge(declared_len));
                     }
+                    checked_resp_lpm = true;
                 }
-
-                if resp_len > config.max_message_size + 5 {
-                    return Err(GrpcError::PayloadTooLarge(resp_len));
-                }
-
-                downstream_send_stream
-                    .send_data(chunk, false)
-                    .map_err(GrpcError::H2)?;
-                // Replenish HTTP/2 receive window to prevent upstream sender stalls
-                let _ = upstream_recv_stream.flow_control().release_capacity(len);
             }
 
-            // Step 5: Forward response trailers (grpc-status) or synthesize empty END_STREAM frame.
-            if let Some(trailers) = upstream_recv_stream
-                .trailers()
-                .await
-                .map_err(GrpcError::H2)?
+            if resp_len > config.max_message_size + 5 {
+                return Err(GrpcError::PayloadTooLarge(resp_len));
+            }
+
+            downstream_send_stream.send_chunk(chunk).await?;
+        }
+
+        // Step 4: Forward response trailers (grpc-status) or synthesize empty END_STREAM frame.
+        if let Some(trailers) = response.body.trailers().await? {
+            if let Some(code) = trailers
+                .get("grpc-status")
+                .and_then(|v| v.to_str().ok())
+                .and_then(|s| s.parse::<u8>().ok())
+                .map(velda_core::GrpcStatus::from_u8)
             {
-                if let Some(code) = trailers
-                    .get("grpc-status")
-                    .and_then(|v| v.to_str().ok())
-                    .and_then(|s| s.parse::<u8>().ok())
-                    .map(velda_core::GrpcStatus::from_u8)
-                {
-                    grpc_status = code;
-                }
-                downstream_send_stream
-                    .send_trailers(trailers)
-                    .map_err(GrpcError::H2)?;
-                has_trailers = true;
+                grpc_status = code;
             }
+            downstream_send_stream.send_trailers(trailers)?;
+            has_trailers = true;
+        }
 
-            if !has_trailers {
-                downstream_send_stream
-                    .send_data(Bytes::new(), true)
-                    .map_err(GrpcError::H2)?;
-            }
+        if !has_trailers {
+            downstream_send_stream.finish()?;
         }
 
         Ok((resp_len as u64, grpc_status))
     };
 
-    // Step 6: Handle deadline expiration by returning canonical DeadlineExceeded gRPC status.
+    // Step 5: Handle deadline expiration by returning canonical DeadlineExceeded gRPC status.
     match tokio::time::timeout(timeout, workflow).await {
         Ok(res) => res,
         Err(_) => {
@@ -210,7 +181,7 @@ pub async fn serve(
     };
     let bytes_rx = req_data.len() as u64;
 
-    // Stage 2: Lease a pre-warmed RDMA connection handle from the local worker core lane shard without cross-thread lock contention.
+    // Stage 2: Lease a pre-warmed RDMA connection handle from the local worker core lane shard.
     let mut client = match upstream.acquire(config).await {
         Ok(c) => c,
         Err(e) => {
@@ -236,7 +207,7 @@ pub async fn serve(
 
     // Stage 3: Forward unary call over HTTP/2 RDMA wire protocol.
     let mut res = pipe_buffered_wire(
-        &server_stream.parts,
+        &server_stream.head,
         &req_data,
         &mut server_stream.respond,
         &mut client,
@@ -244,9 +215,7 @@ pub async fn serve(
     )
     .await;
 
-    // Stage 4: Self-Healing Retry (RFC 9113 §8.1.4):
-    // If an idle pooled RDMA connection dropped or remote peer returned REFUSED_STREAM,
-    // retry transparently 1-shot on a fresh connection before reporting error.
+    // Stage 4: Self-Healing Retry (RFC 9113 §8.1.4)
     if let Err(ref e) = res
         && e.is_stale_or_refused()
     {
@@ -258,7 +227,7 @@ pub async fn serve(
         if let Ok(mut fresh_client) = upstream.acquire_fresh(config).await {
             upstream_addr = fresh_client.target();
             res = pipe_buffered_wire(
-                &server_stream.parts,
+                &server_stream.head,
                 &req_data,
                 &mut server_stream.respond,
                 &mut fresh_client,

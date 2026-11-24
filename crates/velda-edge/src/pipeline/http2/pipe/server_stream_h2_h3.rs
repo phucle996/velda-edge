@@ -9,9 +9,10 @@ use std::sync::Arc;
 use http::StatusCode;
 use http::header::{CONTENT_TYPE, HeaderValue};
 use velda_core::{L7Request, L7Response};
-use velda_http2::server::{Http2Responder, Http2ServerRequestHead, Http2StreamReceiver};
+use velda_http2::server::request::{Http2ServerRequestHead, Http2StreamReceiver};
+use velda_http2::server::response::Http2Responder;
 use velda_http3::error::Http3Error;
-use velda_http3::sanitize_headers;
+use velda_http3::headers::sanitize_headers;
 
 use crate::pipeline::{DownstreamMeta, PipeOutcome};
 use crate::upstream::Http3Upstream;
@@ -40,14 +41,14 @@ pub async fn serve(
             let _ = responder.send_response(&err_resp);
             return PipeOutcome::http(
                 responder.last_status,
-                receiver.bytes_received() as u64,
+                receiver.bytes_received as u64,
                 responder.last_bytes_tx,
                 None,
                 velda_core::CompletionReason::Rejected,
             );
         }
     };
-    let bytes_rx = receiver.bytes_received() as u64;
+    let bytes_rx = receiver.bytes_received as u64;
 
     // 2. Sanitize connection-specific headers forbidden by RFC 9114 §4.2
     sanitize_headers(&mut req_head.headers);
@@ -130,19 +131,19 @@ pub async fn serve(
         }
     };
 
-    // Fast-path guard: Bypasses post-response plugin chain if route has no hooks.
+    let mut resp_ws = std::mem::take(&mut h3_resp.headers);
     if let Some(post_hooks) = &plan.post_response_hooks {
         let mut l7_resp = L7Response::new(
             h3_resp.status,
             http::Version::HTTP_2,
-            h3_resp.headers,
+            resp_ws,
             velda_core::Body::Empty,
         );
         velda_plugin::run_post_response_plugins(post_hooks, &l7_req.headers, &mut l7_resp);
         h3_resp.status = l7_resp.status;
-        h3_resp.headers = l7_resp.headers.into();
+        resp_ws = l7_resp.headers;
     }
-    meta.inject_response_headers(&mut h3_resp.headers);
+    meta.inject_response_headers(&mut resp_ws);
 
     let is_no_body = h3_resp.status.is_informational()
         || h3_resp.status == StatusCode::NO_CONTENT
@@ -152,7 +153,7 @@ pub async fn serve(
         let resp = L7Response::new(
             h3_resp.status,
             http::Version::HTTP_2,
-            h3_resp.headers,
+            resp_ws,
             velda_core::Body::Empty,
         );
         let _ = responder.send_response(&resp);
@@ -166,7 +167,7 @@ pub async fn serve(
     }
 
     // Immediately open streaming response downstream and transmit headers frame
-    let mut stream_sender = match responder.send_stream_response(h3_resp.status, &h3_resp.headers) {
+    let mut stream_sender = match responder.send_stream_response(h3_resp.status, &resp_ws) {
         Ok(s) => s,
         Err(e) => {
             tracing::debug!(error = %e, "Failed to initiate downstream HTTP/2 streaming response");
@@ -188,7 +189,7 @@ pub async fn serve(
                     return PipeOutcome::http(
                         responder.last_status,
                         bytes_rx,
-                        stream_sender.bytes_sent(),
+                        stream_sender.bytes_sent,
                         upstream_addr,
                         velda_core::CompletionReason::ClientCancel,
                     );
@@ -196,11 +197,11 @@ pub async fn serve(
             }
             Err(e) => {
                 tracing::debug!(error = %e, "Error reading upstream HTTP/3 chunk");
-                responder.send_reset(h2::Reason::INTERNAL_ERROR);
+                responder.send_reset(velda_http2::proto::frame::H2ErrorCode::INTERNAL_ERROR);
                 return PipeOutcome::http(
                     responder.last_status,
                     bytes_rx,
-                    stream_sender.bytes_sent(),
+                    stream_sender.bytes_sent,
                     upstream_addr,
                     velda_core::CompletionReason::UpstreamError,
                 );
@@ -212,7 +213,7 @@ pub async fn serve(
     PipeOutcome::http(
         responder.last_status,
         bytes_rx,
-        stream_sender.bytes_sent(),
+        stream_sender.bytes_sent,
         upstream_addr,
         velda_core::CompletionReason::Complete,
     )

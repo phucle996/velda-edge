@@ -49,7 +49,7 @@ pub async fn serve(
     };
     let mut upstream_addr = Some(client.target());
 
-    let mut stream_res = client.send_stream_request_ref(req).await;
+    let mut stream_res = client.send_stream_request(req.clone()).await;
     let mut _fresh_lease_guard = None;
     if stream_res
         .as_ref()
@@ -64,7 +64,7 @@ pub async fn serve(
         );
         if let Ok((fresh_client, fresh_lease)) = upstream.acquire_fresh(&upstream.config).await {
             upstream_addr = Some(fresh_client.target());
-            stream_res = fresh_client.send_stream_request_ref(req).await;
+            stream_res = fresh_client.send_stream_request(req.clone()).await;
             if stream_res.is_err() {
                 fresh_lease.mark_goaway();
             }
@@ -113,7 +113,7 @@ pub async fn serve(
         );
         velda_plugin::run_post_response_plugins(post_hooks, &req.headers, &mut l7_resp);
         stream_resp.status = l7_resp.status;
-        stream_resp.headers = l7_resp.headers.into();
+        stream_resp.headers = l7_resp.headers;
     }
 
     if is_head || is_no_body {

@@ -10,8 +10,9 @@ use http::StatusCode;
 use http::header::{CONTENT_LENGTH, CONTENT_TYPE, HeaderValue, TRANSFER_ENCODING};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use velda_core::L7Response;
-use velda_http1::is_connection_close;
-use velda_http2::server::{Http2Responder, Http2ServerRequestHead, Http2StreamReceiver};
+use velda_http1::server::response::is_connection_close;
+use velda_http2::server::request::{Http2ServerRequestHead, Http2StreamReceiver};
+use velda_http2::server::response::Http2Responder;
 
 use crate::pipeline::{DownstreamMeta, PipeOutcome};
 use crate::upstream::Http1Upstream;
@@ -28,7 +29,7 @@ pub async fn serve(
     // 1. Ensure mandatory Host header (RFC 9112 §7.1)
     if !req_head.headers.contains_key(http::header::HOST)
         && let Some(host) =
-            velda_http2::server::header::extract_host(&req_head.headers, &req_head.uri)
+            velda_http2::server::request::extract_host(&req_head.headers, &req_head.uri)
         && let Ok(hv) = HeaderValue::from_str(host)
     {
         req_head.headers.insert(http::header::HOST, hv);
@@ -50,7 +51,7 @@ pub async fn serve(
             let _ = responder.send_response(&err_resp);
             return PipeOutcome::http(
                 responder.last_status,
-                receiver.bytes_received() as u64,
+                receiver.bytes_received as u64,
                 responder.last_bytes_tx,
                 None,
                 velda_core::CompletionReason::Rejected,
@@ -97,7 +98,7 @@ pub async fn serve(
             let _ = responder.send_response(&err_resp);
             return PipeOutcome::http(
                 responder.last_status,
-                receiver.bytes_received() as u64,
+                receiver.bytes_received as u64,
                 responder.last_bytes_tx,
                 None,
                 velda_core::CompletionReason::UpstreamError,
@@ -118,10 +119,11 @@ pub async fn serve(
     if write_buf.capacity() < initial_cap {
         write_buf.reserve(initial_cap - write_buf.capacity());
     }
-    velda_http1::client::encode_request_head(
+    let h1_req_headers = &req_head.headers;
+    velda_http1::client::request::encode_request_head(
         &req_head.method,
         &req_head.uri,
-        &req_head.headers,
+        h1_req_headers,
         None,
         write_buf,
     );
@@ -155,7 +157,7 @@ pub async fn serve(
                 if let Some(chunk) = first_chunk
                     && !chunk.is_empty()
                 {
-                    velda_http1::client::send_chunk_vectored(&mut write_half, &chunk)
+                    velda_http1::client::request::send_chunk_vectored(&mut write_half, &chunk)
                         .await
                         .map_err(std::io::Error::other)?;
                 }
@@ -168,9 +170,12 @@ pub async fn serve(
                         .map_err(std::io::Error::other)?
                     {
                         if !chunk.is_empty() {
-                            velda_http1::client::send_chunk_vectored(&mut write_half, &chunk)
-                                .await
-                                .map_err(std::io::Error::other)?;
+                            velda_http1::client::request::send_chunk_vectored(
+                                &mut write_half,
+                                &chunk,
+                            )
+                            .await
+                            .map_err(std::io::Error::other)?;
                         }
                         if receiver.is_end_stream() {
                             break;
@@ -188,9 +193,10 @@ pub async fn serve(
             loop {
                 match read_half.read_buf(read_buf).await {
                     Ok(0) => {
-                        if let Ok(Some(resp)) =
-                            velda_http1::client::decode_response(read_buf, &upstream.config)
-                        {
+                        if let Ok(Some(resp)) = velda_http1::client::response::decode_response(
+                            read_buf,
+                            &upstream.config,
+                        ) {
                             return Ok(resp);
                         } else {
                             return Err(std::io::Error::new(
@@ -200,9 +206,10 @@ pub async fn serve(
                         }
                     }
                     Ok(_) => {
-                        if let Ok(Some(resp)) =
-                            velda_http1::client::decode_response(read_buf, &upstream.config)
-                        {
+                        if let Ok(Some(resp)) = velda_http1::client::response::decode_response(
+                            read_buf,
+                            &upstream.config,
+                        ) {
                             return Ok(resp);
                         }
                     }
@@ -241,16 +248,13 @@ pub async fn serve(
     // Drop upstream lease immediately to return connection and pooled buffers to upstream pool
     drop(lease);
 
-    let bytes_rx = receiver.bytes_received() as u64;
+    let bytes_rx = receiver.bytes_received as u64;
     let completion = match resp_res {
         Ok(mut l7_resp) => {
             // Fast-path guard: Bypasses HeaderWorkspace instantiation & plugin dispatch if route has no hooks.
             // req_head reaches end of life here -> mem::take transfers ownership with zero allocations.
             if let Some(post_hooks) = &plan.post_response_hooks {
-                let req_ws = velda_core::HeaderWorkspace::from_headers(std::mem::take(
-                    &mut req_head.headers,
-                ));
-                velda_plugin::run_post_response_plugins(post_hooks, &req_ws, &mut l7_resp);
+                velda_plugin::run_post_response_plugins(post_hooks, h1_req_headers, &mut l7_resp);
             }
             meta.inject_response_headers(&mut l7_resp.headers);
             let _ = responder.send_response(&l7_resp);

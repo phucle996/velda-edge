@@ -352,7 +352,7 @@ pub fn build_mock_runtime(
         tls_server: None,
         tls_client: None,
         overload: std::sync::Arc::new(velda_core::hardware::OverloadTracker::auto()),
-        buffer_pool: std::sync::Arc::new(velda_core::buffer::ShardedBufferPool::default()),
+        buffer_pool: std::sync::Arc::new(velda_core::buffer::pool::ShardedBufferPool::default()),
         etp_table,
     }
 }

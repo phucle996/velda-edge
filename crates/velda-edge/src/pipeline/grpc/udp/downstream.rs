@@ -8,10 +8,9 @@ use std::net::SocketAddr;
 use std::sync::Arc;
 
 use velda_core::{Action, GrpcStatus, L7Request, L7Response, PipeKind};
-use velda_grpc::GrpcConfig;
-use velda_grpc::tcp::GrpcPipeStrategy;
-use velda_grpc::udp::GrpcUdpPipeStrategy;
-use velda_grpc::udp::server::GrpcUdpServerStream;
+use velda_grpc::config::GrpcConfig;
+use velda_grpc::tcp::strategy::GrpcPipeStrategy;
+use velda_grpc::udp::strategy::GrpcUdpPipeStrategy;
 use velda_observability::sampling::grpc::GrpcSampling;
 use velda_observability::{StreamCompletion, global_metrics, global_telemetry_store};
 use velda_router::GrpcRouteRequest;
@@ -50,7 +49,7 @@ pub async fn handle_grpc_udp(
             now,
             datagram.peer_ip,
             datagram.peer_port_be,
-            Some(datagram.local_ip),
+            Some((datagram.local_ip, datagram.local_port_be)),
             datagram.data(),
         )
     };
@@ -63,9 +62,6 @@ pub async fn handle_grpc_udp(
     }
 
     let peer_ip = datagram.peer_ip;
-    let peer_port_be = datagram.peer_port_be;
-    let local_ip = datagram.local_ip;
-    let local_port_be = datagram.local_port_be;
 
     // 2. Process complete gRPC requests concurrently without blocking other datagrams
     for req_event in requests {
@@ -78,35 +74,25 @@ pub async fn handle_grpc_udp(
         tokio::spawn(async move {
             tracing::debug!(
                 method = %req_event.request.method,
-                path = %req_event.request.path(),
+                path = %req_event.request.uri.path(),
                 peer = %peer,
                 "Decoded gRPC request from UDP"
             );
 
-            // [INGRESS W3C REQUEST ID]
-            // Authoritative W3C Request ID is already stamped at QPACK decode into Slot 0.
+            // [INGRESS W3C REQUEST ID & FORWARDING HEADERS]
+            // Stamped in 1 pass during QPACK decode into HeaderWorkspace.
             let mut req = req_event.request;
             req.state.client_ip = peer_ip;
             let req_id_header = req.headers.request_id().clone();
 
-            let mut stream = GrpcUdpServerStream::new(
-                req_event.handle,
-                req_event.stream_id,
-                req,
-                peer_ip,
-                peer_port_be,
-            );
-            stream.enrich_forwarded_headers(local_ip, local_port_be);
-
             let mut response =
-                process_grpc_udp_request(stream.request, peer, &lid, &cfg, sampling, &runtime)
-                    .await;
+                process_grpc_udp_request(req, peer, &lid, &cfg, sampling, &runtime).await;
             response.headers.set_request_id(req_id_header);
 
             let resp_now = std::time::Instant::now();
             let resp_pkts = {
                 let mut engine = engine_lock.lock().await;
-                engine.send_response(resp_now, stream.handle, stream.stream_id, &response)
+                engine.send_response(resp_now, req_event.handle, req_event.stream_id, &response)
             };
 
             if let Ok(pkts) = resp_pkts {
@@ -133,7 +119,7 @@ pub async fn process_grpc_udp_request(
     let ingress_nanos = req.ingress_time_nanos;
     let (log_url_len, log_url_bytes) = {
         let host = velda_http3::server::header::extract_host(&req.headers, &req.uri);
-        velda_observability::TelemetryRecord::encode_url(true, host, req.path())
+        velda_observability::TelemetryRecord::encode_url(true, host, req.uri.path())
     };
     let (ua_family, ua_os, ua_major_version) = req
         .headers
@@ -141,8 +127,8 @@ pub async fn process_grpc_udp_request(
         .map(|v| velda_core::lut::classify_user_agent(v.as_bytes()))
         .unwrap_or((velda_core::UaFamily::None, velda_core::UaOs::Unknown, 0));
 
-    // [PHYSICAL WIRE CEILING: MAX_WIRE_HEADERS = 1024]
-    if req.headers.len() > velda_core::buffer::MAX_WIRE_HEADERS {
+    // [PHYSICAL WIRE CEILING: MAX_WIRE_HEADERS = 256]
+    if req.headers.len() > velda_core::buffer::header::MAX_WIRE_HEADERS {
         let duration_ns = velda_core::clock::now_unix_nanos().saturating_sub(ingress_nanos);
         global_metrics().record_early_completion(
             PipeKind::BufferedGrpcUdpUdp,
@@ -178,12 +164,11 @@ pub async fn process_grpc_udp_request(
 
     let authority = req
         .headers
-        .get(":authority")
-        .and_then(|v| v.to_str().ok())
-        .or_else(|| req.host().and_then(|h| h.to_str().ok()))
+        .get(http::header::HOST)
+        .and_then(|h| h.to_str().ok())
         .or_else(|| req.uri.authority().map(|a| a.as_str()));
 
-    let Some(grpc_req) = GrpcRouteRequest::from_path(req.path(), authority) else {
+    let Some(grpc_req) = GrpcRouteRequest::from_path(req.uri.path(), authority) else {
         let duration_ns = velda_core::clock::now_unix_nanos().saturating_sub(ingress_nanos);
         global_metrics().record_early_completion(
             PipeKind::BufferedGrpcUdpUdp,
@@ -710,36 +695,56 @@ pub async fn process_grpc_udp_request(
 
 #[cfg(test)]
 mod tests {
-
-    use http::HeaderMap;
-    use velda_core::HeaderWorkspace;
-    use velda_grpc::udp::server::enrich_headers;
+    use bytes::{BufMut, BytesMut};
+    use http::HeaderValue;
+    use velda_grpc::udp::wire::{
+        GrpcUdpForwardingAddrs, GrpcUdpIngressEnrich, decode_qpack_ingress, encode_prefixed_int,
+        encode_string_literal,
+    };
 
     #[test]
     fn test_enrich_forwarded_headers() {
-        let mut map = HeaderMap::new();
-        // Client attempts to spoof their IP, host, and SSL status
-        map.insert("x-forwarded-for", "203.0.113.195".parse().unwrap());
-        map.insert("x-real-ip", "203.0.113.195".parse().unwrap());
-        map.insert("x-forwarded-host", "evil.attacker.com".parse().unwrap());
-        map.insert("x-forwarded-proto", "http".parse().unwrap());
-        map.insert("connection", "close".parse().unwrap());
-        map.insert("keep-alive", "timeout=5".parse().unwrap());
-        map.insert("forwarded", "for=203.0.113.195;proto=http".parse().unwrap());
+        let mut buf = BytesMut::new();
+        buf.put_u8(0x00);
+        buf.put_u8(0x00);
+        encode_prefixed_int(20, 6, 0xc0, &mut buf); // :method: POST
+        encode_prefixed_int(23, 6, 0xc0, &mut buf); // :scheme: https
+        encode_prefixed_int(0, 4, 0x50, &mut buf); // :authority
+        encode_string_literal(b"grpc-udp.example.com", &mut buf);
+        encode_prefixed_int(1, 4, 0x50, &mut buf); // :path
+        encode_string_literal(b"/pkg.Svc/Unary", &mut buf);
 
-        let mut headers = HeaderWorkspace::from_headers(map);
+        let push_lit = |dst: &mut BytesMut, k: &[u8], v: &[u8]| {
+            encode_prefixed_int(k.len() as u64, 3, 0x20, dst);
+            dst.put_slice(k);
+            encode_string_literal(v, dst);
+        };
+        // Client attempts to spoof their IP, host, and SSL status
+        push_lit(&mut buf, b"x-forwarded-for", b"203.0.113.195");
+        push_lit(&mut buf, b"x-real-ip", b"203.0.113.195");
+        push_lit(&mut buf, b"x-forwarded-host", b"evil.attacker.com");
+        push_lit(&mut buf, b"x-forwarded-proto", b"http");
+        push_lit(&mut buf, b"connection", b"close");
+        push_lit(&mut buf, b"keep-alive", b"timeout=5");
+        push_lit(&mut buf, b"forwarded", b"for=203.0.113.195;proto=http");
 
         let peer_ip = velda_core::lut::ip::v4_to_u128(0xC000_0232);
         let local_ip = velda_core::lut::ip::v4_to_u128(0x0A00_0001);
         let local_port_be = 443u16.to_be();
 
-        enrich_headers(
-            &mut headers,
-            peer_ip,
-            local_ip,
-            local_port_be,
-            Some("grpc-udp.example.com"),
-        );
+        let dec = decode_qpack_ingress(
+            &buf,
+            GrpcUdpIngressEnrich {
+                request_id: HeaderValue::from_static("auth-req-id"),
+                forwarding: Some(GrpcUdpForwardingAddrs {
+                    peer_ip,
+                    local_ip,
+                    local_port_be,
+                }),
+            },
+        )
+        .unwrap();
+        let headers = dec.headers;
 
         // Client spoofed values MUST be completely replaced with authoritative values
         assert_eq!(headers.get("x-forwarded-for").unwrap(), "192.0.2.50");

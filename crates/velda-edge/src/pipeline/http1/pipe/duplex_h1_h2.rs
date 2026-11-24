@@ -32,12 +32,14 @@ use bytes::Bytes;
 use http::StatusCode;
 use http::header::{CONTENT_TYPE, HeaderValue};
 use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt};
-use velda_http1::wire::{send_chunk, send_chunked_end};
-use velda_http1::{
-    HeadEncodeOptions, Http1BodyFraming, Http1Error, Http1ServerConnection, Http1ServerRequestHead,
-    Http1ServerResponse, ProgressiveChunkDecoder,
+use velda_http1::error::Http1Error;
+use velda_http1::server::connection::Http1ServerConnection;
+use velda_http1::server::request::{Http1BodyFraming, Http1ServerRequestHead};
+use velda_http1::server::response::{
+    HeadEncodeOptions, Http1ServerResponse, encode_head, send_chunked_head,
 };
-use velda_http2::{Http2Config, sanitize_h2_headers};
+use velda_http1::wire::{ProgressiveChunkDecoder, send_chunk, send_chunked_end};
+use velda_http2::config::Http2Config;
 
 use crate::pipeline::DownstreamMeta;
 use crate::upstream::Http2Upstream;
@@ -63,13 +65,10 @@ where
         req_head.headers.remove(http::header::EXPECT);
     }
 
-    // 3. Sanitize connection-specific headers forbidden by RFC 9113 §8.2.2
-    sanitize_h2_headers(&mut req_head.headers);
-
     let h2_config = Http2Config::auto();
 
     // 4. Acquire pooled HTTP/2 client
-    let (mut client, lease) = match upstream.acquire(&h2_config).await {
+    let (client, lease) = match upstream.acquire(&h2_config).await {
         Ok(res) => res,
         Err(e) => {
             tracing::warn!(
@@ -85,7 +84,7 @@ where
                 CONTENT_TYPE,
                 HeaderValue::from_static("text/plain; charset=utf-8"),
             );
-            conn.mark_close();
+            conn.close_requested = true;
             let _ = conn.send_response(&err_resp).await;
             return Err(Http1Error::ConnectionClosed);
         }
@@ -114,14 +113,15 @@ where
         .unwrap_or_else(|_| req_head.uri.clone());
 
     let is_eos = framing == Http1BodyFraming::Empty;
-    let mut req = http::Request::builder()
-        .method(req_head.method.clone())
-        .uri(uri)
-        .version(http::Version::HTTP_2);
-    *req.headers_mut().unwrap() = req_head.headers.clone();
-    let req = req.body(()).unwrap();
-
-    let (response_future, mut send_stream) = match client.send_request(req, is_eos) {
+    let (response_future, mut send_stream) = match client
+        .send_request(
+            req_head.method.clone(),
+            uri,
+            req_head.headers.clone(),
+            is_eos,
+        )
+        .await
+    {
         Ok(parts) => parts,
         Err(e) => {
             tracing::warn!(error = %e, "Failed to initiate HTTP/2 duplex stream");
@@ -129,13 +129,13 @@ where
                 StatusCode::BAD_GATEWAY,
                 format!("502 Bad Gateway: {e}\n").into_bytes(),
             );
-            conn.mark_close();
+            conn.close_requested = true;
             let _ = conn.send_response(&err_resp).await;
             return Err(Http1Error::ConnectionClosed);
         }
     };
 
-    let req_id_val = conn.request_id().cloned();
+    let req_id_val = conn.current_request_id.clone();
     let should_close = conn.close_requested;
 
     // 6. Split downstream IO into concurrent Read and Write halves
@@ -166,9 +166,9 @@ where
 
                     while let Some(chunk) = decoder.decode_step(read_buf)? {
                         *last_bytes_rx += chunk.len() as u64;
-                        send_stream.reserve_capacity(chunk.len());
                         send_stream
-                            .send_data(chunk, false)
+                            .send_chunk(chunk, false)
+                            .await
                             .map_err(|_| Http1Error::ConnectionClosed)?;
                     }
 
@@ -212,9 +212,9 @@ where
                         let chunk = read_buf.split_to(chunk_len).freeze();
                         remaining = remaining.saturating_sub(chunk_len);
                         *last_bytes_rx += chunk_len as u64;
-                        send_stream.reserve_capacity(chunk_len);
                         send_stream
-                            .send_data(chunk, false)
+                            .send_chunk(chunk, false)
+                            .await
                             .map_err(|_| Http1Error::ConnectionClosed)?;
                         continue;
                     }
@@ -236,9 +236,9 @@ where
                             let chunk = read_buf.split_to(chunk_len).freeze();
                             remaining = remaining.saturating_sub(chunk_len);
                             *last_bytes_rx += chunk_len as u64;
-                            send_stream.reserve_capacity(chunk_len);
                             send_stream
-                                .send_data(chunk, false)
+                                .send_chunk(chunk, false)
+                                .await
                                 .map_err(|_| Http1Error::ConnectionClosed)?;
                         }
                     }
@@ -259,42 +259,38 @@ where
 
     // Task 2: Concurrent Download Pump (Upstream H2 -> Downstream)
     let download_task = async {
-        let response = response_future
+        let mut response = response_future
             .await
             .map_err(|_| Http1Error::ConnectionClosed)?;
-        let (mut parts, mut body_stream) = response.into_parts();
+        let mut resp_headers = response.headers;
         if let Some(req_id) = req_head.headers.get(&crate::pipeline::X_REQUEST_ID) {
-            parts
-                .headers
-                .insert(crate::pipeline::X_REQUEST_ID, req_id.clone());
+            resp_headers.insert_bypass(crate::pipeline::X_REQUEST_ID, req_id.clone());
         }
 
-        // Fast-path guard: Bypasses HeaderWorkspace instantiation & plugin dispatch if route has no hooks.
-        // HeaderMap::clone() clones atomic pointer handles (Bytes) in O(1) without copying string payloads.
+        let mut resp_status = response.status;
         if let Some(post_hooks) = &plan.post_response_hooks {
             let mut l7_resp = velda_core::L7Response::new(
-                parts.status,
+                resp_status,
                 http::Version::HTTP_11,
-                std::mem::take(&mut parts.headers),
+                resp_headers,
                 velda_core::Body::Empty,
             );
-            let req_ws = velda_core::HeaderWorkspace::from_headers(req_head.headers.clone());
-            velda_plugin::run_post_response_plugins(post_hooks, &req_ws, &mut l7_resp);
-            parts.status = l7_resp.status;
-            parts.headers = l7_resp.headers.into();
+            velda_plugin::run_post_response_plugins(post_hooks, &req_head.headers, &mut l7_resp);
+            resp_status = l7_resp.status;
+            resp_headers = l7_resp.headers;
         }
-        meta.inject_response_headers(&mut parts.headers);
-        *last_status = parts.status.as_u16();
+        meta.inject_response_headers(&mut resp_headers);
+        *last_status = resp_status.as_u16();
 
-        let is_no_body_status = parts.status.is_informational()
-            || parts.status == http::StatusCode::NO_CONTENT
-            || parts.status == http::StatusCode::NOT_MODIFIED;
+        let is_no_body_status = resp_status.is_informational()
+            || resp_status == http::StatusCode::NO_CONTENT
+            || resp_status == http::StatusCode::NOT_MODIFIED;
         if is_no_body_status {
             let mut write_buf = bytes::BytesMut::with_capacity(256);
-            velda_http1::encode_head(
+            encode_head(
                 http::Version::HTTP_11,
-                parts.status,
-                &parts.headers,
+                resp_status,
+                &resp_headers,
                 HeadEncodeOptions {
                     body_len: Some(0),
                     force_close: should_close,
@@ -309,8 +305,7 @@ where
         }
 
         // Fast-path for finite response payloads (e.g. echo or upload status like 200 OK "pong")
-        let cl_opt = parts
-            .headers
+        let cl_opt = resp_headers
             .get(http::header::CONTENT_LENGTH)
             .and_then(|v| v.to_str().ok())
             .and_then(|v| v.parse::<usize>().ok());
@@ -320,20 +315,21 @@ where
         {
             let mut body_buf = bytes::BytesMut::with_capacity(content_len);
             while body_buf.len() < content_len {
-                match body_stream.data().await {
-                    Some(Ok(chunk)) => {
-                        let _ = body_stream.flow_control().release_capacity(chunk.len());
-                        body_buf.extend_from_slice(&chunk);
-                    }
-                    Some(Err(_)) => return Err(Http1Error::ConnectionClosed),
+                match response
+                    .body
+                    .recv_chunk()
+                    .await
+                    .map_err(|_| Http1Error::ConnectionClosed)?
+                {
+                    Some(chunk) => body_buf.extend_from_slice(&chunk),
                     None => break,
                 }
             }
             let mut write_buf = bytes::BytesMut::with_capacity(256 + body_buf.len());
-            velda_http1::encode_head(
+            encode_head(
                 http::Version::HTTP_11,
-                parts.status,
-                &parts.headers,
+                resp_status,
+                &resp_headers,
                 HeadEncodeOptions {
                     body_len: Some(body_buf.len()),
                     force_close: should_close,
@@ -351,12 +347,12 @@ where
 
         // True progressive chunked streaming path
         let mut write_buf = bytes::BytesMut::with_capacity(512);
-        velda_http1::send_chunked_head(
+        send_chunked_head(
             &mut client_write,
             &mut write_buf,
             http::Version::HTTP_11,
-            parts.status,
-            &parts.headers,
+            resp_status,
+            &resp_headers,
             HeadEncodeOptions {
                 body_len: None,
                 force_close: should_close,
@@ -365,9 +361,12 @@ where
         )
         .await?;
 
-        while let Some(chunk) = body_stream.data().await {
-            let chunk = chunk.map_err(|_| Http1Error::ConnectionClosed)?;
-            let _ = body_stream.flow_control().release_capacity(chunk.len());
+        while let Some(chunk) = response
+            .body
+            .recv_chunk()
+            .await
+            .map_err(|_| Http1Error::ConnectionClosed)?
+        {
             send_chunk(&mut client_write, &chunk).await?;
             *last_bytes_tx += chunk.len() as u64;
         }
@@ -381,7 +380,7 @@ where
     // 7. Concurrently drive upload and download with zero head-of-line blocking
     let duplex_res = tokio::try_join!(upload_task, download_task);
     if !upload_finished.load(Ordering::Acquire) {
-        conn.mark_close();
+        conn.close_requested = true;
     }
     duplex_res.map(|_| ())
 }

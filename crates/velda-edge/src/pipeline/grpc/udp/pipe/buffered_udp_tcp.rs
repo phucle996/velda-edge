@@ -7,8 +7,9 @@
 use std::sync::Arc;
 
 use velda_core::{L7Request, L7Response};
+use velda_grpc::config::GrpcConfig;
+use velda_grpc::error::GrpcError;
 use velda_grpc::tcp::client::request::GrpcClientRequest;
-use velda_grpc::{GrpcConfig, GrpcError};
 
 use crate::upstream::GrpcTcpUpstream;
 

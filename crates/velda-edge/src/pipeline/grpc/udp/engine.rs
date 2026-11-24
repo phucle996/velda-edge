@@ -9,9 +9,9 @@ use std::sync::{Arc, OnceLock, RwLock};
 
 use rustc_hash::FxHashMap;
 use tokio::sync::Mutex;
-use velda_grpc::GrpcConfig;
+use velda_grpc::config::GrpcConfig;
 use velda_grpc::udp::quinn_proto;
-use velda_grpc::udp::server::GrpcUdpEngine;
+use velda_grpc::udp::server::engine::GrpcUdpEngine;
 use velda_tls::TlsServerEngine;
 
 use crate::error::EdgeError;

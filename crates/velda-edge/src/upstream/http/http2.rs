@@ -3,31 +3,31 @@
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
 
-use bytes::Bytes;
 use velda_connection_pool::{MultiplexedPool, PoolableResource};
 use velda_core::StreamingMode;
-use velda_http2::Http2PipeStrategy;
+use velda_http2::client::connection::Http2Client;
+use velda_http2::strategy::Http2PipeStrategy;
 use velda_tls::TlsClientEngine;
 
 use crate::error::EdgeError;
 use crate::upstream::lb::EdgeUpstream;
 
-/// Pooled HTTP/2 client resource wrapping [`h2::client::SendRequest<Bytes>`].
+/// Pooled HTTP/2 client resource wrapping [`Http2Client`].
 #[derive(Clone, Debug)]
 pub struct Http2ClientResource {
-    pub client: h2::client::SendRequest<Bytes>,
+    pub client: Http2Client,
     pub endpoint: (u128, u16),
 }
 
 impl Http2ClientResource {
-    pub fn new(client: h2::client::SendRequest<Bytes>, endpoint: (u128, u16)) -> Self {
+    pub fn new(client: Http2Client, endpoint: (u128, u16)) -> Self {
         Self { client, endpoint }
     }
 }
 
 impl PoolableResource for Http2ClientResource {
     fn is_healthy(&self) -> bool {
-        true
+        self.client.is_healthy()
     }
 
     fn close(&mut self) {}
@@ -56,7 +56,7 @@ pub struct Http2Upstream {
     pub max_concurrent_streams: u32,
     /// [PRE-COMPILED]: Protocol-specific socket acceleration path.
     /// [PRE-COMPILED]: Pre-computed HTTP/2 protocol configuration.
-    pub config: velda_http2::Http2Config,
+    pub config: velda_http2::config::Http2Config,
     /// Cold-start / saturation synchronization lock preventing thundering-herd connection storms.
     connect_lock: tokio::sync::Mutex<()>,
     /// Last active health probe timestamp in seconds from coarse integer clock.
@@ -97,7 +97,7 @@ impl Http2Upstream {
             ),
             max_connections_per_key: max_connections_per_key.max(1),
             max_concurrent_streams,
-            config: velda_http2::Http2Config::auto(),
+            config: velda_http2::config::Http2Config::auto(),
             connect_lock: tokio::sync::Mutex::new(()),
             last_probe_sec: AtomicU64::new(0),
         }
@@ -140,10 +140,10 @@ impl Http2Upstream {
     /// accounting precise via the returned RAII lease guard.
     pub async fn acquire(
         &self,
-        config: &velda_http2::Http2Config,
+        config: &velda_http2::config::Http2Config,
     ) -> Result<
         (
-            h2::client::SendRequest<Bytes>,
+            Http2Client,
             velda_connection_pool::StreamLease<Http2ClientResource>,
         ),
         EdgeError,
@@ -161,29 +161,11 @@ impl Http2Upstream {
             .execute(|endpoint| async move {
                 // 1. Fast-path: lease a stream slot from an existing healthy connection in the pool.
                 if let Some(lease) = self.pool.acquire_stream(&endpoint, idle_timeout) {
-                    let mut client = lease.client.clone();
-                    let ready_res = std::future::poll_fn(|cx| match client.poll_ready(cx) {
-                        std::task::Poll::Ready(Ok(())) => std::task::Poll::Ready(Some(true)),
-                        std::task::Poll::Ready(Err(_)) => std::task::Poll::Ready(Some(false)),
-                        std::task::Poll::Pending => std::task::Poll::Ready(None),
-                    })
-                    .await;
-
-                    match ready_res {
-                        Some(true) => return Ok::<_, String>(((client, lease), endpoint)),
-                        Some(false) => {
-                            lease.mark_goaway();
-                        }
-                        None => {
-                            if let Ok(Ok(ready_client)) =
-                                tokio::time::timeout(connect_timeout, client.ready()).await
-                            {
-                                return Ok::<_, String>(((ready_client, lease), endpoint));
-                            } else {
-                                lease.mark_goaway();
-                            }
-                        }
+                    if lease.client.is_healthy() {
+                        let client = lease.client.clone();
+                        return Ok::<_, String>(((client, lease), endpoint));
                     }
+                    lease.mark_goaway();
                 }
 
                 // 2. Slow-path: acquire connect lock to serialize fresh connection establishment
@@ -191,33 +173,15 @@ impl Http2Upstream {
 
                 // Double-check: did a concurrent request finish connecting while we waited for the lock?
                 if let Some(lease) = self.pool.acquire_stream(&endpoint, idle_timeout) {
-                    let mut client = lease.client.clone();
-                    let ready_res = std::future::poll_fn(|cx| match client.poll_ready(cx) {
-                        std::task::Poll::Ready(Ok(())) => std::task::Poll::Ready(Some(true)),
-                        std::task::Poll::Ready(Err(_)) => std::task::Poll::Ready(Some(false)),
-                        std::task::Poll::Pending => std::task::Poll::Ready(None),
-                    })
-                    .await;
-
-                    match ready_res {
-                        Some(true) => return Ok::<_, String>(((client, lease), endpoint)),
-                        Some(false) => {
-                            lease.mark_goaway();
-                        }
-                        None => {
-                            if let Ok(Ok(ready_client)) =
-                                tokio::time::timeout(connect_timeout, client.ready()).await
-                            {
-                                return Ok::<_, String>(((ready_client, lease), endpoint));
-                            } else {
-                                lease.mark_goaway();
-                            }
-                        }
+                    if lease.client.is_healthy() {
+                        let client = lease.client.clone();
+                        return Ok::<_, String>(((client, lease), endpoint));
                     }
+                    lease.mark_goaway();
                 }
 
                 // Establish a single fresh HTTP/2 client connection
-                let fresh = velda_http2::client::connect(
+                let fresh = velda_http2::client::connector::connect(
                     endpoint.0,
                     endpoint.1,
                     tls,
@@ -227,18 +191,10 @@ impl Http2Upstream {
                 .await
                 .map_err(|e| e.to_string())?;
 
-                let res = Http2ClientResource::new(fresh, endpoint);
+                let res = Http2ClientResource::new(fresh.clone(), endpoint);
                 let lease = self.pool.register(endpoint, res, max_streams);
 
-                let ready_client = lease.client.clone();
-                let ready_client = tokio::time::timeout(connect_timeout, ready_client.ready())
-                    .await
-                    .map_err(|_| {
-                        "Timeout waiting for client ready after fresh connect".to_string()
-                    })?
-                    .map_err(|e| format!("Client not ready after fresh connect: {e}"))?;
-
-                Ok::<_, String>(((ready_client, lease), endpoint))
+                Ok::<_, String>(((fresh, lease), endpoint))
             })
             .await
             .map_err(EdgeError::Upstream)?;
@@ -251,10 +207,10 @@ impl Http2Upstream {
     /// Used for transparent 1-shot self-healing when a pooled connection fails on stream open (RFC 9113 §8.1.4).
     pub async fn acquire_fresh(
         &self,
-        config: &velda_http2::Http2Config,
+        config: &velda_http2::config::Http2Config,
     ) -> Result<
         (
-            h2::client::SendRequest<Bytes>,
+            Http2Client,
             velda_connection_pool::StreamLease<Http2ClientResource>,
         ),
         EdgeError,
@@ -269,7 +225,7 @@ impl Http2Upstream {
         let (client_and_lease, _endpoint) = self
             .inner
             .execute(|endpoint| async move {
-                let fresh = velda_http2::client::connect(
+                let fresh = velda_http2::client::connector::connect(
                     endpoint.0,
                     endpoint.1,
                     tls,
@@ -279,18 +235,10 @@ impl Http2Upstream {
                 .await
                 .map_err(|e| e.to_string())?;
 
-                let res = Http2ClientResource::new(fresh, endpoint);
+                let res = Http2ClientResource::new(fresh.clone(), endpoint);
                 let lease = self.pool.register(endpoint, res, max_streams);
 
-                let ready_client = lease.client.clone();
-                let ready_client = tokio::time::timeout(connect_timeout, ready_client.ready())
-                    .await
-                    .map_err(|_| {
-                        "Timeout waiting for client ready after fresh connect".to_string()
-                    })?
-                    .map_err(|e| format!("Client not ready after fresh connect: {e}"))?;
-
-                Ok::<_, String>(((ready_client, lease), endpoint))
+                Ok::<_, String>(((fresh, lease), endpoint))
             })
             .await
             .map_err(EdgeError::Upstream)?;
@@ -308,7 +256,7 @@ impl Http2Upstream {
     ///
     /// Executed autonomously by the core-local Shadow Worker (`SCHED_IDLE`) whenever
     /// lane capacity drops below available headroom.
-    pub async fn prewarm_lane(&self, lane: usize, config: &velda_http2::Http2Config) {
+    pub async fn prewarm_lane(&self, lane: usize, config: &velda_http2::config::Http2Config) {
         let endpoints = self.inner.current_endpoints();
         let all_eps = endpoints.all_endpoints();
         if all_eps.is_empty() {
@@ -342,7 +290,7 @@ impl Http2Upstream {
                     .map(|(engine, sni)| (engine.as_ref(), sni.as_ref()));
                 let connect_timeout = self.inner.timeouts().connect;
 
-                match velda_http2::client::connect(
+                match velda_http2::client::connector::connect(
                     addr.0,
                     addr.1,
                     tls,
@@ -352,9 +300,8 @@ impl Http2Upstream {
                 .await
                 {
                     Ok(fresh) => {
-                        let ready_res = tokio::time::timeout(connect_timeout, fresh.ready()).await;
-                        if let Ok(Ok(ready_client)) = ready_res {
-                            let res = Http2ClientResource::new(ready_client, addr);
+                        if fresh.is_healthy() {
+                            let res = Http2ClientResource::new(fresh, addr);
                             self.pool.register_warmed_to_lane(
                                 addr,
                                 lane,
@@ -418,10 +365,15 @@ impl Http2Upstream {
                 let leased = self.pool.acquire_stream(&addr, idle_timeout);
 
                 let (client, lease_opt) = match leased {
-                    Some(lease) => (lease.client.clone(), Some(lease)),
+                    Some(lease) if lease.client.is_healthy() => (lease.client.clone(), Some(lease)),
+                    Some(lease) => {
+                        lease.mark_goaway();
+                        health.record_active_result(&addr, false);
+                        continue;
+                    }
                     None => {
                         let tls = self.tls.as_ref().map(|(e, s)| (e.as_ref(), s.as_ref()));
-                        match velda_http2::client::connect(
+                        match velda_http2::client::connector::connect(
                             addr.0,
                             addr.1,
                             tls,
@@ -439,15 +391,6 @@ impl Http2Upstream {
                     }
                 };
 
-                let ready_res = tokio::time::timeout(timeout, client.clone().ready()).await;
-                let Ok(Ok(mut ready_client)) = ready_res else {
-                    if let Some(lease) = lease_opt {
-                        lease.mark_goaway();
-                    }
-                    health.record_active_result(&addr, false);
-                    continue;
-                };
-
                 let path = active_cfg.path.as_deref().unwrap_or("/healthz");
                 let host = self.target_host();
                 let uri: http::Uri = match format!("http://{}{}", host, path).parse() {
@@ -457,15 +400,18 @@ impl Http2Upstream {
                         continue;
                     }
                 };
-                let req = http::Request::builder()
-                    .method(http::Method::GET)
-                    .uri(uri)
-                    .header(http::header::USER_AGENT, "Velda-HealthCheck")
-                    .header(http::header::HOST, host)
-                    .body(())
-                    .unwrap();
+                let mut probe_ws = velda_core::buffer::header::HeaderWorkspace::empty(4);
+                probe_ws.insert(
+                    http::header::USER_AGENT,
+                    http::HeaderValue::from_static("Velda-HealthCheck"),
+                );
+                if let Ok(hv) = http::HeaderValue::from_str(host) {
+                    probe_ws.insert(http::header::HOST, hv);
+                }
 
-                let send_res = ready_client.send_request(req, true);
+                let send_res = client
+                    .send_request(http::Method::GET, uri, probe_ws, true)
+                    .await;
                 let Ok((response_fut, _)) = send_res else {
                     if let Some(lease) = lease_opt {
                         lease.mark_goaway();
@@ -476,7 +422,7 @@ impl Http2Upstream {
 
                 match tokio::time::timeout(timeout, response_fut).await {
                     Ok(Ok(resp)) => {
-                        let status = resp.status().as_u16();
+                        let status = resp.status.as_u16();
                         let is_healthy = active_cfg.expected_statuses.is_empty()
                             || active_cfg.expected_statuses.contains(&status);
                         if is_healthy {

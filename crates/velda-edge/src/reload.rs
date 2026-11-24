@@ -143,10 +143,8 @@ pub fn load_initial_runtime(
     };
 
     let topo = velda_core::hardware::global_hardware_topology();
-    let dims = velda_core::buffer::AdaptiveBufferDimensions::for_topology(topo);
-    let pool_config = velda_core::buffer::AdaptivePoolConfig {
-        header_slots: dims.header_baseline,
-        header_max_cap: dims.header_max_cap,
+    let dims = velda_core::buffer::adaptive::AdaptiveBufferDimensions::for_topology(topo);
+    let pool_config = velda_core::buffer::pool::AdaptivePoolConfig {
         small_slabs: dims.small_baseline,
         small_max_cap: dims.small_max_cap,
         medium_slabs: dims.medium_baseline,
@@ -157,10 +155,12 @@ pub fn load_initial_runtime(
         large_max_cap: dims.large_max_cap,
         idle_ttl_secs: 15,
     };
-    let buffer_pool = Arc::new(velda_core::buffer::ShardedBufferPool::with_adaptive_limits(
-        topo.available_cores,
-        pool_config,
-    ));
+    let buffer_pool = Arc::new(
+        velda_core::buffer::pool::ShardedBufferPool::with_adaptive_limits(
+            topo.available_cores,
+            pool_config,
+        ),
+    );
 
     let pipelines = crate::runtime::pipeline::PipelineTable::build_with_hardware(
         &runtime_config.listeners,

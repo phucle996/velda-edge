@@ -9,10 +9,10 @@ use http::StatusCode;
 use http::header::HeaderValue;
 use u16;
 use velda_core::{Action, L7Request, PipeKind};
-use velda_http1::Http1PipeStrategy;
-use velda_http2::Http2PipeStrategy;
-use velda_http3::Http3PipeStrategy;
+use velda_http1::strategy::Http1PipeStrategy;
+use velda_http2::strategy::Http2PipeStrategy;
 use velda_http3::server::connection::OutgoingDatagram;
+use velda_http3::strategy::Http3PipeStrategy;
 use velda_observability::sampling::http::HttpSampling;
 use velda_observability::{StreamCompletion, global_metrics};
 use velda_router::Http3RouteRequest;
@@ -121,7 +121,7 @@ pub async fn handle_http3_udp(
     listener_id: Arc<str>,
     socket: Arc<UdpSocket>,
     datagram: Datagram,
-    _config: velda_http3::Http3Config,
+    _config: velda_http3::config::Http3Config,
     sampling: HttpSampling,
     runtime: &SharedRuntime,
     precomputed_workers: Option<&Http3WorkerPool>,
@@ -151,7 +151,7 @@ pub async fn handle_http3_udp(
             now,
             datagram.peer_ip,
             datagram.peer_port_be,
-            Some(datagram.local_ip),
+            Some((datagram.local_ip, datagram.local_port_be)),
             datagram.data(),
         )
     };
@@ -198,7 +198,7 @@ pub async fn handle_http3_udp(
                     .uri
                     .path_and_query()
                     .map(|x| x.as_str())
-                    .unwrap_or(req.path());
+                    .unwrap_or(req.uri.path());
                 velda_observability::TelemetryRecord::encode_url(true, host, pq)
             };
 
@@ -211,7 +211,7 @@ pub async fn handle_http3_udp(
 
             tracing::debug!(
                 method = %req.method,
-                path = %req.path(),
+                path = %req.uri.path(),
                 peer = %peer,
                 early_data = req_event.is_early_data,
                 "Decoded HTTP/3 request from UDP"
@@ -227,14 +227,16 @@ pub async fn handle_http3_udp(
                 tracing::warn!(
                     listener = %lid,
                     method = %req.method,
-                    path = %req.path(),
+                    path = %req.uri.path(),
                     "Rejecting non-idempotent HTTP/3 request received in 0-RTT early data (RFC 8470)"
                 );
                 let _ = responder
-                    .send_response(velda_http3::server::precompiled_early_response(
-                        StatusCode::TOO_EARLY,
-                        Some(&req_id_header),
-                    ))
+                    .send_response(
+                        velda_http3::server::early_response::precompiled_early_response(
+                            StatusCode::TOO_EARLY,
+                            Some(&req_id_header),
+                        ),
+                    )
                     .await;
                 let duration_ns =
                     velda_core::clock::now_unix_nanos().saturating_sub(req.ingress_time_nanos);
@@ -283,14 +285,16 @@ pub async fn handle_http3_udp(
                 tracing::warn!(
                     listener = %lid,
                     error = %e,
-                    path = %req.path(),
+                    path = %req.uri.path(),
                     "Rejecting HTTP/3 request with unsafe URI path"
                 );
                 let _ = responder
-                    .send_response(velda_http3::server::precompiled_early_response(
-                        StatusCode::BAD_REQUEST,
-                        Some(&req_id_header),
-                    ))
+                    .send_response(
+                        velda_http3::server::early_response::precompiled_early_response(
+                            StatusCode::BAD_REQUEST,
+                            Some(&req_id_header),
+                        ),
+                    )
                     .await;
                 let duration_ns =
                     velda_core::clock::now_unix_nanos().saturating_sub(req.ingress_time_nanos);
@@ -336,14 +340,6 @@ pub async fn handle_http3_udp(
                 return;
             }
 
-            velda_http3::server::header::enrich_headers(
-                &mut req.headers,
-                &req.uri,
-                datagram.peer_ip,
-                datagram.local_ip,
-                datagram.local_port_be,
-            );
-
             process_http3_request(req, &lid, sampling, &runtime, responder).await;
         });
     }
@@ -359,7 +355,7 @@ async fn process_http3_request(
 ) {
     let ingress_nanos = req.ingress_time_nanos;
     let host = velda_http3::server::header::extract_host(&req.headers, &req.uri);
-    let mut http_req = Http3RouteRequest::new(req.path());
+    let mut http_req = Http3RouteRequest::new(req.uri.path());
     if let Some(h) = host {
         http_req = http_req.with_host(h);
     }
@@ -375,7 +371,7 @@ async fn process_http3_request(
         .uri
         .path_and_query()
         .map(|x| x.as_str())
-        .unwrap_or(req.path());
+        .unwrap_or(req.uri.path());
     let (mut log_url_len, mut log_url_bytes) =
         velda_observability::TelemetryRecord::encode_url(true, host, pq);
 
@@ -386,16 +382,18 @@ async fn process_http3_request(
     else {
         tracing::debug!(
             listener = %listener_id,
-            path = %req.path(),
+            path = %req.uri.path(),
             host = ?host,
             method = %req.method,
             "No HTTP/3 route matched"
         );
         let _ = responder
-            .send_response(velda_http3::server::precompiled_early_response(
-                StatusCode::NOT_FOUND,
-                Some(req.headers.request_id()),
-            ))
+            .send_response(
+                velda_http3::server::early_response::precompiled_early_response(
+                    StatusCode::NOT_FOUND,
+                    Some(req.headers.request_id()),
+                ),
+            )
             .await;
         let duration_ns = velda_core::clock::now_unix_nanos().saturating_sub(ingress_nanos);
         global_metrics().record_early_completion(
@@ -660,7 +658,7 @@ async fn process_http3_request(
             .uri
             .path_and_query()
             .map(|x| x.as_str())
-            .unwrap_or(req.path());
+            .unwrap_or(req.uri.path());
         velda_observability::TelemetryRecord::encode_url(true, host, pq)
     };
     log_url_len = re_len;
@@ -674,10 +672,12 @@ async fn process_http3_request(
             "No HTTP upstream configured"
         );
         let _ = responder
-            .send_response(velda_http3::server::precompiled_early_response(
-                StatusCode::SERVICE_UNAVAILABLE,
-                Some(req.headers.request_id()),
-            ))
+            .send_response(
+                velda_http3::server::early_response::precompiled_early_response(
+                    StatusCode::SERVICE_UNAVAILABLE,
+                    Some(req.headers.request_id()),
+                ),
+            )
             .await;
         let duration_ns = velda_core::clock::now_unix_nanos().saturating_sub(ingress_nanos);
         global_metrics().record_early_completion(
@@ -730,10 +730,12 @@ async fn process_http3_request(
             "Shedding HTTP/3 request due to memory saturation"
         );
         let _ = responder
-            .send_response(velda_http3::server::precompiled_early_response(
-                StatusCode::TOO_MANY_REQUESTS,
-                Some(req.headers.request_id()),
-            ))
+            .send_response(
+                velda_http3::server::early_response::precompiled_early_response(
+                    StatusCode::TOO_MANY_REQUESTS,
+                    Some(req.headers.request_id()),
+                ),
+            )
             .await;
         let duration_ns = velda_core::clock::now_unix_nanos().saturating_sub(ingress_nanos);
         global_metrics().record_early_completion(
@@ -1044,40 +1046,49 @@ async fn process_http3_request(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use http::HeaderMap;
+    use bytes::{BufMut, BytesMut};
+    use velda_http3::proto::qpack::{
+        H3ForwardingAddrs, H3IngressEnrich, decode_qpack_ingress, encode_literal_name_and_value,
+        encode_prefixed_int, encode_string_literal,
+    };
 
     #[test]
     fn test_enrich_forwarded_headers() {
-        let mut headers = HeaderMap::new();
+        let mut buf = BytesMut::new();
+        buf.put_u8(0x00);
+        buf.put_u8(0x00);
+        encode_prefixed_int(17, 6, 0xc0, &mut buf); // :method: GET
+        encode_prefixed_int(23, 6, 0xc0, &mut buf); // :scheme: https
+        encode_prefixed_int(0, 4, 0x50, &mut buf); // :authority
+        encode_string_literal(b"quic.example.com", &mut buf);
+        encode_prefixed_int(1, 4, 0x50, &mut buf); // :path
+        encode_string_literal(b"/test", &mut buf);
         // Client attempts to spoof their IP, host, and SSL status
-        headers.insert("x-forwarded-for", "203.0.113.195".parse().unwrap());
-        headers.insert("x-real-ip", "203.0.113.195".parse().unwrap());
-        headers.insert("x-forwarded-host", "evil.attacker.com".parse().unwrap());
-        headers.insert("x-forwarded-proto", "http".parse().unwrap());
-        headers.insert("connection", "close".parse().unwrap());
-        headers.insert("keep-alive", "timeout=5".parse().unwrap());
-        headers.insert("forwarded", "for=203.0.113.195;proto=http".parse().unwrap());
+        encode_literal_name_and_value(b"x-forwarded-for", b"203.0.113.195", &mut buf);
+        encode_literal_name_and_value(b"x-real-ip", b"203.0.113.195", &mut buf);
+        encode_literal_name_and_value(b"x-forwarded-host", b"evil.attacker.com", &mut buf);
+        encode_literal_name_and_value(b"x-forwarded-proto", b"http", &mut buf);
+        encode_literal_name_and_value(b"connection", b"close", &mut buf);
+        encode_literal_name_and_value(b"keep-alive", b"timeout=5", &mut buf);
+        encode_literal_name_and_value(b"forwarded", b"for=203.0.113.195;proto=http", &mut buf);
 
         let peer_ip = velda_core::lut::ip::v4_to_u128(0xC000_021E);
         let local_ip = velda_core::lut::ip::v4_to_u128(0x0A00_0001);
         let local_port_be = 443u16.to_be();
 
-        let mut req = L7Request::new(
-            http::Method::GET,
-            "https://quic.example.com/test".parse().unwrap(),
-            http::Version::HTTP_3,
-            headers,
-            velda_core::Body::Empty,
-        );
-
-        velda_http3::server::header::enrich_headers(
-            &mut req.headers,
-            &req.uri,
-            peer_ip,
-            local_ip,
-            local_port_be,
-        );
-        let headers = req.headers;
+        let dec = decode_qpack_ingress(
+            &buf,
+            H3IngressEnrich {
+                request_id: HeaderValue::from_static("auth-req-id"),
+                forwarding: Some(H3ForwardingAddrs {
+                    peer_ip,
+                    local_ip,
+                    local_port_be,
+                }),
+            },
+        )
+        .unwrap();
+        let headers = dec.headers;
 
         // Client spoofed values MUST be completely replaced with authoritative values
         assert_eq!(headers.get("x-forwarded-for").unwrap(), "192.0.2.30");
@@ -1096,10 +1107,12 @@ mod tests {
 
     #[test]
     fn test_connection_closed_detection() {
-        assert!(velda_http3::Http3Error::ConnectionClosed.is_connection_closed());
-        assert!(velda_http3::Http3Error::H3("H3_REQUEST_REJECTED".into()).is_connection_closed());
+        assert!(velda_http3::error::Http3Error::ConnectionClosed.is_connection_closed());
         assert!(
-            velda_http3::Http3Error::Io(std::io::Error::new(
+            velda_http3::error::Http3Error::H3("H3_REQUEST_REJECTED".into()).is_connection_closed()
+        );
+        assert!(
+            velda_http3::error::Http3Error::Io(std::io::Error::new(
                 std::io::ErrorKind::BrokenPipe,
                 "broken pipe"
             ))
@@ -1107,7 +1120,7 @@ mod tests {
         );
 
         // Payload size errors are not retryable
-        assert!(!velda_http3::Http3Error::PayloadTooLarge(500).is_connection_closed());
+        assert!(!velda_http3::error::Http3Error::PayloadTooLarge(500).is_connection_closed());
     }
 
     #[test]

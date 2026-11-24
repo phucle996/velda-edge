@@ -52,7 +52,7 @@ pub async fn serve(
     };
     let upstream_addr = Some(client.target());
 
-    let mut stream_resp = match client.send_stream_request_ref(req).await {
+    let mut stream_resp = match client.send_stream_request(req.clone()).await {
         Ok(r) => r,
         Err(e) => {
             drop(lease);
@@ -94,7 +94,7 @@ pub async fn serve(
         );
         velda_plugin::run_post_response_plugins(post_hooks, &req.headers, &mut l7_resp);
         stream_resp.status = l7_resp.status;
-        stream_resp.headers = l7_resp.headers.into();
+        stream_resp.headers = l7_resp.headers;
     }
 
     if is_head || is_no_body {

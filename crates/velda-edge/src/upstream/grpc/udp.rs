@@ -5,8 +5,8 @@ use std::sync::atomic::{AtomicU64, Ordering};
 
 use velda_connection_pool::{MultiplexedPool, PoolableResource};
 use velda_core::StreamingMode;
-use velda_grpc::udp::GrpcUdpPipeStrategy;
-use velda_grpc::udp::client::GrpcUdpClient;
+use velda_grpc::udp::client::connector::GrpcUdpClient;
+use velda_grpc::udp::strategy::GrpcUdpPipeStrategy;
 
 use super::super::lb::EdgeUpstream;
 use crate::error::EdgeError;
@@ -108,7 +108,7 @@ impl GrpcUdpUpstream {
     /// Uses pre-compiled upstream `target_sni` for the TLS handshake inside the connector.
     pub async fn acquire(
         &self,
-        config: &velda_grpc::GrpcConfig,
+        config: &velda_grpc::config::GrpcConfig,
     ) -> Result<GrpcUdpClient, EdgeError> {
         let max_streams = self.max_concurrent_streams;
         let server_name: &str = &self.target_sni;
@@ -127,7 +127,7 @@ impl GrpcUdpUpstream {
                         lease.mark_goaway();
                     }
 
-                    let fresh = velda_grpc::udp::connect_udp(
+                    let fresh = velda_grpc::udp::client::connector::connect(
                         endpoint.0,
                         endpoint.1,
                         server_name,
@@ -157,7 +157,7 @@ impl GrpcUdpUpstream {
     /// Used for transparent 1-shot self-healing when an existing QUIC session drops or closes.
     pub async fn acquire_fresh(
         &self,
-        config: &velda_grpc::GrpcConfig,
+        config: &velda_grpc::config::GrpcConfig,
     ) -> Result<GrpcUdpClient, EdgeError> {
         let max_streams = self.max_concurrent_streams;
         let server_name: &str = &self.target_sni;
@@ -168,7 +168,7 @@ impl GrpcUdpUpstream {
             .execute(|endpoint| {
                 let quic_tls = Arc::clone(&quic_tls);
                 async move {
-                    let fresh = velda_grpc::udp::connect_udp(
+                    let fresh = velda_grpc::udp::client::connector::connect(
                         endpoint.0,
                         endpoint.1,
                         server_name,
@@ -197,7 +197,7 @@ impl GrpcUdpUpstream {
     ///
     /// Executed autonomously by the core-local Shadow Worker (`SCHED_IDLE`) whenever
     /// lane capacity drops below available headroom.
-    pub async fn prewarm_lane(&self, lane: usize, config: &velda_grpc::GrpcConfig) {
+    pub async fn prewarm_lane(&self, lane: usize, config: &velda_grpc::config::GrpcConfig) {
         let endpoints = self.inner.current_endpoints();
         let all_eps = endpoints.all_endpoints();
         if all_eps.is_empty() {
@@ -217,7 +217,7 @@ impl GrpcUdpUpstream {
                 let sni = Arc::clone(&self.target_sni);
                 let quic_tls = Arc::clone(&self.quic_config);
 
-                match velda_grpc::udp::connect_udp(
+                match velda_grpc::udp::client::connector::connect(
                     addr.0,
                     addr.1,
                     &sni,
@@ -283,11 +283,11 @@ impl GrpcUdpUpstream {
             } else {
                 let sni = Arc::clone(&self.target_sni);
                 let quic_tls = Arc::clone(&self.quic_config);
-                let config = velda_grpc::GrpcConfig::default();
+                let config = velda_grpc::config::GrpcConfig::default();
 
                 match tokio::time::timeout(
                     timeout,
-                    velda_grpc::udp::connect_udp(
+                    velda_grpc::udp::client::connector::connect(
                         addr.0,
                         addr.1,
                         &sni,

@@ -31,11 +31,12 @@ use http::StatusCode;
 use http::header::{CONTENT_TYPE, HeaderValue};
 use tokio::io::{AsyncRead, AsyncWrite};
 use velda_core::L7Request;
-use velda_http1::{
-    Http1BodyFraming, Http1Error, Http1ServerConnection, Http1ServerRequestHead,
-    Http1ServerResponse,
-};
-use velda_http3::{Http3Config, sanitize_headers};
+use velda_http1::error::Http1Error;
+use velda_http1::server::connection::Http1ServerConnection;
+use velda_http1::server::request::{Http1BodyFraming, Http1ServerRequestHead};
+use velda_http1::server::response::Http1ServerResponse;
+use velda_http3::config::Http3Config;
+use velda_http3::headers::sanitize_headers;
 
 use crate::pipeline::DownstreamMeta;
 use crate::upstream::Http3Upstream;
@@ -76,7 +77,7 @@ where
                 CONTENT_TYPE,
                 HeaderValue::from_static("text/plain; charset=utf-8"),
             );
-            conn.mark_close();
+            conn.close_requested = true;
             let _ = conn.send_response(&err_resp).await;
             return Err(Http1Error::Timeout);
         }
@@ -89,7 +90,7 @@ where
                 CONTENT_TYPE,
                 HeaderValue::from_static("text/plain; charset=utf-8"),
             );
-            conn.mark_close();
+            conn.close_requested = true;
             let _ = conn.send_response(&err_resp).await;
             return Err(e);
         }
@@ -130,7 +131,7 @@ where
                 CONTENT_TYPE,
                 HeaderValue::from_static("text/plain; charset=utf-8"),
             );
-            conn.mark_close();
+            conn.close_requested = true;
             let _ = conn.send_response(&err_resp).await;
             return Err(Http1Error::ConnectionClosed);
         }
@@ -140,7 +141,7 @@ where
     conn.last_upstream_port_be = __u_port;
 
     // 7. Send request directly with self-healing on connection close
-    let mut pipe_res = client.send_request_ref(&l7_req).await;
+    let mut pipe_res = client.send_request(l7_req.clone()).await;
     let mut _fresh_lease_guard = None;
     if pipe_res
         .as_ref()
@@ -157,7 +158,7 @@ where
             let (__u_ip, __u_port) = fresh_client.target();
             conn.last_upstream_ip = __u_ip;
             conn.last_upstream_port_be = __u_port;
-            pipe_res = fresh_client.send_request_ref(&l7_req).await;
+            pipe_res = fresh_client.send_request(l7_req.clone()).await;
             _fresh_lease_guard = Some(fresh_lease);
         }
     } else {
@@ -179,7 +180,7 @@ where
             let server_resp = Http1ServerResponse::new(
                 l7_resp.status,
                 http::Version::HTTP_11,
-                l7_resp.headers.into(),
+                l7_resp.headers,
                 l7_resp.body,
             );
             conn.send_response(&server_resp).await?;
@@ -203,7 +204,7 @@ where
                 HeaderValue::from_static("text/plain; charset=utf-8"),
             );
             meta.inject_response_headers(&mut err_resp.headers);
-            conn.mark_close();
+            conn.close_requested = true;
             let _ = conn.send_response(&err_resp).await;
             Err(Http1Error::ConnectionClosed)
         }

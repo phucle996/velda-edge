@@ -9,8 +9,9 @@ use std::sync::Arc;
 use http::StatusCode;
 use http::header::{CONTENT_TYPE, HeaderValue};
 use velda_core::L7Response;
-use velda_http2::server::{Http2Responder, Http2ServerRequestHead, Http2StreamReceiver};
-use velda_http3::sanitize_headers;
+use velda_http2::server::request::{Http2ServerRequestHead, Http2StreamReceiver};
+use velda_http2::server::response::Http2Responder;
+use velda_http3::headers::sanitize_headers;
 
 use crate::pipeline::{DownstreamMeta, PipeOutcome};
 use crate::upstream::Http3Upstream;
@@ -26,17 +27,6 @@ pub async fn serve(
 ) -> PipeOutcome {
     // 1. Sanitize connection-specific headers forbidden by RFC 9114 §4.2
     sanitize_headers(&mut req_head.headers);
-
-    // Fast-path guard: Only snapshot request headers into a HeaderWorkspace if post-response
-    // hooks are configured on this route. HeaderMap::clone() clones atomic pointer handles
-    // (Bytes) in O(1) without copying string payloads.
-    let req_headers_ref = if plan.post_response_hooks.is_some() {
-        Some(velda_core::HeaderWorkspace::from_headers(
-            req_head.headers.clone(),
-        ))
-    } else {
-        None
-    };
 
     // 3. Acquire pooled HTTP/3 client
     let (client, _lease) = match upstream.acquire(&upstream.config).await {
@@ -58,7 +48,7 @@ pub async fn serve(
             let _ = responder.send_response(&err_resp);
             return PipeOutcome::http(
                 responder.last_status,
-                receiver.bytes_received() as u64,
+                receiver.bytes_received as u64,
                 responder.last_bytes_tx,
                 None,
                 velda_core::CompletionReason::UpstreamError,
@@ -82,7 +72,7 @@ pub async fn serve(
             let _ = responder.send_response(&err_resp);
             return PipeOutcome::http(
                 responder.last_status,
-                receiver.bytes_received() as u64,
+                receiver.bytes_received as u64,
                 responder.last_bytes_tx,
                 upstream_addr,
                 velda_core::CompletionReason::Rejected,
@@ -91,11 +81,16 @@ pub async fn serve(
     };
 
     // Open progressive bidirectional HTTP/3 stream with fused initial chunk and optional FIN
+    let h3_req_headers = if plan.post_response_hooks.is_some() {
+        req_head.headers.clone()
+    } else {
+        std::mem::take(&mut req_head.headers)
+    };
     let (sender, response_rx) = match client
         .open_stream(
             req_head.method,
             req_head.uri,
-            req_head.headers,
+            h3_req_headers,
             first_chunk,
             is_fin,
         )
@@ -115,7 +110,7 @@ pub async fn serve(
             let _ = responder.send_response(&err_resp);
             return PipeOutcome::http(
                 responder.last_status,
-                receiver.bytes_received() as u64,
+                receiver.bytes_received as u64,
                 responder.last_bytes_tx,
                 upstream_addr,
                 velda_core::CompletionReason::UpstreamError,
@@ -152,23 +147,26 @@ pub async fn serve(
                 _ => return Err(()),
             };
 
-            if let Some(post_hooks) = &plan.post_response_hooks
-                && let Some(ref req_headers) = req_headers_ref
-            {
+            let mut resp_ws = std::mem::take(&mut resp_stream.headers);
+            if let Some(post_hooks) = &plan.post_response_hooks {
                 let mut l7_resp = L7Response::new(
                     resp_stream.status,
                     http::Version::HTTP_2,
-                    resp_stream.headers,
+                    resp_ws,
                     velda_core::Body::Empty,
                 );
-                velda_plugin::run_post_response_plugins(post_hooks, req_headers, &mut l7_resp);
+                velda_plugin::run_post_response_plugins(
+                    post_hooks,
+                    &req_head.headers,
+                    &mut l7_resp,
+                );
                 resp_stream.status = l7_resp.status;
-                resp_stream.headers = l7_resp.headers.into();
+                resp_ws = l7_resp.headers;
             }
-            meta.inject_response_headers(&mut resp_stream.headers);
+            meta.inject_response_headers(&mut resp_ws);
 
             let mut stream_sender =
-                match responder.send_stream_response(resp_stream.status, &resp_stream.headers) {
+                match responder.send_stream_response(resp_stream.status, &resp_ws) {
                     Ok(s) => s,
                     Err(_) => return Err(()),
                 };
@@ -177,18 +175,18 @@ pub async fn serve(
                 match chunk_res {
                     Ok(chunk) => {
                         if stream_sender.send_chunk(chunk).await.is_err() {
-                            responder.last_bytes_tx = stream_sender.bytes_sent();
+                            responder.last_bytes_tx = stream_sender.bytes_sent;
                             return Err(());
                         }
                     }
                     Err(_) => {
-                        responder.last_bytes_tx = stream_sender.bytes_sent();
+                        responder.last_bytes_tx = stream_sender.bytes_sent;
                         return Err(());
                     }
                 }
             }
 
-            responder.last_bytes_tx = stream_sender.bytes_sent();
+            responder.last_bytes_tx = stream_sender.bytes_sent;
             let _ = stream_sender.finish();
             Ok::<(), ()>(())
         };
@@ -215,7 +213,7 @@ pub async fn serve(
     };
     PipeOutcome::http(
         status,
-        receiver.bytes_received() as u64,
+        receiver.bytes_received as u64,
         responder.last_bytes_tx,
         upstream_addr,
         if failed {

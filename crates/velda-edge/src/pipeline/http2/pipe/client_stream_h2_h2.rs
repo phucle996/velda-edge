@@ -13,16 +13,17 @@ use bytes::{Bytes, BytesMut};
 use http::header::{CONTENT_TYPE, HeaderValue};
 use http::{StatusCode, Version};
 use velda_core::{Body, L7Response};
-use velda_http2::Http2Error;
 use velda_http2::config::Http2Config;
-use velda_http2::server::{Http2Responder, Http2ServerRequestHead, Http2StreamReceiver};
+use velda_http2::error::Http2Error;
+use velda_http2::server::request::{Http2ServerRequestHead, Http2StreamReceiver};
+use velda_http2::server::response::Http2Responder;
 
 use crate::pipeline::{DownstreamMeta, PipeOutcome};
 use crate::upstream::Http2Upstream;
 
 /// Serves a client-streaming HTTP/2 downstream stream forwarded to an HTTP/2 upstream backend.
 pub async fn serve(
-    mut req_head: Http2ServerRequestHead,
+    req_head: Http2ServerRequestHead,
     mut receiver: Http2StreamReceiver,
     mut responder: Http2Responder,
     meta: Arc<DownstreamMeta>,
@@ -31,7 +32,7 @@ pub async fn serve(
     plan: &velda_plugin::RoutePluginPlan,
 ) -> PipeOutcome {
     // 1. Fail-fast: Acquire upstream multiplexed connection before streaming
-    let (mut client, lease) = match upstream.acquire(&config).await {
+    let (client, lease) = match upstream.acquire(&config).await {
         Ok(res) => res,
         Err(e) => {
             tracing::warn!(
@@ -54,7 +55,7 @@ pub async fn serve(
             }
             return PipeOutcome::http(
                 responder.last_status,
-                receiver.bytes_received() as u64,
+                receiver.bytes_received as u64,
                 responder.last_bytes_tx,
                 None,
                 velda_core::CompletionReason::UpstreamError,
@@ -66,19 +67,14 @@ pub async fn serve(
     // 3. Pipe client streaming frames directly
     let pipe_res = async {
         let is_head = req_head.method == http::Method::HEAD;
-        // Fast-path guard: Only snapshot request headers into a HeaderWorkspace if post-response
-        // hooks are configured on this route. HeaderMap::clone() clones atomic pointer handles
-        // (Bytes) in O(1) without copying string payloads.
-        let req_headers_ref = if plan.post_response_hooks.is_some() {
-            Some(velda_core::HeaderWorkspace::from_headers(
+        let (response_fut, mut send_stream) = client
+            .send_request(
+                req_head.method.clone(),
+                req_head.uri.clone(),
                 req_head.headers.clone(),
-            ))
-        } else {
-            None
-        };
-        velda_http2::headers::sanitize_h2_headers(&mut req_head.headers);
-        let http_req = req_head.into_http_request();
-        let (response_fut, mut send_stream) = client.send_request(http_req, false)?;
+                false,
+            )
+            .await?;
 
         let coalesce_limit =
             (config.initial_stream_window_size as usize / 2).clamp(16_384, 131_072);
@@ -96,7 +92,7 @@ pub async fn serve(
                 res = receiver.recv_coalesced_chunk(coalesce_limit) => res?,
             };
 
-            let Some(mut chunk) = chunk_opt else {
+            let Some(chunk) = chunk_opt else {
                 break 'upload;
             };
             if chunk.is_empty() {
@@ -106,46 +102,23 @@ pub async fn serve(
                 continue;
             }
 
-            let avail = send_stream.capacity();
-            if avail < chunk.len() {
-                send_stream.reserve_capacity(chunk.len() - avail);
-            }
-
-            while !chunk.is_empty() {
-                let available = send_stream.capacity();
-                if available == 0 {
-                    tokio::select! {
-                        resp = &mut response_fut => {
-                            early_response = Some(resp?);
-                            break 'upload;
-                        }
-                        res = std::future::poll_fn(|cx| send_stream.poll_capacity(cx)) => {
-                            match res {
-                                Some(Ok(_)) => {}
-                                Some(Err(err)) => return Err(err.into()),
-                                None => break 'upload,
-                            }
-                        }
-                    }
-                    if send_stream.capacity() == 0 && early_response.is_none() {
-                        break 'upload;
-                    }
-                    continue;
-                }
-
-                let to_send = chunk.len().min(available);
-                let is_last = receiver.is_end_stream() && to_send == chunk.len();
-                let slice = chunk.split_to(to_send);
-                send_stream.send_data(slice, is_last)?;
-
-                if is_last {
-                    sent_end_stream = true;
+            let is_last = receiver.is_end_stream();
+            tokio::select! {
+                resp = &mut response_fut => {
+                    early_response = Some(resp?);
                     break 'upload;
                 }
+                res = send_stream.send_chunk(chunk, is_last) => {
+                    res?;
+                }
+            }
+            if is_last {
+                sent_end_stream = true;
+                break 'upload;
             }
         }
 
-        let response = match early_response {
+        let mut response = match early_response {
             Some(resp) => resp,
             None => {
                 if !sent_end_stream {
@@ -154,9 +127,8 @@ pub async fn serve(
                 response_fut.await?
             }
         };
-        let (parts, mut body_stream) = response.into_parts();
 
-        if let Some(content_type) = parts.headers.get(http::header::CONTENT_TYPE)
+        if let Some(content_type) = response.headers.get(http::header::CONTENT_TYPE)
             && let Ok(ct_str) = content_type.to_str()
             && ct_str
                 .as_bytes()
@@ -168,39 +140,32 @@ pub async fn serve(
             ));
         }
 
-        let is_no_body_status = parts.status.is_informational()
-            || parts.status == StatusCode::NO_CONTENT
-            || parts.status == StatusCode::NOT_MODIFIED;
+        let is_no_body_status = response.status.is_informational()
+            || response.status == StatusCode::NO_CONTENT
+            || response.status == StatusCode::NOT_MODIFIED;
 
-        let batch_threshold =
-            (config.initial_stream_window_size as usize / 4).clamp(32_768, 262_144);
-
-        let resp_body = if is_head || is_no_body_status || body_stream.is_end_stream() {
+        let resp_body = if is_head || is_no_body_status || response.body.is_end_stream() {
             Body::Empty
-        } else if let Some(first_chunk) = body_stream.data().await {
-            let data = first_chunk?;
-            let len = data.len();
+        } else if let Some(first_chunk) = response.body.recv_chunk().await? {
+            let len = first_chunk.len();
             if len > config.max_body_size {
-                let _ = body_stream.flow_control().release_capacity(len);
                 return Err(Http2Error::PayloadTooLarge(len));
             }
 
-            if body_stream.is_end_stream() {
-                let _ = body_stream.flow_control().release_capacity(len);
-                Body::Bytes(data)
+            if response.body.is_end_stream() {
+                Body::Bytes(first_chunk)
             } else {
-                if let Some(content_length) = parts
+                if let Some(content_length) = response
                     .headers
                     .get(http::header::CONTENT_LENGTH)
                     .and_then(|v| v.to_str().ok())
                     .and_then(|v| v.parse::<usize>().ok())
                     && content_length > config.max_body_size
                 {
-                    let _ = body_stream.flow_control().release_capacity(len);
                     return Err(Http2Error::PayloadTooLarge(content_length));
                 }
 
-                let initial_cap = parts
+                let initial_cap = response
                     .headers
                     .get(http::header::CONTENT_LENGTH)
                     .and_then(|v| v.to_str().ok())
@@ -208,49 +173,15 @@ pub async fn serve(
                     .unwrap_or_else(|| (len.saturating_mul(2)).clamp(16_384, config.max_body_size))
                     .min(config.max_body_size);
                 let mut body_buf = BytesMut::with_capacity(initial_cap);
-                body_buf.extend_from_slice(&data);
-                let mut unreleased_bytes = len;
+                body_buf.extend_from_slice(&first_chunk);
 
-                while let Some(chunk) = body_stream.data().await {
-                    let chunk_data = chunk?;
-                    let chunk_len = chunk_data.len();
-                    if body_buf.len() + chunk_len > config.max_body_size {
-                        let _ = body_stream
-                            .flow_control()
-                            .release_capacity(unreleased_bytes + chunk_len);
-                        return Err(Http2Error::PayloadTooLarge(body_buf.len() + chunk_len));
+                while let Some(chunk_data) = response.body.recv_chunk().await? {
+                    if body_buf.len() + chunk_data.len() > config.max_body_size {
+                        return Err(Http2Error::PayloadTooLarge(
+                            body_buf.len() + chunk_data.len(),
+                        ));
                     }
                     body_buf.extend_from_slice(&chunk_data);
-                    unreleased_bytes += chunk_len;
-
-                    let waker = std::task::Waker::noop();
-                    let mut cx = std::task::Context::from_waker(waker);
-                    while let std::task::Poll::Ready(Some(Ok(extra))) =
-                        body_stream.poll_data(&mut cx)
-                    {
-                        let extra_len = extra.len();
-                        if body_buf.len() + extra_len > config.max_body_size {
-                            let _ = body_stream
-                                .flow_control()
-                                .release_capacity(unreleased_bytes + extra_len);
-                            return Err(Http2Error::PayloadTooLarge(body_buf.len() + extra_len));
-                        }
-                        body_buf.extend_from_slice(&extra);
-                        unreleased_bytes += extra_len;
-                    }
-
-                    if unreleased_bytes >= batch_threshold {
-                        let _ = body_stream
-                            .flow_control()
-                            .release_capacity(unreleased_bytes);
-                        unreleased_bytes = 0;
-                    }
-                }
-
-                if unreleased_bytes > 0 {
-                    let _ = body_stream
-                        .flow_control()
-                        .release_capacity(unreleased_bytes);
                 }
 
                 Body::Bytes(body_buf.freeze())
@@ -259,15 +190,18 @@ pub async fn serve(
             Body::Empty
         };
 
-        let mut resp = L7Response::new(parts.status, Version::HTTP_2, parts.headers, resp_body);
-        if let Some(post_hooks) = &plan.post_response_hooks
-            && let Some(ref req_headers) = req_headers_ref
-        {
-            velda_plugin::run_post_response_plugins(post_hooks, req_headers, &mut resp);
+        let mut resp = L7Response::new(
+            response.status,
+            Version::HTTP_2,
+            response.headers,
+            resp_body,
+        );
+        if let Some(post_hooks) = &plan.post_response_hooks {
+            velda_plugin::run_post_response_plugins(post_hooks, &req_head.headers, &mut resp);
         }
         meta.inject_response_headers(&mut resp.headers);
         responder.send_response(&resp)?;
-        let rx_bytes = receiver.bytes_received() as u64;
+        let rx_bytes = receiver.bytes_received as u64;
         if !receiver.is_end_stream() {
             tokio::spawn(async move { while let Ok(Some(_)) = receiver.recv_chunk().await {} });
         }

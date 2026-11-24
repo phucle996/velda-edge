@@ -32,11 +32,13 @@ use bytes::BytesMut;
 use http::StatusCode;
 use http::header::{CONTENT_TYPE, HeaderValue};
 use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt};
-use velda_http1::{
-    Http1BodyFraming, Http1Error, Http1ServerConnection, Http1ServerRequestHead,
-    Http1ServerResponse, ProgressiveChunkDecoder, send_chunk, send_chunked_end,
-};
-use velda_http3::{Http3Config, sanitize_headers};
+use velda_http1::error::Http1Error;
+use velda_http1::server::connection::Http1ServerConnection;
+use velda_http1::server::request::{Http1BodyFraming, Http1ServerRequestHead};
+use velda_http1::server::response::Http1ServerResponse;
+use velda_http1::wire::{ProgressiveChunkDecoder, send_chunk, send_chunked_end};
+use velda_http3::config::Http3Config;
+use velda_http3::headers::sanitize_headers;
 
 use crate::pipeline::DownstreamMeta;
 use crate::upstream::Http3Upstream;
@@ -84,7 +86,7 @@ where
                 CONTENT_TYPE,
                 HeaderValue::from_static("text/plain; charset=utf-8"),
             );
-            conn.mark_close();
+            conn.close_requested = true;
             let _ = conn.send_response(&err_resp).await;
             return Err(Http1Error::ConnectionClosed);
         }
@@ -167,7 +169,7 @@ where
                         StatusCode::BAD_GATEWAY,
                         format!("502 Bad Gateway: {e}\n").into_bytes(),
                     );
-                    conn.mark_close();
+                    conn.close_requested = true;
                     let _ = conn.send_response(&err_resp).await;
                     return Err(Http1Error::ConnectionClosed);
                 }
@@ -197,7 +199,7 @@ where
                         StatusCode::BAD_GATEWAY,
                         format!("502 Bad Gateway: {e}\n").into_bytes(),
                     );
-                    conn.mark_close();
+                    conn.close_requested = true;
                     let _ = conn.send_response(&err_resp).await;
                     return Err(Http1Error::ConnectionClosed);
                 }
@@ -213,7 +215,7 @@ where
                 StatusCode::BAD_GATEWAY,
                 format!("502 Bad Gateway: {e}\n").into_bytes(),
             );
-            conn.mark_close();
+            conn.close_requested = true;
             let _ = conn.send_response(&err_resp).await;
             return Err(Http1Error::ConnectionClosed);
         }
@@ -302,40 +304,36 @@ where
         .map_err(|_| Http1Error::ConnectionClosed)?
         .map_err(|_| Http1Error::ConnectionClosed)?;
     let should_close = conn.close_requested;
+    let mut resp_headers = std::mem::take(&mut resp_stream.headers);
     if let Some(req_id) = req_head.headers.get(&crate::pipeline::X_REQUEST_ID) {
-        resp_stream
-            .headers
-            .insert(crate::pipeline::X_REQUEST_ID, req_id.clone());
+        resp_headers.insert_bypass(crate::pipeline::X_REQUEST_ID, req_id.clone());
     }
 
-    // Fast-path guard: Bypasses HeaderWorkspace instantiation & plugin dispatch if route has no hooks.
-    // req_head reaches end of life here -> mem::take transfers ownership with zero allocations.
+    let mut resp_status = resp_stream.status;
     if let Some(post_hooks) = &plan.post_response_hooks {
         let mut l7_resp = velda_core::L7Response::new(
-            resp_stream.status,
+            resp_status,
             http::Version::HTTP_11,
-            std::mem::take(&mut resp_stream.headers),
+            resp_headers,
             velda_core::Body::Empty,
         );
-        let req_ws =
-            velda_core::HeaderWorkspace::from_headers(std::mem::take(&mut req_head.headers));
-        velda_plugin::run_post_response_plugins(post_hooks, &req_ws, &mut l7_resp);
-        resp_stream.status = l7_resp.status;
-        resp_stream.headers = l7_resp.headers.into();
+        velda_plugin::run_post_response_plugins(post_hooks, &req_head.headers, &mut l7_resp);
+        resp_status = l7_resp.status;
+        resp_headers = l7_resp.headers;
     }
-    meta.inject_response_headers(&mut resp_stream.headers);
+    meta.inject_response_headers(&mut resp_headers);
 
     // 8. Deliver response downstream
-    let is_no_body_status = resp_stream.status.is_informational()
-        || resp_stream.status == StatusCode::NO_CONTENT
-        || resp_stream.status == StatusCode::NOT_MODIFIED;
+    let is_no_body_status = resp_status.is_informational()
+        || resp_status == StatusCode::NO_CONTENT
+        || resp_status == StatusCode::NOT_MODIFIED;
 
     if is_no_body_status {
         conn.write_buf.clear();
-        conn.encode_response_head(
+        conn.encode_head(
             http::Version::HTTP_11,
-            resp_stream.status,
-            &resp_stream.headers,
+            resp_status,
+            &resp_headers,
             Some(0),
             should_close,
         );
@@ -344,8 +342,7 @@ where
         return Ok(());
     }
 
-    let cl_opt = resp_stream
-        .headers
+    let cl_opt = resp_headers
         .get(http::header::CONTENT_LENGTH)
         .and_then(|v| v.to_str().ok())
         .and_then(|v| v.parse::<usize>().ok());
@@ -365,10 +362,10 @@ where
             }
         }
         conn.write_buf.clear();
-        conn.encode_response_head(
+        conn.encode_head(
             http::Version::HTTP_11,
-            resp_stream.status,
-            &resp_stream.headers,
+            resp_status,
+            &resp_headers,
             Some(body_buf.len()),
             should_close,
         );
@@ -380,10 +377,10 @@ where
 
     // Progressive chunked streaming path
     conn.write_buf.clear();
-    conn.encode_response_head_chunked(
+    conn.encode_chunked_head(
         http::Version::HTTP_11,
-        resp_stream.status,
-        &resp_stream.headers,
+        resp_status,
+        &resp_headers,
         should_close,
     );
     conn.stream.write_all(&conn.write_buf).await?;

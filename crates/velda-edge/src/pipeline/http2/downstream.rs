@@ -6,20 +6,19 @@
 
 use std::sync::Arc;
 
-use crate::pipeline::X_REQUEST_ID;
 use http::StatusCode;
 use http::header::HeaderValue;
 use tokio::io::{AsyncRead, AsyncWrite};
 use u16;
 use velda_core::{Action, L7Request, PipeKind};
-use velda_http1::Http1PipeStrategy;
-use velda_http2::Http2Error;
-use velda_http2::Http2PipeStrategy;
+use velda_http1::strategy::Http1PipeStrategy;
 use velda_http2::config::Http2Config;
-use velda_http2::server::{
-    Http2Responder, Http2ServerConnection, Http2ServerRequestHead, Http2StreamReceiver,
-};
-use velda_http3::Http3PipeStrategy;
+use velda_http2::error::Http2Error;
+use velda_http2::server::connection::Http2ServerConnection;
+use velda_http2::server::request::{Http2ServerRequestHead, Http2StreamReceiver};
+use velda_http2::server::response::Http2Responder;
+use velda_http2::strategy::Http2PipeStrategy;
+use velda_http3::strategy::Http3PipeStrategy;
 use velda_observability::sampling::http::HttpSampling;
 use velda_observability::{StreamCompletion, global_metrics};
 use velda_plugin::RoutePluginPlan;
@@ -142,7 +141,14 @@ pub async fn run_http2_loop<IO>(
 
     let meta = Arc::new(meta);
 
-    match Http2ServerConnection::handshake(stream, config).await {
+    let forwarding = velda_http2::proto::hpack::H2ForwardingAddrs {
+        peer_ip: meta.peer_ip,
+        local_ip: meta.local_ip,
+        local_port_be: meta.local_port_be,
+        is_tls: meta.is_tls,
+    };
+
+    match Http2ServerConnection::handshake_with_forwarding(stream, config, forwarding).await {
         Ok(mut conn) => loop {
             let accept_result = if let Some(res) = conn.try_accept_streaming_request() {
                 Ok(res)
@@ -177,79 +183,24 @@ pub async fn run_http2_loop<IO>(
                         }
                     }
 
-                    let ingress_nanos = velda_core::clock::now_unix_nanos();
-                    let (request_id, req_id_header) =
-                        velda_core::request_id::next_request_id(ingress_nanos);
-                    req_head.headers.insert(X_REQUEST_ID, req_id_header.clone());
-                    let host =
-                        velda_http2::server::header::extract_host(&req_head.headers, &req_head.uri);
-                    let pq = req_head
-                        .uri
-                        .path_and_query()
-                        .map(|x| x.as_str())
-                        .unwrap_or(req_head.uri.path());
-                    let (log_url_len, log_url_bytes) =
-                        velda_observability::TelemetryRecord::encode_url(meta.is_tls, host, pq);
-                    responder = responder
-                        .with_request_id(Some(req_id_header.clone()))
-                        .with_alt_svc(meta.alt_svc_header.clone());
-
-                    if req_head.headers.len() > velda_core::buffer::MAX_WIRE_HEADERS {
-                        tracing::warn!(
-                            listener = %meta.listener_id,
-                            peer_ip = %meta.peer_ip,
-                            peer_port = u16::from_be(meta.peer_port_be),
-                            headers = req_head.headers.len(),
-                            max = velda_core::buffer::MAX_WIRE_HEADERS,
-                            "Rejecting HTTP/2 request exceeding MAX_WIRE_HEADERS"
-                        );
-                        let _ =
-                            responder.send_early_error(StatusCode::REQUEST_HEADER_FIELDS_TOO_LARGE);
-                        let duration_ns =
-                            velda_core::clock::now_unix_nanos().saturating_sub(ingress_nanos);
-                        global_metrics().record_early_completion(
-                            PipeKind::BufferedH2H1,
-                            StreamCompletion::new(
-                                StatusCode::REQUEST_HEADER_FIELDS_TOO_LARGE.as_u16(),
-                                0,
-                                responder.last_bytes_tx,
-                                duration_ns,
-                                0,
-                            ),
-                        );
-                        if sampling.keep(StatusCode::REQUEST_HEADER_FIELDS_TOO_LARGE.as_u16()) {
-                            let log_method = velda_core::HttpMethod::from_bytes(
-                                req_head.method.as_str().as_bytes(),
-                            );
-                            velda_observability::global_telemetry_store().emit(
-                                &velda_observability::TelemetryRecord {
-                                    request_id: velda_core::request_id::entropy(request_id),
-                                    ingress_time_nanos: ingress_nanos,
-                                    duration_ns,
-                                    peer_ip: meta.peer_ip,
-                                    bytes_rx: 0,
-                                    bytes_tx: responder.last_bytes_tx.min(u32::MAX as u64) as u32,
-                                    upstream_ip: 0,
-                                    upstream_port: 0,
-                                    status_code: StatusCode::REQUEST_HEADER_FIELDS_TOO_LARGE
-                                        .as_u16(),
-                                    route_id: velda_core::UNMATCHED_ROUTE_ID,
-                                    upstream_id: velda_core::UNASSIGNED_UPSTREAM_ID,
-                                    ua_major_version: 0,
-                                    rpc_msgs_or_flags: 0,
-                                    pipe: velda_core::PipeKind::BufferedH2H1,
-                                    completion: velda_core::CompletionReason::Complete,
-                                    method: log_method,
-                                    grpc_status: velda_core::GrpcStatus::NonGrpc,
-                                    ua_family: velda_core::UaFamily::None,
-                                    ua_os: velda_core::UaOs::Unknown,
-                                    url_len: log_url_len,
-                                    url_bytes: log_url_bytes,
-                                },
-                            );
-                        }
-                        continue;
+                    let ingress_nanos = if req_head.ingress_time_nanos > 0 {
+                        req_head.ingress_time_nanos
+                    } else {
+                        velda_core::clock::now_unix_nanos()
+                    };
+                    let request_id = if req_head.request_id != 0 {
+                        req_head.request_id
+                    } else {
+                        velda_core::request_id::next_request_id(ingress_nanos).0
+                    };
+                    if let Some(hdr) = req_head
+                        .headers
+                        .get(&crate::pipeline::X_REQUEST_ID)
+                        .cloned()
+                    {
+                        responder.request_id = Some(hdr);
                     }
+                    responder.alt_svc = meta.alt_svc_header.clone();
 
                     if let Err(e) = velda_http2::server::path::normalize_path(&mut req_head.uri) {
                         tracing::warn!(
@@ -258,12 +209,8 @@ pub async fn run_http2_loop<IO>(
                             path = %req_head.uri.path(),
                             "Rejecting HTTP/2 request with unsafe URI path"
                         );
-                        if !receiver.is_end_stream() {
-                            let _ = responder
-                                .send_early_error_and_cancel_upload(StatusCode::BAD_REQUEST);
-                        } else {
-                            let _ = responder.send_early_error(StatusCode::BAD_REQUEST);
-                        }
+                        let _ = responder
+                            .send_early_error(StatusCode::BAD_REQUEST, !receiver.is_end_stream());
                         let duration_ns =
                             velda_core::clock::now_unix_nanos().saturating_sub(ingress_nanos);
                         global_metrics().record_early_completion(
@@ -277,6 +224,21 @@ pub async fn run_http2_loop<IO>(
                             ),
                         );
                         if sampling.keep(StatusCode::BAD_REQUEST.as_u16()) {
+                            let host = velda_http2::server::request::extract_host(
+                                &req_head.headers,
+                                &req_head.uri,
+                            );
+                            let pq = req_head
+                                .uri
+                                .path_and_query()
+                                .map(|x| x.as_str())
+                                .unwrap_or(req_head.uri.path());
+                            let (log_url_len, log_url_bytes) =
+                                velda_observability::TelemetryRecord::encode_url(
+                                    meta.is_tls,
+                                    host,
+                                    pq,
+                                );
                             let log_method = velda_core::HttpMethod::from_bytes(
                                 req_head.method.as_str().as_bytes(),
                             );
@@ -309,11 +271,21 @@ pub async fn run_http2_loop<IO>(
                         continue;
                     }
 
+                    let host = velda_http2::server::request::extract_host(
+                        &req_head.headers,
+                        &req_head.uri,
+                    );
+                    let pq = req_head
+                        .uri
+                        .path_and_query()
+                        .map(|x| x.as_str())
+                        .unwrap_or(req_head.uri.path());
+                    let (log_url_len, log_url_bytes) =
+                        velda_observability::TelemetryRecord::encode_url(meta.is_tls, host, pq);
+
                     // Route matching
                     let mut http_req = Http2RouteRequest::new(req_head.uri.path());
-                    if let Some(h) =
-                        velda_http2::server::header::extract_host(&req_head.headers, &req_head.uri)
-                    {
+                    if let Some(h) = host {
                         http_req = http_req.with_host(h);
                     }
                     http_req = http_req.with_method(req_head.method.as_str());
@@ -336,12 +308,8 @@ pub async fn run_http2_loop<IO>(
                             break;
                         }
 
-                        if !receiver.is_end_stream() {
-                            let _ =
-                                responder.send_early_error_and_cancel_upload(StatusCode::NOT_FOUND);
-                        } else {
-                            let _ = responder.send_early_error(StatusCode::NOT_FOUND);
-                        }
+                        let _ = responder
+                            .send_early_error(StatusCode::NOT_FOUND, !receiver.is_end_stream());
                         let duration_ns =
                             velda_core::clock::now_unix_nanos().saturating_sub(ingress_nanos);
                         global_metrics().record_early_completion(
@@ -401,13 +369,10 @@ pub async fn run_http2_loop<IO>(
                             upstream = %target_upstream_id,
                             "No healthy backend endpoints available for HTTP upstream"
                         );
-                        if !receiver.is_end_stream() {
-                            let _ = responder.send_early_error_and_cancel_upload(
-                                StatusCode::SERVICE_UNAVAILABLE,
-                            );
-                        } else {
-                            let _ = responder.send_early_error(StatusCode::SERVICE_UNAVAILABLE);
-                        }
+                        let _ = responder.send_early_error(
+                            StatusCode::SERVICE_UNAVAILABLE,
+                            !receiver.is_end_stream(),
+                        );
                         let duration_ns =
                             velda_core::clock::now_unix_nanos().saturating_sub(ingress_nanos);
                         global_metrics().record_early_completion(
@@ -462,12 +427,10 @@ pub async fn run_http2_loop<IO>(
                             overload = ?overload_lvl,
                             "Shedding HTTP/2 request due to memory saturation"
                         );
-                        if !receiver.is_end_stream() {
-                            let _ = responder
-                                .send_early_error_and_cancel_upload(StatusCode::TOO_MANY_REQUESTS);
-                        } else {
-                            let _ = responder.send_early_error(StatusCode::TOO_MANY_REQUESTS);
-                        }
+                        let _ = responder.send_early_error(
+                            StatusCode::TOO_MANY_REQUESTS,
+                            !receiver.is_end_stream(),
+                        );
                         let duration_ns =
                             velda_core::clock::now_unix_nanos().saturating_sub(ingress_nanos);
                         global_metrics().record_early_completion(
@@ -610,7 +573,7 @@ async fn serve_http2_stream(
         .map(|v| velda_core::lut::classify_user_agent(v.as_bytes()))
         .unwrap_or((velda_core::UaFamily::None, velda_core::UaOs::Unknown, 0));
     let (mut log_url_len, mut log_url_bytes) = {
-        let host = velda_http2::server::header::extract_host(&req_head.headers, &req_head.uri);
+        let host = velda_http2::server::request::extract_host(&req_head.headers, &req_head.uri);
         let pq = req_head
             .uri
             .path_and_query()
@@ -619,29 +582,22 @@ async fn serve_http2_stream(
         velda_observability::TelemetryRecord::encode_url(meta.is_tls, host, pq)
     };
 
-    // Authoritatively enrich proxy forwarding headers (x-forwarded-*, x-real-ip)
-    // directly from downstream connection metadata BEFORE pre_route and pre_upstream plugins.
-    velda_http2::server::header::enrich_headers_precomputed(
-        &mut req_head.headers,
-        &req_head.uri,
-        &meta.client_ip_header,
-        &meta.listener_port_header,
-        meta.is_tls,
-    );
-
     if !plan.is_empty() {
         let mut short_circuit_resp = None;
 
         if plan.pre_route_hooks.is_some() || plan.pre_upstream_hooks.is_some() {
-            // Optimization: Zero-clone move of method, uri, and headers into L7Request.
+            // Optimization: Zero-clone move of method, uri, and HeaderWorkspace into L7Request.
             let method = std::mem::replace(&mut req_head.method, http::Method::GET);
             let uri = std::mem::take(&mut req_head.uri);
-            let headers = std::mem::take(&mut req_head.headers);
+            let headers = std::mem::replace(
+                &mut req_head.headers,
+                velda_core::buffer::header::HeaderWorkspace::empty(0),
+            );
             let mut l7_req = L7Request::new(
                 method,
                 uri,
                 http::Version::HTTP_2,
-                velda_core::HeaderWorkspace::from_headers(headers),
+                headers,
                 velda_core::Body::Empty,
             );
             l7_req.state.request_id = request_id;
@@ -874,12 +830,12 @@ async fn serve_http2_stream(
                 return;
             }
 
-            req_head.headers = l7_req.headers.into();
+            req_head.headers = l7_req.headers;
             req_head.uri = l7_req.uri;
             req_head.method = l7_req.method;
             let (re_len, re_bytes) = {
                 let host =
-                    velda_http2::server::header::extract_host(&req_head.headers, &req_head.uri);
+                    velda_http2::server::request::extract_host(&req_head.headers, &req_head.uri);
                 let pq = req_head
                     .uri
                     .path_and_query()
@@ -903,11 +859,8 @@ async fn serve_http2_stream(
             "No HTTP upstream configured"
         );
         let mut responder = responder;
-        if !receiver.is_end_stream() {
-            let _ = responder.send_early_error_and_cancel_upload(StatusCode::SERVICE_UNAVAILABLE);
-        } else {
-            let _ = responder.send_early_error(StatusCode::SERVICE_UNAVAILABLE);
-        }
+        let _ =
+            responder.send_early_error(StatusCode::SERVICE_UNAVAILABLE, !receiver.is_end_stream());
         let duration_ns = velda_core::clock::now_unix_nanos().saturating_sub(ingress_time_nanos);
         global_metrics().record_early_completion(
             PipeKind::BufferedH2H1,
@@ -1150,32 +1103,41 @@ async fn serve_http2_stream(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use http::HeaderMap;
 
     #[test]
     fn test_enrich_forwarded_headers() {
-        let mut head = Http2ServerRequestHead::new(
-            http::Method::GET,
-            "http://secure.example.com/api".parse().unwrap(),
-            HeaderMap::new(),
+        let mut enc = velda_http2::proto::hpack::HpackEncoder::default();
+        let mut wire_ws = velda_core::buffer::header::HeaderWorkspace::empty(8);
+        wire_ws.insert("x-forwarded-for", "203.0.113.195".parse().unwrap());
+        wire_ws.insert("x-real-ip", "203.0.113.195".parse().unwrap());
+        wire_ws.insert("x-forwarded-host", "evil.attacker.com".parse().unwrap());
+        wire_ws.insert("x-forwarded-proto", "http".parse().unwrap());
+        let uri: http::Uri = "http://secure.example.com/api".parse().unwrap();
+
+        let mut hpack_block = bytes::BytesMut::new();
+        enc.encode_request(&http::Method::GET, &uri, &wire_ws, &mut hpack_block);
+
+        let mut dec = velda_http2::proto::hpack::HpackDecoder::default();
+        let decoded = dec
+            .decode_ingress(
+                &hpack_block,
+                velda_http2::proto::hpack::H2IngressEnrich {
+                    request_id: HeaderValue::from_static("req-test-1"),
+                    forwarding: Some(velda_http2::proto::hpack::H2ForwardingAddrs {
+                        peer_ip: velda_core::lut::ip::v4_to_u128(0xC000_0214), // 192.0.2.20
+                        local_ip: velda_core::lut::ip::v4_to_u128(0x0A00_0001),
+                        local_port_be: 8443u16.to_be(),
+                        is_tls: true,
+                    }),
+                },
+            )
+            .unwrap();
+        let head = Http2ServerRequestHead::new(
+            decoded.method.unwrap(),
+            decoded.uri.unwrap(),
+            decoded.headers,
             None,
         );
-        head.headers
-            .insert("x-forwarded-for", "203.0.113.195".parse().unwrap());
-        head.headers
-            .insert("x-real-ip", "203.0.113.195".parse().unwrap());
-        head.headers
-            .insert("x-forwarded-host", "evil.attacker.com".parse().unwrap());
-        head.headers
-            .insert("x-forwarded-proto", "http".parse().unwrap());
-        head.headers
-            .insert("forwarded", "for=203.0.113.195;proto=http".parse().unwrap());
-
-        let peer_ip = velda_core::lut::ip::v4_to_u128(0xC000_0214);
-        let local_ip = velda_core::lut::ip::v4_to_u128(0x0A00_0001);
-        let local_port_be = 8443u16.to_be();
-
-        head.enrich_forwarded_headers(peer_ip, local_ip, local_port_be, true);
 
         assert_eq!(
             head.headers.get("x-forwarded-for").unwrap(),
@@ -1188,20 +1150,20 @@ mod tests {
             head.headers.get("x-forwarded-host").unwrap(),
             "secure.example.com"
         );
-        assert_eq!(
-            head.headers.get("forwarded").unwrap(),
-            "for=192.0.2.20;proto=https;by=10.0.0.1;host=\"secure.example.com\""
-        );
+        assert_eq!(head.headers.get("x-request-id").unwrap(), "req-test-1");
     }
 
     #[test]
     fn test_refused_or_goaway_detection() {
-        assert!(velda_http2::Http2Error::ConnectionClosed.is_refused_or_goaway());
+        assert!(velda_http2::error::Http2Error::ConnectionClosed.is_refused_or_goaway());
         assert!(
-            velda_http2::Http2Error::StreamReset(h2::Reason::REFUSED_STREAM).is_refused_or_goaway()
+            velda_http2::error::Http2Error::StreamReset(
+                velda_http2::proto::frame::H2ErrorCode::REFUSED_STREAM
+            )
+            .is_refused_or_goaway()
         );
         assert!(
-            velda_http2::Http2Error::Io(std::io::Error::new(
+            velda_http2::error::Http2Error::Io(std::io::Error::new(
                 std::io::ErrorKind::BrokenPipe,
                 "broken pipe"
             ))
@@ -1209,19 +1171,21 @@ mod tests {
         );
 
         assert!(
-            !velda_http2::Http2Error::StreamReset(h2::Reason::INTERNAL_ERROR)
-                .is_refused_or_goaway()
+            !velda_http2::error::Http2Error::StreamReset(
+                velda_http2::proto::frame::H2ErrorCode::INTERNAL_ERROR
+            )
+            .is_refused_or_goaway()
         );
-        assert!(!velda_http2::Http2Error::PayloadTooLarge(500).is_refused_or_goaway());
+        assert!(!velda_http2::error::Http2Error::PayloadTooLarge(500).is_refused_or_goaway());
     }
 
     #[test]
     fn test_host_header_extraction_and_injection() {
         let uri: http::Uri = "http://example.com:8080/path".parse().unwrap();
-        let mut headers = HeaderMap::new();
+        let mut headers = velda_core::buffer::header::HeaderWorkspace::empty(4);
         assert!(!headers.contains_key(http::header::HOST));
 
-        if let Some(host) = velda_http2::server::header::extract_host(&headers, &uri)
+        if let Some(host) = velda_http2::server::request::extract_host(&headers, &uri)
             && let Ok(hv) = http::header::HeaderValue::from_str(host)
         {
             headers.insert(http::header::HOST, hv);

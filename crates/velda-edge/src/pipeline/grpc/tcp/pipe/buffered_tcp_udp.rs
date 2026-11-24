@@ -11,9 +11,10 @@ use std::time::Duration;
 
 use velda_core::GrpcStatus;
 use velda_core::{Body, L7Request, L7Response};
-use velda_grpc::tcp::server::GrpcServerStream;
-use velda_grpc::udp::client::GrpcUdpClient;
-use velda_grpc::{GrpcConfig, GrpcError};
+use velda_grpc::config::GrpcConfig;
+use velda_grpc::error::GrpcError;
+use velda_grpc::tcp::server::stream::GrpcServerStream;
+use velda_grpc::udp::client::connector::GrpcUdpClient;
 
 use crate::pipeline::PipeOutcome;
 use crate::upstream::GrpcUdpUpstream;
@@ -40,7 +41,7 @@ async fn pipe_buffered_udp(
             }
         }
 
-        let resp = client.send_request_ref(req).await?;
+        let resp = client.send_request(req.clone()).await?;
 
         let b = resp.body.as_slice();
         if !b.is_empty() {
@@ -92,10 +93,10 @@ pub async fn serve(
     let bytes_rx = req_data.len() as u64;
 
     let l7_req = L7Request::new(
-        server_stream.parts.method.clone(),
-        server_stream.parts.uri.clone(),
+        server_stream.head.method.clone(),
+        server_stream.head.uri.clone(),
         http::Version::HTTP_3,
-        server_stream.parts.headers.clone(),
+        server_stream.head.headers.clone(),
         Body::Bytes(req_data),
     );
 
@@ -156,11 +157,10 @@ pub async fn serve(
                 Some(resp.body.to_bytes())
             };
 
-            let _ = server_stream.respond.send_unary_response(
-                status,
-                body_bytes.as_deref(),
-                Some(resp.headers.into()),
-            );
+            let _ = server_stream
+                .respond
+                .send_unary_response(status, body_bytes.as_deref(), Some(resp.headers))
+                .await;
             PipeOutcome::grpc(
                 200,
                 velda_core::GrpcStatus::from_u8(status as u8),

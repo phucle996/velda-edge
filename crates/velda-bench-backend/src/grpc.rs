@@ -12,7 +12,8 @@ use tokio::net::TcpListener;
 use tokio_rustls::TlsAcceptor;
 use tokio_rustls::rustls::ServerConfig;
 use velda_core::GrpcStatus;
-use velda_grpc::{GrpcConfig, GrpcServerConnection};
+use velda_grpc::config::GrpcConfig;
+use velda_grpc::tcp::server::connection::GrpcServerConnection;
 
 static ORDER_RESP: &[u8] =
     b"{\"order_id\":\"ord_real_azure_12345\",\"status\":\"CONFIRMED\",\"total_amount\":99.99}";
@@ -46,7 +47,7 @@ impl GrpcRouter {
                     if let Ok(mut conn) = GrpcServerConnection::handshake(stream, &cfg).await {
                         while let Ok(Some(mut server_stream)) = conn.accept().await {
                             tokio::spawn(async move {
-                                let path = server_stream.parts.uri.path().to_string();
+                                let path = server_stream.head.uri.path().to_string();
                                 let req_msg = server_stream
                                     .read_unary_message(10 * 1024 * 1024)
                                     .await
@@ -54,34 +55,46 @@ impl GrpcRouter {
 
                                 match path.as_str() {
                                     "/order.v1.OrderService/CreateOrder" => {
-                                        let _ = server_stream.respond.send_unary_response(
-                                            GrpcStatus::Ok,
-                                            Some(ORDER_RESP),
-                                            None,
-                                        );
+                                        let _ = server_stream
+                                            .respond
+                                            .send_unary_response(
+                                                GrpcStatus::Ok,
+                                                Some(ORDER_RESP),
+                                                None,
+                                            )
+                                            .await;
                                     }
                                     "/payment.v1.PaymentService/ProcessPayment" => {
-                                        let _ = server_stream.respond.send_unary_response(
-                                            GrpcStatus::Ok,
-                                            Some(PAYMENT_RESP),
-                                            None,
-                                        );
+                                        let _ = server_stream
+                                            .respond
+                                            .send_unary_response(
+                                                GrpcStatus::Ok,
+                                                Some(PAYMENT_RESP),
+                                                None,
+                                            )
+                                            .await;
                                     }
                                     "/test.UnaryService/EchoUnary" => {
                                         let resp_bytes =
                                             req_msg.as_deref().unwrap_or(b"echo_empty");
-                                        let _ = server_stream.respond.send_unary_response(
-                                            GrpcStatus::Ok,
-                                            Some(resp_bytes),
-                                            None,
-                                        );
+                                        let _ = server_stream
+                                            .respond
+                                            .send_unary_response(
+                                                GrpcStatus::Ok,
+                                                Some(resp_bytes),
+                                                None,
+                                            )
+                                            .await;
                                     }
                                     _ => {
-                                        let _ = server_stream.respond.send_unary_response(
-                                            GrpcStatus::Unimplemented,
-                                            None,
-                                            None,
-                                        );
+                                        let _ = server_stream
+                                            .respond
+                                            .send_unary_response(
+                                                GrpcStatus::Unimplemented,
+                                                None,
+                                                None,
+                                            )
+                                            .await;
                                     }
                                 }
                             });
@@ -112,7 +125,7 @@ impl GrpcRouter {
                         {
                             while let Ok(Some(mut server_stream)) = conn.accept().await {
                                 tokio::spawn(async move {
-                                    let path = server_stream.parts.uri.path().to_string();
+                                    let path = server_stream.head.uri.path().to_string();
                                     let req_msg = server_stream
                                         .read_unary_message(10 * 1024 * 1024)
                                         .await
@@ -120,34 +133,46 @@ impl GrpcRouter {
 
                                     match path.as_str() {
                                         "/order.v1.OrderService/CreateOrder" => {
-                                            let _ = server_stream.respond.send_unary_response(
-                                                GrpcStatus::Ok,
-                                                Some(ORDER_RESP),
-                                                None,
-                                            );
+                                            let _ = server_stream
+                                                .respond
+                                                .send_unary_response(
+                                                    GrpcStatus::Ok,
+                                                    Some(ORDER_RESP),
+                                                    None,
+                                                )
+                                                .await;
                                         }
                                         "/payment.v1.PaymentService/ProcessPayment" => {
-                                            let _ = server_stream.respond.send_unary_response(
-                                                GrpcStatus::Ok,
-                                                Some(PAYMENT_RESP),
-                                                None,
-                                            );
+                                            let _ = server_stream
+                                                .respond
+                                                .send_unary_response(
+                                                    GrpcStatus::Ok,
+                                                    Some(PAYMENT_RESP),
+                                                    None,
+                                                )
+                                                .await;
                                         }
                                         "/test.UnaryService/EchoUnary" => {
                                             let resp_bytes =
                                                 req_msg.as_deref().unwrap_or(b"echo_empty");
-                                            let _ = server_stream.respond.send_unary_response(
-                                                GrpcStatus::Ok,
-                                                Some(resp_bytes),
-                                                None,
-                                            );
+                                            let _ = server_stream
+                                                .respond
+                                                .send_unary_response(
+                                                    GrpcStatus::Ok,
+                                                    Some(resp_bytes),
+                                                    None,
+                                                )
+                                                .await;
                                         }
                                         _ => {
-                                            let _ = server_stream.respond.send_unary_response(
-                                                GrpcStatus::Unimplemented,
-                                                None,
-                                                None,
-                                            );
+                                            let _ = server_stream
+                                                .respond
+                                                .send_unary_response(
+                                                    GrpcStatus::Unimplemented,
+                                                    None,
+                                                    None,
+                                                )
+                                                .await;
                                         }
                                     }
                                 });
@@ -172,11 +197,11 @@ impl GrpcRouter {
 mod tests {
     use super::*;
     use bytes::BytesMut;
-    use http::{HeaderMap, Method, StatusCode, Uri, Version};
+    use http::{HeaderValue, Method, StatusCode, Uri, Version};
     use std::time::Duration;
-    use velda_core::{Body, L7Request};
+    use velda_core::{Body, HeaderWorkspace, L7Request};
     use velda_grpc::frame::encode_grpc_frame;
-    use velda_grpc::tcp::client::GrpcUpstreamConnector;
+    use velda_grpc::tcp::client::connector::GrpcUpstreamConnector;
 
     #[tokio::test]
     async fn test_real_grpc_backend_order_service() {
@@ -207,9 +232,9 @@ mod tests {
         let mut req_body = BytesMut::new();
         encode_grpc_frame(b"{\"order_id\":\"ord_123\"}", false, &mut req_body);
 
-        let mut headers = HeaderMap::new();
-        headers.insert("content-type", "application/grpc".parse().unwrap());
-        headers.insert("te", "trailers".parse().unwrap());
+        let mut headers = HeaderWorkspace::empty(4);
+        headers.insert("content-type", HeaderValue::from_static("application/grpc"));
+        headers.insert("te", HeaderValue::from_static("trailers"));
 
         let req = L7Request::new(
             Method::POST,
@@ -271,9 +296,9 @@ mod tests {
         let mut req_body = BytesMut::new();
         encode_grpc_frame(b"test", false, &mut req_body);
 
-        let mut headers = HeaderMap::new();
-        headers.insert("content-type", "application/grpc".parse().unwrap());
-        headers.insert("te", "trailers".parse().unwrap());
+        let mut headers = HeaderWorkspace::empty(4);
+        headers.insert("content-type", HeaderValue::from_static("application/grpc"));
+        headers.insert("te", HeaderValue::from_static("trailers"));
 
         let req = L7Request::new(
             Method::POST,

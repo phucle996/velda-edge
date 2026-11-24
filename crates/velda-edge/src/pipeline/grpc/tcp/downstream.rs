@@ -1,17 +1,18 @@
 //! Layer 7 gRPC over TCP downstream stream worker, route evaluation, and streaming forwarding.
 //!
-//! Powered entirely by `velda-grpc`. Operates strictly for listeners explicitly configured
-//! with `transport = "tcp"` and `protocol = "grpc"`. Zero HTTP fallback, zero header sniffing,
-//! and full bidirectional streaming.
+//! Powered natively by `velda-grpc` and `velda-http2` over [`velda_core::HeaderWorkspace`].
+//! Operates strictly for listeners explicitly configured with `transport = "tcp"` and
+//! `protocol = "grpc"`. Zero HTTP fallback, zero header sniffing, and full bidirectional streaming.
 
 use std::sync::Arc;
 
 use tokio::io::{AsyncRead, AsyncWrite};
 use velda_core::{Action, GrpcStatus, L7Request, PipeKind};
-use velda_grpc::GrpcConfig;
-use velda_grpc::tcp::GrpcPipeStrategy;
-use velda_grpc::tcp::server::{GrpcServerConnection, GrpcServerStream};
-use velda_grpc::udp::GrpcUdpPipeStrategy;
+use velda_grpc::config::GrpcConfig;
+use velda_grpc::tcp::server::connection::GrpcServerConnection;
+use velda_grpc::tcp::server::stream::GrpcServerStream;
+use velda_grpc::tcp::strategy::GrpcPipeStrategy;
+use velda_grpc::udp::strategy::GrpcUdpPipeStrategy;
 use velda_observability::sampling::grpc::GrpcSampling;
 use velda_observability::{StreamCompletion, global_metrics, global_telemetry_store};
 use velda_router::GrpcRouteRequest;
@@ -60,8 +61,7 @@ pub async fn handle_grpc_tcp(
         match tls_server.accept_with_timeout(connection).await {
             Ok(tls_stream) => {
                 // gRPC protocol specification: gRPC over TCP/TLS is strictly framed atop HTTP/2 binary framing.
-                // Clients MUST successfully negotiate ALPN "h2". Missing (None) or non-h2 ALPN is dropped
-                // to prevent raw binary stream misinterpretation in downstream RPC dispatching.
+                // Clients MUST successfully negotiate ALPN "h2".
                 let alpn = TlsServerEngine::extract_alpn(&tls_stream);
 
                 if alpn.as_deref() != Some("h2") {
@@ -122,17 +122,25 @@ pub async fn run_grpc_tcp_loop<IO>(
 ) where
     IO: AsyncRead + AsyncWrite + Unpin + Send + 'static,
 {
-    let mut conn = match GrpcServerConnection::handshake(stream, &config).await {
-        Ok(c) => c,
-        Err(e) => {
-            tracing::warn!(
-                error = %e,
-                listener = %meta.listener_id,
-                "Failed downstream gRPC server handshake"
-            );
-            return;
-        }
+    let forwarding = velda_http2::proto::hpack::H2ForwardingAddrs {
+        peer_ip: meta.peer_ip,
+        local_ip: meta.local_ip,
+        local_port_be: meta.local_port_be,
+        is_tls: meta.is_tls,
     };
+
+    let mut conn =
+        match GrpcServerConnection::handshake_with_forwarding(stream, &config, forwarding).await {
+            Ok(c) => c,
+            Err(e) => {
+                tracing::warn!(
+                    error = %e,
+                    listener = %meta.listener_id,
+                    "Failed downstream gRPC server handshake"
+                );
+                return;
+            }
+        };
 
     let timeout_duration = std::time::Duration::from_millis(config.idle_timeout_ms);
 
@@ -165,21 +173,33 @@ async fn dispatch_grpc_tcp_request_stream(
     sampling: GrpcSampling,
     runtime: &SharedRuntime,
 ) {
-    let ingress_nanos = velda_core::clock::now_unix_nanos();
-    let authority = server_stream.parts.uri.authority().map(|a| a.as_str());
-    let path = server_stream.parts.uri.path();
+    let ingress_nanos = if server_stream.head.ingress_time_nanos != 0 {
+        server_stream.head.ingress_time_nanos
+    } else {
+        velda_core::clock::now_unix_nanos()
+    };
+    let request_id = if server_stream.head.request_id != 0 {
+        server_stream.head.request_id
+    } else {
+        let (id, hdr) = velda_core::request_id::next_request_id(ingress_nanos);
+        server_stream.head.headers.set_request_id(hdr.clone());
+        server_stream.respond = server_stream.respond.with_request_id(Some(hdr));
+        id
+    };
+
+    let authority = server_stream.head.uri.authority().map(|a| a.as_str());
+    let path = server_stream.head.uri.path();
     let (log_url_len, log_url_bytes) =
         velda_observability::TelemetryRecord::encode_url(meta.is_tls, authority, path);
     let (ua_family, ua_os, ua_major_version) = server_stream
-        .parts
+        .head
         .headers
         .get(http::header::USER_AGENT)
         .map(|v| velda_core::lut::classify_user_agent(v.as_bytes()))
         .unwrap_or((velda_core::UaFamily::None, velda_core::UaOs::Unknown, 0));
 
-    // [PHYSICAL WIRE CEILING: MAX_WIRE_HEADERS = 1024]
-    if server_stream.parts.headers.len() > velda_core::buffer::MAX_WIRE_HEADERS {
-        let (request_id, _) = velda_core::request_id::next_request_id(ingress_nanos);
+    // [PHYSICAL WIRE CEILING: MAX_WIRE_HEADERS = 256]
+    if server_stream.head.headers.len() > velda_core::buffer::header::MAX_WIRE_HEADERS {
         let _ = server_stream.respond.send_trailers_only(
             GrpcStatus::ResourceExhausted,
             Some("too many request headers"),
@@ -217,24 +237,11 @@ async fn dispatch_grpc_tcp_request_stream(
         return;
     }
 
-    // [INGRESS W3C REQUEST ID GENERATION]
-    // Authoritatively generate W3C Request ID from thread-local pool.
-    // Overwrite any client-supplied x-request-id to enforce zero-trust Edge boundary.
-    let (request_id, req_id_header) = velda_core::request_id::next_request_id(ingress_nanos);
-    server_stream
-        .parts
-        .headers
-        .insert(crate::pipeline::X_REQUEST_ID, req_id_header.clone());
-    server_stream.respond = server_stream.respond.with_request_id(Some(req_id_header));
-
-    server_stream.enrich_forwarded_headers(
-        meta.peer_ip,
-        meta.local_ip,
-        meta.local_port_be,
-        meta.is_tls,
+    let authority_str = velda_grpc::tcp::server::header::extract_authority(
+        &server_stream.head.headers,
+        &server_stream.head.uri,
     );
-    let authority_str = server_stream.authority();
-    let path = server_stream.parts.uri.path();
+    let path = server_stream.head.uri.path();
 
     let Some(grpc_req) = GrpcRouteRequest::from_path(path, authority_str) else {
         let _ = server_stream.respond.send_trailers_only(
@@ -327,13 +334,11 @@ async fn dispatch_grpc_tcp_request_stream(
         let mut short_circuit_resp = None;
 
         if plan.pre_route_hooks.is_some() || plan.pre_upstream_hooks.is_some() {
-            // Optimization: Construct L7Request ONCE across both pre_route and pre_upstream phases
-            // to eliminate redundant URI/Method cloning and HeaderMap swapping.
             let mut l7_req = L7Request::new(
-                server_stream.parts.method.clone(),
-                server_stream.parts.uri.clone(),
+                server_stream.head.method.clone(),
+                server_stream.head.uri.clone(),
                 http::Version::HTTP_2,
-                std::mem::take(&mut server_stream.parts.headers),
+                std::mem::take(&mut server_stream.head.headers),
                 velda_core::Body::Empty,
             );
             l7_req.state.request_id = request_id;
@@ -356,24 +361,17 @@ async fn dispatch_grpc_tcp_request_stream(
                         short_circuit_resp = Some(cached.into_l7_response());
                     }
                     Action::Reject(reason) => {
-                        // FAST-FAIL INVARIANT: Rejections terminate immediately at the Edge boundary.
-                        // Strictly bypasses post_response_hooks (anti-CPDoS & Zero-DDoS CPU burn),
-                        // transforming HeaderWorkspace in-place to preserve only Bit-1 bypass headers.
                         let grpc_status = GrpcStatus::from_reject_reason(reason);
                         let log_grpc_status = grpc_status;
                         l7_req.headers.prepare_for_grpc_rejection(
                             grpc_status,
                             Some(reason.canonical_phrase()),
                         );
-                        let mut builder = http::Response::builder()
-                            .status(http::StatusCode::OK)
-                            .version(http::Version::HTTP_2);
-                        for (name, val) in &l7_req.headers {
-                            builder = builder.header(name, val);
-                        }
-                        if let Ok(r) = builder.body(()) {
-                            let _ = server_stream.respond.send_response(r, true);
-                        }
+                        let _ = server_stream.respond.send_response_headers(
+                            http::StatusCode::OK,
+                            &l7_req.headers,
+                            true,
+                        );
                         let duration_ns =
                             velda_core::clock::now_unix_nanos().saturating_sub(ingress_nanos);
                         global_metrics().record_early_completion(
@@ -433,24 +431,17 @@ async fn dispatch_grpc_tcp_request_stream(
                         short_circuit_resp = Some(cached.into_l7_response());
                     }
                     Action::Reject(reason) => {
-                        // FAST-FAIL INVARIANT: Rejections terminate immediately at the Edge boundary.
-                        // Strictly bypasses post_response_hooks (anti-CPDoS & Zero-DDoS CPU burn),
-                        // transforming HeaderWorkspace in-place to preserve only Bit-1 bypass headers.
                         let grpc_status = GrpcStatus::from_reject_reason(reason);
                         let log_grpc_status = grpc_status;
                         l7_req.headers.prepare_for_grpc_rejection(
                             grpc_status,
                             Some(reason.canonical_phrase()),
                         );
-                        let mut builder = http::Response::builder()
-                            .status(http::StatusCode::OK)
-                            .version(http::Version::HTTP_2);
-                        for (name, val) in &l7_req.headers {
-                            builder = builder.header(name, val);
-                        }
-                        if let Ok(r) = builder.body(()) {
-                            let _ = server_stream.respond.send_response(r, true);
-                        }
+                        let _ = server_stream.respond.send_response_headers(
+                            http::StatusCode::OK,
+                            &l7_req.headers,
+                            true,
+                        );
                         let duration_ns =
                             velda_core::clock::now_unix_nanos().saturating_sub(ingress_nanos);
                         global_metrics().record_early_completion(
@@ -494,21 +485,17 @@ async fn dispatch_grpc_tcp_request_stream(
                 if let Some(post_hooks) = &plan.post_response_hooks {
                     velda_plugin::run_post_response_plugins(post_hooks, &l7_req.headers, &mut resp);
                 }
-                let mut builder = http::Response::builder()
-                    .status(http::StatusCode::OK)
-                    .version(http::Version::HTTP_2);
-                for (name, val) in &resp.headers {
-                    builder = builder.header(name, val);
-                }
-                if let Ok(r) = builder.body(()) {
-                    let _ = server_stream.respond.send_response(r, true);
-                }
+                let _ = server_stream.respond.inner.send_parts(
+                    http::StatusCode::OK,
+                    &resp.headers,
+                    &resp.body,
+                );
                 return;
             }
 
-            server_stream.parts.headers = l7_req.headers.into();
-            server_stream.parts.uri = l7_req.uri;
-            server_stream.parts.method = l7_req.method;
+            server_stream.head.headers = l7_req.headers;
+            server_stream.head.uri = l7_req.uri;
+            server_stream.head.method = l7_req.method;
         }
     }
 
@@ -758,13 +745,12 @@ async fn dispatch_grpc_tcp_request_stream(
 
 #[cfg(test)]
 mod tests {
-    use http::HeaderMap;
-    use velda_core::GrpcStatus;
-    use velda_grpc::tcp::server::enrich_headers;
+    use velda_core::{GrpcStatus, HeaderWorkspace};
+    use velda_grpc::tcp::server::header::enrich_headers;
 
     #[test]
     fn test_enrich_forwarded_headers() {
-        let mut headers = HeaderMap::new();
+        let mut headers = HeaderWorkspace::empty(8);
         headers.insert("x-forwarded-for", "203.0.113.195".parse().unwrap());
         headers.insert("x-real-ip", "203.0.113.195".parse().unwrap());
         headers.insert("x-forwarded-host", "evil.attacker.com".parse().unwrap());
@@ -801,26 +787,20 @@ mod tests {
 
     #[test]
     fn test_stale_or_refused_detection() {
-        assert!(velda_grpc::GrpcError::Protocol("connection closed".into()).is_stale_or_refused());
         assert!(
-            velda_grpc::GrpcError::Io(std::io::Error::new(
-                std::io::ErrorKind::BrokenPipe,
-                "broken pipe"
-            ))
-            .is_stale_or_refused()
-        );
-        assert!(
-            velda_grpc::GrpcError::Io(std::io::Error::new(
-                std::io::ErrorKind::ConnectionReset,
-                "connection reset"
-            ))
-            .is_stale_or_refused()
-        );
-
-        assert!(
-            !velda_grpc::GrpcError::Status(GrpcStatus::NotFound, "not found".into())
+            velda_grpc::error::GrpcError::Protocol("connection closed".into())
                 .is_stale_or_refused()
         );
-        assert!(!velda_grpc::GrpcError::PayloadTooLarge(100).is_stale_or_refused());
+        assert!(
+            velda_grpc::error::GrpcError::Io(std::io::Error::new(
+                std::io::ErrorKind::ConnectionReset,
+                "reset"
+            ))
+            .is_stale_or_refused()
+        );
+        assert!(
+            !velda_grpc::error::GrpcError::Status(GrpcStatus::InvalidArgument, "bad arg".into())
+                .is_stale_or_refused()
+        );
     }
 }

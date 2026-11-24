@@ -9,14 +9,14 @@
 
 use std::sync::Arc;
 
-use bytes::Bytes;
-use h2::client::SendRequest;
 use http::header::{CONTENT_TYPE, HeaderValue};
 use http::{StatusCode, Version};
 use velda_core::{Body, L7Response};
-use velda_http2::Http2Error;
+use velda_http2::client::connection::Http2Client;
 use velda_http2::config::Http2Config;
-use velda_http2::server::{Http2Responder, Http2ServerRequestHead, Http2StreamReceiver};
+use velda_http2::error::Http2Error;
+use velda_http2::server::request::{Http2ServerRequestHead, Http2StreamReceiver};
+use velda_http2::server::response::Http2Responder;
 
 use crate::pipeline::{DownstreamMeta, PipeOutcome};
 use crate::upstream::Http2Upstream;
@@ -26,79 +26,64 @@ async fn forward_server_stream(
     req_head: &Http2ServerRequestHead,
     body: &Body,
     responder: &mut Http2Responder,
-    client: &mut SendRequest<Bytes>,
+    client: &Http2Client,
     meta: &DownstreamMeta,
     config: &Http2Config,
     plan: &velda_plugin::RoutePluginPlan,
 ) -> Result<(), Http2Error> {
     let is_head = req_head.method == http::Method::HEAD;
-    let mut http_req = http::Request::new(());
-    *http_req.method_mut() = req_head.method.clone();
-    *http_req.uri_mut() = req_head.uri.clone();
-    *http_req.version_mut() = Version::HTTP_2;
-    *http_req.headers_mut() = req_head.headers.clone();
-
     let has_body = !body.is_empty();
-    let (response_fut, mut send_stream) = client.send_request(http_req, !has_body)?;
+    let (response_fut, mut send_stream) = client
+        .send_request(
+            req_head.method.clone(),
+            req_head.uri.clone(),
+            req_head.headers.clone(),
+            !has_body,
+        )
+        .await?;
     if has_body {
         send_stream.send_data(body.to_bytes(), true)?;
     }
 
-    let response = response_fut.await?;
-    let (mut parts, mut body_stream) = response.into_parts();
-
-    // Fast-path guard: Bypasses HeaderWorkspace instantiation & plugin dispatch if route has no hooks.
-    // req_head is behind an immutable reference (&), so headers.clone() is required to populate workspace.
-    // Note: HeaderMap::clone() clones atomic pointer handles (Bytes) in O(1) without copying string payloads.
+    let mut response = response_fut.await?;
+    let mut resp_ws = response.headers;
     if let Some(post_hooks) = &plan.post_response_hooks {
-        let mut l7_resp =
-            L7Response::new(parts.status, Version::HTTP_2, parts.headers, Body::Empty);
-        let req_ws = velda_core::HeaderWorkspace::from_headers(req_head.headers.clone());
-        velda_plugin::run_post_response_plugins(post_hooks, &req_ws, &mut l7_resp);
-        parts.status = l7_resp.status;
-        parts.headers = l7_resp.headers.into();
+        let mut l7_resp = L7Response::new(response.status, Version::HTTP_2, resp_ws, Body::Empty);
+        velda_plugin::run_post_response_plugins(post_hooks, &req_head.headers, &mut l7_resp);
+        response.status = l7_resp.status;
+        resp_ws = l7_resp.headers;
     }
-    meta.inject_response_headers(&mut parts.headers);
+    meta.inject_response_headers(&mut resp_ws);
 
-    let is_no_body_status = parts.status.is_informational()
-        || parts.status == StatusCode::NO_CONTENT
-        || parts.status == StatusCode::NOT_MODIFIED;
+    let is_no_body_status = response.status.is_informational()
+        || response.status == StatusCode::NO_CONTENT
+        || response.status == StatusCode::NOT_MODIFIED;
 
     if is_head || is_no_body_status {
-        let resp = L7Response::new(parts.status, Version::HTTP_2, parts.headers, Body::Empty);
+        let resp = L7Response::new(response.status, Version::HTTP_2, resp_ws, Body::Empty);
         responder.send_response(&resp)?;
         return Ok(());
     }
 
-    let mut sender = responder.send_stream_response(parts.status, &parts.headers)?;
+    let mut sender = responder.send_stream_response(response.status, &resp_ws)?;
 
-    let batch_threshold = (config.initial_stream_window_size as usize / 4).clamp(32_768, 262_144);
     let mut total_bytes = 0;
-    let mut unreleased_bytes = 0;
     let coalesce_limit = (config.initial_stream_window_size as usize / 8).clamp(16_384, 65_536);
     let zero_copy_threshold = (coalesce_limit / 4).clamp(8_192, 16_384);
     let mut pending_buf = bytes::BytesMut::with_capacity(coalesce_limit);
 
-    while let Some(chunk) = body_stream.data().await {
-        let data = chunk?;
+    while let Some(data) = response.body.recv_chunk().await? {
         let len = data.len();
         total_bytes += len;
-        unreleased_bytes += len;
 
         if total_bytes > config.max_body_size {
-            let _ = body_stream
-                .flow_control()
-                .release_capacity(unreleased_bytes);
             return Err(Http2Error::PayloadTooLarge(total_bytes));
         }
 
         if pending_buf.is_empty() && len >= zero_copy_threshold {
             if sender.send_chunk(data).await.is_err() {
                 tracing::debug!("Downstream client disconnected during H2 response streaming");
-                let _ = body_stream
-                    .flow_control()
-                    .release_capacity(unreleased_bytes);
-                responder.last_bytes_tx = sender.bytes_sent();
+                responder.last_bytes_tx = sender.bytes_sent;
                 return Ok(());
             }
         } else {
@@ -107,20 +92,10 @@ async fn forward_server_stream(
                 let to_send = pending_buf.split().freeze();
                 if sender.send_chunk(to_send).await.is_err() {
                     tracing::debug!("Downstream client disconnected during H2 response streaming");
-                    let _ = body_stream
-                        .flow_control()
-                        .release_capacity(unreleased_bytes);
-                    responder.last_bytes_tx = sender.bytes_sent();
+                    responder.last_bytes_tx = sender.bytes_sent;
                     return Ok(());
                 }
             }
-        }
-
-        if unreleased_bytes >= batch_threshold {
-            let _ = body_stream
-                .flow_control()
-                .release_capacity(unreleased_bytes);
-            unreleased_bytes = 0;
         }
     }
 
@@ -128,21 +103,12 @@ async fn forward_server_stream(
         let to_send = pending_buf.freeze();
         if sender.send_chunk(to_send).await.is_err() {
             tracing::debug!("Downstream client disconnected during H2 response streaming tail");
-            let _ = body_stream
-                .flow_control()
-                .release_capacity(unreleased_bytes);
-            responder.last_bytes_tx = sender.bytes_sent();
+            responder.last_bytes_tx = sender.bytes_sent;
             return Ok(());
         }
     }
 
-    if unreleased_bytes > 0 {
-        let _ = body_stream
-            .flow_control()
-            .release_capacity(unreleased_bytes);
-    }
-
-    responder.last_bytes_tx = sender.bytes_sent();
+    responder.last_bytes_tx = sender.bytes_sent;
     let _ = sender.finish();
     Ok(())
 }
@@ -173,17 +139,17 @@ pub async fn serve(
             let _ = responder.send_response(&err_resp);
             return PipeOutcome::http(
                 responder.last_status,
-                receiver.bytes_received() as u64,
+                receiver.bytes_received as u64,
                 responder.last_bytes_tx,
                 None,
                 velda_core::CompletionReason::Rejected,
             );
         }
     };
-    let bytes_rx = receiver.bytes_received() as u64;
+    let bytes_rx = receiver.bytes_received as u64;
 
     // 2. Acquire upstream multiplexed connection
-    let (mut client, lease) = match upstream.acquire(&config).await {
+    let (client, lease) = match upstream.acquire(&config).await {
         Ok(res) => res,
         Err(e) => {
             tracing::warn!(
@@ -217,7 +183,7 @@ pub async fn serve(
         &req_head,
         &body,
         &mut responder,
-        &mut client,
+        &client,
         &meta,
         &config,
         plan,
@@ -231,13 +197,13 @@ pub async fn serve(
             error = %e,
             "HTTP/2 server-stream refused or connection closed; self-healing with fresh connection"
         );
-        if let Ok((mut fresh_client, fresh_lease)) = upstream.acquire_fresh(&config).await {
+        if let Ok((fresh_client, fresh_lease)) = upstream.acquire_fresh(&config).await {
             upstream_addr = Some(fresh_lease.endpoint);
             res = forward_server_stream(
                 &req_head,
                 &body,
                 &mut responder,
-                &mut fresh_client,
+                &fresh_client,
                 &meta,
                 &config,
                 plan,

@@ -4,9 +4,9 @@ use std::sync::Arc;
 
 use velda_connection_pool::MultiplexedPool;
 use velda_core::StreamingMode;
-use velda_grpc::GrpcConfig;
-use velda_grpc::tcp::GrpcPipeStrategy;
-use velda_grpc::tcp::client::GrpcUpstreamConnector;
+use velda_grpc::config::GrpcConfig;
+use velda_grpc::tcp::client::connector::GrpcUpstreamConnector;
+use velda_grpc::tcp::strategy::GrpcPipeStrategy;
 use velda_rdma::{RdmaConfig, RdmaConnector};
 
 use super::super::lb::EdgeUpstream;

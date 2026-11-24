@@ -10,14 +10,15 @@
 
 use std::sync::Arc;
 
-use bytes::{Bytes, BytesMut};
-use h2::client::SendRequest;
+use bytes::BytesMut;
 use http::header::{CONTENT_TYPE, HeaderValue};
 use http::{StatusCode, Version};
 use velda_core::{Body, L7Response};
-use velda_http2::Http2Error;
+use velda_http2::client::connection::Http2Client;
 use velda_http2::config::Http2Config;
-use velda_http2::server::{Http2Responder, Http2ServerRequestHead, Http2StreamReceiver};
+use velda_http2::error::Http2Error;
+use velda_http2::server::request::{Http2ServerRequestHead, Http2StreamReceiver};
+use velda_http2::server::response::Http2Responder;
 
 use crate::pipeline::{DownstreamMeta, PipeOutcome};
 use crate::upstream::Http2Upstream;
@@ -27,29 +28,29 @@ async fn forward_buffered(
     req_head: &Http2ServerRequestHead,
     body: &Body,
     responder: &mut Http2Responder,
-    client: &mut SendRequest<Bytes>,
+    client: &Http2Client,
     meta: &DownstreamMeta,
     config: &Http2Config,
     plan: &velda_plugin::RoutePluginPlan,
 ) -> Result<(), Http2Error> {
     let is_head = req_head.method == http::Method::HEAD;
-    let mut http_req = http::Request::new(());
-    *http_req.method_mut() = req_head.method.clone();
-    *http_req.uri_mut() = req_head.uri.clone();
-    *http_req.version_mut() = Version::HTTP_2;
-    *http_req.headers_mut() = req_head.headers.clone();
-
     let has_body = !body.is_empty();
-    let (response_fut, mut send_stream) = client.send_request(http_req, !has_body)?;
+    let (response_fut, mut send_stream) = client
+        .send_request(
+            req_head.method.clone(),
+            req_head.uri.clone(),
+            req_head.headers.clone(),
+            !has_body,
+        )
+        .await?;
     if has_body {
         send_stream.send_data(body.to_bytes(), true)?;
     }
 
-    let response = response_fut.await?;
-    let (parts, mut body_stream) = response.into_parts();
+    let mut response = response_fut.await?;
 
     // Enforce non-streaming invariant: reject SSE if listener has server streaming disabled
-    if let Some(content_type) = parts.headers.get(http::header::CONTENT_TYPE)
+    if let Some(content_type) = response.headers.get(http::header::CONTENT_TYPE)
         && let Ok(ct_str) = content_type.to_str()
         && ct_str
             .as_bytes()
@@ -61,38 +62,32 @@ async fn forward_buffered(
         ));
     }
 
-    let is_no_body_status = parts.status.is_informational()
-        || parts.status == StatusCode::NO_CONTENT
-        || parts.status == StatusCode::NOT_MODIFIED;
+    let is_no_body_status = response.status.is_informational()
+        || response.status == StatusCode::NO_CONTENT
+        || response.status == StatusCode::NOT_MODIFIED;
 
-    let batch_threshold = (config.initial_stream_window_size as usize / 4).clamp(32_768, 262_144);
-
-    let resp_body = if is_head || is_no_body_status || body_stream.is_end_stream() {
+    let resp_body = if is_head || is_no_body_status || response.body.is_end_stream() {
         Body::Empty
-    } else if let Some(first_chunk) = body_stream.data().await {
-        let data = first_chunk?;
-        let len = data.len();
+    } else if let Some(first_chunk) = response.body.recv_chunk().await? {
+        let len = first_chunk.len();
         if len > config.max_body_size {
-            let _ = body_stream.flow_control().release_capacity(len);
             return Err(Http2Error::PayloadTooLarge(len));
         }
 
-        if body_stream.is_end_stream() {
-            let _ = body_stream.flow_control().release_capacity(len);
-            Body::Bytes(data)
+        if response.body.is_end_stream() {
+            Body::Bytes(first_chunk)
         } else {
-            if let Some(content_length) = parts
+            if let Some(content_length) = response
                 .headers
                 .get(http::header::CONTENT_LENGTH)
                 .and_then(|v| v.to_str().ok())
                 .and_then(|v| v.parse::<usize>().ok())
                 && content_length > config.max_body_size
             {
-                let _ = body_stream.flow_control().release_capacity(len);
                 return Err(Http2Error::PayloadTooLarge(content_length));
             }
 
-            let initial_cap = parts
+            let initial_cap = response
                 .headers
                 .get(http::header::CONTENT_LENGTH)
                 .and_then(|v| v.to_str().ok())
@@ -100,62 +95,30 @@ async fn forward_buffered(
                 .unwrap_or_else(|| (len.saturating_mul(2)).clamp(16_384, config.max_body_size))
                 .min(config.max_body_size);
             let mut body_buf = BytesMut::with_capacity(initial_cap);
-            body_buf.extend_from_slice(&data);
-            let mut unreleased_bytes = len;
+            body_buf.extend_from_slice(&first_chunk);
 
-            while let Some(chunk) = body_stream.data().await {
-                let chunk_data = chunk?;
-                let chunk_len = chunk_data.len();
-                if body_buf.len() + chunk_len > config.max_body_size {
-                    let _ = body_stream
-                        .flow_control()
-                        .release_capacity(unreleased_bytes + chunk_len);
-                    return Err(Http2Error::PayloadTooLarge(body_buf.len() + chunk_len));
+            while let Some(chunk_data) = response.body.recv_chunk().await? {
+                if body_buf.len() + chunk_data.len() > config.max_body_size {
+                    return Err(Http2Error::PayloadTooLarge(
+                        body_buf.len() + chunk_data.len(),
+                    ));
                 }
                 body_buf.extend_from_slice(&chunk_data);
-                unreleased_bytes += chunk_len;
-
-                let waker = std::task::Waker::noop();
-                let mut cx = std::task::Context::from_waker(waker);
-                while let std::task::Poll::Ready(Some(Ok(extra))) = body_stream.poll_data(&mut cx) {
-                    let extra_len = extra.len();
-                    if body_buf.len() + extra_len > config.max_body_size {
-                        let _ = body_stream
-                            .flow_control()
-                            .release_capacity(unreleased_bytes + extra_len);
-                        return Err(Http2Error::PayloadTooLarge(body_buf.len() + extra_len));
-                    }
-                    body_buf.extend_from_slice(&extra);
-                    unreleased_bytes += extra_len;
-                }
-
-                if unreleased_bytes >= batch_threshold {
-                    let _ = body_stream
-                        .flow_control()
-                        .release_capacity(unreleased_bytes);
-                    unreleased_bytes = 0;
-                }
             }
-
-            if unreleased_bytes > 0 {
-                let _ = body_stream
-                    .flow_control()
-                    .release_capacity(unreleased_bytes);
-            }
-
             Body::Bytes(body_buf.freeze())
         }
     } else {
         Body::Empty
     };
 
-    let mut resp = L7Response::new(parts.status, Version::HTTP_2, parts.headers, resp_body);
-    // Fast-path guard: Bypasses HeaderWorkspace instantiation & plugin dispatch if route has no hooks.
-    // req_head is behind an immutable reference (&), so headers.clone() is required to populate workspace.
-    // Note: HeaderMap::clone() clones atomic pointer handles (Bytes) in O(1) without copying string payloads.
+    let mut resp = L7Response::new(
+        response.status,
+        Version::HTTP_2,
+        response.headers,
+        resp_body,
+    );
     if let Some(post_hooks) = &plan.post_response_hooks {
-        let req_ws = velda_core::HeaderWorkspace::from_headers(req_head.headers.clone());
-        velda_plugin::run_post_response_plugins(post_hooks, &req_ws, &mut resp);
+        velda_plugin::run_post_response_plugins(post_hooks, &req_head.headers, &mut resp);
     }
     meta.inject_response_headers(&mut resp.headers);
     responder.send_response_owned(resp)?;
@@ -189,17 +152,17 @@ pub async fn serve(
             let _ = responder.send_response(&err_resp);
             return PipeOutcome::http(
                 responder.last_status,
-                receiver.bytes_received() as u64,
+                receiver.bytes_received as u64,
                 responder.last_bytes_tx,
                 None,
                 velda_core::CompletionReason::Rejected,
             );
         }
     };
-    let bytes_rx = receiver.bytes_received() as u64;
+    let bytes_rx = receiver.bytes_received as u64;
 
     // 2. Acquire upstream multiplexed connection
-    let (mut client, lease) = match upstream.acquire(&config).await {
+    let (client, lease) = match upstream.acquire(&config).await {
         Ok(res) => res,
         Err(e) => {
             tracing::warn!(
@@ -233,7 +196,7 @@ pub async fn serve(
         &req_head,
         &body,
         &mut responder,
-        &mut client,
+        &client,
         &meta,
         &config,
         plan,
@@ -247,13 +210,13 @@ pub async fn serve(
             error = %e,
             "HTTP/2 buffered stream refused or connection closed; self-healing with fresh connection"
         );
-        if let Ok((mut fresh_client, fresh_lease)) = upstream.acquire_fresh(&config).await {
+        if let Ok((fresh_client, fresh_lease)) = upstream.acquire_fresh(&config).await {
             upstream_addr = Some(fresh_lease.endpoint);
             res = forward_buffered(
                 &req_head,
                 &body,
                 &mut responder,
-                &mut fresh_client,
+                &fresh_client,
                 &meta,
                 &config,
                 plan,

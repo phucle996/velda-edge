@@ -9,8 +9,9 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use velda_core::{L7Request, L7Response};
-use velda_grpc::udp::client::GrpcUdpClient;
-use velda_grpc::{GrpcConfig, GrpcError};
+use velda_grpc::config::GrpcConfig;
+use velda_grpc::error::GrpcError;
+use velda_grpc::udp::client::connector::GrpcUdpClient;
 
 use crate::upstream::GrpcUdpUpstream;
 
@@ -23,7 +24,7 @@ async fn pipe_duplex_wire(
     let timeout = Duration::from_millis(config.max_call_duration_ms);
 
     let workflow = async {
-        let resp = client.send_request_ref(req).await?;
+        let resp = client.send_request(req.clone()).await?;
 
         // Validate response LPM length if present
         let b = resp.body.as_slice();

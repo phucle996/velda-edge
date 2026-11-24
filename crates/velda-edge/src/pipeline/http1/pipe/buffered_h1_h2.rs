@@ -31,11 +31,11 @@ use bytes::BytesMut;
 use http::StatusCode;
 use http::header::{CONTENT_TYPE, HeaderValue};
 use tokio::io::{AsyncRead, AsyncWrite};
-use velda_http1::{
-    Http1BodyFraming, Http1Error, Http1ServerConnection, Http1ServerRequestHead,
-    Http1ServerResponse,
-};
-use velda_http2::Http2Config;
+use velda_http1::error::Http1Error;
+use velda_http1::server::connection::Http1ServerConnection;
+use velda_http1::server::request::{Http1BodyFraming, Http1ServerRequestHead};
+use velda_http1::server::response::Http1ServerResponse;
+use velda_http2::config::Http2Config;
 
 use crate::pipeline::DownstreamMeta;
 use crate::upstream::Http2Upstream;
@@ -76,7 +76,7 @@ where
                 CONTENT_TYPE,
                 HeaderValue::from_static("text/plain; charset=utf-8"),
             );
-            conn.mark_close();
+            conn.close_requested = true;
             let _ = conn.send_response(&err_resp).await;
             return Err(Http1Error::Timeout);
         }
@@ -89,7 +89,7 @@ where
                 CONTENT_TYPE,
                 HeaderValue::from_static("text/plain; charset=utf-8"),
             );
-            conn.mark_close();
+            conn.close_requested = true;
             let _ = conn.send_response(&err_resp).await;
             return Err(e);
         }
@@ -97,13 +97,10 @@ where
 
     let body_bytes = body.to_bytes();
 
-    // 4. Sanitize headers disallowed by RFC 9113 for HTTP/2
-    velda_http2::client::sanitize_h2_headers(&mut req_head.headers);
-
     let h2_config = Http2Config::auto();
 
     // 5. Acquire upstream multiplexed connection
-    let (mut client, lease) = match upstream.acquire(&h2_config).await {
+    let (client, lease) = match upstream.acquire(&h2_config).await {
         Ok(res) => res,
         Err(e) => {
             tracing::warn!(
@@ -119,7 +116,7 @@ where
                 CONTENT_TYPE,
                 HeaderValue::from_static("text/plain; charset=utf-8"),
             );
-            conn.mark_close();
+            conn.close_requested = true;
             let _ = conn.send_response(&err_resp).await;
             return Err(Http1Error::ConnectionClosed);
         }
@@ -132,7 +129,7 @@ where
     let upstream_host = upstream.target_host();
     let max_body_size = h2_config.max_body_size.min(conn.config().max_body_size);
     let mut pipe_res = send_h2_buffered(
-        &mut client,
+        &client,
         &req_head,
         &body_bytes,
         is_tls,
@@ -141,17 +138,17 @@ where
     )
     .await;
     if let Err(ref e) = pipe_res
-        && is_h2_refused_or_goaway(e)
+        && e.is_refused_or_goaway()
     {
         tracing::debug!(
             upstream = %upstream.id(),
             "HTTP/2 stream refused or connection closed; self-healing with fresh connection"
         );
-        if let Ok((mut fresh_client, fresh_lease)) = upstream.acquire_fresh(&h2_config).await {
+        if let Ok((fresh_client, fresh_lease)) = upstream.acquire_fresh(&h2_config).await {
             conn.last_upstream_ip = fresh_lease.endpoint.0;
             conn.last_upstream_port_be = fresh_lease.endpoint.1;
             pipe_res = send_h2_buffered(
-                &mut fresh_client,
+                &fresh_client,
                 &req_head,
                 &body_bytes,
                 is_tls,
@@ -168,8 +165,6 @@ where
                 resp.headers
                     .insert(crate::pipeline::X_REQUEST_ID, req_id.clone());
             }
-            // Fast-path guard: Bypasses HeaderWorkspace instantiation & plugin dispatch if route has no hooks.
-            // req_head reaches end of life here -> mem::take transfers ownership with zero allocations.
             if let Some(post_hooks) = &plan.post_response_hooks {
                 let initial_body = if plan.is_response_payload_passthrough() {
                     velda_core::Body::Empty
@@ -182,12 +177,13 @@ where
                     std::mem::take(&mut resp.headers),
                     initial_body,
                 );
-                let req_ws = velda_core::HeaderWorkspace::from_headers(std::mem::take(
-                    &mut req_head.headers,
-                ));
-                velda_plugin::run_post_response_plugins(post_hooks, &req_ws, &mut l7_resp);
+                velda_plugin::run_post_response_plugins(
+                    post_hooks,
+                    &req_head.headers,
+                    &mut l7_resp,
+                );
                 resp.status = l7_resp.status;
-                resp.headers = l7_resp.headers.into();
+                resp.headers = l7_resp.headers;
                 if !matches!(l7_resp.body, velda_core::Body::Empty) {
                     resp.body = l7_resp.body;
                 }
@@ -211,7 +207,7 @@ where
                 HeaderValue::from_static("text/plain; charset=utf-8"),
             );
             meta.inject_response_headers(&mut err_resp.headers);
-            conn.mark_close();
+            conn.close_requested = true;
             let _ = conn.send_response(&err_resp).await;
             Err(Http1Error::ConnectionClosed)
         }
@@ -219,13 +215,13 @@ where
 }
 
 async fn send_h2_buffered(
-    client: &mut h2::client::SendRequest<bytes::Bytes>,
+    client: &velda_http2::client::connection::Http2Client,
     req_head: &Http1ServerRequestHead,
     body: &bytes::Bytes,
     is_tls: bool,
     upstream_host: &str,
     max_body_size: usize,
-) -> Result<Http1ServerResponse, h2::Error> {
+) -> Result<Http1ServerResponse, velda_http2::error::Http2Error> {
     let scheme = if is_tls { "https" } else { "http" };
     let authority = req_head
         .headers
@@ -245,23 +241,22 @@ async fn send_h2_buffered(
         .build()
         .unwrap_or_else(|_| req_head.uri.clone());
 
-    let mut req = http::Request::builder()
-        .method(req_head.method.clone())
-        .uri(uri)
-        .version(http::Version::HTTP_2);
-    *req.headers_mut().unwrap() = req_head.headers.clone();
-    let req = req.body(()).unwrap();
-
     let has_body = !body.is_empty();
-    let (response_future, mut send_stream) = client.send_request(req, !has_body)?;
+    let (response_future, mut send_stream) = client
+        .send_request(
+            req_head.method.clone(),
+            uri,
+            req_head.headers.clone(),
+            !has_body,
+        )
+        .await?;
     if has_body {
         send_stream.send_data(body.clone(), true)?;
     }
 
-    let response = response_future.await?;
-    let (parts, mut body_stream) = response.into_parts();
+    let mut response = response_future.await?;
 
-    let expected_len = parts
+    let expected_len = response
         .headers
         .get(http::header::CONTENT_LENGTH)
         .and_then(|v| velda_http1::wire::parse_ascii_digits(v.as_bytes()).ok())
@@ -273,28 +268,20 @@ async fn send_h2_buffered(
         ));
     }
     let mut resp_body = BytesMut::with_capacity(expected_len.min(max_body_size));
-    while let Some(chunk) = body_stream.data().await {
-        let chunk = chunk?;
+    while let Some(chunk) = response.body.recv_chunk().await? {
         if resp_body.len() + chunk.len() > max_body_size {
-            let _ = body_stream.flow_control().release_capacity(chunk.len());
             return Ok(Http1ServerResponse::from_bytes(
                 StatusCode::PAYLOAD_TOO_LARGE,
                 b"413 Payload Too Large\n".to_vec(),
             ));
         }
-        body_stream.flow_control().release_capacity(chunk.len())?;
         resp_body.extend_from_slice(&chunk);
     }
 
     Ok(Http1ServerResponse::new(
-        parts.status,
+        response.status,
         http::Version::HTTP_11,
-        parts.headers,
+        response.headers,
         velda_core::Body::Bytes(resp_body.freeze()),
     ))
-}
-
-#[inline]
-fn is_h2_refused_or_goaway(err: &h2::Error) -> bool {
-    (err.is_reset() && err.reason() == Some(h2::Reason::REFUSED_STREAM)) || err.is_go_away()
 }

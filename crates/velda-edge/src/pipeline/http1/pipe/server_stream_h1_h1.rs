@@ -33,12 +33,16 @@ use http::StatusCode;
 use http::header::{CONTENT_TYPE, HeaderValue};
 use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt};
 use velda_core::Body;
-use velda_http1::{
-    HeadEncodeOptions, Http1BodyFraming, Http1Error, Http1ServerConnection, Http1ServerRequest,
-    Http1ServerRequestHead, Http1ServerResponse, Http1ServerResponseHead, read_chunk_sized,
-    read_next_chunk, read_response_head, sanitize_headers, send_chunk, send_chunked_end,
-    send_request,
+use velda_http1::client::header::sanitize_headers;
+use velda_http1::client::request::send_request_parts;
+use velda_http1::client::response::{read_chunk_sized, read_next_chunk, read_response_head};
+use velda_http1::error::Http1Error;
+use velda_http1::server::connection::Http1ServerConnection;
+use velda_http1::server::request::{Http1BodyFraming, Http1ServerRequest, Http1ServerRequestHead};
+use velda_http1::server::response::{
+    HeadEncodeOptions, Http1ServerResponse, Http1ServerResponseHead,
 };
+use velda_http1::wire::{send_chunk, send_chunked_end};
 
 use crate::pipeline::DownstreamMeta;
 use crate::upstream::Http1Upstream;
@@ -76,7 +80,7 @@ where
                 CONTENT_TYPE,
                 HeaderValue::from_static("text/plain; charset=utf-8"),
             );
-            conn.mark_close();
+            conn.close_requested = true;
             let _ = conn.send_response(&err_resp).await;
             return Err(Http1Error::Timeout);
         }
@@ -89,7 +93,7 @@ where
                 CONTENT_TYPE,
                 HeaderValue::from_static("text/plain; charset=utf-8"),
             );
-            conn.mark_close();
+            conn.close_requested = true;
             let _ = conn.send_response(&err_resp).await;
             return Err(e);
         }
@@ -112,7 +116,7 @@ where
                 CONTENT_TYPE,
                 HeaderValue::from_static("text/plain; charset=utf-8"),
             );
-            conn.mark_close();
+            conn.close_requested = true;
             let _ = conn.send_response(&err_resp).await;
             return Err(Http1Error::ConnectionClosed);
         }
@@ -121,7 +125,13 @@ where
     conn.last_upstream_port_be = upstream_lease.endpoint.1;
 
     let cfg = *conn.config();
-    let mut req = Http1ServerRequest::from_parts(req_head, body);
+    let mut req = Http1ServerRequest {
+        method: req_head.method,
+        uri: req_head.uri,
+        version: req_head.version,
+        headers: req_head.headers,
+        body,
+    };
     sanitize_headers(&mut req.headers);
 
     // 5. Send request and read response head with self-healing retry on stale pooled connection
@@ -136,7 +146,15 @@ where
         }
 
         let exchange_attempt = async {
-            send_request(&req, &mut *upstream_lease, &mut conn.upstream_write_buf).await?;
+            send_request_parts(
+                &req.method,
+                &req.uri,
+                &req.headers,
+                &req.body,
+                &mut *upstream_lease,
+                &mut conn.upstream_write_buf,
+            )
+            .await?;
             read_response_head(&mut *upstream_lease, &mut conn.upstream_read_buf, &cfg).await
         };
 
@@ -156,8 +174,15 @@ where
                         conn.last_upstream_ip = fresh_lease.endpoint.0;
                         conn.last_upstream_port_be = fresh_lease.endpoint.1;
                         let retry_res = async {
-                            send_request(&req, &mut *fresh_lease, &mut conn.upstream_write_buf)
-                                .await?;
+                            send_request_parts(
+                                &req.method,
+                                &req.uri,
+                                &req.headers,
+                                &req.body,
+                                &mut *fresh_lease,
+                                &mut conn.upstream_write_buf,
+                            )
+                            .await?;
                             read_response_head(&mut *fresh_lease, &mut conn.upstream_read_buf, &cfg)
                                 .await
                         }
@@ -198,8 +223,7 @@ where
             .insert(crate::pipeline::X_REQUEST_ID, req_id.clone());
     }
 
-    // Fast-path guard: Bypasses HeaderWorkspace instantiation & plugin dispatch if route has no hooks.
-    // HeaderMap::clone() clones atomic pointer handles (Bytes) in O(1) without copying string payloads.
+    // Fast-path guard: Bypasses plugin dispatch if route has no hooks.
     if let Some(post_hooks) = &plan.post_response_hooks {
         let mut l7_resp = velda_core::L7Response::new(
             resp_head.status,
@@ -207,10 +231,9 @@ where
             std::mem::take(&mut resp_head.headers),
             velda_core::Body::Empty,
         );
-        let req_ws = velda_core::HeaderWorkspace::from_headers(req.headers.clone());
-        velda_plugin::run_post_response_plugins(post_hooks, &req_ws, &mut l7_resp);
+        velda_plugin::run_post_response_plugins(post_hooks, &req.headers, &mut l7_resp);
         resp_head.status = l7_resp.status;
-        resp_head.headers = l7_resp.headers.into();
+        resp_head.headers = l7_resp.headers;
     }
     meta.inject_response_headers(&mut resp_head.headers);
 
@@ -237,10 +260,10 @@ where
     if is_http10 {
         resp_head.version = http::Version::HTTP_10;
         resp_head.headers.remove(http::header::TRANSFER_ENCODING);
-        conn.mark_close();
+        conn.close_requested = true;
         let server_head =
             Http1ServerResponseHead::new(resp_head.status, resp_head.version, resp_head.headers);
-        conn.send_response_parts(&server_head, &Body::Empty).await?;
+        conn.send_parts(&server_head, &Body::Empty).await?;
 
         let mut client_disconnected = false;
         match resp_framing {
@@ -329,8 +352,8 @@ where
                 drop(upstream_lease);
 
                 conn.write_buf.clear();
-                let force_close = conn.is_closed() || conn.close_requested;
-                conn.encode_response_head(
+                let force_close = conn.close_requested;
+                conn.encode_head(
                     server_head.version,
                     server_head.status,
                     &server_head.headers,
@@ -346,7 +369,7 @@ where
                         let bufs_slice = if b1.is_empty() { &bufs[1..] } else { &bufs[..] };
                         let n = conn.stream.write_vectored(bufs_slice).await?;
                         if n == 0 {
-                            return Err(velda_http1::Http1Error::ConnectionClosed);
+                            return Err(velda_http1::error::Http1Error::ConnectionClosed);
                         }
                         if n < b1.len() {
                             b1 = &b1[n..];
@@ -369,7 +392,7 @@ where
             }
 
             // Normal chunked progressive stream
-            conn.send_response_head_chunked(&server_head).await?;
+            conn.send_chunked_head(&server_head).await?;
 
             if available > 0 {
                 let first_chunk = &conn.upstream_read_buf[..available];
@@ -427,26 +450,25 @@ where
             // chunk or the entire stream is already present in `upstream_read_buf`.
             let mut sent_via_coalesced = false;
             if let Some((wire1, payload1, is_term1)) =
-                velda_http1::parse_single_chunk(&conn.upstream_read_buf)?
+                velda_http1::wire::parse_single_chunk(&conn.upstream_read_buf)?
             {
                 sent_via_coalesced = true;
                 if is_term1 {
                     conn.upstream_read_buf.advance(wire1);
-                    let _close = conn
-                        .send_response_head_chunked_coalesced(&server_head, None, true)
-                        .await?;
+                    let _close = conn.send_head_coalesced(&server_head, None, true).await?;
                     return Ok(());
                 }
 
-                let (is_terminated, total_wire) =
-                    match velda_http1::parse_single_chunk(&conn.upstream_read_buf[wire1..])? {
-                        Some((wire2, _, true)) => (true, wire1 + wire2),
-                        _ => (false, wire1),
-                    };
+                let (is_terminated, total_wire) = match velda_http1::wire::parse_single_chunk(
+                    &conn.upstream_read_buf[wire1..],
+                )? {
+                    Some((wire2, _, true)) => (true, wire1 + wire2),
+                    _ => (false, wire1),
+                };
 
                 conn.last_status = server_head.status.as_u16();
                 conn.last_bytes_tx += payload1.len() as u64;
-                let close = velda_http1::send_head_coalesced(
+                let close = velda_http1::server::response::send_head_coalesced(
                     &mut conn.stream,
                     &mut conn.write_buf,
                     &server_head,
@@ -490,7 +512,7 @@ where
             }
 
             if !sent_via_coalesced {
-                conn.send_response_head_chunked(&server_head).await?;
+                conn.send_chunked_head(&server_head).await?;
 
                 while let Some(chunk) =
                     read_next_chunk(&mut *upstream_lease, &mut conn.upstream_read_buf).await?
@@ -508,7 +530,7 @@ where
             }
         }
         Http1BodyFraming::Empty => {
-            conn.send_response_head_chunked(&server_head).await?;
+            conn.send_chunked_head(&server_head).await?;
         }
     }
 
