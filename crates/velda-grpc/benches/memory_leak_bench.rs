@@ -6,13 +6,14 @@ use std::time::Instant;
 
 use bytes::BytesMut;
 use common::{CountingAllocator, format_duration, format_throughput};
-use http::Method;
 use http::header::CONTENT_TYPE;
+use http::{Method, Uri};
 use tokio::io::duplex;
-use velda_core::GrpcStatus;
+use velda_core::{GrpcStatus, HeaderWorkspace};
 use velda_grpc::config::GrpcConfig;
 use velda_grpc::frame::encode_grpc_frame;
-use velda_grpc::tcp::server::GrpcServerConnection;
+use velda_grpc::tcp::client::connector::GrpcUpstreamConnector;
+use velda_grpc::tcp::server::connection::GrpcServerConnection;
 use velda_grpc::wire::GrpcWire;
 
 #[global_allocator]
@@ -41,69 +42,62 @@ async fn bench_heap_leak_detection(iterations: u64) {
             .unwrap();
         while let Some(mut stream) = server.accept().await.unwrap() {
             let _ = stream.read_unary_message(1024 * 1024).await.unwrap();
-            let _ =
-                stream
-                    .respond
-                    .send_unary_response(GrpcStatus::Ok, Some(b"leak_check_ack"), None);
+            let _ = stream
+                .respond
+                .send_unary_response(GrpcStatus::Ok, Some(b"leak_check_ack"), None)
+                .await;
         }
     });
 
     let client_task = tokio::spawn(async move {
-        let (mut client, h2_conn) = h2::client::handshake(client_io).await.unwrap();
-        tokio::spawn(async move {
-            let _ = h2_conn.await;
-        });
+        let mut client = GrpcUpstreamConnector::handshake_stream(client_io, &TEST_CONFIG, None)
+            .await
+            .unwrap();
 
         // 1. Warmup phase (50 requests) to stabilize initial H2 connection allocations
         let mut warmup_body = BytesMut::new();
         encode_grpc_frame(b"warmup", false, &mut warmup_body);
         let frozen_warmup = warmup_body.freeze();
+        let warmup_uri = Uri::from_static("http://localhost/test.Bench/Warmup");
 
         for _ in 0..50 {
-            let req = http::Request::builder()
-                .method(Method::POST)
-                .uri("http://localhost/test.Bench/Warmup")
-                .header(CONTENT_TYPE, GrpcWire::CONTENT_TYPE_VALUE)
-                .body(())
+            let mut req_ws = HeaderWorkspace::empty(2);
+            req_ws.insert(CONTENT_TYPE, GrpcWire::CONTENT_TYPE_VALUE);
+            client.ready().await.unwrap();
+            let (resp_fut, mut send) = client
+                .open_stream(Method::POST, warmup_uri.clone(), req_ws, false)
+                .await
                 .unwrap();
-            client = client.ready().await.unwrap();
-            let (resp_fut, mut send) = client.send_request(req, false).unwrap();
-            send.send_data(frozen_warmup.clone(), true).unwrap();
-            let (_, mut body) = resp_fut.await.unwrap().into_parts();
-            while let Some(chunk) = body.data().await {
-                let _ = chunk.unwrap();
-            }
-            let _ = body.trailers().await.unwrap();
+            send.send_chunk(frozen_warmup.clone(), true).await.unwrap();
+            let mut resp = resp_fut.await.unwrap();
+            while resp.body.recv_chunk().await.unwrap().is_some() {}
+            let _ = resp.body.trailers().await.unwrap();
         }
 
         // 2. Measure phase
         let mut payload_buf = BytesMut::new();
         encode_grpc_frame(b"memory_leak_test_payload", false, &mut payload_buf);
         let frozen_payload = payload_buf.freeze();
+        let uri = Uri::from_static("http://localhost/test.Bench/LeakCheck");
 
         ALLOCATOR.reset();
         let start = Instant::now();
 
         for _ in 0..iterations {
-            let req = http::Request::builder()
-                .method(Method::POST)
-                .uri("http://localhost/test.Bench/LeakCheck")
-                .header(CONTENT_TYPE, GrpcWire::CONTENT_TYPE_VALUE)
-                .body(())
+            let mut req_ws = HeaderWorkspace::empty(2);
+            req_ws.insert(CONTENT_TYPE, GrpcWire::CONTENT_TYPE_VALUE);
+            client.ready().await.unwrap();
+            let (resp_fut, mut send) = client
+                .open_stream(Method::POST, uri.clone(), req_ws, false)
+                .await
                 .unwrap();
-            client = client.ready().await.unwrap();
-            let (resp_fut, mut send) = client.send_request(req, false).unwrap();
-            send.send_data(frozen_payload.clone(), true).unwrap();
+            send.send_chunk(frozen_payload.clone(), true).await.unwrap();
 
-            let (parts, mut body) = resp_fut.await.unwrap().into_parts();
-            assert_eq!(parts.status, http::StatusCode::OK);
+            let mut resp = resp_fut.await.unwrap();
+            assert_eq!(resp.status, http::StatusCode::OK);
 
-            while let Some(chunk_res) = body.data().await {
-                let chunk = chunk_res.unwrap();
-                let len = chunk.len();
-                let _ = body.flow_control().release_capacity(len);
-            }
-            let _ = body.trailers().await.unwrap();
+            while resp.body.recv_chunk().await.unwrap().is_some() {}
+            let _ = resp.body.trailers().await.unwrap();
         }
 
         let elapsed = start.elapsed();

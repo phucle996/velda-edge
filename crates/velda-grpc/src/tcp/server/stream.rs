@@ -1,9 +1,12 @@
-//! Downstream active gRPC stream representation.
+//! Downstream active gRPC stream representation backed by `velda-http2` and [`HeaderWorkspace`].
+
+use bytes::{Bytes, BytesMut};
+use velda_core::HeaderWorkspace;
+use velda_http2::server::request::{Http2ServerRequestHead, Http2StreamReceiver};
 
 use super::responder::GrpcResponder;
 use crate::error::GrpcError;
 use crate::frame::{GrpcFrame, decode_grpc_frame};
-use bytes::{Bytes, BytesMut};
 
 /// Downstream gRPC server request head metadata over TCP.
 #[derive(Debug, Clone)]
@@ -13,13 +16,13 @@ pub struct GrpcServerRequestHead {
     /// Target authority (:authority or Host).
     pub authority: Option<String>,
     /// Request metadata / headers.
-    pub headers: http::HeaderMap,
+    pub headers: HeaderWorkspace,
 }
 
 impl GrpcServerRequestHead {
     /// Creates a new request head.
     #[inline]
-    pub fn new(uri: http::Uri, authority: Option<String>, headers: http::HeaderMap) -> Self {
+    pub fn new(uri: http::Uri, authority: Option<String>, headers: HeaderWorkspace) -> Self {
         Self {
             uri,
             authority,
@@ -44,16 +47,17 @@ impl GrpcServerRequest {
         Self { head, body }
     }
 
-    /// Constructs from HTTP request parts and body.
-    pub fn from_parts(parts: &http::request::Parts, body: velda_core::Body) -> Self {
-        let authority = parts
+    /// Constructs from [`Http2ServerRequestHead`] and body.
+    pub fn from_head(head: &Http2ServerRequestHead, body: velda_core::Body) -> Self {
+        let authority = head
             .headers
-            .get(":authority")
+            .get(http::header::HOST)
             .and_then(|v| v.to_str().ok().map(|s| s.to_string()))
-            .or_else(|| parts.uri.authority().map(|a| a.as_str().to_string()));
+            .or_else(|| head.uri.authority().map(|a| a.as_str().to_string()));
 
-        let head = GrpcServerRequestHead::new(parts.uri.clone(), authority, parts.headers.clone());
-        Self::new(head, body)
+        let grpc_head =
+            GrpcServerRequestHead::new(head.uri.clone(), authority, head.headers.clone());
+        Self::new(grpc_head, body)
     }
 
     /// Converts into canonical [`velda_core::L7Request`].
@@ -70,10 +74,10 @@ impl GrpcServerRequest {
 
 /// An accepted, active downstream gRPC stream.
 pub struct GrpcServerStream {
-    /// Initial HTTP/2 headers / parts (:path, :authority, metadata).
-    pub parts: http::request::Parts,
+    /// Initial HTTP/2 request head (`:path`, `:authority`, enriched [`HeaderWorkspace`]).
+    pub head: Http2ServerRequestHead,
     /// Streaming body reader receiving raw gRPC message frames.
-    pub recv_stream: h2::RecvStream,
+    pub receiver: Http2StreamReceiver,
     /// Streaming response sender responding to client.
     pub respond: GrpcResponder,
 }
@@ -88,24 +92,18 @@ impl GrpcServerStream {
             Some(payload) => velda_core::Body::Bytes(payload),
             None => velda_core::Body::Empty,
         };
-        Ok(GrpcServerRequest::from_parts(&self.parts, body))
+        Ok(GrpcServerRequest::from_head(&self.head, body))
     }
+
     /// Reads exactly one Length-Prefixed Message from the downstream stream (Unary).
-    ///
-    /// Fast-paths single complete frames to return `Ok(Some(payload))` with zero heap allocation and zero copying.
-    /// Buffers incoming data chunks when fragmented across frames until full LPM payload is received.
-    /// Enforces `max_body_size` — rejects with [`GrpcError::PayloadTooLarge`] if exceeded.
-    /// Returns `Ok(Some(payload))` or `Ok(None)` if stream was empty.
     pub async fn read_unary_message(
         &mut self,
         max_body_size: usize,
     ) -> Result<Option<Bytes>, GrpcError> {
-        let Some(first_chunk_res) = self.recv_stream.data().await else {
+        let Some(first_chunk) = self.receiver.recv_chunk().await? else {
             return Ok(None);
         };
-        let first_chunk = first_chunk_res.map_err(GrpcError::H2)?;
         let first_len = first_chunk.len();
-        let _ = self.recv_stream.flow_control().release_capacity(first_len);
 
         // Fast-path: single complete LPM frame (typical for Unary RPCs)
         if first_len >= GrpcFrame::HEADER_SIZE {
@@ -118,7 +116,7 @@ impl GrpcServerStream {
             if msg_len > max_body_size {
                 return Err(GrpcError::PayloadTooLarge(msg_len));
             }
-            if first_len == GrpcFrame::HEADER_SIZE + msg_len {
+            if GrpcFrame::HEADER_SIZE.checked_add(msg_len) == Some(first_len) {
                 let flag = first_chunk[0];
                 if flag != GrpcFrame::FLAG_UNCOMPRESSED && flag != GrpcFrame::FLAG_COMPRESSED {
                     return Err(GrpcError::Protocol(format!(
@@ -137,11 +135,8 @@ impl GrpcServerStream {
             return Ok(Some(payload));
         }
 
-        while let Some(chunk_res) = self.recv_stream.data().await {
-            let chunk = chunk_res.map_err(GrpcError::H2)?;
-            let len = chunk.len();
+        while let Some(chunk) = self.receiver.recv_chunk().await? {
             buf.extend_from_slice(&chunk);
-            let _ = self.recv_stream.flow_control().release_capacity(len);
 
             if buf.len() >= GrpcFrame::HEADER_SIZE {
                 let msg_len = u32::from_be_bytes([buf[1], buf[2], buf[3], buf[4]]) as usize;
@@ -150,7 +145,7 @@ impl GrpcServerStream {
                 }
             }
 
-            if buf.len() > max_body_size + GrpcFrame::HEADER_SIZE {
+            if buf.len() > max_body_size.saturating_add(GrpcFrame::HEADER_SIZE) {
                 return Err(GrpcError::PayloadTooLarge(buf.len()));
             }
 
@@ -173,16 +168,14 @@ impl GrpcServerStream {
     ///
     /// Preserves the 5-byte LPM frame header for zero-copy forwarding to upstream backends.
     pub async fn read_raw_message(&mut self, max_body_size: usize) -> Result<Bytes, GrpcError> {
-        if self.recv_stream.is_end_stream() {
+        if self.receiver.is_end_stream() {
             return Ok(Bytes::new());
         }
 
-        let Some(first_chunk_res) = self.recv_stream.data().await else {
+        let Some(chunk) = self.receiver.recv_chunk().await? else {
             return Ok(Bytes::new());
         };
-        let chunk = first_chunk_res.map_err(GrpcError::H2)?;
         let len = chunk.len();
-        let _ = self.recv_stream.flow_control().release_capacity(len);
 
         if len >= 5 {
             let declared_len =
@@ -192,18 +185,19 @@ impl GrpcServerStream {
             }
         }
 
-        if self.recv_stream.is_end_stream() {
+        if len > max_body_size.saturating_add(GrpcFrame::HEADER_SIZE) {
+            return Err(GrpcError::PayloadTooLarge(len));
+        }
+
+        if self.receiver.is_end_stream() {
             Ok(chunk)
         } else {
             let mut buf = BytesMut::with_capacity(len * 2);
             buf.extend_from_slice(&chunk);
             let mut checked_lpm = len >= 5;
 
-            while let Some(chunk_res) = self.recv_stream.data().await {
-                let chunk = chunk_res.map_err(GrpcError::H2)?;
-                let len = chunk.len();
+            while let Some(chunk) = self.receiver.recv_chunk().await? {
                 buf.extend_from_slice(&chunk);
-                let _ = self.recv_stream.flow_control().release_capacity(len);
 
                 if !checked_lpm && buf.len() >= 5 {
                     let declared_len =
@@ -214,46 +208,11 @@ impl GrpcServerStream {
                     checked_lpm = true;
                 }
 
-                if buf.len() > max_body_size + 5 {
+                if buf.len() > max_body_size.saturating_add(GrpcFrame::HEADER_SIZE) {
                     return Err(GrpcError::PayloadTooLarge(buf.len()));
                 }
             }
             Ok(buf.freeze())
         }
-    }
-
-    /// Extracts the effective authority from `:authority` or URI authority.
-    #[inline]
-    pub fn authority(&self) -> Option<&str> {
-        self.parts
-            .headers
-            .get(":authority")
-            .and_then(|v| v.to_str().ok())
-            .or_else(|| self.parts.uri.authority().map(|a| a.as_str()))
-    }
-
-    /// Strips untrusted client forwarding headers and RFC 9113 hop-by-hop headers,
-    /// and injects authoritative proxy forwarding headers (RFC 7239 + `X-Forwarded-*`).
-    pub fn enrich_forwarded_headers(
-        &mut self,
-        peer_ip: u128,
-        local_ip: u128,
-        local_port_be: u16,
-        is_tls: bool,
-    ) {
-        let auth_hdr = self.parts.headers.get(":authority").cloned();
-        let authority_str = auth_hdr
-            .as_ref()
-            .and_then(|v| v.to_str().ok())
-            .or_else(|| self.parts.uri.authority().map(|a| a.as_str()));
-
-        super::header::enrich_headers(
-            &mut self.parts.headers,
-            peer_ip,
-            local_ip,
-            local_port_be,
-            is_tls,
-            authority_str,
-        );
     }
 }

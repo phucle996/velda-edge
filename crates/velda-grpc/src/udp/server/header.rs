@@ -1,149 +1,36 @@
-//! Downstream gRPC Header Processing and Proxy Enrichment over UDP (RFC 9114 / RFC 7239).
+//! Downstream gRPC Authority Extraction Helper over UDP (RFC 9114).
+//!
+//! Proxy forwarding enrichment and RFC 9114/9113 hop-by-hop anti-spoofing sanitization run
+//! in a single wire decode pass inside [`crate::udp::wire::decode_qpack_ingress`].
 
 use http::Uri;
-use http::header::{HeaderMap, HeaderName, HeaderValue};
 use velda_core::HeaderWorkspace;
-
-/// Prohibited connection-specific hop-by-hop headers per RFC 9114 Section 4.2.
-pub const HOP_BY_HOP: [HeaderName; 5] = [
-    http::header::CONNECTION,
-    HeaderName::from_static("keep-alive"),
-    HeaderName::from_static("proxy-connection"),
-    http::header::TRANSFER_ENCODING,
-    http::header::UPGRADE,
-];
-
-/// Enriches gRPC UDP headers with authoritative proxy forwarding headers and strips
-/// RFC 9114/9113 hop-by-hop headers.
-///
-/// Overwrites standard proxy forwarding headers (`x-forwarded-*`, `x-real-ip`) directly with authoritative values.
-pub fn enrich_headers(
-    headers: &mut HeaderWorkspace,
-    peer_ip: u128,
-    local_ip: u128,
-    local_port_be: u16,
-    authority: Option<&str>,
-) {
-    // 1. Strip RFC 9114/9113 connection-specific hop-by-hop headers
-    for name in &HOP_BY_HOP {
-        headers.remove(name);
-    }
-    if let Some(te_val) = headers.get(http::header::TE) {
-        let is_trailers = te_val
-            .to_str()
-            .is_ok_and(|s| s.eq_ignore_ascii_case("trailers"));
-        if !is_trailers {
-            headers.remove(http::header::TE);
-        }
-    }
-
-    // 2. Inject authoritative client IP (directly overwriting spoofed headers)
-    // gRPC over UDP QUIC is always TLS 1.3 encrypted
-    let proto = "https";
-
-    let (ip_buf, ip_len) = velda_core::lut::ip::format_ip_bytes(peer_ip);
-    let client_ip_bytes = &ip_buf[..ip_len];
-
-    if let Ok(val) = HeaderValue::from_bytes(client_ip_bytes) {
-        headers.insert(HeaderName::from_static("x-forwarded-for"), val.clone());
-        headers.insert(HeaderName::from_static("x-real-ip"), val);
-    }
-
-    headers.insert(
-        HeaderName::from_static("x-forwarded-proto"),
-        HeaderValue::from_static(proto),
-    );
-
-    headers.insert(
-        HeaderName::from_static("x-forwarded-port"),
-        HeaderValue::from(u16::from_be(local_port_be)),
-    );
-
-    if let Some(auth) = authority
-        && let Ok(val) = HeaderValue::from_str(auth)
-    {
-        headers.insert(HeaderName::from_static("x-forwarded-host"), val);
-    }
-
-    // RFC 7239 Forwarded
-    let mut fwd_buf = [0u8; 256];
-    let fwd_len = {
-        use std::io::Write;
-        let mut cursor = std::io::Cursor::new(&mut fwd_buf[..]);
-        let client_str = std::str::from_utf8(client_ip_bytes).unwrap_or("");
-        if velda_core::lut::ip::is_v4_u128(peer_ip) {
-            let _ = write!(cursor, "for={client_str}");
-        } else {
-            let _ = write!(cursor, "for=\"[{client_str}]\"");
-        }
-        let _ = write!(cursor, ";proto={proto};by=");
-        let (local_buf, local_len) = velda_core::lut::ip::format_ip_bytes(local_ip);
-        let local_str = std::str::from_utf8(&local_buf[..local_len]).unwrap_or("");
-        if velda_core::lut::ip::is_v4_u128(local_ip) {
-            let _ = write!(cursor, "{local_str}");
-        } else {
-            let _ = write!(cursor, "\"[{local_str}]\"");
-        }
-        if let Some(auth) = authority {
-            let _ = write!(cursor, ";host=\"{auth}\"");
-        }
-        cursor.position() as usize
-    };
-    let fwd_bytes = &fwd_buf[..fwd_len];
-    if let Ok(val) = HeaderValue::from_bytes(fwd_bytes) {
-        headers.insert(HeaderName::from_static("forwarded"), val);
-    }
-}
 
 /// Extracts effective authority from request headers or URI authority.
 #[inline]
-pub fn extract_authority<'a>(headers: &'a HeaderMap, uri: &'a Uri) -> Option<&'a str> {
+pub fn extract_authority<'a>(headers: &'a HeaderWorkspace, uri: &'a Uri) -> Option<&'a str> {
     headers
         .get(http::header::HOST)
         .and_then(|v| v.to_str().ok())
-        .or_else(|| uri.authority().map(|a| a.as_str()))
+        .or_else(|| uri.authority().map(|a| a.as_str()).or_else(|| uri.host()))
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use http::header::HeaderValue;
 
     #[test]
-    fn test_enrich_grpc_udp_forwarded_headers() {
-        let mut headers = HeaderWorkspace::default();
-        headers.insert(
-            HeaderName::from_static("connection"),
-            "keep-alive".parse().unwrap(),
+    fn test_extract_authority_precedence() {
+        let mut ws = HeaderWorkspace::empty(2);
+        ws.insert(
+            http::header::HOST,
+            HeaderValue::from_static("udp-grpc.internal"),
         );
-        headers.insert(
-            HeaderName::from_static("x-forwarded-for"),
-            "10.0.0.99".parse().unwrap(),
-        );
+        let uri: Uri = "https://uri.example.com/pkg.Svc/Call".parse().unwrap();
+        assert_eq!(extract_authority(&ws, &uri), Some("udp-grpc.internal"));
 
-        let peer_ip = velda_core::lut::ip::v4_to_u128(0xC0A8_0101);
-        let local_ip = velda_core::lut::ip::v4_to_u128(0x0A00_0001);
-        let local_port_be = 443u16.to_be();
-
-        enrich_headers(
-            &mut headers,
-            peer_ip,
-            local_ip,
-            local_port_be,
-            Some("udp-grpc.internal"),
-        );
-
-        assert_eq!(
-            headers.get("x-forwarded-for").unwrap().to_str().unwrap(),
-            "192.168.1.1"
-        );
-        assert_eq!(
-            headers.get("x-forwarded-proto").unwrap().to_str().unwrap(),
-            "https"
-        );
-        assert_eq!(
-            headers.get("x-forwarded-host").unwrap().to_str().unwrap(),
-            "udp-grpc.internal"
-        );
-        assert!(headers.get("connection").is_none());
+        let empty = HeaderWorkspace::empty(0);
+        assert_eq!(extract_authority(&empty, &uri), Some("uri.example.com"));
     }
 }

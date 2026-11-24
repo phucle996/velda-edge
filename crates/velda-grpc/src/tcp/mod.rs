@@ -13,9 +13,10 @@ pub use strategy::GrpcPipeStrategy;
 
 pub use client::{
     GrpcClientRequest, GrpcClientRequestHead, GrpcClientResponse, GrpcClientResponseHead,
-    GrpcUpstreamConnector,
+    GrpcUpstreamConnector, build_headers, sanitize_headers,
 };
 pub use server::{
     GrpcResponder, GrpcServerConnection, GrpcServerRequest, GrpcServerRequestHead,
-    GrpcServerResponse, GrpcServerResponseHead, GrpcServerStream,
+    GrpcServerResponse, GrpcServerResponseHead, GrpcServerStream, enrich_headers,
+    extract_authority, parse_grpc_path,
 };

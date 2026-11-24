@@ -42,22 +42,6 @@ impl GrpcUdpClient {
             .map_err(|_| GrpcError::Protocol("connection closed".into()))?
     }
 
-    /// Dispatches an upstream [`super::request::GrpcUdpClientRequest`] over a new multiplexed bidirectional stream on this connection.
-    pub async fn send_client_request(
-        &self,
-        req: super::request::GrpcUdpClientRequest,
-    ) -> Result<super::response::GrpcUdpClientResponse, GrpcError> {
-        let l7_req = req.into_l7();
-        let l7_resp = self.send_request(l7_req).await?;
-        Ok(super::response::GrpcUdpClientResponse::from_l7(&l7_resp))
-    }
-
-    /// Dispatches a borrowed [`L7Request`] by cloning it.
-    #[inline]
-    pub async fn send_request_ref(&self, req: &L7Request) -> Result<L7Response, GrpcError> {
-        self.send_request(req.clone()).await
-    }
-
     /// Returns the target physical `(ip: u128, port_be: u16)` of this client connection.
     #[inline]
     pub fn target(&self) -> (u128, u16) {

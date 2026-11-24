@@ -26,10 +26,8 @@ pub use tcp::{
     GrpcServerRequestHead, GrpcServerResponse, GrpcServerResponseHead, GrpcServerStream,
     GrpcUpstreamConnector,
 };
-pub use udp::{
-    GrpcUdpClient, GrpcUdpClientRequest, GrpcUdpClientRequestHead, GrpcUdpClientResponse,
-    GrpcUdpClientResponseHead, GrpcUdpEngine, GrpcUdpPipeStrategy, GrpcUdpRequestEvent,
-    GrpcUdpResponder, GrpcUdpServerRequest, GrpcUdpServerRequestHead, GrpcUdpServerResponse,
-    GrpcUdpServerResponseHead, GrpcUdpServerStream,
-};
+pub use udp::client::connector::{GrpcUdpClient, connect as connect_udp};
+pub use udp::quinn_proto;
+pub use udp::server::engine::{GrpcUdpEngine, GrpcUdpRequestEvent, OutgoingDatagram};
+pub use udp::strategy::GrpcUdpPipeStrategy;
 pub use wire::{GrpcWire, X_REQUEST_ID};

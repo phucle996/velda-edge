@@ -17,8 +17,8 @@ use velda_core::{Body, L7Request, L7Response};
 use crate::config::GrpcConfig;
 use crate::error::GrpcError;
 use crate::udp::wire::{
-    UdpFrame, decode_qpack_headers, decode_udp_frame, encode_qpack_response, encode_udp_frame,
-    encode_varint,
+    GrpcUdpForwardingAddrs, GrpcUdpIngressEnrich, UdpFrame, decode_qpack_ingress, decode_udp_frame,
+    encode_qpack_response, encode_udp_frame, encode_varint,
 };
 use velda_core::GrpcStatus;
 
@@ -92,7 +92,7 @@ impl GrpcUdpEngine {
         now: Instant,
         remote_ip: u128,
         remote_port_be: u16,
-        local_ip: Option<u128>,
+        local_addr: Option<(u128, u16)>,
         data: &[u8],
     ) -> (Vec<OutgoingDatagram>, Vec<GrpcUdpRequestEvent>) {
         let remote = if velda_core::lut::ip::is_v4_u128(remote_ip) {
@@ -100,12 +100,17 @@ impl GrpcUdpEngine {
         } else {
             std::net::SocketAddr::V6(velda_core::lut::ip::v6itoaddr(remote_ip, remote_port_be))
         };
-        let local_ip = local_ip.map(|ip| {
+        let local_ip = local_addr.map(|(ip, _)| {
             if velda_core::lut::ip::is_v4_u128(ip) {
                 std::net::IpAddr::V4(*velda_core::lut::ip::v4itoaddr(ip, 0).ip())
             } else {
                 std::net::IpAddr::V6(*velda_core::lut::ip::v6itoaddr(ip, 0).ip())
             }
+        });
+        let forwarding = local_addr.map(|(lip, lport_be)| GrpcUdpForwardingAddrs {
+            peer_ip: remote_ip,
+            local_ip: lip,
+            local_port_be: lport_be,
         });
         let mut outgoing = Vec::new();
         let mut ready_requests = Vec::new();
@@ -210,6 +215,7 @@ impl GrpcUdpEngine {
                                         &mut self.streams,
                                         &mut ready_requests,
                                         self.config.max_message_size,
+                                        forwarding,
                                     );
                                 }
                             }
@@ -227,6 +233,7 @@ impl GrpcUdpEngine {
                                     &mut self.streams,
                                     &mut ready_requests,
                                     self.config.max_message_size,
+                                    forwarding,
                                 );
                             }
                         }
@@ -323,6 +330,7 @@ impl GrpcUdpEngine {
         streams: &mut HashMap<(ConnectionHandle, StreamId), StreamSlot>,
         ready_requests: &mut Vec<GrpcUdpRequestEvent>,
         max_message_size: usize,
+        forwarding: Option<GrpcUdpForwardingAddrs>,
     ) {
         let slot = streams.entry((handle, id)).or_default();
         let mut stream_finished = false;
@@ -364,50 +372,36 @@ impl GrpcUdpEngine {
         loop {
             match decode_udp_frame(&mut slot.wire_buf) {
                 Ok(Some(frame)) => match frame {
-                    UdpFrame::Headers(payload) => match decode_qpack_headers(&payload) {
-                        Ok(mut decoded) => {
-                            if decoded.headers.len() > velda_core::buffer::MAX_WIRE_HEADERS {
-                                tracing::warn!(
-                                    stream_id = id.index(),
-                                    header_count = decoded.headers.len(),
-                                    max = velda_core::buffer::MAX_WIRE_HEADERS,
-                                    "Rejecting gRPC UDP request exceeding MAX_WIRE_HEADERS"
+                    UdpFrame::Headers(payload) => {
+                        let ingress_nanos = velda_core::clock::now_unix_nanos();
+                        let (_id, req_id) = velda_core::request_id::next_request_id(ingress_nanos);
+                        match decode_qpack_ingress(
+                            &payload,
+                            GrpcUdpIngressEnrich {
+                                request_id: req_id,
+                                forwarding,
+                            },
+                        ) {
+                            Ok(decoded) => {
+                                let req = L7Request::new(
+                                    decoded.method.unwrap_or(http::Method::POST),
+                                    decoded.uri.unwrap_or_else(|| http::Uri::from_static("/")),
+                                    http::Version::HTTP_3,
+                                    decoded.headers,
+                                    Body::Empty,
                                 );
+                                slot.request = Some(req);
+                            }
+                            Err(e) => {
+                                tracing::warn!(error = %e, "Failed to decode QPACK headers on gRPC UDP stream");
                                 let _ = conn
                                     .recv_stream(id)
-                                    .stop(quinn_proto::VarInt::from_u32(0x0107)); // H3_EXCESSIVE_LOAD
+                                    .stop(quinn_proto::VarInt::from_u32(0x0106));
                                 streams.remove(&(handle, id));
                                 return;
                             }
-
-                            // [INGRESS W3C REQUEST ID GENERATION]
-                            // Authoritatively generate W3C Request ID at QPACK decode boundary (~1-2ns).
-                            // Overwrite any client-supplied x-request-id in-place so HeaderWorkspace::from_headers
-                            // preserves it directly in Slot 0 without double ID generation.
-                            let ingress_nanos = velda_core::clock::now_unix_nanos();
-                            let (_id, req_id) =
-                                velda_core::request_id::next_request_id(ingress_nanos);
-                            decoded
-                                .headers
-                                .insert(velda_core::buffer::X_REQUEST_ID, req_id);
-                            let req = L7Request::new(
-                                decoded.method.unwrap_or(http::Method::POST),
-                                decoded.uri.unwrap_or_else(|| http::Uri::from_static("/")),
-                                http::Version::HTTP_3,
-                                decoded.headers,
-                                Body::Empty,
-                            );
-                            slot.request = Some(req);
                         }
-                        Err(e) => {
-                            tracing::warn!(error = %e, "Failed to decode QPACK headers on gRPC UDP stream");
-                            let _ = conn
-                                .recv_stream(id)
-                                .stop(quinn_proto::VarInt::from_u32(0x0106));
-                            streams.remove(&(handle, id));
-                            return;
-                        }
-                    },
+                    }
                     UdpFrame::Data(payload) => {
                         if let Some(ref mut req) = slot.request {
                             match req.body {
@@ -487,7 +481,7 @@ impl GrpcUdpEngine {
             .get_mut(&handle)
             .ok_or_else(|| GrpcError::Internal("connection handle closed".into()))?;
 
-        // 1. Encode response HEADERS frame
+        // 1. Encode response HEADERS frame directly from HeaderWorkspace
         let mut header_payload = BytesMut::new();
         encode_qpack_response(response.status, &response.headers, &mut header_payload);
         let mut write_buf = BytesMut::new();

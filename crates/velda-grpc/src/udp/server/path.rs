@@ -1,7 +1,5 @@
 //! Downstream gRPC Path Parsing and Security Validation over UDP (RFC 9114 / gRPC-over-HTTP3).
 
-use http::Uri;
-
 use crate::error::GrpcError;
 
 /// Parses and validates a gRPC request URI path into `(service, method)` components over UDP.
@@ -56,12 +54,6 @@ pub fn parse_grpc_path(path: &str) -> Result<(&str, &str), GrpcError> {
     }
 
     Ok((service, method))
-}
-
-/// Validates that a URI has a well-formed gRPC path according to the gRPC specification over UDP.
-#[inline]
-pub fn validate_grpc_path(uri: &Uri) -> Result<(&str, &str), GrpcError> {
-    parse_grpc_path(uri.path())
 }
 
 #[cfg(test)]

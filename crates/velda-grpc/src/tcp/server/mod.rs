@@ -13,6 +13,6 @@ pub mod stream;
 
 pub use connection::GrpcServerConnection;
 pub use header::{enrich_headers, extract_authority};
-pub use path::{parse_grpc_path, validate_grpc_path};
+pub use path::parse_grpc_path;
 pub use responder::{GrpcResponder, GrpcServerResponse, GrpcServerResponseHead};
 pub use stream::{GrpcServerRequest, GrpcServerRequestHead, GrpcServerStream};

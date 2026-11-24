@@ -11,15 +11,4 @@ pub mod server;
 pub mod strategy;
 pub mod wire;
 
-pub use strategy::GrpcUdpPipeStrategy;
-
-pub use client::{
-    GrpcUdpClient, GrpcUdpClientRequest, GrpcUdpClientRequestHead, GrpcUdpClientResponse,
-    GrpcUdpClientResponseHead, connect as connect_udp, default_client_config,
-};
 pub use quinn_proto;
-pub use server::{
-    GrpcUdpEngine, GrpcUdpRequestEvent, GrpcUdpResponder, GrpcUdpServerRequest,
-    GrpcUdpServerRequestHead, GrpcUdpServerResponse, GrpcUdpServerResponseHead,
-    GrpcUdpServerStream, OutgoingDatagram,
-};

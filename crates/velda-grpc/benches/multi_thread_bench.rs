@@ -6,14 +6,15 @@ use std::time::Instant;
 
 use bytes::BytesMut;
 use common::{format_duration, format_throughput};
-use http::Method;
 use http::header::CONTENT_TYPE;
+use http::{Method, Uri};
 use tokio::io::duplex;
 use tokio::task::JoinSet;
-use velda_core::GrpcStatus;
+use velda_core::{GrpcStatus, HeaderWorkspace};
 use velda_grpc::config::GrpcConfig;
 use velda_grpc::frame::encode_grpc_frame;
-use velda_grpc::tcp::server::GrpcServerConnection;
+use velda_grpc::tcp::client::connector::GrpcUpstreamConnector;
+use velda_grpc::tcp::server::connection::GrpcServerConnection;
 use velda_grpc::wire::GrpcWire;
 
 const TEST_CONFIG: GrpcConfig = GrpcConfig::from_hardware(4, 8 * 1024 * 1024 * 1024);
@@ -42,69 +43,68 @@ async fn bench_multiplexed_concurrency(concurrency: usize, requests_per_worker: 
         while let Some(mut stream) = server.accept().await.unwrap() {
             tokio::spawn(async move {
                 let _ = stream.read_unary_message(1024 * 1024).await.unwrap();
-                let _ = stream.respond.send_unary_response(
-                    GrpcStatus::Ok,
-                    Some(b"concurrent_reply"),
-                    None,
-                );
+                let _ = stream
+                    .respond
+                    .send_unary_response(GrpcStatus::Ok, Some(b"concurrent_reply"), None)
+                    .await;
             });
         }
     });
 
     let client_task = tokio::spawn(async move {
-        let (client, h2_conn) = h2::client::handshake(client_io).await.unwrap();
-        tokio::spawn(async move {
-            let _ = h2_conn.await;
-        });
+        let client = GrpcUpstreamConnector::handshake_stream(client_io, &TEST_CONFIG, None)
+            .await
+            .unwrap();
 
         // Warmup single request
         let mut warmup_c = client.clone();
         let mut warmup_body = BytesMut::new();
         encode_grpc_frame(b"warmup", false, &mut warmup_body);
-        let warmup_req = http::Request::builder()
-            .method(Method::POST)
-            .uri("http://localhost/test.Bench/Warmup")
-            .header(CONTENT_TYPE, GrpcWire::CONTENT_TYPE_VALUE)
-            .body(())
+        let mut warmup_ws = HeaderWorkspace::empty(2);
+        warmup_ws.insert(CONTENT_TYPE, GrpcWire::CONTENT_TYPE_VALUE);
+        warmup_c.ready().await.unwrap();
+        let (resp_fut, mut send) = warmup_c
+            .open_stream(
+                Method::POST,
+                Uri::from_static("http://localhost/test.Bench/Warmup"),
+                warmup_ws,
+                false,
+            )
+            .await
             .unwrap();
-        warmup_c = warmup_c.ready().await.unwrap();
-        let (resp_fut, mut send) = warmup_c.send_request(warmup_req, false).unwrap();
-        send.send_data(warmup_body.freeze(), true).unwrap();
+        send.send_chunk(warmup_body.freeze(), true).await.unwrap();
         let _ = resp_fut.await.unwrap();
 
         let mut workers = JoinSet::new();
         let mut payload_buf = BytesMut::new();
         encode_grpc_frame(b"concurrent_request_payload", false, &mut payload_buf);
         let frozen_payload = payload_buf.freeze();
+        let uri = Uri::from_static("http://localhost/test.Bench/Echo");
 
         let start = Instant::now();
 
         for _ in 0..concurrency {
             let mut c = client.clone();
             let payload = frozen_payload.clone();
+            let worker_uri = uri.clone();
 
             workers.spawn(async move {
                 for _ in 0..requests_per_worker {
-                    let req = http::Request::builder()
-                        .method(Method::POST)
-                        .uri("http://localhost/test.Bench/Echo")
-                        .header(CONTENT_TYPE, GrpcWire::CONTENT_TYPE_VALUE)
-                        .body(())
+                    let mut req_ws = HeaderWorkspace::empty(2);
+                    req_ws.insert(CONTENT_TYPE, GrpcWire::CONTENT_TYPE_VALUE);
+
+                    c.ready().await.unwrap();
+                    let (resp_fut, mut send) = c
+                        .open_stream(Method::POST, worker_uri.clone(), req_ws, false)
+                        .await
                         .unwrap();
+                    send.send_chunk(payload.clone(), true).await.unwrap();
 
-                    c = c.ready().await.unwrap();
-                    let (resp_fut, mut send) = c.send_request(req, false).unwrap();
-                    send.send_data(payload.clone(), true).unwrap();
+                    let mut resp = resp_fut.await.unwrap();
+                    assert_eq!(resp.status, http::StatusCode::OK);
 
-                    let (resp_parts, mut body) = resp_fut.await.unwrap().into_parts();
-                    assert_eq!(resp_parts.status, http::StatusCode::OK);
-
-                    while let Some(chunk_res) = body.data().await {
-                        let chunk = chunk_res.unwrap();
-                        let len = chunk.len();
-                        let _ = body.flow_control().release_capacity(len);
-                    }
-                    let _ = body.trailers().await.unwrap();
+                    while resp.body.recv_chunk().await.unwrap().is_some() {}
+                    let _ = resp.body.trailers().await.unwrap();
                 }
             });
         }

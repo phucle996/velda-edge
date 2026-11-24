@@ -142,6 +142,18 @@ impl GrpcConfig {
         self.max_call_duration_ms = ms;
         self
     }
+
+    /// Derives an underlying [`velda_http2::config::Http2Config`] for gRPC over TCP/HTTP2 transport.
+    #[inline]
+    pub const fn to_http2_config(&self) -> velda_http2::config::Http2Config {
+        let mut h2 = velda_http2::config::Http2Config::from_hardware(4, 8 * 1024 * 1024 * 1024);
+        h2.max_body_size = self.max_message_size.saturating_add(5);
+        h2.max_header_size = self.max_header_size;
+        h2.max_header_list_size = self.max_header_size as u32;
+        h2.idle_timeout_ms = self.idle_timeout_ms;
+        h2.max_concurrent_streams = self.max_concurrent_streams;
+        h2
+    }
 }
 
 #[cfg(test)]

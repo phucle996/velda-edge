@@ -1,13 +1,12 @@
 use bytes::{Bytes, BytesMut};
-use http::{HeaderMap, Method, StatusCode, Uri};
+use http::{HeaderValue, Method, StatusCode, Uri};
 use std::time::Duration;
 use tokio::net::TcpListener;
-use velda_core::GrpcStatus;
-use velda_core::{Body, L7Request};
-use velda_grpc::GrpcConfig;
+use velda_core::{Body, GrpcStatus, HeaderWorkspace, L7Request};
+use velda_grpc::config::GrpcConfig;
 use velda_grpc::frame::{decode_grpc_frame, encode_grpc_frame};
-use velda_grpc::tcp::client::GrpcUpstreamConnector;
-use velda_grpc::tcp::server::GrpcServerConnection;
+use velda_grpc::tcp::client::connector::GrpcUpstreamConnector;
+use velda_grpc::tcp::server::connection::GrpcServerConnection;
 
 /// Tests direct Unary RPC roundtrip between GrpcUpstreamConnector and GrpcServerConnection.
 #[tokio::test]
@@ -23,8 +22,8 @@ async fn test_grpc_unary_roundtrip() {
             .unwrap();
 
         while let Some(mut stream) = conn.accept().await.unwrap() {
-            assert_eq!(stream.parts.uri.path(), "/test.UnaryService/EchoUnary");
-            assert_eq!(stream.parts.method, Method::POST);
+            assert_eq!(stream.head.uri.path(), "/test.UnaryService/EchoUnary");
+            assert_eq!(stream.head.method, Method::POST);
 
             let msg = stream.read_unary_message(10 * 1024 * 1024).await.unwrap();
             assert_eq!(msg, Some(Bytes::from_static(b"hello_unary")));
@@ -32,6 +31,7 @@ async fn test_grpc_unary_roundtrip() {
             stream
                 .respond
                 .send_unary_response(GrpcStatus::Ok, Some(b"world_unary"), None)
+                .await
                 .unwrap();
         }
     });
@@ -55,9 +55,9 @@ async fn test_grpc_unary_roundtrip() {
     let mut req_body = BytesMut::new();
     encode_grpc_frame(b"hello_unary", false, &mut req_body);
 
-    let mut headers = HeaderMap::new();
-    headers.insert("content-type", "application/grpc".parse().unwrap());
-    headers.insert("te", "trailers".parse().unwrap());
+    let mut headers = HeaderWorkspace::empty(4);
+    headers.insert("content-type", HeaderValue::from_static("application/grpc"));
+    headers.insert("te", HeaderValue::from_static("trailers"));
 
     let req = L7Request::new(
         Method::POST,
@@ -121,8 +121,8 @@ async fn test_grpc_server_trailers_only_response() {
     .await
     .unwrap();
 
-    let mut headers = HeaderMap::new();
-    headers.insert("content-type", "application/grpc".parse().unwrap());
+    let mut headers = HeaderWorkspace::empty(4);
+    headers.insert("content-type", HeaderValue::from_static("application/grpc"));
 
     let req = L7Request::new(
         Method::POST,
@@ -158,25 +158,26 @@ async fn test_grpc_server_streaming_roundtrip() {
             .unwrap();
 
         while let Some(mut stream) = conn.accept().await.unwrap() {
-            let resp = http::Response::builder()
-                .status(StatusCode::OK)
-                .header("content-type", "application/grpc")
-                .body(())
-                .unwrap();
+            let mut resp_ws = HeaderWorkspace::empty(2);
+            resp_ws.insert("content-type", HeaderValue::from_static("application/grpc"));
 
-            let mut send = stream.respond.send_response(resp, false).unwrap();
+            let mut send = stream
+                .respond
+                .send_response_headers(StatusCode::OK, &resp_ws, false)
+                .unwrap()
+                .unwrap();
 
             let mut f1 = BytesMut::new();
             encode_grpc_frame(b"server_stream_chunk_1", false, &mut f1);
-            send.send_data(f1.freeze(), false).unwrap();
+            send.send_chunk(f1.freeze()).await.unwrap();
 
             let mut f2 = BytesMut::new();
             encode_grpc_frame(b"server_stream_chunk_2", false, &mut f2);
-            send.send_data(f2.freeze(), false).unwrap();
+            send.send_chunk(f2.freeze()).await.unwrap();
 
-            let mut trailers = HeaderMap::new();
-            trailers.insert("grpc-status", "0".parse().unwrap());
-            trailers.insert("grpc-message", "Stream complete".parse().unwrap());
+            let mut trailers = HeaderWorkspace::empty(2);
+            trailers.insert("grpc-status", HeaderValue::from_static("0"));
+            trailers.insert("grpc-message", HeaderValue::from_static("Stream complete"));
             send.send_trailers(trailers).unwrap();
         }
     });
@@ -184,7 +185,7 @@ async fn test_grpc_server_streaming_roundtrip() {
     tokio::time::sleep(Duration::from_millis(20)).await;
 
     let test_config = GrpcConfig::default();
-    let mut connector = GrpcUpstreamConnector::connect(
+    let connector = GrpcUpstreamConnector::connect(
         match server_addr {
             std::net::SocketAddr::V4(v4) => velda_core::lut::ip::v4_to_u128(v4.ip().to_bits()),
             std::net::SocketAddr::V6(v6) => v6.ip().to_bits(),
@@ -197,30 +198,32 @@ async fn test_grpc_server_streaming_roundtrip() {
     .await
     .unwrap();
 
-    let req = http::Request::builder()
-        .method("POST")
-        .uri("http://localhost/test.StreamService/FetchEvents")
-        .header("content-type", "application/grpc")
-        .body(())
+    let mut req_ws = HeaderWorkspace::empty(2);
+    req_ws.insert("content-type", HeaderValue::from_static("application/grpc"));
+
+    let (resp_fut, _) = connector
+        .open_stream(
+            Method::POST,
+            Uri::from_static("http://localhost/test.StreamService/FetchEvents"),
+            req_ws,
+            true,
+        )
+        .await
         .unwrap();
+    let mut resp = resp_fut.await.unwrap();
+    assert_eq!(resp.status, StatusCode::OK);
 
-    let (resp_fut, _) = connector.open_stream(req, true).unwrap();
-    let resp = resp_fut.await.unwrap();
-    assert_eq!(resp.status(), StatusCode::OK);
-
-    let (_, mut body) = resp.into_parts();
-
-    let chunk1 = body.data().await.unwrap().unwrap();
+    let chunk1 = resp.body.recv_chunk().await.unwrap().unwrap();
     let mut b1 = BytesMut::from(&chunk1[..]);
     let (_, p1) = decode_grpc_frame(&mut b1).unwrap().unwrap();
     assert_eq!(&p1[..], b"server_stream_chunk_1");
 
-    let chunk2 = body.data().await.unwrap().unwrap();
+    let chunk2 = resp.body.recv_chunk().await.unwrap().unwrap();
     let mut b2 = BytesMut::from(&chunk2[..]);
     let (_, p2) = decode_grpc_frame(&mut b2).unwrap().unwrap();
     assert_eq!(&p2[..], b"server_stream_chunk_2");
 
-    let trailers = body.trailers().await.unwrap().unwrap();
+    let trailers = resp.body.trailers().await.unwrap().unwrap();
     assert_eq!(trailers.get("grpc-status").unwrap(), "0");
     assert_eq!(trailers.get("grpc-message").unwrap(), "Stream complete");
 
@@ -242,13 +245,10 @@ async fn test_grpc_client_streaming_roundtrip() {
 
         while let Some(mut stream) = conn.accept().await.unwrap() {
             let mut total_chunks = 0;
-            while let Some(chunk_res) = stream.recv_stream.data().await {
-                let chunk = chunk_res.unwrap();
-                let len = chunk.len();
+            while let Some(chunk) = stream.receiver.recv_chunk().await.unwrap() {
                 let mut b = BytesMut::from(&chunk[..]);
                 let (_, _) = decode_grpc_frame(&mut b).unwrap().unwrap();
                 total_chunks += 1;
-                let _ = stream.recv_stream.flow_control().release_capacity(len);
             }
             assert_eq!(total_chunks, 2);
 
@@ -259,6 +259,7 @@ async fn test_grpc_client_streaming_roundtrip() {
                     Some(format!("received:{}", total_chunks).as_bytes()),
                     None,
                 )
+                .await
                 .unwrap();
         }
     });
@@ -266,7 +267,7 @@ async fn test_grpc_client_streaming_roundtrip() {
     tokio::time::sleep(Duration::from_millis(20)).await;
 
     let test_config = GrpcConfig::default();
-    let mut connector = GrpcUpstreamConnector::connect(
+    let connector = GrpcUpstreamConnector::connect(
         match server_addr {
             std::net::SocketAddr::V4(v4) => velda_core::lut::ip::v4_to_u128(v4.ip().to_bits()),
             std::net::SocketAddr::V6(v6) => v6.ip().to_bits(),
@@ -279,33 +280,36 @@ async fn test_grpc_client_streaming_roundtrip() {
     .await
     .unwrap();
 
-    let req = http::Request::builder()
-        .method("POST")
-        .uri("http://localhost/test.ClientStream/Upload")
-        .header("content-type", "application/grpc")
-        .body(())
-        .unwrap();
+    let mut req_ws = HeaderWorkspace::empty(2);
+    req_ws.insert("content-type", HeaderValue::from_static("application/grpc"));
 
-    let (resp_fut, mut send_stream) = connector.open_stream(req, false).unwrap();
+    let (resp_fut, mut send_stream) = connector
+        .open_stream(
+            Method::POST,
+            Uri::from_static("http://localhost/test.ClientStream/Upload"),
+            req_ws,
+            false,
+        )
+        .await
+        .unwrap();
 
     let mut f1 = BytesMut::new();
     encode_grpc_frame(b"chunk_one", false, &mut f1);
-    send_stream.send_data(f1.freeze(), false).unwrap();
+    send_stream.send_chunk(f1.freeze(), false).await.unwrap();
 
     let mut f2 = BytesMut::new();
     encode_grpc_frame(b"chunk_two", false, &mut f2);
-    send_stream.send_data(f2.freeze(), true).unwrap();
+    send_stream.send_chunk(f2.freeze(), true).await.unwrap();
 
-    let resp = resp_fut.await.unwrap();
-    assert_eq!(resp.status(), StatusCode::OK);
+    let mut resp = resp_fut.await.unwrap();
+    assert_eq!(resp.status, StatusCode::OK);
 
-    let (_, mut body) = resp.into_parts();
-    let data = body.data().await.unwrap().unwrap();
+    let data = resp.body.recv_chunk().await.unwrap().unwrap();
     let mut b = BytesMut::from(&data[..]);
     let (_, payload) = decode_grpc_frame(&mut b).unwrap().unwrap();
     assert_eq!(&payload[..], b"received:2");
 
-    let trailers = body.trailers().await.unwrap().unwrap();
+    let trailers = resp.body.trailers().await.unwrap().unwrap();
     assert_eq!(trailers.get("grpc-status").unwrap(), "0");
 
     server_task.abort();
@@ -326,18 +330,17 @@ async fn test_grpc_bidirectional_streaming_roundtrip() {
 
         while let Some(mut stream) = conn.accept().await.unwrap() {
             tokio::spawn(async move {
-                let resp = http::Response::builder()
-                    .status(StatusCode::OK)
-                    .header("content-type", "application/grpc")
-                    .body(())
+                let mut resp_ws = HeaderWorkspace::empty(2);
+                resp_ws.insert("content-type", HeaderValue::from_static("application/grpc"));
+
+                let mut send = stream
+                    .respond
+                    .send_response_headers(StatusCode::OK, &resp_ws, false)
+                    .unwrap()
                     .unwrap();
 
-                let mut send = stream.respond.send_response(resp, false).unwrap();
-
                 // Echo each incoming frame back to client
-                while let Some(chunk_res) = stream.recv_stream.data().await {
-                    let chunk = chunk_res.unwrap();
-                    let len = chunk.len();
+                while let Some(chunk) = stream.receiver.recv_chunk().await.unwrap() {
                     let mut b = BytesMut::from(&chunk[..]);
                     let (_, payload) = decode_grpc_frame(&mut b).unwrap().unwrap();
 
@@ -346,12 +349,11 @@ async fn test_grpc_bidirectional_streaming_roundtrip() {
                     echo_data.extend_from_slice(&payload);
                     encode_grpc_frame(&echo_data, false, &mut echo_frame);
 
-                    send.send_data(echo_frame.freeze(), false).unwrap();
-                    let _ = stream.recv_stream.flow_control().release_capacity(len);
+                    send.send_chunk(echo_frame.freeze()).await.unwrap();
                 }
 
-                let mut trailers = HeaderMap::new();
-                trailers.insert("grpc-status", "0".parse().unwrap());
+                let mut trailers = HeaderWorkspace::empty(2);
+                trailers.insert("grpc-status", HeaderValue::from_static("0"));
                 send.send_trailers(trailers).unwrap();
             });
         }
@@ -360,7 +362,7 @@ async fn test_grpc_bidirectional_streaming_roundtrip() {
     tokio::time::sleep(Duration::from_millis(20)).await;
 
     let test_config = GrpcConfig::default();
-    let mut connector = GrpcUpstreamConnector::connect(
+    let connector = GrpcUpstreamConnector::connect(
         match server_addr {
             std::net::SocketAddr::V4(v4) => velda_core::lut::ip::v4_to_u128(v4.ip().to_bits()),
             std::net::SocketAddr::V6(v6) => v6.ip().to_bits(),
@@ -373,25 +375,28 @@ async fn test_grpc_bidirectional_streaming_roundtrip() {
     .await
     .unwrap();
 
-    let req = http::Request::builder()
-        .method("POST")
-        .uri("http://localhost/test.Bidi/Chat")
-        .header("content-type", "application/grpc")
-        .body(())
-        .unwrap();
+    let mut req_ws = HeaderWorkspace::empty(2);
+    req_ws.insert("content-type", HeaderValue::from_static("application/grpc"));
 
-    let (resp_fut, mut send_stream) = connector.open_stream(req, false).unwrap();
+    let (resp_fut, mut send_stream) = connector
+        .open_stream(
+            Method::POST,
+            Uri::from_static("http://localhost/test.Bidi/Chat"),
+            req_ws,
+            false,
+        )
+        .await
+        .unwrap();
 
     // Send ping_1
     let mut f1 = BytesMut::new();
     encode_grpc_frame(b"ping_1", false, &mut f1);
-    send_stream.send_data(f1.freeze(), false).unwrap();
+    send_stream.send_chunk(f1.freeze(), false).await.unwrap();
 
-    let resp = resp_fut.await.unwrap();
-    assert_eq!(resp.status(), StatusCode::OK);
-    let (_, mut body) = resp.into_parts();
+    let mut resp = resp_fut.await.unwrap();
+    assert_eq!(resp.status, StatusCode::OK);
 
-    let r1 = body.data().await.unwrap().unwrap();
+    let r1 = resp.body.recv_chunk().await.unwrap().unwrap();
     let mut b1 = BytesMut::from(&r1[..]);
     let (_, p1) = decode_grpc_frame(&mut b1).unwrap().unwrap();
     assert_eq!(&p1[..], b"echo:ping_1");
@@ -399,14 +404,14 @@ async fn test_grpc_bidirectional_streaming_roundtrip() {
     // Send ping_2 and end client stream
     let mut f2 = BytesMut::new();
     encode_grpc_frame(b"ping_2", false, &mut f2);
-    send_stream.send_data(f2.freeze(), true).unwrap();
+    send_stream.send_chunk(f2.freeze(), true).await.unwrap();
 
-    let r2 = body.data().await.unwrap().unwrap();
+    let r2 = resp.body.recv_chunk().await.unwrap().unwrap();
     let mut b2 = BytesMut::from(&r2[..]);
     let (_, p2) = decode_grpc_frame(&mut b2).unwrap().unwrap();
     assert_eq!(&p2[..], b"echo:ping_2");
 
-    let trailers = body.trailers().await.unwrap().unwrap();
+    let trailers = resp.body.trailers().await.unwrap().unwrap();
     assert_eq!(trailers.get("grpc-status").unwrap(), "0");
 
     server_task.abort();
@@ -434,6 +439,7 @@ async fn test_grpc_server_payload_too_large() {
                     stream
                         .respond
                         .send_unary_response(GrpcStatus::Ok, Some(b"ok"), None)
+                        .await
                         .unwrap();
                 }
                 Err(_) => {
@@ -469,8 +475,8 @@ async fn test_grpc_server_payload_too_large() {
     let mut req_body = BytesMut::new();
     encode_grpc_frame(&large_payload, false, &mut req_body);
 
-    let mut headers = HeaderMap::new();
-    headers.insert("content-type", "application/grpc".parse().unwrap());
+    let mut headers = HeaderWorkspace::empty(2);
+    headers.insert("content-type", HeaderValue::from_static("application/grpc"));
 
     let req = L7Request::new(
         Method::POST,

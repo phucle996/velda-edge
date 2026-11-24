@@ -1,54 +1,75 @@
 //! Downstream gRPC server connection lifecycle and stream accept loop.
+//!
+//! Powered directly by native `velda-http2` ([`Http2ServerConnection`]) with single-pass
+//! HPACK decoding into [`velda_core::HeaderWorkspace`].
 
-use bytes::Bytes;
-use h2::server::Connection;
 use tokio::io::{AsyncRead, AsyncWrite};
+use velda_http2::proto::hpack::H2ForwardingAddrs;
+use velda_http2::server::connection::Http2ServerConnection;
 
 use super::responder::GrpcResponder;
 use super::stream::GrpcServerStream;
 use crate::config::GrpcConfig;
 use crate::error::GrpcError;
 
-/// An active gRPC downstream server connection over an asynchronous I/O stream.
-pub struct GrpcServerConnection<IO>
-where
-    IO: AsyncRead + AsyncWrite + Unpin,
-{
-    connection: Connection<IO, Bytes>,
+/// An active gRPC downstream server connection backed by native HTTP/2 framing.
+pub struct GrpcServerConnection {
+    inner: Http2ServerConnection,
 }
 
-impl<IO> GrpcServerConnection<IO>
-where
-    IO: AsyncRead + AsyncWrite + Unpin,
-{
+impl GrpcServerConnection {
     /// Performs HTTP/2 server handshake over the transport stream configuring
     /// limits and stream concurrency from [`GrpcConfig`].
-    pub async fn handshake(stream: IO, config: &GrpcConfig) -> Result<Self, GrpcError> {
-        let mut builder = h2::server::Builder::default();
-        builder
-            .max_concurrent_streams(config.max_concurrent_streams)
-            .max_header_list_size(config.max_header_size as u32);
-
-        let connection = builder.handshake(stream).await.map_err(GrpcError::H2)?;
-        Ok(Self { connection })
+    pub async fn handshake<IO>(stream: IO, config: &GrpcConfig) -> Result<Self, GrpcError>
+    where
+        IO: AsyncRead + AsyncWrite + Unpin + Send + 'static,
+    {
+        let h2_cfg = config.to_http2_config();
+        let inner = Http2ServerConnection::handshake(stream, h2_cfg).await?;
+        Ok(Self { inner })
     }
 
-    /// Accepts the next incoming gRPC stream from the client.
-    ///
-    /// Returns `Ok(Some(GrpcServerStream))` for new incoming streams without buffering the body,
-    /// or `Ok(None)` when the connection is closed.
-    pub async fn accept(&mut self) -> Result<Option<GrpcServerStream>, GrpcError> {
-        let Some(res) = self.connection.accept().await else {
+    /// Performs HTTP/2 server handshake with 1-pass proxy forwarding header enrichment
+    /// executed directly during HPACK ingress decode.
+    pub async fn handshake_with_forwarding<IO>(
+        stream: IO,
+        config: &GrpcConfig,
+        forwarding: H2ForwardingAddrs,
+    ) -> Result<Self, GrpcError>
+    where
+        IO: AsyncRead + AsyncWrite + Unpin + Send + 'static,
+    {
+        let h2_cfg = config.to_http2_config();
+        let inner =
+            Http2ServerConnection::handshake_with_forwarding(stream, h2_cfg, forwarding).await?;
+        Ok(Self { inner })
+    }
+
+    /// Non-blocking accept returning `Some(...)` if an incoming gRPC request stream is queued.
+    #[inline]
+    pub fn try_accept(&mut self) -> Result<Option<GrpcServerStream>, GrpcError> {
+        let Some(res) = self.inner.try_accept_streaming_request() else {
             return Ok(None);
         };
+        match res? {
+            Some((head, receiver, responder)) => Ok(Some(GrpcServerStream {
+                head,
+                receiver,
+                respond: GrpcResponder::new(responder),
+            })),
+            None => Ok(None),
+        }
+    }
 
-        let (request, respond) = res.map_err(GrpcError::H2)?;
-        let (parts, recv_stream) = request.into_parts();
-
+    /// Accepts the next incoming gRPC stream from the client without buffering the body.
+    pub async fn accept(&mut self) -> Result<Option<GrpcServerStream>, GrpcError> {
+        let Some((head, receiver, responder)) = self.inner.accept_streaming_request().await? else {
+            return Ok(None);
+        };
         Ok(Some(GrpcServerStream {
-            parts,
-            recv_stream,
-            respond: GrpcResponder::new(respond),
+            head,
+            receiver,
+            respond: GrpcResponder::new(responder),
         }))
     }
 }

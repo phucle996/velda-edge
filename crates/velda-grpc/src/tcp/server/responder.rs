@@ -1,17 +1,17 @@
-//! Downstream gRPC response serialization and streaming responder.
+//! Downstream gRPC response serialization and streaming responder backed by `velda-http2`.
 //!
 //! Encodes canonical gRPC status codes, Length-Prefixed Message (LPM) data frames,
-//! and HTTP/2 response headers/trailers over the downstream send stream.
+//! and HTTP/2 response headers/trailers directly over [`HeaderWorkspace`] without `HeaderMap`.
 
 use bytes::{Bytes, BytesMut};
-use h2::server::SendResponse;
 use http::header::CONTENT_TYPE;
-use http::{HeaderMap, HeaderValue, Response, StatusCode};
+use http::{HeaderValue, StatusCode};
+use velda_core::{Body, GrpcStatus, HeaderWorkspace};
+use velda_http2::server::response::{Http2Responder, Http2StreamSender};
 
 use crate::error::GrpcError;
 use crate::frame::encode_grpc_frame;
 use crate::wire::{GrpcWire, X_REQUEST_ID};
-use velda_core::GrpcStatus;
 
 /// Downstream gRPC server response head metadata over TCP.
 #[derive(Debug, Clone)]
@@ -21,15 +21,19 @@ pub struct GrpcServerResponseHead {
     /// Canonical gRPC status.
     pub grpc_status: GrpcStatus,
     /// Response headers.
-    pub headers: HeaderMap,
+    pub headers: HeaderWorkspace,
     /// Response trailers.
-    pub trailers: HeaderMap,
+    pub trailers: HeaderWorkspace,
 }
 
 impl GrpcServerResponseHead {
     /// Creates a new gRPC server response head.
     #[inline]
-    pub fn new(grpc_status: GrpcStatus, headers: HeaderMap, trailers: HeaderMap) -> Self {
+    pub fn new(
+        grpc_status: GrpcStatus,
+        headers: HeaderWorkspace,
+        trailers: HeaderWorkspace,
+    ) -> Self {
         Self {
             status: StatusCode::OK,
             grpc_status,
@@ -45,7 +49,7 @@ pub struct GrpcServerResponse {
     /// Response head metadata.
     pub head: GrpcServerResponseHead,
     /// Response payload (LPM or raw bytes).
-    pub body: velda_core::Body,
+    pub body: Body,
 }
 
 impl GrpcServerResponse {
@@ -53,9 +57,9 @@ impl GrpcServerResponse {
     #[inline]
     pub fn new(
         grpc_status: GrpcStatus,
-        headers: HeaderMap,
-        trailers: HeaderMap,
-        body: velda_core::Body,
+        headers: HeaderWorkspace,
+        trailers: HeaderWorkspace,
+        body: Body,
     ) -> Self {
         Self {
             head: GrpcServerResponseHead::new(grpc_status, headers, trailers),
@@ -67,160 +71,124 @@ impl GrpcServerResponse {
     pub fn unary(
         status: GrpcStatus,
         payload: Option<Bytes>,
-        extra_headers: Option<HeaderMap>,
+        extra_headers: Option<HeaderWorkspace>,
     ) -> Self {
-        let headers = extra_headers.unwrap_or_default();
-        let trailers = status.to_trailers(None);
+        let headers = extra_headers.unwrap_or_else(|| HeaderWorkspace::empty(4));
+        let trailers = status.to_trailer_workspace(None);
         let body = match payload {
-            Some(b) => velda_core::Body::Bytes(b),
-            None => velda_core::Body::Empty,
+            Some(b) => Body::Bytes(b),
+            None => Body::Empty,
         };
         Self::new(status, headers, trailers, body)
     }
 
     /// Creates a trailers-only gRPC response for errors or immediate completions.
     pub fn trailers_only(status: GrpcStatus, message: Option<&str>) -> Self {
-        let trailers = status.to_trailers(message);
-        Self::new(status, HeaderMap::new(), trailers, velda_core::Body::Empty)
+        let trailers = status.to_trailer_workspace(message);
+        Self::new(status, HeaderWorkspace::empty(0), trailers, Body::Empty)
     }
 
     /// Converts into canonical [`velda_core::L7Response`].
     pub fn into_l7_response(self) -> velda_core::L7Response {
         let mut headers = self.head.headers;
-        for (name, val) in self.head.trailers {
-            if let Some(name) = name {
-                headers.append(name, val);
-            }
+        for (name, val) in self.head.trailers.iter() {
+            headers.append(name, val.clone());
         }
         velda_core::L7Response::new(self.head.status, http::Version::HTTP_2, headers, self.body)
     }
 }
 
 /// Streaming responder for an active downstream gRPC call.
-///
-/// Encodes response payload or status, serializing headers, LPM data frames,
-/// and HTTP/2 trailers over the underlying H2 send stream.
+#[derive(Debug)]
 pub struct GrpcResponder {
-    pub respond: SendResponse<Bytes>,
-    pub request_id: Option<HeaderValue>,
+    pub inner: Http2Responder,
 }
 
 impl GrpcResponder {
-    /// Creates a new [`GrpcResponder`] wrapping an active H2 send handle.
-    pub fn new(respond: SendResponse<Bytes>) -> Self {
-        Self {
-            respond,
-            request_id: None,
-        }
+    /// Creates a new [`GrpcResponder`] wrapping an active [`Http2Responder`].
+    #[inline]
+    pub fn new(inner: Http2Responder) -> Self {
+        Self { inner }
     }
 
-    /// Sets an optional W3C Request ID header value to automatically stamp onto downstream responses.
+    /// Sets an optional W3C Request ID header value stamped onto downstream responses.
     #[inline]
     pub fn with_request_id(mut self, request_id: Option<HeaderValue>) -> Self {
-        self.request_id = request_id;
+        self.inner.request_id = request_id;
         self
     }
 
-    /// Sends a standard Unary response: HTTP 200 + 1 LPM frame + trailers with `grpc-status`.
-    pub fn send_unary_response(
+    /// Sends a standard Unary response: HTTP 200 + optional LPM frame + trailers with `grpc-status`.
+    pub async fn send_unary_response(
         &mut self,
         status: GrpcStatus,
         payload: Option<&[u8]>,
-        extra_headers: Option<HeaderMap>,
+        extra_headers: Option<HeaderWorkspace>,
     ) -> Result<(), GrpcError> {
-        let mut resp_builder = Response::builder()
-            .status(StatusCode::OK)
-            .version(http::Version::HTTP_2)
-            .header(CONTENT_TYPE, GrpcWire::CONTENT_TYPE_VALUE);
-
-        if let Some(ref req_id) = self.request_id {
-            resp_builder = resp_builder.header("x-request-id", req_id.clone());
-        }
-
-        if let Some(headers) = extra_headers {
-            for (name, val) in headers {
-                if let Some(name) = name {
-                    resp_builder = resp_builder.header(name, val);
-                }
-            }
+        let mut headers = extra_headers.unwrap_or_else(|| HeaderWorkspace::empty(4));
+        headers.insert(CONTENT_TYPE, GrpcWire::CONTENT_TYPE_VALUE);
+        if let Some(ref req_id) = self.inner.request_id {
+            headers.insert_bypass(X_REQUEST_ID, req_id.clone());
         }
 
         let is_trailers_only = payload.is_none() && status != GrpcStatus::Ok;
-
         if is_trailers_only {
-            let trailers = status.to_trailers(None);
-            for (name, val) in trailers {
-                if let Some(name) = name {
-                    resp_builder = resp_builder.header(name, val);
-                }
-            }
-            let resp = resp_builder.body(()).map_err(GrpcError::Http)?;
-            self.respond
-                .send_response(resp, true)
-                .map_err(GrpcError::H2)?;
+            headers.insert(GrpcWire::STATUS_NAME, status.code_header_value());
+            self.inner
+                .send_parts(StatusCode::OK, &headers, &Body::Empty)?;
             return Ok(());
         }
 
-        let resp = resp_builder.body(()).map_err(GrpcError::Http)?;
-        let mut send_stream = self
-            .respond
-            .send_response(resp, false)
-            .map_err(GrpcError::H2)?;
+        let mut sender = self.inner.send_stream_response(StatusCode::OK, &headers)?;
 
-        // Send payload LPM frame
         if let Some(data) = payload {
             let mut buf = BytesMut::new();
             encode_grpc_frame(data, false, &mut buf);
-            send_stream
-                .send_data(buf.freeze(), false)
-                .map_err(GrpcError::H2)?;
+            sender.send_chunk(buf.freeze()).await?;
         }
 
-        // Send trailers with status code
-        let trailers = status.to_trailers(None);
-        send_stream.send_trailers(trailers).map_err(GrpcError::H2)?;
-
+        sender.send_trailers(status.to_trailer_workspace(None))?;
         Ok(())
     }
 
     /// Responds immediately with a Trailers-Only gRPC response (e.g. for routing errors).
+    #[cold]
     pub fn send_trailers_only(
         &mut self,
         status: GrpcStatus,
         message: Option<&str>,
     ) -> Result<(), GrpcError> {
-        let mut builder = Response::builder()
-            .status(StatusCode::OK)
-            .version(http::Version::HTTP_2)
-            .header(CONTENT_TYPE, GrpcWire::CONTENT_TYPE_VALUE);
-
-        if let Some(ref req_id) = self.request_id {
-            builder = builder.header("x-request-id", req_id.clone());
+        let mut headers = HeaderWorkspace::empty(4);
+        headers.insert(CONTENT_TYPE, GrpcWire::CONTENT_TYPE_VALUE);
+        if let Some(ref req_id) = self.inner.request_id {
+            headers.insert_bypass(X_REQUEST_ID, req_id.clone());
+        }
+        headers.insert(GrpcWire::STATUS_NAME, status.code_header_value());
+        if let Some(val) = message.and_then(|m| HeaderValue::from_str(m).ok()) {
+            headers.insert(GrpcWire::MESSAGE_NAME, val);
         }
 
-        let trailers = status.to_trailers(message);
-        for (name, val) in trailers {
-            if let Some(name) = name {
-                builder = builder.header(name, val);
-            }
-        }
-
-        let resp = builder.body(()).map_err(GrpcError::Http)?;
-        self.respond
-            .send_response(resp, true)
-            .map_err(GrpcError::H2)?;
+        self.inner
+            .send_parts(StatusCode::OK, &headers, &Body::Empty)?;
         Ok(())
     }
 
-    /// Sends an HTTP/2 response header frame on the underlying H2 send stream.
-    pub fn send_response(
+    /// Sends an HTTP/2 response header frame from [`HeaderWorkspace`].
+    ///
+    /// When `end_of_stream` is `true`, concludes the stream in a single `HEADERS` frame (`Ok(None)`).
+    /// When `end_of_stream` is `false`, returns an active [`Http2StreamSender`] for chunks/trailers.
+    pub fn send_response_headers(
         &mut self,
-        mut response: Response<()>,
+        status: StatusCode,
+        headers: &HeaderWorkspace,
         end_of_stream: bool,
-    ) -> Result<h2::SendStream<Bytes>, h2::Error> {
-        if let Some(ref req_id) = self.request_id {
-            response.headers_mut().insert(X_REQUEST_ID, req_id.clone());
+    ) -> Result<Option<Http2StreamSender>, GrpcError> {
+        if end_of_stream {
+            self.inner.send_parts(status, headers, &Body::Empty)?;
+            Ok(None)
+        } else {
+            let sender = self.inner.send_stream_response(status, headers)?;
+            Ok(Some(sender))
         }
-        self.respond.send_response(response, end_of_stream)
     }
 }

@@ -1,11 +1,10 @@
-//! Upstream gRPC Client Request Entity and HTTP/2 framing.
+//! Upstream gRPC Client Request Entity and HTTP/2 framing over [`HeaderWorkspace`].
 
 use bytes::{Bytes, BytesMut};
 use http::header::CONTENT_TYPE;
-use http::{HeaderMap, Method, Request, Uri, Version};
-use velda_core::{Body, L7Request};
+use http::{Method, Uri, Version};
+use velda_core::{Body, HeaderWorkspace, L7Request};
 
-use crate::error::GrpcError;
 use crate::frame::encode_grpc_frame;
 use crate::wire::GrpcWire;
 
@@ -17,13 +16,13 @@ pub struct GrpcClientRequestHead {
     /// Upstream target authority.
     pub authority: Option<String>,
     /// Request headers / metadata.
-    pub headers: HeaderMap,
+    pub headers: HeaderWorkspace,
 }
 
 impl GrpcClientRequestHead {
     /// Creates a new request head.
     #[inline]
-    pub fn new(uri: Uri, authority: Option<String>, headers: HeaderMap) -> Self {
+    pub fn new(uri: Uri, authority: Option<String>, headers: HeaderWorkspace) -> Self {
         Self {
             uri,
             authority,
@@ -50,7 +49,7 @@ impl GrpcClientRequest {
 
     /// Creates a unary request with an uncompressed payload.
     pub fn unary(uri: Uri, authority: Option<String>, payload: Option<Bytes>) -> Self {
-        let mut headers = HeaderMap::new();
+        let mut headers = HeaderWorkspace::empty(4);
         headers.insert(CONTENT_TYPE, GrpcWire::CONTENT_TYPE_VALUE);
         if let Some(ref auth) = authority
             && let Ok(v) = auth.parse()
@@ -87,11 +86,7 @@ impl GrpcClientRequest {
             .or_else(|| req.uri.authority().map(|a| a.as_str().to_string()));
 
         Self {
-            head: GrpcClientRequestHead::new(
-                req.uri.clone(),
-                authority,
-                req.headers.clone().into(),
-            ),
+            head: GrpcClientRequestHead::new(req.uri.clone(), authority, req.headers.clone()),
             body: req.body.clone(),
         }
     }
@@ -107,21 +102,14 @@ impl GrpcClientRequest {
         )
     }
 
-    /// Encodes this request into an `http::Request<()>` ready for transmission over an H2 send stream.
-    /// Returns `(request, end_of_stream)`.
-    pub fn encode_http_request(&self) -> Result<(Request<()>, bool), GrpcError> {
-        let mut builder = Request::builder()
-            .method(Method::POST)
-            .uri(&self.head.uri)
-            .version(Version::HTTP_2);
-
-        for (name, val) in &self.head.headers {
-            builder = builder.header(name, val);
-        }
-
-        let has_body = !self.body.is_empty();
-
-        let req = builder.body(()).map_err(GrpcError::Http)?;
-        Ok((req, !has_body))
+    /// Returns `(method, uri, headers, end_of_stream)` ready for `velda-http2` transmission.
+    #[inline]
+    pub fn encode_headers(&self) -> (Method, Uri, HeaderWorkspace, bool) {
+        (
+            Method::POST,
+            self.head.uri.clone(),
+            self.head.headers.clone(),
+            self.body.is_empty(),
+        )
     }
 }

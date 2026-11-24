@@ -71,7 +71,10 @@ pub fn decode_grpc_frame(src: &mut BytesMut) -> Result<Option<(bool, Bytes)>, Gr
         src[GrpcFrame::FLAG_SIZE + 3],
     ]) as usize;
 
-    if src.len() < GrpcFrame::HEADER_SIZE + length {
+    let Some(total) = GrpcFrame::HEADER_SIZE.checked_add(length) else {
+        return Err(GrpcError::PayloadTooLarge(length));
+    };
+    if src.len() < total {
         return Ok(None);
     }
 

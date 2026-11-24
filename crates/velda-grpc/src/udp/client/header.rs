@@ -1,6 +1,7 @@
 //! Upstream gRPC Client Header Processing and RFC 9114 Sanitization over UDP.
 
-use http::header::{CONTENT_TYPE, HeaderMap, HeaderName, HeaderValue};
+use http::header::{CONTENT_TYPE, HeaderName, HeaderValue};
+use velda_core::HeaderWorkspace;
 
 use crate::wire::GrpcWire;
 
@@ -13,9 +14,9 @@ pub const HOP_BY_HOP: [HeaderName; 5] = [
     http::header::UPGRADE,
 ];
 
-/// Sanitizes an outbound upstream gRPC header map over UDP/QUIC according to RFC 9114 Section 4.2.
+/// Sanitizes an outbound upstream gRPC header workspace over UDP/QUIC according to RFC 9114 Section 4.2.
 #[inline]
-pub fn sanitize_headers(headers: &mut HeaderMap) {
+pub fn sanitize_headers(headers: &mut HeaderWorkspace) {
     for name in &HOP_BY_HOP {
         headers.remove(name);
     }
@@ -30,9 +31,9 @@ pub fn sanitize_headers(headers: &mut HeaderMap) {
     }
 }
 
-/// Constructs a canonical baseline gRPC UDP upstream client header map.
-pub fn build_headers(authority: Option<&str>) -> HeaderMap {
-    let mut headers = HeaderMap::new();
+/// Constructs a canonical baseline gRPC UDP upstream client [`HeaderWorkspace`].
+pub fn build_headers(authority: Option<&str>) -> HeaderWorkspace {
+    let mut headers = HeaderWorkspace::empty(4);
     headers.insert(CONTENT_TYPE, GrpcWire::CONTENT_TYPE_VALUE);
     headers.insert(http::header::TE, HeaderValue::from_static("trailers"));
 
@@ -51,7 +52,7 @@ mod tests {
 
     #[test]
     fn test_sanitize_grpc_udp_client_headers() {
-        let mut headers = HeaderMap::new();
+        let mut headers = HeaderWorkspace::empty(4);
         headers.insert(http::header::CONNECTION, HeaderValue::from_static("close"));
         headers.insert(
             HeaderName::from_static("keep-alive"),

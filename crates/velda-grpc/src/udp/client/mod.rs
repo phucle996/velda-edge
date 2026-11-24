@@ -7,10 +7,6 @@
 pub mod connector;
 pub mod driver;
 pub mod header;
-pub mod request;
-pub mod response;
 
 pub use connector::{GrpcUdpClient, connect, default_client_config};
 pub use header::{build_headers, sanitize_headers};
-pub use request::{GrpcUdpClientRequest, GrpcUdpClientRequestHead};
-pub use response::{GrpcUdpClientResponse, GrpcUdpClientResponseHead};

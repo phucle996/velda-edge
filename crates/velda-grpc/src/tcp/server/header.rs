@@ -1,7 +1,19 @@
 //! Downstream gRPC Header Processing and Proxy Enrichment over TCP (RFC 9113 / RFC 7239).
+//!
+//! Operates directly on [`velda_core::HeaderWorkspace`] with zero `HeaderMap` allocations.
 
 use http::Uri;
-use http::header::{HeaderMap, HeaderName, HeaderValue};
+use http::header::{HeaderName, HeaderValue};
+use velda_core::HeaderWorkspace;
+
+const X_REAL_IP: HeaderName = HeaderName::from_static("x-real-ip");
+const X_FORWARDED_FOR: HeaderName = HeaderName::from_static("x-forwarded-for");
+const X_FORWARDED_PROTO: HeaderName = HeaderName::from_static("x-forwarded-proto");
+const X_FORWARDED_PORT: HeaderName = HeaderName::from_static("x-forwarded-port");
+const X_FORWARDED_HOST: HeaderName = HeaderName::from_static("x-forwarded-host");
+const FORWARDED: HeaderName = HeaderName::from_static("forwarded");
+const PROTO_HTTPS_VAL: HeaderValue = HeaderValue::from_static("https");
+const PROTO_HTTP_VAL: HeaderValue = HeaderValue::from_static("http");
 
 /// Prohibited connection-specific hop-by-hop headers per RFC 9113 Section 8.2.2.
 pub const HOP_BY_HOP: [HeaderName; 5] = [
@@ -13,11 +25,9 @@ pub const HOP_BY_HOP: [HeaderName; 5] = [
 ];
 
 /// Enriches gRPC headers with authoritative proxy forwarding headers and strips
-/// RFC 9113 hop-by-hop headers.
-///
-/// Overwrites standard proxy forwarding headers (`x-forwarded-*`, `x-real-ip`) directly with authoritative values.
+/// RFC 9113 hop-by-hop headers directly inside [`HeaderWorkspace`].
 pub fn enrich_headers(
-    headers: &mut HeaderMap,
+    headers: &mut HeaderWorkspace,
     peer_ip: u128,
     local_ip: u128,
     local_port_be: u16,
@@ -33,35 +43,36 @@ pub fn enrich_headers(
             .to_str()
             .is_ok_and(|s| s.eq_ignore_ascii_case("trailers"));
         if !is_trailers {
-            headers.remove(http::header::TE);
+            headers.remove(&http::header::TE);
         }
     }
 
     // 2. Inject authoritative client IP (directly overwriting spoofed headers)
-    let proto = if is_tls { "https" } else { "http" };
+    let (proto, proto_val) = if is_tls {
+        ("https", PROTO_HTTPS_VAL)
+    } else {
+        ("http", PROTO_HTTP_VAL)
+    };
 
     let (ip_buf, ip_len) = velda_core::lut::ip::format_ip_bytes(peer_ip);
     let client_ip_bytes = &ip_buf[..ip_len];
 
     if let Ok(val) = HeaderValue::from_bytes(client_ip_bytes) {
-        headers.insert(HeaderName::from_static("x-forwarded-for"), val.clone());
-        headers.insert(HeaderName::from_static("x-real-ip"), val);
+        headers.insert(X_FORWARDED_FOR, val.clone());
+        headers.insert(X_REAL_IP, val);
     }
 
-    headers.insert(
-        HeaderName::from_static("x-forwarded-proto"),
-        HeaderValue::from_static(proto),
-    );
+    headers.insert(X_FORWARDED_PROTO, proto_val);
 
     headers.insert(
-        HeaderName::from_static("x-forwarded-port"),
-        HeaderValue::from(u16::from_be(local_port_be)),
+        X_FORWARDED_PORT,
+        velda_core::buffer::header::resolve_u64_header_value(u16::from_be(local_port_be) as u64),
     );
 
     if let Some(auth) = authority
         && let Ok(val) = HeaderValue::from_str(auth)
     {
-        headers.insert(HeaderName::from_static("x-forwarded-host"), val);
+        headers.insert(X_FORWARDED_HOST, val);
     }
 
     // RFC 7239 Forwarded
@@ -90,17 +101,17 @@ pub fn enrich_headers(
     };
     let fwd_bytes = &fwd_buf[..fwd_len];
     if let Ok(val) = HeaderValue::from_bytes(fwd_bytes) {
-        headers.insert(HeaderName::from_static("forwarded"), val);
+        headers.insert(FORWARDED, val);
     }
 }
 
 /// Extracts effective authority from request headers or URI authority.
 #[inline]
-pub fn extract_authority<'a>(headers: &'a HeaderMap, uri: &'a Uri) -> Option<&'a str> {
+pub fn extract_authority<'a>(headers: &'a HeaderWorkspace, uri: &'a Uri) -> Option<&'a str> {
     headers
         .get(http::header::HOST)
         .and_then(|v| v.to_str().ok())
-        .or_else(|| uri.authority().map(|a| a.as_str()))
+        .or_else(|| uri.authority().map(|a| a.as_str()).or_else(|| uri.host()))
 }
 
 #[cfg(test)]
@@ -109,7 +120,7 @@ mod tests {
 
     #[test]
     fn test_enrich_grpc_forwarded_headers() {
-        let mut headers = HeaderMap::new();
+        let mut headers = HeaderWorkspace::empty(4);
         headers.insert("connection", "keep-alive".parse().unwrap());
         headers.insert("x-forwarded-for", "1.2.3.4".parse().unwrap());
 

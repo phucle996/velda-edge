@@ -6,13 +6,15 @@ use std::time::Instant;
 
 use bytes::{Bytes, BytesMut};
 use common::{format_duration, format_throughput};
-use http::Method;
 use http::header::CONTENT_TYPE;
+use http::{Method, Uri};
 use tokio::io::duplex;
+use velda_core::HeaderWorkspace;
 use velda_grpc::config::GrpcConfig;
 use velda_grpc::error::GrpcError;
 use velda_grpc::frame::{decode_grpc_frame, encode_grpc_frame};
-use velda_grpc::tcp::server::GrpcServerConnection;
+use velda_grpc::tcp::client::connector::GrpcUpstreamConnector;
+use velda_grpc::tcp::server::connection::GrpcServerConnection;
 use velda_grpc::wire::GrpcWire;
 
 #[tokio::main]
@@ -58,29 +60,29 @@ async fn bench_oversized_payload_rejection() {
     });
 
     let client_task = tokio::spawn(async move {
-        let (mut client, h2_conn) = h2::client::handshake(client_io).await.unwrap();
-        tokio::spawn(async move {
-            let _ = h2_conn.await;
-        });
+        let mut client = GrpcUpstreamConnector::handshake_stream(client_io, &config, None)
+            .await
+            .unwrap();
 
+        let uri = Uri::from_static("http://localhost/test.Attack/TooLarge");
         let start = Instant::now();
         for _ in 0..ITERS {
-            let req = http::Request::builder()
-                .method(Method::POST)
-                .uri("http://localhost/test.Attack/TooLarge")
-                .header(CONTENT_TYPE, GrpcWire::CONTENT_TYPE_VALUE)
-                .body(())
-                .unwrap();
+            let mut req_ws = HeaderWorkspace::empty(2);
+            req_ws.insert(CONTENT_TYPE, GrpcWire::CONTENT_TYPE_VALUE);
 
-            client = client.ready().await.unwrap();
-            let (resp_fut, mut send) = client.send_request(req, false).unwrap();
+            client.ready().await.unwrap();
+            let (resp_fut, mut send) = client
+                .open_stream(Method::POST, uri.clone(), req_ws, false)
+                .await
+                .unwrap();
             // Send only the first chunk of the oversized frame (header + partial payload)
-            send.send_data(frozen_oversized.slice(0..128), true)
+            send.send_chunk(frozen_oversized.slice(0..128), true)
+                .await
                 .unwrap();
 
-            let (parts, _body) = resp_fut.await.unwrap().into_parts();
-            assert_eq!(parts.status, http::StatusCode::OK);
-            assert_eq!(parts.headers.get(GrpcWire::STATUS_HEADER).unwrap(), "8"); // RESOURCE_EXHAUSTED
+            let resp = resp_fut.await.unwrap();
+            assert_eq!(resp.status, http::StatusCode::OK);
+            assert_eq!(resp.headers.get(GrpcWire::STATUS_HEADER).unwrap(), "8"); // RESOURCE_EXHAUSTED
         }
         start.elapsed()
     });

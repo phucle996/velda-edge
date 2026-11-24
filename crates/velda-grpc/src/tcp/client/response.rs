@@ -1,13 +1,11 @@
-//! Upstream gRPC Client Response Entity and Ingestion (RFC 9113 / gRPC specification).
+//! Upstream gRPC Client Response Entity and Ingestion over [`HeaderWorkspace`].
 
 use bytes::BytesMut;
-use h2::client::ResponseFuture;
-use http::header::HeaderMap;
 use http::{StatusCode, Version};
-use velda_core::{Body, L7Response};
+use velda_core::{Body, GrpcStatus, HeaderWorkspace, L7Response};
+use velda_http2::client::connection::{Http2ClientResponse, Http2ResponseFuture};
 
 use crate::error::GrpcError;
-use velda_core::GrpcStatus;
 
 /// Upstream gRPC client response head metadata.
 #[derive(Debug, Clone)]
@@ -17,9 +15,9 @@ pub struct GrpcClientResponseHead {
     /// Canonical gRPC status parsed from trailers or response headers.
     pub grpc_status: GrpcStatus,
     /// Response headers.
-    pub headers: HeaderMap,
+    pub headers: HeaderWorkspace,
     /// Response trailers.
-    pub trailers: HeaderMap,
+    pub trailers: HeaderWorkspace,
 }
 
 impl GrpcClientResponseHead {
@@ -28,8 +26,8 @@ impl GrpcClientResponseHead {
     pub fn new(
         status: StatusCode,
         grpc_status: GrpcStatus,
-        headers: HeaderMap,
-        trailers: HeaderMap,
+        headers: HeaderWorkspace,
+        trailers: HeaderWorkspace,
     ) -> Self {
         Self {
             status,
@@ -69,8 +67,8 @@ impl GrpcClientResponse {
         let head = GrpcClientResponseHead::new(
             resp.status,
             grpc_status,
-            resp.headers.clone().into(),
-            HeaderMap::new(),
+            resp.headers.clone(),
+            HeaderWorkspace::empty(0),
         );
 
         Self {
@@ -82,10 +80,8 @@ impl GrpcClientResponse {
     /// Converts into canonical [`L7Response`].
     pub fn into_l7(self) -> L7Response {
         let mut headers = self.head.headers;
-        for (name, val) in self.head.trailers {
-            if let Some(name) = name {
-                headers.append(name, val);
-            }
+        for (name, val) in self.head.trailers.iter() {
+            headers.append(name, val.clone());
         }
         L7Response::new(self.head.status, Version::HTTP_2, headers, self.body)
     }
@@ -100,26 +96,26 @@ impl GrpcClientResponse {
         )
     }
 
-    /// Decodes an upstream gRPC response from an active HTTP/2 `ResponseFuture`,
-    /// enforcing flow control and `max_body` limits sequentially without arbitrary wrappers.
+    /// Decodes an upstream gRPC response from an active [`Http2ResponseFuture`],
+    /// enforcing flow control and `max_body` limits sequentially.
     pub async fn decode_from_future(
-        response_future: ResponseFuture,
+        response_future: Http2ResponseFuture,
         max_body: usize,
     ) -> Result<Self, GrpcError> {
-        let response = response_future.await.map_err(GrpcError::H2)?;
-        let (parts, mut body_stream) = response.into_parts();
+        let Http2ClientResponse {
+            status,
+            headers,
+            body: mut body_stream,
+        } = response_future.await?;
 
         // 1. Read data chunks
         let body = if body_stream.is_end_stream() {
             Body::Empty
-        } else if let Some(first_chunk) = body_stream.data().await {
-            let chunk = first_chunk.map_err(GrpcError::H2)?;
+        } else if let Some(chunk) = body_stream.recv_chunk().await? {
             let len = chunk.len();
             if len > max_body {
-                let _ = body_stream.flow_control().release_capacity(len);
                 return Err(GrpcError::PayloadTooLarge(len));
             }
-            let _ = body_stream.flow_control().release_capacity(len);
 
             if body_stream.is_end_stream() {
                 Body::Bytes(chunk)
@@ -127,15 +123,12 @@ impl GrpcClientResponse {
                 let mut resp_body = BytesMut::with_capacity(len * 2);
                 resp_body.extend_from_slice(&chunk);
 
-                while let Some(chunk_res) = body_stream.data().await {
-                    let chunk = chunk_res.map_err(GrpcError::H2)?;
+                while let Some(chunk) = body_stream.recv_chunk().await? {
                     let len = chunk.len();
                     if resp_body.len() + len > max_body {
-                        let _ = body_stream.flow_control().release_capacity(len);
                         return Err(GrpcError::PayloadTooLarge(resp_body.len() + len));
                     }
                     resp_body.extend_from_slice(&chunk);
-                    let _ = body_stream.flow_control().release_capacity(len);
                 }
 
                 Body::Bytes(resp_body.freeze())
@@ -147,19 +140,18 @@ impl GrpcClientResponse {
         // 2. Read trailers
         let trailers = body_stream
             .trailers()
-            .await
-            .map_err(GrpcError::H2)?
-            .unwrap_or_default();
+            .await?
+            .unwrap_or_else(|| HeaderWorkspace::empty(0));
 
         let grpc_status = trailers
             .get("grpc-status")
-            .or_else(|| parts.headers.get("grpc-status"))
+            .or_else(|| headers.get("grpc-status"))
             .and_then(|v| v.to_str().ok())
             .and_then(|s| s.parse::<u32>().ok())
             .map(GrpcStatus::from_code)
             .unwrap_or(GrpcStatus::Ok);
 
-        let head = GrpcClientResponseHead::new(parts.status, grpc_status, parts.headers, trailers);
+        let head = GrpcClientResponseHead::new(status, grpc_status, headers, trailers);
 
         Ok(Self::new(head, body))
     }

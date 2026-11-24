@@ -8,15 +8,15 @@ use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use bytes::BytesMut;
-use http::{HeaderMap, StatusCode, Version};
+use http::{StatusCode, Version};
 use quinn_proto::{Dir, Endpoint, Event, StreamEvent, StreamId};
 use tokio::net::UdpSocket;
 use tokio::sync::{mpsc, oneshot};
-use velda_core::{Body, L7Request, L7Response};
+use velda_core::{Body, HeaderWorkspace, L7Request, L7Response};
 
 use crate::error::GrpcError;
 use crate::udp::wire::{
-    UdpFrame, decode_qpack_headers, decode_udp_frame, encode_qpack_request, encode_udp_frame,
+    UdpFrame, decode_qpack, decode_udp_frame, encode_qpack_request, encode_udp_frame,
 };
 
 /// Internal command dispatched to the background QUIC connection driver loop.
@@ -64,7 +64,8 @@ pub(crate) async fn run_client_driver(
     max_message_size: usize,
 ) {
     let mut active_streams: HashMap<StreamId, ActiveStream> = HashMap::new();
-    let mut stream_headers: HashMap<StreamId, (Option<StatusCode>, HeaderMap)> = HashMap::new();
+    let mut stream_headers: HashMap<StreamId, (Option<StatusCode>, HeaderWorkspace)> =
+        HashMap::new();
     let mut stream_raw_bufs: HashMap<StreamId, BytesMut> = HashMap::new();
     let mut stream_data_payloads: HashMap<StreamId, BytesMut> = HashMap::new();
     let mut transmit_buf = Vec::with_capacity(65535);
@@ -101,9 +102,14 @@ pub(crate) async fn run_client_driver(
                             }
                         };
 
-                        // 1. Encode request headers into QPACK buffer
+                        // 1. Encode request headers into QPACK buffer directly from HeaderWorkspace
                         let mut header_buf = BytesMut::new();
-                        encode_qpack_request(&request.method, &request.uri, &request.headers, &mut header_buf);
+                        encode_qpack_request(
+                            &request.method,
+                            &request.uri,
+                            &request.headers,
+                            &mut header_buf,
+                        );
 
                         let mut send_buf = BytesMut::new();
                         encode_udp_frame(&UdpFrame::Headers(header_buf.freeze()), &mut send_buf);
@@ -293,7 +299,7 @@ pub(crate) async fn run_client_driver(
                     while let Ok(Some(frame)) = decode_udp_frame(raw_buf) {
                         match frame {
                             UdpFrame::Headers(header_bytes) => {
-                                if let Ok(decoded) = decode_qpack_headers(&header_bytes) {
+                                if let Ok(decoded) = decode_qpack(&header_bytes) {
                                     stream_headers.insert(id, (decoded.status, decoded.headers));
                                 }
                             }
@@ -310,7 +316,7 @@ pub(crate) async fn run_client_driver(
                     if let Some(stream) = active_streams.remove(&id) {
                         let (status, headers) = stream_headers
                             .remove(&id)
-                            .unwrap_or_else(|| (Some(StatusCode::OK), HeaderMap::new()));
+                            .unwrap_or_else(|| (Some(StatusCode::OK), HeaderWorkspace::empty(0)));
                         let body_bytes = stream_data_payloads
                             .remove(&id)
                             .map(|b| b.freeze())

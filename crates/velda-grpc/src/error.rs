@@ -8,7 +8,7 @@ use velda_core::GrpcStatus;
 #[derive(Debug, Error)]
 pub enum GrpcError {
     #[error("HTTP/2 framing error: {0}")]
-    H2(#[from] h2::Error),
+    Http2(#[from] velda_http2::error::Http2Error),
 
     #[error("I/O error: {0}")]
     Io(#[from] std::io::Error),
@@ -41,9 +41,7 @@ impl GrpcError {
     /// transparent 1-shot self-healing.
     pub fn is_stale_or_refused(&self) -> bool {
         match self {
-            GrpcError::H2(e) => {
-                e.reason() == Some(h2::Reason::REFUSED_STREAM) || e.is_go_away() || e.is_io()
-            }
+            GrpcError::Http2(e) => e.is_refused_or_goaway(),
             GrpcError::Io(e) => matches!(
                 e.kind(),
                 std::io::ErrorKind::BrokenPipe

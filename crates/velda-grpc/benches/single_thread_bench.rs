@@ -7,12 +7,13 @@ use std::time::Instant;
 use bytes::BytesMut;
 use common::{CountingAllocator, format_duration, format_throughput};
 use http::header::CONTENT_TYPE;
-use http::{HeaderMap, Method, StatusCode};
+use http::{HeaderValue, Method, StatusCode, Uri};
 use tokio::io::duplex;
-use velda_core::GrpcStatus;
+use velda_core::{GrpcStatus, HeaderWorkspace};
 use velda_grpc::config::GrpcConfig;
 use velda_grpc::frame::{decode_grpc_frame, encode_grpc_frame};
-use velda_grpc::tcp::server::GrpcServerConnection;
+use velda_grpc::tcp::client::connector::GrpcUpstreamConnector;
+use velda_grpc::tcp::server::connection::GrpcServerConnection;
 use velda_grpc::wire::GrpcWire;
 
 #[global_allocator]
@@ -101,28 +102,28 @@ async fn bench_unary_roundtrip_turnaround() {
                 stream
                     .respond
                     .send_unary_response(GrpcStatus::Ok, Some(reply_data), None)
+                    .await
                     .unwrap();
             }
         });
 
         let client_task = tokio::spawn(async move {
-            let (mut client, h2_conn) = h2::client::handshake(client_io).await.unwrap();
-            tokio::spawn(async move {
-                let _ = h2_conn.await;
-            });
+            let mut client = GrpcUpstreamConnector::handshake_stream(client_io, &TEST_CONFIG, None)
+                .await
+                .unwrap();
+            let uri = Uri::from_static("http://localhost/test.Bench/Echo");
 
             // Warmup
             let mut warmup_body = BytesMut::new();
             encode_grpc_frame(b"ping", false, &mut warmup_body);
-            let req = http::Request::builder()
-                .method(Method::POST)
-                .uri("http://localhost/test.Bench/Echo")
-                .header(CONTENT_TYPE, GrpcWire::CONTENT_TYPE_VALUE)
-                .body(())
+            let mut warmup_ws = HeaderWorkspace::empty(2);
+            warmup_ws.insert(CONTENT_TYPE, GrpcWire::CONTENT_TYPE_VALUE);
+            client.ready().await.unwrap();
+            let (resp_fut, mut send) = client
+                .open_stream(Method::POST, uri.clone(), warmup_ws, false)
+                .await
                 .unwrap();
-            client = client.ready().await.unwrap();
-            let (resp_fut, mut send) = client.send_request(req, false).unwrap();
-            send.send_data(warmup_body.freeze(), true).unwrap();
+            send.send_chunk(warmup_body.freeze(), true).await.unwrap();
             let _ = resp_fut.await.unwrap();
 
             let payload = b"benchmark_unary_payload";
@@ -134,23 +135,20 @@ async fn bench_unary_roundtrip_turnaround() {
             let start = Instant::now();
 
             for _ in 0..iters {
-                let req = http::Request::builder()
-                    .method(Method::POST)
-                    .uri("http://localhost/test.Bench/Echo")
-                    .header(CONTENT_TYPE, GrpcWire::CONTENT_TYPE_VALUE)
-                    .body(())
+                let mut req_ws = HeaderWorkspace::empty(2);
+                req_ws.insert(CONTENT_TYPE, GrpcWire::CONTENT_TYPE_VALUE);
+                client.ready().await.unwrap();
+                let (resp_fut, mut send) = client
+                    .open_stream(Method::POST, uri.clone(), req_ws, false)
+                    .await
                     .unwrap();
-                client = client.ready().await.unwrap();
-                let (resp_fut, mut send) = client.send_request(req, false).unwrap();
-                send.send_data(frozen_req.clone(), true).unwrap();
+                send.send_chunk(frozen_req.clone(), true).await.unwrap();
 
-                let (resp_parts, mut body) = resp_fut.await.unwrap().into_parts();
-                assert_eq!(resp_parts.status, StatusCode::OK);
+                let mut resp = resp_fut.await.unwrap();
+                assert_eq!(resp.status, StatusCode::OK);
 
-                while let Some(chunk) = body.data().await {
-                    let _ = chunk.unwrap();
-                }
-                let _ = body.trailers().await.unwrap();
+                while resp.body.recv_chunk().await.unwrap().is_some() {}
+                let _ = resp.body.trailers().await.unwrap();
             }
 
             let elapsed = start.elapsed();
@@ -192,12 +190,13 @@ async fn bench_streaming_response_turnaround() {
             .await
             .unwrap();
         while let Some(mut stream) = server.accept().await.unwrap() {
-            let resp = http::Response::builder()
-                .status(StatusCode::OK)
-                .header(CONTENT_TYPE, GrpcWire::CONTENT_TYPE_VALUE)
-                .body(())
+            let mut resp_ws = HeaderWorkspace::empty(2);
+            resp_ws.insert(CONTENT_TYPE, GrpcWire::CONTENT_TYPE_VALUE);
+            let mut send = stream
+                .respond
+                .send_response_headers(StatusCode::OK, &resp_ws, false)
+                .unwrap()
                 .unwrap();
-            let mut send = stream.respond.send_response(resp, false).unwrap();
 
             let chunk_data = vec![0xEEu8; CHUNK_SIZE];
             let mut frame = BytesMut::new();
@@ -205,45 +204,41 @@ async fn bench_streaming_response_turnaround() {
             let frozen = frame.freeze();
 
             for _ in 0..CHUNKS {
-                send.send_data(frozen.clone(), false).unwrap();
+                send.send_chunk(frozen.clone()).await.unwrap();
             }
 
-            let mut trailers = HeaderMap::new();
-            trailers.insert(GrpcWire::STATUS_NAME, "0".parse().unwrap());
+            let mut trailers = HeaderWorkspace::empty(2);
+            trailers.insert(GrpcWire::STATUS_NAME, HeaderValue::from_static("0"));
             send.send_trailers(trailers).unwrap();
         }
     });
 
     let client_task = tokio::spawn(async move {
-        let (mut client, h2_conn) = h2::client::handshake(client_io).await.unwrap();
-        tokio::spawn(async move {
-            let _ = h2_conn.await;
-        });
+        let mut client = GrpcUpstreamConnector::handshake_stream(client_io, &TEST_CONFIG, None)
+            .await
+            .unwrap();
+        let uri = Uri::from_static("http://localhost/test.Stream/Events");
 
         let start = Instant::now();
 
         for _ in 0..STREAMS {
-            let req = http::Request::builder()
-                .method(Method::POST)
-                .uri("http://localhost/test.Stream/Events")
-                .header(CONTENT_TYPE, GrpcWire::CONTENT_TYPE_VALUE)
-                .body(())
+            let mut req_ws = HeaderWorkspace::empty(2);
+            req_ws.insert(CONTENT_TYPE, GrpcWire::CONTENT_TYPE_VALUE);
+            client.ready().await.unwrap();
+            let (resp_fut, _) = client
+                .open_stream(Method::POST, uri.clone(), req_ws, true)
+                .await
                 .unwrap();
-            client = client.ready().await.unwrap();
-            let (resp_fut, _) = client.send_request(req, true).unwrap();
 
-            let (resp_parts, mut body) = resp_fut.await.unwrap().into_parts();
-            assert_eq!(resp_parts.status, StatusCode::OK);
+            let mut resp = resp_fut.await.unwrap();
+            assert_eq!(resp.status, StatusCode::OK);
 
             let mut received_chunks = 0;
-            while let Some(chunk_res) = body.data().await {
-                let chunk = chunk_res.unwrap();
-                let len = chunk.len();
+            while resp.body.recv_chunk().await.unwrap().is_some() {
                 received_chunks += 1;
-                let _ = body.flow_control().release_capacity(len);
             }
             assert_eq!(received_chunks, CHUNKS);
-            let _ = body.trailers().await.unwrap();
+            let _ = resp.body.trailers().await.unwrap();
         }
 
         start.elapsed()

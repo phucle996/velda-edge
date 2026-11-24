@@ -1,13 +1,14 @@
-//! Upstream gRPC client connector for `velda-upstream` and connection pool.
+//! Upstream gRPC client connector powered by native `velda-http2` ([`Http2Client`]).
 //!
 //! Owns connection establishment, HTTP/2 client framing, and both Unary
 //! and Streaming request dispatch to physical backend endpoints.
 
-use bytes::Bytes;
-use h2::SendStream;
-use h2::client::{ResponseFuture, SendRequest};
 use std::time::Duration;
-use velda_core::{L7Request, L7Response};
+
+use http::{Method, Uri};
+use velda_core::{HeaderWorkspace, L7Request, L7Response};
+use velda_http2::client::connection::{Http2Client, Http2ClientSendStream, Http2ResponseFuture};
+use velda_http2::error::Http2Error;
 use velda_tls::TlsClientEngine;
 
 use crate::config::GrpcConfig;
@@ -16,7 +17,7 @@ use crate::error::GrpcError;
 /// Active gRPC client connector to an upstream backend endpoint.
 #[derive(Clone)]
 pub struct GrpcUpstreamConnector {
-    send_request: SendRequest<Bytes>,
+    client: Http2Client,
     target: Option<(u128, u16)>,
 }
 
@@ -27,49 +28,47 @@ impl GrpcUpstreamConnector {
         self.target
     }
 
+    /// Returns true if the underlying HTTP/2 connection is open and not draining (`GOAWAY`).
+    #[inline(always)]
+    pub fn is_healthy(&self) -> bool {
+        self.client.is_healthy()
+    }
+
     /// Attaches the physical backend `(ip: u128, port_be: u16)` to a stream-handshaked connector.
     #[inline(always)]
     pub fn with_target(mut self, target_ip: u128, target_port_be: u16) -> Self {
         self.target = Some((target_ip, target_port_be));
         self
     }
-    /// Polls or awaits readiness of the underlying HTTP/2 connection to accept a new request stream.
+
+    /// Verifies that the underlying HTTP/2 connection is healthy and ready to accept streams.
+    #[inline]
     pub async fn ready(&mut self) -> Result<(), GrpcError> {
-        let ready_send = self
-            .send_request
-            .clone()
-            .ready()
-            .await
-            .map_err(GrpcError::H2)?;
-        self.send_request = ready_send;
-        Ok(())
+        if self.client.is_healthy() {
+            Ok(())
+        } else {
+            Err(GrpcError::Http2(Http2Error::ConnectionClosed))
+        }
     }
 
-    /// Establishes a new HTTP/2 connection to the upstream target backend endpoint
-    /// applying limits from [`GrpcConfig`], optional socket acceleration path, optional TLS,
-    /// and connection timeout.
+    /// Establishes a new HTTP/2 connection to the upstream target backend endpoint.
     ///
-    /// `tls` is `Some((engine, sni))` for TLS upstreams; the SNI is the upstream's pre-compiled
-    /// static property. gRPC is always HTTP/2 as declared by the upstream: ALPN is only validated
-    /// (a negotiated value other than `h2` is rejected), never used to choose the protocol.
+    /// `tls` is `Some((engine, sni))` for TLS upstreams; gRPC strictly enforces ALPN `"h2"`.
     pub async fn connect(
         target_ip: u128,
         target_port_be: u16,
         tls: Option<(&TlsClientEngine, &str)>,
         config: &GrpcConfig,
-        timeout: Option<std::time::Duration>,
+        timeout: Option<Duration>,
     ) -> Result<Self, GrpcError> {
-        let connect_timeout = timeout.unwrap_or(std::time::Duration::from_secs(10));
+        let connect_timeout = timeout.unwrap_or(Duration::from_secs(10));
         let stream =
             velda_sock::connect::connect_tcp_u128(target_ip, target_port_be, connect_timeout)
                 .await
                 .map_err(GrpcError::Io)?;
+        let h2_cfg = config.to_http2_config();
 
-        let mut builder = h2::client::Builder::default();
-        builder.max_header_list_size(config.max_header_size as u32);
-
-        let send_request = if let Some((engine, sni)) = tls {
-            // Enforce connect timeout on upstream gRPC TLS handshake
+        let client = if let Some((engine, sni)) = tls {
             let tls_fut = engine.connect(sni, stream);
             let tls_stream = if let Some(to) = timeout {
                 tokio::time::timeout(to, tls_fut)
@@ -85,7 +84,6 @@ impl GrpcUpstreamConnector {
                 tls_fut.await.map_err(|e| GrpcError::Tls(e.to_string()))?
             };
 
-            // gRPC over TCP/TLS requires HTTP/2 transport framing: ALPN "h2" is strictly enforced
             let alpn = tls_stream.get_ref().1.alpn_protocol();
             if alpn != Some(b"h2") {
                 return Err(GrpcError::Tls(format!(
@@ -94,53 +92,33 @@ impl GrpcUpstreamConnector {
                 )));
             }
 
-            // Enforce timeout on gRPC HTTP/2 SETTINGS frame exchange over TLS
-            let h2_fut = builder.handshake::<_, Bytes>(tls_stream);
-            let (send_request, connection) = if let Some(to) = timeout {
-                tokio::time::timeout(to, h2_fut)
-                    .await
-                    .map_err(|_| {
-                        GrpcError::Io(std::io::Error::new(
-                            std::io::ErrorKind::TimedOut,
-                            "Upstream gRPC H2 handshake timed out",
-                        ))
-                    })?
-                    .map_err(GrpcError::H2)?
+            let h2_fut = Http2Client::handshake(tls_stream, &h2_cfg);
+            if let Some(to) = timeout {
+                tokio::time::timeout(to, h2_fut).await.map_err(|_| {
+                    GrpcError::Io(std::io::Error::new(
+                        std::io::ErrorKind::TimedOut,
+                        "Upstream gRPC H2 handshake timed out",
+                    ))
+                })??
             } else {
-                h2_fut.await.map_err(GrpcError::H2)?
-            };
-
-            // Drive background H2 connection management
-            tokio::spawn(async move {
-                let _ = connection.await;
-            });
-            send_request
+                h2_fut.await?
+            }
         } else {
-            // Enforce timeout on cleartext gRPC HTTP/2 handshake
-            let h2_fut = builder.handshake::<_, Bytes>(stream);
-            let (send_request, connection) = if let Some(to) = timeout {
-                tokio::time::timeout(to, h2_fut)
-                    .await
-                    .map_err(|_| {
-                        GrpcError::Io(std::io::Error::new(
-                            std::io::ErrorKind::TimedOut,
-                            "Upstream gRPC cleartext H2 handshake timed out",
-                        ))
-                    })?
-                    .map_err(GrpcError::H2)?
+            let h2_fut = Http2Client::handshake(stream, &h2_cfg);
+            if let Some(to) = timeout {
+                tokio::time::timeout(to, h2_fut).await.map_err(|_| {
+                    GrpcError::Io(std::io::Error::new(
+                        std::io::ErrorKind::TimedOut,
+                        "Upstream gRPC cleartext H2 handshake timed out",
+                    ))
+                })??
             } else {
-                h2_fut.await.map_err(GrpcError::H2)?
-            };
-
-            // Drive background H2 connection management
-            tokio::spawn(async move {
-                let _ = connection.await;
-            });
-            send_request
+                h2_fut.await?
+            }
         };
 
         Ok(Self {
-            send_request,
+            client,
             target: Some((target_ip, target_port_be)),
         })
     }
@@ -154,46 +132,37 @@ impl GrpcUpstreamConnector {
     where
         S: tokio::io::AsyncRead + tokio::io::AsyncWrite + Unpin + Send + 'static,
     {
-        let mut builder = h2::client::Builder::default();
-        builder.max_header_list_size(config.max_header_size as u32);
-        builder.enable_push(false);
-
-        let h2_fut = builder.handshake::<_, Bytes>(stream);
-        let (send_request, connection) = if let Some(to) = timeout {
-            tokio::time::timeout(to, h2_fut)
-                .await
-                .map_err(|_| {
-                    GrpcError::Io(std::io::Error::new(
-                        std::io::ErrorKind::TimedOut,
-                        "Upstream gRPC stream handshake timed out",
-                    ))
-                })?
-                .map_err(GrpcError::H2)?
+        let h2_cfg = config.to_http2_config();
+        let h2_fut = Http2Client::handshake(stream, &h2_cfg);
+        let client = if let Some(to) = timeout {
+            tokio::time::timeout(to, h2_fut).await.map_err(|_| {
+                GrpcError::Io(std::io::Error::new(
+                    std::io::ErrorKind::TimedOut,
+                    "Upstream gRPC stream handshake timed out",
+                ))
+            })??
         } else {
-            h2_fut.await.map_err(GrpcError::H2)?
+            h2_fut.await?
         };
 
-        tokio::spawn(async move {
-            let _ = connection.await;
-        });
-
         Ok(Self {
-            send_request,
+            client,
             target: None,
         })
     }
 
-    /// Submits a raw streaming gRPC request to the upstream backend.
-    ///
-    /// Returns the upstream `ResponseFuture` and an active `SendStream` for streaming data chunks.
-    pub fn open_stream(
-        &mut self,
-        request: http::Request<()>,
+    /// Submits a raw streaming gRPC request directly from [`HeaderWorkspace`] to the upstream backend.
+    pub async fn open_stream(
+        &self,
+        method: Method,
+        uri: Uri,
+        headers: HeaderWorkspace,
         end_of_stream: bool,
-    ) -> Result<(ResponseFuture, SendStream<Bytes>), GrpcError> {
-        self.send_request
-            .send_request(request, end_of_stream)
-            .map_err(GrpcError::H2)
+    ) -> Result<(Http2ResponseFuture, Http2ClientSendStream), GrpcError> {
+        self.client
+            .send_request(method, uri, headers, end_of_stream)
+            .await
+            .map_err(GrpcError::Http2)
     }
 
     /// Dispatches an upstream [`super::request::GrpcClientRequest`] and returns a [`super::response::GrpcClientResponse`].
@@ -202,13 +171,13 @@ impl GrpcUpstreamConnector {
         req: &super::request::GrpcClientRequest,
         config: &GrpcConfig,
     ) -> Result<super::response::GrpcClientResponse, GrpcError> {
-        let (http_req, end_of_stream) = req.encode_http_request()?;
-        let (response_future, mut send_stream) = self.open_stream(http_req, end_of_stream)?;
+        let (method, uri, headers, end_of_stream) = req.encode_headers();
+        let (response_future, mut send_stream) = self
+            .open_stream(method, uri, headers, end_of_stream)
+            .await?;
 
         if !req.body.is_empty() {
-            send_stream
-                .send_data(req.body.to_bytes(), true)
-                .map_err(GrpcError::H2)?;
+            send_stream.send_chunk(req.body.to_bytes(), true).await?;
         }
 
         super::response::GrpcClientResponse::decode_from_future(
@@ -218,11 +187,7 @@ impl GrpcUpstreamConnector {
         .await
     }
 
-    /// Invokes a Unary gRPC request and returns the upstream `L7Response`.
-    ///
-    /// Seamlessly forwards request payload, waits for response headers, reads response LPM frame,
-    /// and collects trailers (`grpc-status`). Enforces `max_message_size` from [`GrpcConfig`]
-    /// on the upstream response body.
+    /// Invokes a Unary gRPC request and returns the upstream [`L7Response`].
     pub async fn invoke_unary(
         &mut self,
         req: &L7Request,
