@@ -177,14 +177,14 @@ sequenceDiagram
     participant Redis as Redis Cluster (HINCRBY)
 
     Worker->>Shard: Flush local_credits_spent_unflushed -> delta
-    Shadow->>Shard: collect_deltas(): in_flight_delta = delta; delta = 0
+    Shadow->>Shard: collect_deltas() (in_flight_delta = delta, delta = 0)
     Shadow->>Redis: Pipelined HINCRBY(key, -in_flight_delta)
 
     alt Redis ACK (Global Balance G returned)
         Note over Worker,Shard: Meanwhile Worker may have added new delta'
-        Shadow->>Shard: balance = G - delta'; in_flight_delta = 0; reconcile_epoch++
+        Shadow->>Shard: balance = G - delta', in_flight_delta = 0, reconcile_epoch++
     else Redis Timeout / Network Error
-        Shadow->>Shard: revert_in_flight_deltas(): delta += in_flight_delta; in_flight_delta = 0
+        Shadow->>Shard: revert_in_flight_deltas() (delta += in_flight_delta, in_flight_delta = 0)
     end
 ```
 
