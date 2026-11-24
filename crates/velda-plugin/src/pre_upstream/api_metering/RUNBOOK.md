@@ -4,7 +4,7 @@
 
 | Field | Type | Default | Constraints | Description |
 | :--- | :--- | :---: | :--- | :--- |
-| `account_headers` | `Vec<String>` | `["x-tenant-id", "x-org-id", "x-account-id"]` | Valid RFC 9110 header names | Ordered list; the **first non-empty** header value hashes to `account_hash` (first-match wins, not concatenated). |
+| `account_headers` | `Vec<String>` | `["x-tenant-id", "x-org-id", "x-account-id"]` | Valid RFC 9110 header names (`1..=3` levels) | Ordered hierarchy chain (`L0 -> L1 -> L2`). Present levels are hashed cumulatively (`L0`, `L0\|L1`, `L0\|L1\|L2`) and enforced atomically; missing all levels rejects `400 Bad Request`. |
 | `account_header` | `String` | — | Valid RFC 9110 header name | Single-header shorthand used when `account_headers` array is omitted. |
 | `tier_header` | `String` | `"x-plan-tier"` | Valid RFC 9110 header name | Header selecting the active tier (trimmed, ASCII case-insensitive). |
 | `default_tier` | `String` | `"free"` | Lowercased | Fallback tier when `tier_header` is absent, empty, or unrecognized. |
@@ -46,12 +46,12 @@ With `windows: []`, only `x-metering-tier` and `x-metering-balance` are forwarde
 }
 ```
 
-### Recipe B: Tiered SaaS with Multi-Gateway Redis Sync
+### Recipe B: Hierarchical 3-Level SaaS (`tenant -> team -> user`) with Multi-Gateway Redis Sync
 ```json
 {
   "id": "api_metering",
   "config": {
-    "account_headers": ["x-tenant-id", "x-org-id"],
+    "account_headers": ["x-tenant-id", "x-team-id", "x-user-id"],
     "tier_header": "x-plan-tier",
     "default_tier": "free",
     "initial_balance_micro_credits": 1000000,
@@ -59,6 +59,7 @@ With `windows: []`, only `x-metering-tier` and `x-metering-balance` are forwarde
       "free": {
         "cost_per_req_micro_credits": 0,
         "exhausted_action": "402",
+        "grace_enabled": false,
         "windows": [
           { "name": "daily", "window_seconds": 86400, "limit": 500, "algorithm": "fixed_window" }
         ]
@@ -66,6 +67,7 @@ With `windows: []`, only `x-metering-tier` and `x-metering-balance` are forwarde
       "enterprise": {
         "cost_per_req_micro_credits": 500,
         "exhausted_action": "passthrough",
+        "grace_enabled": true,
         "windows": [
           { "name": "burst", "window_seconds": 60, "limit": 5000, "algorithm": "token_bucket" },
           { "name": "monthly", "window_seconds": 2592000, "limit": 10000000, "algorithm": "sliding_window" }
@@ -102,6 +104,6 @@ With `windows: []`, only `x-metering-tier` and `x-metering-balance` are forwarde
 
 | Symptom | Root Cause | Resolution |
 | :--- | :--- | :--- |
-| `ApiMeteringPlugin::from_config` fails at reload | Tier defines `> 4` windows (`MAX_WINDOWS_PER_TIER = 4`) or invalid header name | Reduce windows per tier to `<= 4` and verify RFC 9110 header names. |
+| `ApiMeteringPlugin::from_config` fails at reload | Tier defines `> 4` windows (`MAX_WINDOWS_PER_TIER = 4`), `distributed.enabled` lacks `etp_id`, or invalid header name | Reduce windows per tier to `<= 4`, configure `etp_id` matching a `redis` ETP in `etp.json`, and verify RFC 9110 header names. |
 | Tenant sees `400 Bad Request` (`Missing required tenant account header`) | All headers in `account_headers` were missing or whitespace/empty | Ensure upstream auth plugin (`api_key_auth`, `jwt_auth`, `hmac_auth`) runs before `api_metering` and injects `x-tenant-id`. |
-| Distributed balance diverges during Redis outage | Redis TCP unreachable or timing out; `run_shadow_metering_sync` logs warning | Pending deltas are restored via `revert_in_flight_deltas` automatically; verify `redis_addr` connectivity and `sync_interval_ms`. |
+| Distributed balance diverges during Redis outage | Redis TCP unreachable or timing out; `run_shadow_metering_sync` logs warning | Pending deltas are restored via `revert_in_flight_deltas` automatically; verify `etp.json` Redis endpoint connectivity and `sync_interval_ms`. |

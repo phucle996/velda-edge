@@ -1,6 +1,6 @@
 # Verification & Test Specification (`api_metering`)
 
-Automated test suites verifying multi-tier routing, micro-credit wallet accounting, `402`/`429` rejections, overage debt tracking, dynamic tier swaps, multi-window dry-run isolation, cardinality eviction, and Redis delta reconciliation.
+Automated test suites verifying multi-tier routing, micro-credit wallet accounting, `402`/`429` rejections, overage debt tracking, dynamic tier swaps, multi-window dry-run isolation, 3-level hierarchical 2-phase Check-Then-Commit, cardinality eviction, and Redis delta reconciliation.
 
 ---
 
@@ -43,4 +43,4 @@ Automated test suites verifying multi-tier routing, micro-credit wallet accounti
 cargo test -p velda-plugin --test api_metering_test --test distributed_sync_test
 ```
 
-Latest run observed `16 passed; 0 failed` (`0.15s`) in `api_metering_test` and `3 passed; 0 failed` (`0.00s`) in `distributed_sync_test`.
+Latest run observed `16 passed; 0 failed` (`0.14s`) in `api_metering_test` and `3 passed; 0 failed` (`0.00s`) in `distributed_sync_test`.
