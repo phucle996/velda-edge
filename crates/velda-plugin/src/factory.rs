@@ -268,13 +268,14 @@ pub fn wire_plugin_dependencies(
 }
 
 /// Wires External Third-Party (`velda-etp`) pool handles from `etp_registry` into any
-/// instantiated background or post-response plugins that declare `etp_id()`.
+/// instantiated pre-upstream, background, or post-response plugins that declare `etp_id()`.
 pub fn wire_plugin_etps(
     available_plugins: &FxHashMap<String, LoadedPlugin>,
     etp_registry: &velda_etp::EtpRegistry,
 ) -> Result<(), PluginError> {
     for (id, plugin) in available_plugins {
         let etp_id = match plugin {
+            LoadedPlugin::PreUpstream(pu) => pu.etp_id(),
             LoadedPlugin::Background(bg) => bg.etp_id(),
             LoadedPlugin::PostResponse(pr) => pr.etp_id(),
             _ => None,
@@ -286,6 +287,7 @@ pub fn wire_plugin_etps(
                 ))
             })?;
             match plugin {
+                LoadedPlugin::PreUpstream(pu) => pu.attach_etp(inst)?,
                 LoadedPlugin::Background(bg) => bg.attach_etp(inst)?,
                 LoadedPlugin::PostResponse(pr) => pr.attach_etp(inst)?,
                 _ => {}

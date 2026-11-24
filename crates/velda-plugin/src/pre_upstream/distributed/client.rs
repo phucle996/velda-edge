@@ -157,10 +157,23 @@ impl RedisClient {
 
                     if line.starts_with(b":") {
                         // Integer response :<number>
-                        if let Ok(num_str) = std::str::from_utf8(&line[1..]) {
-                            let val = num_str.parse::<i64>().unwrap_or(0);
-                            results.push(val);
-                        }
+                        let num_str = match std::str::from_utf8(&line[1..]) {
+                            Ok(s) => s,
+                            Err(e) => {
+                                self.stream = None;
+                                return Err(RedisError::Protocol(format!("Non-UTF8 integer: {e}")));
+                            }
+                        };
+                        let val = match num_str.parse::<i64>() {
+                            Ok(v) => v,
+                            Err(e) => {
+                                self.stream = None;
+                                return Err(RedisError::Protocol(format!(
+                                    "Invalid integer '{num_str}': {e}"
+                                )));
+                            }
+                        };
+                        results.push(val);
                     } else if line.starts_with(b"-") {
                         // Error response -ERR ...
                         let err_msg = std::str::from_utf8(&line[1..]).unwrap_or("unknown error");
@@ -169,6 +182,12 @@ impl RedisClient {
                             "Redis returned error for command in batch"
                         );
                         results.push(0);
+                    } else {
+                        self.stream = None;
+                        return Err(RedisError::Protocol(format!(
+                            "Unexpected RESP line prefix in HINCRBY batch: {:?}",
+                            line.first()
+                        )));
                     }
                 } else {
                     // Incomplete line, await next chunk

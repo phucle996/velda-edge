@@ -106,6 +106,8 @@ async fn test_metering_delta_collection_and_reconciliation() {
         windows: vec![],
         cost_per_req_micro_credits: 50_000,
         exhausted_action: velda_plugin::pre_upstream::api_metering::ExhaustedAction::Reject402,
+        grace_enabled: false,
+        grace_requests: None,
     };
 
     let now_sec = 1000;

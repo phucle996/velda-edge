@@ -1,120 +1,54 @@
-//! API Metering & Monetization Plugin (`api_metering`).
+//! API Metering Plugin (`api_metering::plugin`).
 //!
-//! # Objective & Mission
-//! Enforces tenant organization tiers (`free`, `pro`, `enterprise`), prepaid wallet balances,
-//! and macro-level quotas (e.g. 1,000,000 requests/month, 50GB bandwidth) with authoritative
-//! rejection (`402 Payment Required` or `429 Too Many Requests`).
-//!
-//! # Phase
-//! Evaluated during the `pre_upstream` phase immediately before forwarding to backend backplanes.
-//!
-//! # Rejection Behavior
-//! - `ExhaustedAction::Reject402`: Short-circuits with [`Action::Respond`] carrying `402 Payment Required`,
-//!   an informative JSON payload, and `x-metering-tier` metadata.
-//! - `ExhaustedAction::Reject429`: Rejects with [`Action::Reject(RejectReason::TooManyRequests)`] and
-//!   tags Bit-1 bypass headers (`Retry-After`, `x-metering-exhausted`).
-//! - `ExhaustedAction::Passthrough`: Permits request and records debt (negative micro-credit balance).
+//! ```text
+//! on_upstream_request(req)
+//!   ├─► resolve_account_hash() ─► None -> #[cold] 400 Bad Request
+//!   ├─► resolve_tier()         ─► &CompiledTier (0 alloc)
+//!   └─► evaluate_compiled()
+//!         ├── Allowed        ─► write x-metering-* headers -> Continue
+//!         ├── OverageAllowed ─► #[cold] overage headers    -> Continue
+//!         └── Exhausted      ─► #[cold] 402 JSON | 429 bypass
+//! ```
 
-use crate::config::PluginConfig;
+use std::fmt::Write as _;
+use std::sync::{Arc, OnceLock};
+use std::time::Instant;
+
 use bytes::Bytes;
 use http::header::{CONTENT_LENGTH, CONTENT_TYPE, RETRY_AFTER};
 use http::{HeaderName, HeaderValue, StatusCode};
-use rustc_hash::FxHashMap;
-use std::sync::Arc;
-use std::time::Instant;
 use velda_core::{Action, L7Request, L7Response, RejectReason};
+use velda_etp::redis::RedisEtp;
+use velda_etp::{EtpBackend, EtpInstance};
 
-use super::algorithm::{ExhaustedAction, MeteringDecision, ShardedMeteringState, TierConfig};
-use super::key::resolve_account_and_tier;
+use super::algorithm::{CompiledDecision, ShardedMeteringState};
+use super::config::{
+    ApiMeteringConfig, CompiledTier, ExhaustedAction, compile_tiers, parse_metering_config,
+};
+use super::key::{resolve_account_keys, resolve_tier};
+use super::redis::run_shadow_metering_sync;
 use crate::capability::{AccessLevel, PluginCapability, SupportedProtocols};
+use crate::config::PluginConfig;
 use crate::error::PluginError;
 use crate::pre_upstream::PreUpstreamPlugin;
-use crate::pre_upstream::consumer_quota::{QuotaAlgorithm, QuotaWindowConfig};
-use crate::pre_upstream::distributed::{DistributedSyncConfig, RedisClient};
 
-/// Static configuration contract for [`ApiMeteringPlugin`].
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct ApiMeteringConfig {
-    /// Ordered list of header names evaluated to resolve tenant account identity.
-    pub account_headers: Vec<HeaderName>,
-    /// Header name specifying client tier (default: `x-plan-tier`).
-    pub tier_header: HeaderName,
-    /// Fallback tier name when header is absent or unrecognized (default: `free`).
-    pub default_tier: String,
-    /// Initial wallet micro-credits credited to newly discovered accounts.
-    pub initial_balance_micro_credits: i64,
-    /// Tier definitions indexed by lowercase name.
-    pub tiers: FxHashMap<String, TierConfig>,
-    /// Distributed multi-gateway synchronization configuration via Redis.
-    pub distributed: Option<DistributedSyncConfig>,
-}
-
-impl Default for ApiMeteringConfig {
-    fn default() -> Self {
-        let mut tiers = FxHashMap::default();
-        tiers.insert(
-            "free".to_string(),
-            TierConfig {
-                name: "free".to_string(),
-                windows: vec![QuotaWindowConfig {
-                    name: "monthly_cap".to_string(),
-                    window_seconds: 30 * 86_400,
-                    limit: 10_000,
-                    algorithm: QuotaAlgorithm::FixedWindow,
-                }],
-                cost_per_req_micro_credits: 0,
-                exhausted_action: ExhaustedAction::Reject402,
-            },
-        );
-        tiers.insert(
-            "pro".to_string(),
-            TierConfig {
-                name: "pro".to_string(),
-                windows: vec![QuotaWindowConfig {
-                    name: "monthly_cap".to_string(),
-                    window_seconds: 30 * 86_400,
-                    limit: 1_000_000,
-                    algorithm: QuotaAlgorithm::SlidingWindow,
-                }],
-                cost_per_req_micro_credits: 0,
-                exhausted_action: ExhaustedAction::Reject429,
-            },
-        );
-        tiers.insert(
-            "enterprise".to_string(),
-            TierConfig {
-                name: "enterprise".to_string(),
-                windows: vec![QuotaWindowConfig {
-                    name: "monthly_cap".to_string(),
-                    window_seconds: 30 * 86_400,
-                    limit: 10_000_000,
-                    algorithm: QuotaAlgorithm::SlidingWindow,
-                }],
-                cost_per_req_micro_credits: 0,
-                exhausted_action: ExhaustedAction::Passthrough,
-            },
-        );
-
-        Self {
-            account_headers: vec![
-                HeaderName::from_static("x-tenant-id"),
-                HeaderName::from_static("x-org-id"),
-                HeaderName::from_static("x-account-id"),
-            ],
-            tier_header: HeaderName::from_static("x-plan-tier"),
-            default_tier: "free".to_string(),
-            initial_balance_micro_credits: 0,
-            tiers,
-            distributed: None,
-        }
-    }
-}
+static X_METERING_TIER: HeaderName = HeaderName::from_static("x-metering-tier");
+static X_METERING_REMAINING: HeaderName = HeaderName::from_static("x-metering-remaining");
+static X_METERING_WINDOW: HeaderName = HeaderName::from_static("x-metering-window");
+static X_METERING_BALANCE: HeaderName = HeaderName::from_static("x-metering-balance");
+static X_METERING_OVERAGE: HeaderName = HeaderName::from_static("x-metering-overage");
+static X_METERING_EXHAUSTED_WINDOW: HeaderName =
+    HeaderName::from_static("x-metering-exhausted-window");
+static X_METERING_EXHAUSTED: HeaderName = HeaderName::from_static("x-metering-exhausted");
 
 /// Pre-upstream multi-tenant API metering and billing enforcement engine.
 pub struct ApiMeteringPlugin {
     pub id: String,
     pub config: ApiMeteringConfig,
     pub state: Arc<ShardedMeteringState>,
+    pub etp: OnceLock<Arc<RedisEtp>>,
+    compiled_tiers: Box<[CompiledTier]>,
+    default_tier_idx: usize,
 }
 
 impl std::fmt::Debug for ApiMeteringPlugin {
@@ -130,11 +64,7 @@ impl ApiMeteringPlugin {
     /// Constructs a new API metering plugin instance with an explicit configuration.
     pub fn new(id: impl Into<String>, config: ApiMeteringConfig) -> Self {
         let state = Arc::new(ShardedMeteringState::new());
-        Self {
-            id: id.into(),
-            config,
-            state,
-        }
+        Self::with_shared_state(id, config, state)
     }
 
     /// Constructs an instance sharing an existing sharded metering state.
@@ -143,154 +73,23 @@ impl ApiMeteringPlugin {
         config: ApiMeteringConfig,
         state: Arc<ShardedMeteringState>,
     ) -> Self {
+        let (compiled_tiers, default_tier_idx) = compile_tiers(&config);
         Self {
             id: id.into(),
             config,
             state,
+            etp: OnceLock::new(),
+            compiled_tiers,
+            default_tier_idx,
         }
     }
 
     /// Compiles a configuration from control-plane JSON definition.
     pub fn from_config(config: &PluginConfig) -> Result<Self, PluginError> {
-        let account_headers = if let Some(arr) = config
-            .config
-            .get("account_headers")
-            .and_then(|v| v.as_array())
-        {
-            let mut headers = Vec::with_capacity(arr.len());
-            for v in arr {
-                if let Some(s) = v.as_str() {
-                    let name = HeaderName::from_bytes(s.as_bytes()).map_err(|e| {
-                        PluginError::Config(format!("Invalid account_header name '{s}': {e}"))
-                    })?;
-                    headers.push(name);
-                }
-            }
-            headers
-        } else if let Some(single) = config.config.get("account_header").and_then(|v| v.as_str()) {
-            vec![HeaderName::from_bytes(single.as_bytes()).map_err(|e| {
-                PluginError::Config(format!("Invalid account_header name '{single}': {e}"))
-            })?]
-        } else {
-            vec![
-                HeaderName::from_static("x-tenant-id"),
-                HeaderName::from_static("x-org-id"),
-                HeaderName::from_static("x-account-id"),
-            ]
-        };
-
-        let tier_header = if let Some(s) = config.config.get("tier_header").and_then(|v| v.as_str())
-        {
-            HeaderName::from_bytes(s.as_bytes())
-                .map_err(|e| PluginError::Config(format!("Invalid tier_header name '{s}': {e}")))?
-        } else {
-            HeaderName::from_static("x-plan-tier")
-        };
-
-        let default_tier = config
-            .config
-            .get("default_tier")
-            .and_then(|v| v.as_str())
-            .unwrap_or("free")
-            .trim()
-            .to_ascii_lowercase();
-
-        let initial_balance_micro_credits = config
-            .config
-            .get("initial_balance_micro_credits")
-            .and_then(|v| v.as_i64())
-            .unwrap_or(0);
-
-        let mut tiers = FxHashMap::default();
-        if let Some(tier_map) = config.config.get("tiers").and_then(|v| v.as_object()) {
-            for (tier_name, val) in tier_map {
-                let name = tier_name.to_ascii_lowercase();
-                let cost_per_req_micro_credits = val
-                    .get("cost_per_req_micro_credits")
-                    .and_then(|v| v.as_u64())
-                    .unwrap_or(0);
-
-                let exhausted_action = val
-                    .get("exhausted_action")
-                    .and_then(|v| v.as_str())
-                    .map(ExhaustedAction::parse)
-                    .unwrap_or(ExhaustedAction::Reject402);
-
-                let mut windows = Vec::new();
-                if let Some(win_arr) = val.get("windows").and_then(|v| v.as_array()) {
-                    for (idx, w) in win_arr.iter().enumerate() {
-                        let w_name = w
-                            .get("name")
-                            .and_then(|v| v.as_str())
-                            .unwrap_or(&format!("window_{idx}"))
-                            .to_string();
-
-                        let window_seconds = w
-                            .get("window_seconds")
-                            .and_then(|v| v.as_u64())
-                            .unwrap_or(30 * 86_400);
-
-                        let limit = w.get("limit").and_then(|v| v.as_u64()).unwrap_or(10_000);
-
-                        let algorithm = w
-                            .get("algorithm")
-                            .and_then(|v| v.as_str())
-                            .map(QuotaAlgorithm::parse)
-                            .unwrap_or(QuotaAlgorithm::FixedWindow);
-
-                        windows.push(QuotaWindowConfig {
-                            name: w_name,
-                            window_seconds,
-                            limit,
-                            algorithm,
-                        });
-                    }
-                }
-
-                tiers.insert(
-                    name.clone(),
-                    TierConfig {
-                        name,
-                        windows,
-                        cost_per_req_micro_credits,
-                        exhausted_action,
-                    },
-                );
-            }
-        }
-
-        // Fallback default tier if user did not supply tiers map
-        if tiers.is_empty() {
-            tiers = ApiMeteringConfig::default().tiers;
-        }
-
-        let distributed = config
-            .config
-            .get("distributed")
-            .map(|v| DistributedSyncConfig::from_json(Some(v)));
-
-        Ok(Self::new(
-            config.id.clone(),
-            ApiMeteringConfig {
-                account_headers,
-                tier_header,
-                default_tier,
-                initial_balance_micro_credits,
-                tiers,
-                distributed,
-            },
-        ))
+        let parsed = parse_metering_config(config)?;
+        Ok(Self::new(config.id.clone(), parsed))
     }
 }
-
-static X_METERING_TIER: HeaderName = HeaderName::from_static("x-metering-tier");
-static X_METERING_REMAINING: HeaderName = HeaderName::from_static("x-metering-remaining");
-static X_METERING_WINDOW: HeaderName = HeaderName::from_static("x-metering-window");
-static X_METERING_BALANCE: HeaderName = HeaderName::from_static("x-metering-balance");
-static X_METERING_OVERAGE: HeaderName = HeaderName::from_static("x-metering-overage");
-static X_METERING_EXHAUSTED_WINDOW: HeaderName =
-    HeaderName::from_static("x-metering-exhausted-window");
-static X_METERING_EXHAUSTED: HeaderName = HeaderName::from_static("x-metering-exhausted");
 
 impl PreUpstreamPlugin for ApiMeteringPlugin {
     fn id(&self) -> &str {
@@ -305,6 +104,30 @@ impl PreUpstreamPlugin for ApiMeteringPlugin {
         }
     }
 
+    #[inline(always)]
+    fn etp_id(&self) -> Option<&str> {
+        if self.config.distributed.as_ref().is_some_and(|d| d.enabled) {
+            self.config.etp_id.as_deref()
+        } else {
+            None
+        }
+    }
+
+    fn attach_etp(&self, instance: &EtpInstance) -> Result<(), PluginError> {
+        match &instance.backend {
+            EtpBackend::Redis(pool) => {
+                let _ = self.etp.set(Arc::clone(pool));
+                Ok(())
+            }
+            _ => Err(PluginError::Config(format!(
+                "Plugin '{}' (api_metering) requires a 'redis' ETP for etp_id '{}', got '{}'",
+                self.id,
+                self.config.etp_id.as_deref().unwrap_or(""),
+                instance.kind
+            ))),
+        }
+    }
+
     fn run_background(
         self: Arc<Self>,
         shutdown: tokio::sync::watch::Receiver<bool>,
@@ -313,10 +136,22 @@ impl PreUpstreamPlugin for ApiMeteringPlugin {
             Some(d) if d.enabled => d.clone(),
             _ => return None,
         };
+        let etp = match self.etp.get() {
+            Some(pool) => Arc::clone(pool),
+            None => {
+                let msg = format!(
+                    "Plugin '{}' (api_metering) has no attached RedisEtp for etp_id '{}'",
+                    self.id,
+                    self.config.etp_id.as_deref().unwrap_or("")
+                );
+                return Some(Box::pin(async move { Err(PluginError::Config(msg)) }));
+            }
+        };
         let state = Arc::clone(&self.state);
         let initial_balance = self.config.initial_balance_micro_credits;
         Some(Box::pin(run_shadow_metering_sync(
             state,
+            etp,
             dist,
             initial_balance,
             shutdown,
@@ -324,7 +159,8 @@ impl PreUpstreamPlugin for ApiMeteringPlugin {
     }
 
     fn capability(&self) -> PluginCapability {
-        PluginCapability::header_only(AccessLevel::Read)
+        // Injects `x-metering-*` telemetry headers onto `req.headers` on the forward path.
+        PluginCapability::header_only(AccessLevel::Write)
     }
 
     fn supported_protocols(&self) -> SupportedProtocols {
@@ -332,48 +168,54 @@ impl PreUpstreamPlugin for ApiMeteringPlugin {
     }
 
     fn on_upstream_request(&self, req: &mut L7Request, _upstream_target: &mut u16) -> Action {
-        let (account_hash, tier_name) = resolve_account_and_tier(
+        let Some(chain) = resolve_account_keys(req, &self.config.account_headers) else {
+            return handle_missing_account();
+        };
+        let Some(default_tier) = self
+            .compiled_tiers
+            .get(self.default_tier_idx)
+            .or_else(|| self.compiled_tiers.first())
+        else {
+            return Action::Continue;
+        };
+        let tier = resolve_tier(
             req,
-            &self.config.account_headers,
             &self.config.tier_header,
-            &self.config.default_tier,
+            &self.compiled_tiers,
+            default_tier,
         );
 
-        let default_cfg = TierConfig::default();
-        let tier_cfg = self
-            .config
-            .tiers
-            .get(&tier_name)
-            .or_else(|| self.config.tiers.get(&self.config.default_tier))
-            .unwrap_or(&default_cfg);
-
-        // Use authoritative pre-sampled ingress timestamp from HeaderWorkspace (0ns)
-        let now_sec = if req.headers.ingress_time_sec() != 0 {
-            req.headers.ingress_time_sec()
+        let mut now_sec = req.headers.ingress_time_sec();
+        if now_sec == 0 {
+            now_sec = velda_core::clock::coarse_sec();
+        }
+        let now_instant = if tier.has_token_bucket {
+            Instant::now()
         } else {
-            req.ingress_time_sec()
+            self.state.start_instant()
         };
-        let now_instant = Instant::now();
 
-        match self.state.evaluate(
-            account_hash,
-            tier_cfg,
+        match self.state.evaluate_chain_compiled(
+            &chain,
+            tier,
             self.config.initial_balance_micro_credits,
             now_sec,
             now_instant,
         ) {
-            MeteringDecision::Allowed {
+            CompiledDecision::Allowed {
                 min_remaining,
-                window_name,
+                min_window_idx,
                 balance_micro_credits,
             } => {
-                if let Ok(val) = HeaderValue::from_str(&tier_cfg.name) {
-                    req.headers.insert(&X_METERING_TIER, val);
+                if let Some(ref val) = tier.tier_header_val {
+                    req.headers.insert(&X_METERING_TIER, val.clone());
                 }
-                req.headers
-                    .set_u64(X_METERING_REMAINING.clone(), min_remaining);
-                if let Ok(val) = HeaderValue::from_str(&window_name) {
-                    req.headers.insert(&X_METERING_WINDOW, val);
+                if let Some(w) = min_window_idx.and_then(|idx| tier.windows.get(idx)) {
+                    req.headers
+                        .set_u64(X_METERING_REMAINING.clone(), min_remaining);
+                    if let Some(ref wv) = w.name_header_val {
+                        req.headers.insert(&X_METERING_WINDOW, wv.clone());
+                    }
                 }
                 if balance_micro_credits >= 0 {
                     req.headers
@@ -383,16 +225,29 @@ impl PreUpstreamPlugin for ApiMeteringPlugin {
                 }
                 Action::Continue
             }
-            MeteringDecision::OverageAllowed { negative_balance } => {
-                handle_overage_allowed(req, &tier_cfg.name, negative_balance)
+            CompiledDecision::OverageAllowed { negative_balance } => {
+                handle_overage_allowed(req, tier.tier_header_val.as_ref(), negative_balance)
             }
-            MeteringDecision::Exhausted {
+            CompiledDecision::Exhausted {
                 action,
-                window_name,
+                window_idx,
                 reset_seconds,
-            } => handle_exhausted(req, action, &tier_cfg.name, &window_name, reset_seconds),
+            } => handle_exhausted(req, action, tier, window_idx, reset_seconds),
         }
     }
+}
+
+#[cold]
+#[inline(never)]
+fn handle_missing_account() -> Action {
+    const JSON_CT: HeaderValue = HeaderValue::from_static("application/json; charset=utf-8");
+    const BODY: &[u8] =
+        br#"{"error":"bad_request","message":"Missing required tenant account header for API metering"}"#;
+
+    let mut resp = L7Response::from_bytes(StatusCode::BAD_REQUEST, Bytes::from_static(BODY));
+    resp.headers.insert(CONTENT_TYPE, JSON_CT);
+    resp.headers.set_u64(CONTENT_LENGTH, BODY.len() as u64);
+    Action::Respond(resp)
 }
 
 #[cold]
@@ -407,10 +262,14 @@ fn insert_negative_balance(req: &mut L7Request, balance_micro_credits: i64) {
 
 #[cold]
 #[inline(never)]
-fn handle_overage_allowed(req: &mut L7Request, tier_name: &str, negative_balance: i64) -> Action {
+fn handle_overage_allowed(
+    req: &mut L7Request,
+    tier_header_val: Option<&HeaderValue>,
+    negative_balance: i64,
+) -> Action {
     const TRUE_VAL: HeaderValue = HeaderValue::from_static("true");
-    if let Ok(val) = HeaderValue::from_str(tier_name) {
-        req.headers.insert(&X_METERING_TIER, val);
+    if let Some(val) = tier_header_val {
+        req.headers.insert(&X_METERING_TIER, val.clone());
     }
     req.headers.insert(&X_METERING_OVERAGE, TRUE_VAL);
     insert_negative_balance(req, negative_balance);
@@ -419,32 +278,71 @@ fn handle_overage_allowed(req: &mut L7Request, tier_name: &str, negative_balance
 
 #[cold]
 #[inline(never)]
+fn push_json_escaped(out: &mut String, s: &str) {
+    for ch in s.chars() {
+        match ch {
+            '"' => out.push_str(r#"\""#),
+            '\\' => out.push_str(r#"\\"#),
+            '\n' => out.push_str(r#"\n"#),
+            '\r' => out.push_str(r#"\r"#),
+            '\t' => out.push_str(r#"\t"#),
+            c if (c as u32) < 0x20 => {
+                let _ = write!(out, "\\u{:04x}", c as u32);
+            }
+            c => out.push(c),
+        }
+    }
+}
+
+#[cold]
+#[inline(never)]
 fn handle_exhausted(
     req: &mut L7Request,
     action: ExhaustedAction,
-    tier_name: &str,
-    window_name: &str,
+    tier: &CompiledTier,
+    window_idx: Option<usize>,
     reset_seconds: u64,
 ) -> Action {
     const JSON_CT: HeaderValue = HeaderValue::from_static("application/json; charset=utf-8");
     const TRUE_VAL: HeaderValue = HeaderValue::from_static("true");
+    const CREDIT_BALANCE_VAL: HeaderValue = HeaderValue::from_static("credit_balance");
+
     match action {
         ExhaustedAction::Reject402 => {
-            let json_payload = format!(
-                r#"{{"error":"payment_required","message":"API tier quota or prepaid credit balance exhausted","tier":"{}","window":"{}","reset_seconds":{}}}"#,
-                tier_name, window_name, reset_seconds
+            let window_str = window_idx
+                .and_then(|idx| tier.windows.get(idx))
+                .map(|w| w.cfg.name.as_str())
+                .unwrap_or("credit_balance");
+
+            let mut json_payload = String::with_capacity(140);
+            json_payload.push_str(
+                r#"{"error":"payment_required","message":"API tier quota or prepaid credit balance exhausted","tier":""#,
             );
+            push_json_escaped(&mut json_payload, &tier.name);
+            json_payload.push_str(r#"","window":""#);
+            push_json_escaped(&mut json_payload, window_str);
+            let _ = write!(json_payload, r#"","reset_seconds":{}}}"#, reset_seconds);
+
             let body_bytes = Bytes::from(json_payload);
             let len = body_bytes.len();
 
             let mut resp = L7Response::from_bytes(StatusCode::PAYMENT_REQUIRED, body_bytes);
             resp.headers.insert(CONTENT_TYPE, JSON_CT);
             resp.headers.set_u64(CONTENT_LENGTH, len as u64);
-            if let Ok(val) = HeaderValue::from_str(tier_name) {
-                resp.headers.insert(&X_METERING_TIER, val);
+            if let Some(ref tv) = tier.tier_header_val {
+                resp.headers.insert(&X_METERING_TIER, tv.clone());
             }
-            if let Ok(val) = HeaderValue::from_str(window_name) {
-                resp.headers.insert(&X_METERING_EXHAUSTED_WINDOW, val);
+            match window_idx.and_then(|idx| tier.windows.get(idx)) {
+                Some(w) => {
+                    if let Some(ref wv) = w.name_header_val {
+                        resp.headers
+                            .insert(&X_METERING_EXHAUSTED_WINDOW, wv.clone());
+                    }
+                }
+                None => {
+                    resp.headers
+                        .insert(&X_METERING_EXHAUSTED_WINDOW, CREDIT_BALANCE_VAL);
+                }
             }
             if reset_seconds > 0 {
                 resp.headers.set_u64(RETRY_AFTER, reset_seconds);
@@ -456,8 +354,9 @@ fn handle_exhausted(
             if reset_seconds > 0 {
                 req.headers.insert_bypass_u64(RETRY_AFTER, reset_seconds);
             }
-            if let Ok(val) = HeaderValue::from_str(tier_name) {
-                req.headers.insert_bypass(X_METERING_TIER.clone(), val);
+            if let Some(ref tv) = tier.tier_header_val {
+                req.headers
+                    .insert_bypass(X_METERING_TIER.clone(), tv.clone());
             }
             req.headers
                 .insert_bypass(X_METERING_EXHAUSTED.clone(), TRUE_VAL);
@@ -466,68 +365,4 @@ fn handle_exhausted(
         }
         ExhaustedAction::Passthrough => Action::Continue,
     }
-}
-
-/// Asynchronous background Shadow Logistics Worker loop reconciling local credit deltas with distributed Redis.
-async fn run_shadow_metering_sync(
-    state: Arc<ShardedMeteringState>,
-    dist_cfg: DistributedSyncConfig,
-    initial_balance: i64,
-    mut shutdown: tokio::sync::watch::Receiver<bool>,
-) -> Result<(), PluginError> {
-    let mut client = RedisClient::new(dist_cfg.redis_addr);
-    let mut interval = tokio::time::interval(std::time::Duration::from_millis(
-        dist_cfg.sync_interval_ms.max(10),
-    ));
-
-    loop {
-        tokio::select! {
-            _ = interval.tick() => {}
-            _ = shutdown.changed() => {
-                if *shutdown.borrow() {
-                    break;
-                }
-            }
-        }
-
-        if *shutdown.borrow() {
-            break;
-        }
-
-        let deltas = state.collect_deltas();
-        if deltas.is_empty() {
-            continue;
-        }
-
-        // Format HINCRBY {prefix}:metering:consumed {acc_hash} {delta}
-        let mut cmd_strings = Vec::with_capacity(deltas.len());
-        for &(acc_hash, delta) in &deltas {
-            let key = format!("{}:metering:consumed", dist_cfg.key_prefix);
-            let field = acc_hash.to_string();
-            // Track positive accumulated consumption
-            cmd_strings.push((key, field, delta, acc_hash));
-        }
-
-        let cmd_refs: Vec<(&str, &str, i64)> = cmd_strings
-            .iter()
-            .map(|(k, f, d, _)| (k.as_str(), f.as_str(), *d))
-            .collect();
-
-        match client.pipelined_hincrby(&cmd_refs).await {
-            Ok(results) => {
-                let mut updates = Vec::with_capacity(results.len());
-                for (idx, &res) in results.iter().enumerate() {
-                    let (_, _, _, acc_hash) = cmd_strings[idx];
-                    let remaining_balance = initial_balance - res;
-                    updates.push((acc_hash, remaining_balance));
-                }
-                state.reconcile_balances(&updates);
-            }
-            Err(e) => {
-                tracing::warn!(error = %e, "Shadow logistics failed to flush metering deltas to Redis");
-            }
-        }
-    }
-
-    Ok(())
 }
