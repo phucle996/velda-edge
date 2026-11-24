@@ -332,6 +332,7 @@ pub fn build_mock_runtime(
         build_plugin_table(
             &config.plugins,
             &config.routes,
+            &config.upstreams,
             &config.listeners,
             &etp_table,
         )

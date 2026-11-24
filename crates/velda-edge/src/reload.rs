@@ -171,6 +171,7 @@ pub fn load_initial_runtime(
     let plugins = Arc::new(crate::runtime::build_plugin_table(
         &runtime_config.plugins,
         &runtime_config.routes,
+        &runtime_config.upstreams,
         &runtime_config.listeners,
         &etp_table,
     )?);
@@ -321,11 +322,17 @@ pub async fn apply_reload(
         current.etp_table.clone()
     };
 
-    // Recompile PluginTable if plugins, routes, listeners, or ETPs changed
-    let plugins = if plugins_changed || routes_changed || listeners_changed || etps_changed {
+    // Recompile PluginTable if plugins, routes, upstreams, listeners, or ETPs changed
+    let plugins = if plugins_changed
+        || routes_changed
+        || upstreams_changed
+        || listeners_changed
+        || etps_changed
+    {
         Arc::new(crate::runtime::build_plugin_table(
             &config.plugins,
             &config.routes,
+            &config.upstreams,
             &config.listeners,
             &etp_table,
         )?)

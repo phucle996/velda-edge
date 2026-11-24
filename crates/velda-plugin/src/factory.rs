@@ -303,6 +303,41 @@ pub fn wire_plugin_etps(
     Ok(())
 }
 
+/// Resolves target upstream names declared by pre-upstream plugins (such as `canary`)
+/// into their dense `u16` runtime indices in `upstream_ids`.
+pub fn wire_plugin_upstreams(
+    available_plugins: &FxHashMap<String, LoadedPlugin>,
+    upstream_ids: &[&str],
+) -> Result<(), PluginError> {
+    for (id, plugin) in available_plugins {
+        if let LoadedPlugin::PreUpstream(pu) = plugin
+            && let Some(target_name) = pu.canary_upstream_target()
+        {
+            let pos = upstream_ids
+                .iter()
+                .position(|u| *u == target_name)
+                .ok_or_else(|| {
+                    PluginError::Config(format!(
+                        "Plugin '{id}' targets canary_upstream '{target_name}', which does not exist in upstreams"
+                    ))
+                })?;
+            let dense_id = u16::try_from(pos).map_err(|_| {
+                PluginError::Config(format!(
+                    "Upstream index for '{target_name}' exceeds u16::MAX"
+                ))
+            })?;
+            pu.attach_canary_upstream(dense_id);
+            tracing::info!(
+                plugin_id = %id,
+                canary_upstream = %target_name,
+                upstream_id = dense_id,
+                "Wired dense upstream index for canary plugin"
+            );
+        }
+    }
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

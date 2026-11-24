@@ -1,425 +1,149 @@
-//! Canary Traffic Splitting Pre-Upstream Plugin (`canary`).
+//! Canary Traffic Splitting Pre-Upstream Plugin (`canary::plugin`).
 //!
-//! Provides controlled, progressive traffic steering between baseline and canary upstreams
-//! based on:
-//! 1. **Rule-Based Overrides**: Direct routing based on exact, prefix, suffix, contains,
-//!    or exists header conditions evaluated on raw byte slices (Zero DFA/NFA Regex overhead).
-//! 2. **Flexible Consistent Session Hashing**: Multi-strategy session stickiness (`priority`,
-//!    `composite`, or `random`) across user-defined sources (`header:<name>`, `cookie:<name>`,
-//!    `query:<name>`, `client_ip`, `uri_path`). Zero hardcoded default header/cookie names.
-//! 3. **Weight-Based Percentage**: Configurable percentage (0% to 100%) for gradual rollout.
-//! 4. **Spoof-Resistant Backend Marker**: Injects an informational header when routed to canary,
-//!    and strictly purges any client-supplied marker on the baseline path to prevent telemetry/flag spoofing.
+//! ```text
+//! on_upstream_request(req, target_upstream)  [AccessLevel::Read, 0 Header Mutations]
+//!   ├─► 1. Header Rules (`rules` against HeaderWorkspace)     -> force canary
+//!   ├─► 2. Ratio Shortcuts (`ratio == 0` -> false, `>= 1000` -> true)
+//!   └─► 3. Stateless Permille Split (`((swar_hash64 * 1000) >> 64) < ratio`)
+//!         ├── true  ─► *target_upstream = canary_upstream_id -> Continue
+//!         └── false ─► keep default upstream                 -> Continue
+//! ```
 
-use crate::config::PluginConfig;
-use http::header::{COOKIE, HeaderName, HeaderValue};
-use std::cell::Cell;
-use std::hash::Hasher;
 use std::sync::Arc;
-use velda_core::{Action, L7Request};
+use std::sync::atomic::{AtomicU16, Ordering};
 
+use http::HeaderName;
+use velda_core::{Action, L7Request, UNASSIGNED_UPSTREAM_ID};
+
+use super::config::{CanaryConfig, HashStrategy, HeaderRule, RuleOperator, schema_to_config};
+use super::hash::evaluate_permille;
+use super::validation::validate_canary_config;
 use crate::capability::{AccessLevel, PluginCapability, SupportedProtocols};
+use crate::config::PluginConfig;
 use crate::error::PluginError;
 use crate::pre_upstream::PreUpstreamPlugin;
 
-/// Fast thread-local pseudo-random percentage generator (0..100).
-///
-/// Uses Xorshift64* to eliminate atomic MESI cache-line bouncing and lock contention
-/// across worker threads while maintaining uniform distribution.
-#[inline]
-pub fn fast_prng_percent() -> u32 {
-    thread_local! {
-        static RNG_STATE: Cell<u64> = Cell::new({
-            let ptr = &RNG_STATE as *const _ as usize as u64;
-            let time = std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)
-                .map(|d| d.as_nanos() as u64)
-                .unwrap_or(0x517cc1b727220a95);
-            ptr ^ time ^ 0x9e3779b97f4a7c15
-        });
-    }
-
-    RNG_STATE.with(|cell| {
-        let mut x = cell.get();
-        if x == 0 {
-            x = 0x853c49e6748fea9b;
-        }
-        x ^= x >> 12;
-        x ^= x << 25;
-        x ^= x >> 27;
-        cell.set(x);
-        let rand_val = x.wrapping_mul(0x2545f4914f6cdd1d);
-        (rand_val % 100) as u32
-    })
-}
-
-/// Matching operator for header override rules.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub enum RuleOperator {
-    /// Exact match (case-insensitive ASCII comparison).
-    Equals(Box<[u8]>),
-    /// Prefix match (case-insensitive ASCII comparison).
-    Prefix(Box<[u8]>),
-    /// Suffix match (case-insensitive ASCII comparison).
-    Suffix(Box<[u8]>),
-    /// Substring match (case-insensitive ASCII comparison).
-    Contains(Box<[u8]>),
-    /// Checks for the presence of the header regardless of value.
-    Exists,
-}
-
-/// Rule matching against request headers to force immediate canary routing.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct HeaderRule {
-    /// Pre-compiled header name.
-    pub header: HeaderName,
-    /// Matching operator and pre-compiled byte target.
-    pub operator: RuleOperator,
-}
-
-impl HeaderRule {
-    /// Evaluates this rule against incoming request headers directly on byte slices.
-    #[inline]
-    pub fn matches(&self, req: &L7Request) -> bool {
-        for val in req.headers.get_all(&self.header) {
-            let b = val.as_bytes();
-            match &self.operator {
-                RuleOperator::Exists => return true,
-                RuleOperator::Equals(expected) => {
-                    if b.eq_ignore_ascii_case(expected) {
-                        return true;
-                    }
-                }
-                RuleOperator::Prefix(prefix) => {
-                    if b.len() >= prefix.len() && b[..prefix.len()].eq_ignore_ascii_case(prefix) {
-                        return true;
-                    }
-                }
-                RuleOperator::Suffix(suffix) => {
-                    if b.len() >= suffix.len()
-                        && b[b.len() - suffix.len()..].eq_ignore_ascii_case(suffix)
-                    {
-                        return true;
-                    }
-                }
-                RuleOperator::Contains(needle) => {
-                    if !needle.is_empty()
-                        && b.len() >= needle.len()
-                        && b.windows(needle.len())
-                            .any(|window| window.eq_ignore_ascii_case(needle))
-                    {
-                        return true;
-                    }
-                }
-            }
-        }
-        false
-    }
-}
-
-/// Strategy for evaluating consistent session hashing.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
-pub enum HashStrategy {
-    /// Evaluates `hash_sources` in priority order; first non-empty source is hashed (Default).
-    #[default]
-    Priority,
-    /// Concatenates all specified sources into a compound hash key.
-    Composite,
-    /// Pure uniform pseudo-random percentage without key hashing.
-    Random,
-}
-
-impl HashStrategy {
-    /// Parses a hash strategy identifier from configuration string.
-    pub fn parse(s: &str) -> Self {
-        match s.trim().to_ascii_lowercase().as_str() {
-            "composite" | "combine" => Self::Composite,
-            "random" => Self::Random,
-            _ => Self::Priority,
-        }
-    }
-}
-
-/// Source attribute used for consistent hashing.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub enum HashSource {
-    /// Downstream client IP (authoritative `x-real-ip` or rightmost `x-forwarded-for`).
-    ClientIp,
-    /// Full request URI path (`req.uri.path()`).
-    UriPath,
-    /// Pre-compiled header name (user-specified, e.g. `header:x-user-id`).
-    Header(HeaderName),
-    /// Cookie name (user-specified, e.g. `cookie:session_id`).
-    Cookie(Box<str>),
-    /// URL query parameter name (user-specified, e.g. `query:tenant_id`).
-    Query(Box<str>),
-}
-
-impl HashSource {
-    /// Extracts raw byte representation for this hash source directly without heap allocations.
-    #[inline]
-    pub fn extract_bytes<'a>(&'a self, req: &'a L7Request) -> Option<&'a [u8]> {
-        match self {
-            Self::ClientIp => {
-                // Priority 1: x-real-ip (authoritatively overwritten by gateway from verified socket peer)
-                if let Some(val) = req.headers.get("x-real-ip").and_then(|v| v.to_str().ok()) {
-                    let trimmed = val.trim();
-                    if !trimmed.is_empty() {
-                        return Some(trimmed.as_bytes());
-                    }
-                }
-                // Priority 2: rightmost entry in x-forwarded-for (where gateway appends verified socket peer)
-                if let Some(val) = req
-                    .headers
-                    .get("x-forwarded-for")
-                    .and_then(|v| v.to_str().ok())
-                    && let Some(last) = val.rsplit(',').next()
-                {
-                    let trimmed = last.trim();
-                    if !trimmed.is_empty() {
-                        return Some(trimmed.as_bytes());
-                    }
-                }
-                None
-            }
-            Self::UriPath => Some(req.uri.path().as_bytes()),
-            Self::Header(name) => {
-                for val in req.headers.get_all(name) {
-                    let b = val.as_bytes();
-                    if !b.is_empty() {
-                        return Some(b);
-                    }
-                }
-                None
-            }
-            Self::Cookie(target_name) => {
-                for val in req.headers.get_all(COOKIE) {
-                    if let Ok(s) = val.to_str() {
-                        for pair in s.split(';') {
-                            let trimmed = pair.trim();
-                            if let Some((name, val)) = trimmed.split_once('=')
-                                && name.trim().eq_ignore_ascii_case(target_name)
-                            {
-                                let v = val.trim();
-                                if !v.is_empty() {
-                                    return Some(v.as_bytes());
-                                }
-                            }
-                        }
-                    }
-                }
-                None
-            }
-            Self::Query(target_param) => {
-                let query_str = req.uri.query()?;
-                for pair in query_str.split('&') {
-                    if let Some((name, val)) = pair.split_once('=') {
-                        if name.eq_ignore_ascii_case(target_param) {
-                            return Some(val.as_bytes());
-                        }
-                    } else if pair.eq_ignore_ascii_case(target_param) {
-                        return Some(b"");
-                    }
-                }
-                None
-            }
-        }
-    }
-}
-
-/// Configuration settings for the Canary Traffic Splitting plugin.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct CanaryConfig {
-    /// Name of the target canary upstream (e.g., `"orders-v2"`).
-    pub canary_upstream: String,
-    /// Percentage of traffic directed to the canary upstream (0 to 100).
-    pub weight: u32,
-    /// Explicit header rules that force canary routing when matched.
-    pub rules: Vec<HeaderRule>,
-    /// Consistent hashing strategy.
-    pub hash_strategy: HashStrategy,
-    /// List of sources used for consistent session hashing.
-    pub hash_sources: Vec<HashSource>,
-    /// Header name injected into upstream request to mark canary status (or `"none"`).
-    pub canary_header: String,
-    /// Header value injected (or `"none"`).
-    pub canary_header_value: String,
-}
-
-/// Canary Traffic Splitting Pre-Upstream Plugin.
-#[derive(Debug, Clone)]
+/// Lean, header-only, read-only Canary Traffic Splitting plugin.
 pub struct CanaryPlugin {
     pub id: String,
     pub canary_upstream: Arc<str>,
-    pub canary_upstream_id: u16,
-    pub weight: u32,
-    pub rules: Vec<HeaderRule>,
+    pub canary_upstream_id: AtomicU16,
+    /// Traffic share routed to canary in permille (`0..=1000`).
+    pub ratio: u32,
+    pub rules: Box<[HeaderRule]>,
     pub hash_strategy: HashStrategy,
-    pub hash_sources: Vec<HashSource>,
-    pub canary_marker: Option<(HeaderName, HeaderValue)>,
+    pub hash_headers: Box<[HeaderName]>,
+}
+
+impl std::fmt::Debug for CanaryPlugin {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("CanaryPlugin")
+            .field("id", &self.id)
+            .field("canary_upstream", &self.canary_upstream)
+            .field(
+                "canary_upstream_id",
+                &self.canary_upstream_id.load(Ordering::Relaxed),
+            )
+            .field("ratio", &self.ratio)
+            .field("hash_strategy", &self.hash_strategy)
+            .finish()
+    }
 }
 
 impl CanaryPlugin {
-    /// Constructs a new canary plugin with full configuration.
+    /// Constructs a new canary plugin from typed configuration.
     pub fn new(id: impl Into<String>, config: CanaryConfig) -> Result<Self, PluginError> {
-        let canary_upstream_id = 2;
-        let canary_upstream: Arc<str> = Arc::from(config.canary_upstream.as_str());
-
-        let canary_marker = if config.canary_header.trim().eq_ignore_ascii_case("none") {
-            None
-        } else {
-            let name = HeaderName::from_bytes(config.canary_header.trim().as_bytes())
-                .map_err(|e| PluginError::Config(format!("Invalid canary_header: {e}")))?;
-            let val = HeaderValue::from_str(config.canary_header_value.trim())
-                .map_err(|e| PluginError::Config(format!("Invalid canary_header_value: {e}")))?;
-            Some((name, val))
-        };
+        if config.canary_upstream.trim().is_empty() {
+            return Err(PluginError::Config(
+                "canary_upstream cannot be empty".to_string(),
+            ));
+        }
+        if config.ratio > 1000 {
+            return Err(PluginError::Config(format!(
+                "canary ratio ({}) must be in 0..=1000",
+                config.ratio
+            )));
+        }
 
         Ok(Self {
             id: id.into(),
-            canary_upstream,
-            canary_upstream_id,
-            weight: config.weight,
-            rules: config.rules,
+            canary_upstream: Arc::from(config.canary_upstream.trim()),
+            canary_upstream_id: AtomicU16::new(UNASSIGNED_UPSTREAM_ID),
+            ratio: config.ratio,
+            rules: config.rules.into_boxed_slice(),
             hash_strategy: config.hash_strategy,
-            hash_sources: config.hash_sources,
-            canary_marker,
+            hash_headers: config.hash_headers.into_boxed_slice(),
         })
     }
 
-    /// Deserializes and constructs an instance directly from a [`PluginConfig`].
+    /// Parses, validates, and constructs a [`CanaryPlugin`] from control-plane JSON.
     pub fn from_config(config: &PluginConfig) -> Result<Self, PluginError> {
-        let cfg =
-            super::validation::validate_canary_config(&config.id, &config.config).map_err(|e| {
-                PluginError::Config(format!(
-                    "Invalid canary configuration for '{}': {e}",
-                    config.id
-                ))
-            })?;
-
-        let mut rules = Vec::with_capacity(cfg.rules.len());
-        for r in &cfg.rules {
-            let name = HeaderName::from_bytes(r.name.trim().as_bytes()).map_err(|e| {
-                PluginError::Config(format!("Invalid header rule name '{}': {e}", r.name))
-            })?;
-
-            let operator = match r.operator.trim().to_ascii_lowercase().as_str() {
-                "equals" => RuleOperator::Equals(r.value.trim().as_bytes().into()),
-                "prefix" => RuleOperator::Prefix(r.value.trim().as_bytes().into()),
-                "suffix" => RuleOperator::Suffix(r.value.trim().as_bytes().into()),
-                "contains" => RuleOperator::Contains(r.value.trim().as_bytes().into()),
-                "exists" => RuleOperator::Exists,
-                other => {
-                    return Err(PluginError::Config(format!(
-                        "Unsupported canary rule operator '{other}'"
-                    )));
-                }
-            };
-
-            rules.push(HeaderRule {
-                header: name,
-                operator,
-            });
-        }
-
-        let hash_strategy = HashStrategy::parse(&cfg.hash_strategy);
-        let mut hash_sources = Vec::with_capacity(cfg.hash_sources.len());
-
-        for src in &cfg.hash_sources {
-            let src_trim = src.trim();
-            let src_lower = src_trim.to_ascii_lowercase();
-            if src_lower == "client_ip" || src_lower == "ip" {
-                hash_sources.push(HashSource::ClientIp);
-            } else if src_lower == "uri_path" || src_lower == "path" {
-                hash_sources.push(HashSource::UriPath);
-            } else if let Some(hdr) = src_trim.strip_prefix("header:") {
-                let name = HeaderName::from_bytes(hdr.trim().as_bytes()).map_err(|e| {
-                    PluginError::Config(format!("Invalid hash_source header '{hdr}': {e}"))
-                })?;
-                hash_sources.push(HashSource::Header(name));
-            } else if let Some(cookie) = src_trim.strip_prefix("cookie:") {
-                hash_sources.push(HashSource::Cookie(cookie.trim().into()));
-            } else if let Some(query) = src_trim.strip_prefix("query:") {
-                hash_sources.push(HashSource::Query(query.trim().into()));
-            } else {
-                return Err(PluginError::Config(format!(
-                    "Unsupported hash_source '{src_trim}' for canary plugin '{}'",
-                    config.id
-                )));
-            }
-        }
-
-        Self::new(
-            &config.id,
-            CanaryConfig {
-                canary_upstream: cfg.canary_upstream,
-                weight: cfg.weight,
-                rules,
-                hash_strategy,
-                hash_sources,
-                canary_header: cfg.canary_header,
-                canary_header_value: cfg.canary_header_value,
-            },
-        )
+        let schema = validate_canary_config(&config.id, &config.config)?;
+        let cfg = schema_to_config(schema)?;
+        Self::new(&config.id, cfg)
     }
 
-    /// Evaluates whether the incoming request should be routed to the canary upstream.
+    /// Evaluates whether the request should route to the canary upstream.
     #[inline]
     pub fn should_route_to_canary(&self, req: &L7Request) -> bool {
-        // Step 1: Rule-based overrides (highest priority)
         for rule in &self.rules {
-            if rule.matches(req) {
+            if rule_matches(req, rule) {
                 return true;
             }
         }
-
-        // Step 2: Weight boundaries
-        if self.weight == 0 {
+        if self.ratio == 0 {
             return false;
         }
-        if self.weight >= 100 {
+        if self.ratio >= 1000 {
             return true;
         }
-
-        // Step 3: Consistent Hashing / Weight Distribution
-        self.evaluate_percentage(req) < self.weight
+        evaluate_permille(req, self.hash_strategy, &self.hash_headers) < self.ratio
     }
+}
 
-    /// Evaluates consistent percentage (0..100) based on configured strategy and sources.
-    #[inline]
-    pub fn evaluate_percentage(&self, req: &L7Request) -> u32 {
-        match self.hash_strategy {
-            HashStrategy::Random => fast_prng_percent(),
-            HashStrategy::Priority => {
-                for src in &self.hash_sources {
-                    if let Some(bytes) = src.extract_bytes(req) {
-                        let mut hasher = rustc_hash::FxHasher::default();
-                        hasher.write(bytes);
-                        return (hasher.finish() % 100) as u32;
-                    }
+#[inline]
+fn rule_matches(req: &L7Request, rule: &HeaderRule) -> bool {
+    let needle = &rule.pattern;
+    for val in req.headers.get_all(&rule.header) {
+        let b = val.as_bytes();
+        match rule.operator {
+            RuleOperator::Exists => return true,
+            RuleOperator::Equals => {
+                if b.eq_ignore_ascii_case(needle) {
+                    return true;
                 }
-                fast_prng_percent()
             }
-            HashStrategy::Composite => {
-                let mut hasher = rustc_hash::FxHasher::default();
-                let mut matched_any = false;
-                for src in &self.hash_sources {
-                    if let Some(bytes) = src.extract_bytes(req) {
-                        hasher.write(bytes);
-                        matched_any = true;
-                    } else {
-                        hasher.write(b"\0");
-                    }
-                    hasher.write(b":");
+            RuleOperator::Prefix => {
+                if let Some(head) = b.get(..needle.len())
+                    && head.eq_ignore_ascii_case(needle)
+                {
+                    return true;
                 }
-                if matched_any {
-                    (hasher.finish() % 100) as u32
-                } else {
-                    fast_prng_percent()
+            }
+            RuleOperator::Suffix => {
+                if let Some(start) = b.len().checked_sub(needle.len())
+                    && let Some(tail) = b.get(start..)
+                    && tail.eq_ignore_ascii_case(needle)
+                {
+                    return true;
+                }
+            }
+            RuleOperator::Contains => {
+                if !needle.is_empty()
+                    && let Some(limit) = b.len().checked_sub(needle.len())
+                {
+                    for start in 0..=limit {
+                        if let Some(win) = b.get(start..start + needle.len())
+                            && win.eq_ignore_ascii_case(needle)
+                        {
+                            return true;
+                        }
+                    }
                 }
             }
         }
     }
+    false
 }
 
 impl PreUpstreamPlugin for CanaryPlugin {
@@ -433,28 +157,31 @@ impl PreUpstreamPlugin for CanaryPlugin {
         0
     }
 
+    #[inline(always)]
+    fn canary_upstream_target(&self) -> Option<&str> {
+        Some(self.canary_upstream.as_ref())
+    }
+
+    #[inline(always)]
+    fn attach_canary_upstream(&self, upstream_id: u16) {
+        self.canary_upstream_id
+            .store(upstream_id, Ordering::Relaxed);
+    }
+
+    #[inline]
     fn on_upstream_request(&self, req: &mut L7Request, target_upstream: &mut u16) -> Action {
         if self.should_route_to_canary(req) {
-            // 1. Inject informational marker header for backend telemetry/sandbox (if configured)
-            if let Some((ref name, ref val)) = self.canary_marker {
-                req.headers.insert(name.clone(), val.clone());
-            }
-
-            // 2. Direct in-memory u32 u16 register store without heap allocation
-            *target_upstream = self.canary_upstream_id;
-        } else {
-            // Baseline Path: Strip client-supplied canary marker to prevent telemetry/flag spoofing
-            if let Some((ref name, _)) = self.canary_marker {
-                req.headers.remove(name);
+            let cid = self.canary_upstream_id.load(Ordering::Relaxed);
+            if cid != UNASSIGNED_UPSTREAM_ID {
+                *target_upstream = cid;
             }
         }
-
         Action::Continue
     }
 
     #[inline(always)]
     fn capability(&self) -> PluginCapability {
-        PluginCapability::header_only(AccessLevel::Write)
+        PluginCapability::header_only(AccessLevel::Read)
     }
 
     #[inline(always)]
@@ -466,277 +193,204 @@ impl PreUpstreamPlugin for CanaryPlugin {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use http::{Method, Uri, Version};
+    use http::{HeaderValue, Method, Uri, Version};
     use velda_core::{Body, HeaderWorkspace};
 
     #[test]
-    fn test_canary_rule_based_override_and_operators() {
+    fn test_canary_header_rules_read_only() {
         let config = CanaryConfig {
             canary_upstream: "payments-v2".into(),
-            weight: 0,
+            ratio: 0,
             rules: vec![
                 HeaderRule {
                     header: HeaderName::from_static("x-canary"),
-                    operator: RuleOperator::Equals(b"always".to_vec().into_boxed_slice()),
+                    operator: RuleOperator::Equals,
+                    pattern: (*b"always").into(),
                 },
                 HeaderRule {
                     header: HeaderName::from_static("x-user-email"),
-                    operator: RuleOperator::Suffix(b"@velda.io".to_vec().into_boxed_slice()),
+                    operator: RuleOperator::Suffix,
+                    pattern: (*b"@velda.io").into(),
                 },
                 HeaderRule {
                     header: HeaderName::from_static("x-client-version"),
-                    operator: RuleOperator::Prefix(b"v2-".to_vec().into_boxed_slice()),
+                    operator: RuleOperator::Prefix,
+                    pattern: (*b"v2-").into(),
                 },
                 HeaderRule {
                     header: HeaderName::from_static("user-agent"),
-                    operator: RuleOperator::Contains(b"mobile".to_vec().into_boxed_slice()),
+                    operator: RuleOperator::Contains,
+                    pattern: (*b"mobile").into(),
                 },
                 HeaderRule {
                     header: HeaderName::from_static("x-debug"),
                     operator: RuleOperator::Exists,
+                    pattern: Box::new([]),
                 },
             ],
             hash_strategy: HashStrategy::Random,
-            hash_sources: Vec::new(),
-            canary_header: "x-velda-canary".into(),
-            canary_header_value: "true".into(),
+            hash_headers: Vec::new(),
         };
 
         let plugin = CanaryPlugin::new("canary-test", config).unwrap();
+        assert_eq!(
+            plugin.capability(),
+            PluginCapability::header_only(AccessLevel::Read)
+        );
+        plugin.attach_canary_upstream(2);
 
-        // 1. Equals match
-        let mut req1 = L7Request::new(
-            Method::GET,
-            Uri::from_static("/v1/pay"),
-            Version::HTTP_11,
-            {
-                let mut h = HeaderWorkspace::empty(4);
-                h.insert("x-canary", HeaderValue::from_static("always"));
-                h
-            },
-            Body::Empty,
-        );
-        let mut target1 = 1;
-        plugin.on_upstream_request(&mut req1, &mut target1);
-        assert_eq!(target1, 2);
-        assert_eq!(req1.headers.get("x-velda-canary").unwrap(), "true");
+        let make_req = |k: &'static str, v: &'static str| {
+            L7Request::new(
+                Method::GET,
+                Uri::from_static("/v1/pay"),
+                Version::HTTP_11,
+                {
+                    let mut h = HeaderWorkspace::empty(4);
+                    h.insert(k, HeaderValue::from_static(v));
+                    h
+                },
+                Body::Empty,
+            )
+        };
 
-        // 2. Suffix match
-        let mut req2 = L7Request::new(
-            Method::GET,
-            Uri::from_static("/v1/pay"),
-            Version::HTTP_11,
-            {
-                let mut h = HeaderWorkspace::empty(4);
-                h.insert("x-user-email", HeaderValue::from_static("dev@velda.io"));
-                h
-            },
-            Body::Empty,
-        );
-        let mut target2 = 1;
-        plugin.on_upstream_request(&mut req2, &mut target2);
-        assert_eq!(target2, 2);
+        for (hdr, val) in [
+            ("x-canary", "ALWAYS"),
+            ("x-user-email", "dev@velda.io"),
+            ("x-client-version", "v2-beta"),
+            ("user-agent", "Mozilla-Mobile-Safari"),
+            ("x-debug", "1"),
+        ] {
+            let mut req = make_req(hdr, val);
+            let mut target = 0;
+            plugin.on_upstream_request(&mut req, &mut target);
+            assert_eq!(target, 2, "failed rule {hdr}={val}");
+        }
 
-        // 3. Prefix match
-        let mut req3 = L7Request::new(
-            Method::GET,
-            Uri::from_static("/v1/pay"),
-            Version::HTTP_11,
-            {
-                let mut h = HeaderWorkspace::empty(4);
-                h.insert("x-client-version", HeaderValue::from_static("v2-beta"));
-                h
-            },
-            Body::Empty,
-        );
-        let mut target3 = 1;
-        plugin.on_upstream_request(&mut req3, &mut target3);
-        assert_eq!(target3, 2);
-
-        // 4. Contains match
-        let mut req4 = L7Request::new(
-            Method::GET,
-            Uri::from_static("/v1/pay"),
-            Version::HTTP_11,
-            {
-                let mut h = HeaderWorkspace::empty(4);
-                h.insert(
-                    "user-agent",
-                    HeaderValue::from_static("Mozilla-Mobile-Safari"),
-                );
-                h
-            },
-            Body::Empty,
-        );
-        let mut target4 = 1;
-        plugin.on_upstream_request(&mut req4, &mut target4);
-        assert_eq!(target4, 2);
-
-        // 5. Exists match
-        let mut req5 = L7Request::new(
-            Method::GET,
-            Uri::from_static("/v1/pay"),
-            Version::HTTP_11,
-            {
-                let mut h = HeaderWorkspace::empty(4);
-                h.insert("x-debug", HeaderValue::from_static("any-value"));
-                h
-            },
-            Body::Empty,
-        );
-        let mut target5 = 1;
-        plugin.on_upstream_request(&mut req5, &mut target5);
-        assert_eq!(target5, 2);
-
-        // 6. Non-matching request with spoofed canary marker -> marker MUST be stripped!
-        let mut req_spoof = L7Request::new(
-            Method::GET,
-            Uri::from_static("/v1/pay"),
-            Version::HTTP_11,
-            {
-                let mut h = HeaderWorkspace::empty(4);
-                h.insert("x-velda-canary", HeaderValue::from_static("true"));
-                h
-            },
-            Body::Empty,
-        );
-        let mut target_base = 1;
-        plugin.on_upstream_request(&mut req_spoof, &mut target_base);
-        assert_eq!(target_base, 1);
-        assert!(
-            !req_spoof.headers.contains_key("x-velda-canary"),
-            "Spoofed canary marker must be stripped on baseline path!"
-        );
+        // Unmatched request leaves target_upstream unchanged and mutates zero headers
+        let mut base = make_req("x-canary", "never");
+        let mut target_base = 0;
+        plugin.on_upstream_request(&mut base, &mut target_base);
+        assert_eq!(target_base, 0);
+        assert_eq!(base.headers.get("x-canary").unwrap(), "never");
     }
 
     #[test]
-    fn test_priority_hash_sources_user_defined() {
+    fn test_canary_permille_distribution_and_priority_headers() {
         let config = CanaryConfig {
-            canary_upstream: "service-canary".into(),
-            weight: 50,
+            canary_upstream: "canary-v2".into(),
+            ratio: 125, // 125/1000 = 12.5%
             rules: Vec::new(),
             hash_strategy: HashStrategy::Priority,
-            hash_sources: vec![
-                HashSource::Header(HeaderName::from_static("x-user-id")),
-                HashSource::Cookie("session_token".into()),
-                HashSource::Query("tenant_id".into()),
-                HashSource::ClientIp,
+            hash_headers: vec![
+                HeaderName::from_static("x-user-id"),
+                HeaderName::from_static("x-real-ip"),
             ],
-            canary_header: "none".into(),
-            canary_header_value: "none".into(),
         };
-        let plugin = CanaryPlugin::new("canary-multi", config).unwrap();
+        let plugin = CanaryPlugin::new("canary-dist", config).unwrap();
+        plugin.attach_canary_upstream(1);
 
-        // 1. First priority: header
-        let req_header = L7Request::new(
-            Method::GET,
-            Uri::from_static("/test?tenant_id=123"),
-            Version::HTTP_11,
-            {
-                let mut h = HeaderWorkspace::empty(4);
-                h.insert("x-user-id", HeaderValue::from_static("user-999"));
-                h
-            },
-            Body::Empty,
+        let mut canary_hits = 0u64;
+        let total = 20_000u64;
+        let mut buf = itoa::Buffer::new();
+        for uid in 1_000_000_000u64..(1_000_000_000u64 + total) {
+            let mut h = HeaderWorkspace::empty(2);
+            h.insert("x-user-id", HeaderValue::from_str(buf.format(uid)).unwrap());
+            let mut req = L7Request::new(
+                Method::GET,
+                Uri::from_static("/"),
+                Version::HTTP_11,
+                h,
+                Body::Empty,
+            );
+            let mut target = 0;
+            plugin.on_upstream_request(&mut req, &mut target);
+            if target == 1 {
+                canary_hits += 1;
+            }
+        }
+        let observed_permille = (canary_hits as f64 / total as f64) * 1000.0;
+        assert!(
+            (observed_permille - 125.0).abs() < 15.0,
+            "expected ~125/1000, got {observed_permille:.1}"
         );
-        let pct_hdr1 = plugin.evaluate_percentage(&req_header);
-        let pct_hdr2 = plugin.evaluate_percentage(&req_header);
-        assert_eq!(pct_hdr1, pct_hdr2);
 
-        // 2. Second priority: cookie
-        let req_cookie = L7Request::new(
-            Method::GET,
-            Uri::from_static("/test?tenant_id=123"),
-            Version::HTTP_11,
-            {
-                let mut h = HeaderWorkspace::empty(4);
-                h.insert(
-                    COOKIE,
-                    HeaderValue::from_static("theme=dark; session_token=tok_456; lang=en"),
-                );
-                h
-            },
-            Body::Empty,
-        );
-        let pct_cook1 = plugin.evaluate_percentage(&req_cookie);
-        let pct_cook2 = plugin.evaluate_percentage(&req_cookie);
-        assert_eq!(pct_cook1, pct_cook2);
-
-        // 3. Third priority: query param
-        let req_query = L7Request::new(
-            Method::GET,
-            Uri::from_static("/test?other=1&tenant_id=corp_alpha"),
-            Version::HTTP_11,
-            HeaderWorkspace::empty(0),
-            Body::Empty,
-        );
-        let pct_q1 = plugin.evaluate_percentage(&req_query);
-        let pct_q2 = plugin.evaluate_percentage(&req_query);
-        assert_eq!(pct_q1, pct_q2);
-    }
-
-    #[test]
-    fn test_composite_hash_consistency() {
-        let config = CanaryConfig {
-            canary_upstream: "service-canary".into(),
-            weight: 50,
-            rules: Vec::new(),
-            hash_strategy: HashStrategy::Composite,
-            hash_sources: vec![
-                HashSource::Header(HeaderName::from_static("x-tenant-id")),
-                HashSource::ClientIp,
-            ],
-            canary_header: "x-canary-route".into(),
-            canary_header_value: "yes".into(),
-        };
-        let plugin = CanaryPlugin::new("canary-comp", config).unwrap();
-
-        let req = L7Request::new(
+        // Whitespace x-user-id falls back cleanly to x-real-ip
+        let mut ws = HeaderWorkspace::empty(4);
+        ws.insert("x-user-id", HeaderValue::from_static("   "));
+        ws.insert("x-real-ip", HeaderValue::from_static("10.0.0.42"));
+        let r_fallback = L7Request::new(
             Method::GET,
             Uri::from_static("/"),
             Version::HTTP_11,
-            {
-                let mut h = HeaderWorkspace::empty(4);
-                h.insert("x-tenant-id", HeaderValue::from_static("tenant-42"));
-                h.insert("x-real-ip", HeaderValue::from_static("192.168.1.100"));
-                h
-            },
+            ws,
             Body::Empty,
         );
-        let p1 = plugin.evaluate_percentage(&req);
-        let p2 = plugin.evaluate_percentage(&req);
-        assert_eq!(p1, p2, "Composite hash must be deterministic");
+        assert_eq!(
+            evaluate_permille(&r_fallback, plugin.hash_strategy, &plugin.hash_headers),
+            evaluate_permille(&r_fallback, plugin.hash_strategy, &plugin.hash_headers)
+        );
     }
 
     #[test]
-    fn test_canary_from_config_multi_sources() {
-        let json_cfg = serde_json::json!({
-            "canary_upstream": "catalog-v2",
-            "weight": 20,
-            "rules": [
-                {
-                    "name": "x-canary",
-                    "operator": "equals",
-                    "value": "always"
-                }
-            ],
-            "hash_strategy": "priority",
-            "hash_sources": [
-                "header:x-device-id",
-                "client_ip"
-            ],
-            "canary_header": "x-velda-canary",
-            "canary_header_value": "true"
-        });
-        let config = PluginConfig {
-            id: "canary".into(),
-            config: json_cfg,
-        };
-        let plugin = CanaryPlugin::from_config(&config).expect("valid config");
-        assert_eq!(plugin.id, "canary");
-        assert_eq!(plugin.canary_upstream.as_ref(), "catalog-v2");
-        assert_eq!(plugin.weight, 20);
-        assert_eq!(plugin.rules.len(), 1);
-        assert_eq!(plugin.hash_sources.len(), 2);
+    fn test_canary_from_config_validation_and_wiring() {
+        assert!(
+            validate_canary_config(
+                "c_bad",
+                &serde_json::json!({
+                    "canary_upstream": "v2",
+                    "ratio": 1001,
+                    "rules": [],
+                    "hash_strategy": "random",
+                    "hash_headers": []
+                })
+            )
+            .is_err()
+        );
+        assert!(
+            validate_canary_config(
+                "c_ws",
+                &serde_json::json!({
+                    "canary_upstream": "v2",
+                    "ratio": 50,
+                    "rules": [{ "name": "x-env", "operator": "equals", "value": "   " }],
+                    "hash_strategy": "random",
+                    "hash_headers": []
+                })
+            )
+            .is_err()
+        );
+
+        let plugin = Arc::new(
+            CanaryPlugin::from_config(&PluginConfig {
+                id: "canary_main".into(),
+                config: serde_json::json!({
+                    "canary_upstream": "orders-v2",
+                    "ratio": 1000,
+                    "rules": [],
+                    "hash_strategy": "composite",
+                    "hash_headers": ["x-tenant-id", "cookie"]
+                }),
+            })
+            .unwrap(),
+        );
+
+        let mut available = rustc_hash::FxHashMap::default();
+        available.insert(
+            "canary_main".to_string(),
+            crate::LoadedPlugin::PreUpstream(Arc::clone(&plugin) as Arc<dyn PreUpstreamPlugin>),
+        );
+        crate::wire_plugin_upstreams(&available, &["orders-v1", "auth", "orders-v2"]).unwrap();
+
+        let mut req = L7Request::new(
+            Method::GET,
+            Uri::from_static("/orders"),
+            Version::HTTP_11,
+            HeaderWorkspace::empty(2),
+            Body::Empty,
+        );
+        let mut target = 0;
+        plugin.on_upstream_request(&mut req, &mut target);
+        assert_eq!(target, 2);
+        assert!(crate::wire_plugin_upstreams(&available, &["orders-v1"]).is_err());
     }
 }

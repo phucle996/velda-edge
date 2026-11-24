@@ -26,11 +26,12 @@ use rustc_hash::FxHashMap;
 use velda_core::{ProtocolFamily, StreamingMode};
 use velda_plugin::{
     LoadedPlugin, RoutePluginPlan, build_route_plugin_plan, instantiate_plugin,
-    wire_plugin_dependencies, wire_plugin_etps,
+    wire_plugin_dependencies, wire_plugin_etps, wire_plugin_upstreams,
 };
 use velda_sync::post_sync::listener::ListenerConfig;
 use velda_sync::post_sync::plugin::PluginConfig;
 use velda_sync::post_sync::route::RouteConfig;
+use velda_sync::post_sync::upstream::UpstreamConfig;
 
 use crate::error::EdgeError;
 
@@ -99,6 +100,7 @@ impl PluginTable {
 pub fn build_plugin_table(
     plugins: &[PluginConfig],
     routes: &[RouteConfig],
+    upstreams: &[UpstreamConfig],
     listeners: &[ListenerConfig],
     etp_registry: &velda_etp::EtpRegistry,
 ) -> Result<PluginTable, EdgeError> {
@@ -132,6 +134,14 @@ pub fn build_plugin_table(
     // 1c. Wire External Third-Party (velda-etp) pool instances into background plugins
     wire_plugin_etps(&available_plugins, etp_registry).map_err(|e| EdgeError::InvalidConfig {
         detail: format!("Failed to wire plugin ETPs: {e}"),
+    })?;
+
+    // 1d. Wire dense u16 upstream indices for plugins targeting alternate upstreams (e.g. canary)
+    let upstream_ids: Vec<&str> = upstreams.iter().map(|u| u.id.as_str()).collect();
+    wire_plugin_upstreams(&available_plugins, &upstream_ids).map_err(|e| {
+        EdgeError::InvalidConfig {
+            detail: format!("Failed to wire plugin target upstreams: {e}"),
+        }
     })?;
 
     // 2. Host Ingress Port Authority: register Traffic Ingress listeners with SocketManager
