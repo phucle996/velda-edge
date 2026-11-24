@@ -18,7 +18,6 @@ use velda_etp::redis::RedisEtp;
 
 use super::algorithm::ShardedMeteringState;
 use crate::error::PluginError;
-use crate::pre_upstream::distributed::DistributedSyncConfig;
 
 fn encode_hincrby_batch(key: &str, deltas: &[(u64, i64)], out: &mut Vec<u8>) {
     out.clear();
@@ -171,13 +170,13 @@ async fn flush_deltas_via_etp(
 pub(crate) async fn run_shadow_metering_sync(
     state: Arc<ShardedMeteringState>,
     etp: Arc<RedisEtp>,
-    dist_cfg: DistributedSyncConfig,
+    sync_interval_ms: u64,
+    key_prefix: String,
     initial_balance: i64,
     mut shutdown: watch::Receiver<bool>,
 ) -> Result<(), PluginError> {
-    let mut interval =
-        tokio::time::interval(Duration::from_millis(dist_cfg.sync_interval_ms.max(10)));
-    let key = format!("{}:metering:consumed", dist_cfg.key_prefix);
+    let mut interval = tokio::time::interval(Duration::from_millis(sync_interval_ms.max(10)));
+    let key = format!("{key_prefix}:metering:consumed");
     let mut cmd_buf = Vec::with_capacity(8192);
     let mut read_buf = Vec::with_capacity(8192);
 

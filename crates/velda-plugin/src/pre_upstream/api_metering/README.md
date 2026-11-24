@@ -49,7 +49,7 @@ In steady state, almost every request is checked and billed **in-memory on the l
 
 - An L7 listener (`http` or `grpc`).
 - Upstream authentication (such as `api_key_auth`, `jwt_auth`, or `hmac_auth`) or trusted ingress headers supplying at least the first header in `account_headers`.
-- *(Optional)* A `redis` entry in `etp.json` if `distributed.enabled` is `true`.
+- *(Optional)* A `redis` entry in `etp.json` referenced by `etp_id` (omit `etp_id` for node-local-only metering).
 
 ---
 

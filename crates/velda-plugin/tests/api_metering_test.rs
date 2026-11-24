@@ -64,8 +64,7 @@ fn test_api_metering_free_tier_rejection_402() {
         default_tier: "free".to_string(),
         initial_balance_micro_credits: 0,
         tiers,
-        etp_id: None,
-        distributed: None,
+        ..ApiMeteringConfig::default()
     };
     let plugin = Arc::new(ApiMeteringPlugin::new("metering-test-1", config));
     let mut target = 1;
@@ -155,8 +154,7 @@ fn test_api_metering_pro_tier_rejection_429() {
         default_tier: "free".to_string(),
         initial_balance_micro_credits: 0,
         tiers,
-        etp_id: None,
-        distributed: None,
+        ..ApiMeteringConfig::default()
     };
     let plugin = Arc::new(ApiMeteringPlugin::new("metering-test-2", config));
     let mut target = 1;
@@ -226,8 +224,7 @@ fn test_api_metering_enterprise_overage_passthrough() {
         default_tier: "enterprise".to_string(),
         initial_balance_micro_credits: 100_000, // 1 request credit funded
         tiers,
-        etp_id: None,
-        distributed: None,
+        ..ApiMeteringConfig::default()
     };
     let plugin = Arc::new(ApiMeteringPlugin::new("metering-test-3", config));
     let mut target = 1;
@@ -279,8 +276,7 @@ fn test_api_metering_prepaid_micro_credits_deduction() {
         default_tier: "payg".to_string(),
         initial_balance_micro_credits: 1_000_000, // 1.0 credit funded
         tiers,
-        etp_id: None,
-        distributed: None,
+        ..ApiMeteringConfig::default()
     };
     let plugin = Arc::new(ApiMeteringPlugin::new("metering-credits-test", config));
     let mut target = 1;
@@ -782,17 +778,26 @@ fn test_api_metering_missing_account_header_rejects_400() {
 
 #[tokio::test]
 async fn test_api_metering_etp_wiring_and_shadow_sync() {
-    // 1. Validation: distributed.enabled=true without etp_id must fail fast.
-    let missing_etp_cfg = PluginConfig {
+    // 1. Empty string etp_id must fail fast; omitted etp_id runs node-local (pbww = 0).
+    let blank_etp_cfg = PluginConfig {
         id: "api_metering".to_string(),
         config: json!({
-            "distributed": {
-                "enabled": true,
-                "sync_interval_ms": 50
-            }
+            "etp_id": "   "
         }),
     };
-    assert!(ApiMeteringPlugin::from_config(&missing_etp_cfg).is_err());
+    assert!(ApiMeteringPlugin::from_config(&blank_etp_cfg).is_err());
+
+    let local_only = Arc::new(
+        ApiMeteringPlugin::from_config(&PluginConfig {
+            id: "api_metering".to_string(),
+            config: json!({}),
+        })
+        .unwrap(),
+    );
+    assert_eq!(local_only.etp_id(), None);
+    assert_eq!(local_only.pbww(), 0);
+    let (_tx, rx) = tokio::sync::watch::channel(false);
+    assert!(Arc::clone(&local_only).run_background(rx).is_none());
 
     // 2. Start lightweight mock RESP2 server for RedisEtp.
     let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
@@ -813,6 +818,9 @@ async fn test_api_metering_etp_wiring_and_shadow_sync() {
             id: "api_metering".to_string(),
             config: json!({
                 "etp_id": "redis-metering",
+                "key_prefix": "velda:test",
+                "sync_interval_ms": 20,
+                "pbww": 25,
                 "initial_balance_micro_credits": 1_000_000,
                 "default_tier": "payg",
                 "tiers": {
@@ -821,12 +829,6 @@ async fn test_api_metering_etp_wiring_and_shadow_sync() {
                         "exhausted_action": "402",
                         "windows": []
                     }
-                },
-                "distributed": {
-                    "enabled": true,
-                    "key_prefix": "velda:test",
-                    "sync_interval_ms": 20,
-                    "pbww": 25
                 }
             }),
         })

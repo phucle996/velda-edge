@@ -19,8 +19,10 @@
 | `tiers.<name>.windows[].window_seconds` | `u64` | `2592000` (30 days) | `>= 0` (`0` = pass-through) | Window duration in seconds. |
 | `tiers.<name>.windows[].limit` | `u64` | `10000` | `>= 0` | Max request count (or bucket capacity) within `window_seconds`. |
 | `tiers.<name>.windows[].algorithm` | `String` | `"fixed_window"` | `"fixed"` / `"fixed_window"`, `"sliding_window"`, `"token"` / `"token_bucket"` | Window accounting algorithm. |
-| `distributed` | `Object` | `None` (disabled) | `DistributedSyncConfig` (`enabled`, `key_prefix`, `sync_interval_ms`, `pbww`) | Enables background `RedisEtp` `HINCRBY` balance reconciliation. |
-| `etp_id` | `String` | Required if `distributed.enabled` | Matches a `redis` entry in `etp.json` / `EtpRegistry` | `RedisEtp` pool identifier attached via `PreUpstreamPlugin::attach_etp`. |
+| `etp_id` | `String` | `None` (local-only) | Omit for local-only, or match a `redis` entry in `etp.json` | Presence of `etp_id` enables background `RedisEtp` `HINCRBY` balance reconciliation. |
+| `sync_interval_ms` | `u64` | `1000` | `>= 10` ms | Batch reconciliation interval in milliseconds when `etp_id` is set. |
+| `key_prefix` | `String` | `"velda"` | Non-empty string | Redis hash key prefix (`<key_prefix>:metering:consumed`) when `etp_id` is set. |
+| `pbww` | `u32` | `35` (or `0` if local-only) | `1..=100` | Background Shadow Worker workload weight when `etp_id` is set. |
 
 ---
 
@@ -75,12 +77,9 @@ With `windows: []`, only `x-metering-tier` and `x-metering-balance` are forwarde
       }
     },
     "etp_id": "redis-metering",
-    "distributed": {
-      "enabled": true,
-      "key_prefix": "velda:prod",
-      "sync_interval_ms": 250,
-      "pbww": 20
-    }
+    "key_prefix": "velda:prod",
+    "sync_interval_ms": 250,
+    "pbww": 20
   }
 }
 ```
@@ -104,6 +103,6 @@ With `windows: []`, only `x-metering-tier` and `x-metering-balance` are forwarde
 
 | Symptom | Root Cause | Resolution |
 | :--- | :--- | :--- |
-| `ApiMeteringPlugin::from_config` fails at reload | Tier defines `> 4` windows (`MAX_WINDOWS_PER_TIER = 4`), `distributed.enabled` lacks `etp_id`, or invalid header name | Reduce windows per tier to `<= 4`, configure `etp_id` matching a `redis` ETP in `etp.json`, and verify RFC 9110 header names. |
+| `ApiMeteringPlugin::from_config` fails at reload | Tier defines `> 4` windows (`MAX_WINDOWS_PER_TIER = 4`), blank/non-string `etp_id`, or invalid header name | Reduce windows per tier to `<= 4`, either omit `etp_id` (local-only) or set a valid `redis` ETP ID from `etp.json`, and verify RFC 9110 header names. |
 | Tenant sees `400 Bad Request` (`Missing required tenant account header`) | All headers in `account_headers` were missing or whitespace/empty | Ensure upstream auth plugin (`api_key_auth`, `jwt_auth`, `hmac_auth`) runs before `api_metering` and injects `x-tenant-id`. |
 | Distributed balance diverges during Redis outage | Redis TCP unreachable or timing out; `run_shadow_metering_sync` logs warning | Pending deltas are restored via `revert_in_flight_deltas` automatically; verify `etp.json` Redis endpoint connectivity and `sync_interval_ms`. |

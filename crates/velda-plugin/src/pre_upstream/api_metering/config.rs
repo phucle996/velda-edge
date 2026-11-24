@@ -2,8 +2,8 @@
 //!
 //! ```text
 //! PluginConfig (JSON) ──► parse_metering_config()
-//!   ├── windows.len() > 4             -> Err(Config)
-//!   ├── distributed && etp_id.is_none -> Err(Config)
+//!   ├── windows.len() > 4         -> Err(Config)
+//!   ├── blank/invalid etp_id      -> Err(Config) (`None` = local-only, `Some` = Redis ETP sync)
 //!   └── compile_tiers() ──► Box<[CompiledTier]> + default_tier_idx
 //! ```
 
@@ -16,7 +16,6 @@ use super::arena::MAX_WINDOWS_PER_TIER;
 use crate::config::PluginConfig;
 use crate::error::PluginError;
 use crate::pre_upstream::consumer_quota::{QuotaAlgorithm, QuotaWindowConfig};
-use crate::pre_upstream::distributed::DistributedSyncConfig;
 
 /// Action taken when an account exhausts its tier quota or credit balance.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
@@ -187,10 +186,14 @@ pub struct ApiMeteringConfig {
     pub initial_balance_micro_credits: i64,
     /// Tier definitions indexed by lowercase name.
     pub tiers: FxHashMap<String, TierConfig>,
-    /// Identifier of the `redis` ETP entry in `EtpRegistry` when distributed sync is enabled.
+    /// Identifier of the `redis` ETP entry in `EtpRegistry` (`None` = node-local only).
     pub etp_id: Option<String>,
-    /// Distributed multi-gateway synchronization parameters (sync interval, key prefix, pbww).
-    pub distributed: Option<DistributedSyncConfig>,
+    /// Batch reconciliation interval in milliseconds when `etp_id` is set (default: `1000`).
+    pub sync_interval_ms: u64,
+    /// Namespace prefix applied to Redis keys when `etp_id` is set (default: `"velda"`).
+    pub key_prefix: String,
+    /// Plugin Background Workload Weight (`0` when local-only, `1..=100` when `etp_id` is set).
+    pub pbww: u32,
 }
 
 impl Default for ApiMeteringConfig {
@@ -256,7 +259,9 @@ impl Default for ApiMeteringConfig {
             initial_balance_micro_credits: 0,
             tiers,
             etp_id: None,
-            distributed: None,
+            sync_interval_ms: 1000,
+            key_prefix: "velda".to_string(),
+            pbww: 0,
         }
     }
 }
@@ -407,31 +412,50 @@ pub(crate) fn parse_metering_config(
         tiers = ApiMeteringConfig::default().tiers;
     }
 
-    let distributed = config
-        .config
-        .get("distributed")
-        .map(|v| DistributedSyncConfig::from_json(Some(v)));
+    let etp_id = match config.config.get("etp_id") {
+        None | Some(serde_json::Value::Null) => None,
+        Some(serde_json::Value::String(s)) => {
+            let trimmed = s.trim();
+            if trimmed.is_empty() {
+                return Err(PluginError::Config(format!(
+                    "Plugin '{}': 'etp_id' must be a non-empty string or omitted",
+                    config.id
+                )));
+            }
+            Some(trimmed.to_string())
+        }
+        Some(_) => {
+            return Err(PluginError::Config(format!(
+                "Plugin '{}': 'etp_id' must be a string",
+                config.id
+            )));
+        }
+    };
 
-    let etp_id = config
+    let sync_interval_ms = config
         .config
-        .get("etp_id")
-        .or_else(|| {
-            config
-                .config
-                .get("distributed")
-                .and_then(|d| d.get("etp_id"))
-        })
+        .get("sync_interval_ms")
+        .and_then(|v| v.as_u64())
+        .unwrap_or(1000);
+
+    let key_prefix = config
+        .config
+        .get("key_prefix")
         .and_then(|v| v.as_str())
-        .map(str::trim)
-        .filter(|s| !s.is_empty())
-        .map(ToOwned::to_owned);
+        .unwrap_or("velda")
+        .to_string();
 
-    if distributed.as_ref().is_some_and(|d| d.enabled) && etp_id.is_none() {
-        return Err(PluginError::Config(format!(
-            "Plugin '{}': 'etp_id' is required when distributed sync is enabled",
-            config.id
-        )));
-    }
+    let pbww = if etp_id.is_some() {
+        config
+            .config
+            .get("pbww")
+            .or_else(|| config.config.get("shadow_weight"))
+            .and_then(|v| v.as_u64())
+            .map(|w| (w as u32).clamp(1, 100))
+            .unwrap_or(35)
+    } else {
+        0
+    };
 
     Ok(ApiMeteringConfig {
         account_headers,
@@ -440,6 +464,8 @@ pub(crate) fn parse_metering_config(
         initial_balance_micro_credits,
         tiers,
         etp_id,
-        distributed,
+        sync_interval_ms,
+        key_prefix,
+        pbww,
     })
 }

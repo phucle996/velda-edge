@@ -98,19 +98,16 @@ impl PreUpstreamPlugin for ApiMeteringPlugin {
 
     #[inline(always)]
     fn pbww(&self) -> u32 {
-        match &self.config.distributed {
-            Some(d) if d.enabled => d.pbww.clamp(1, 100),
-            _ => 0,
+        if self.config.etp_id.is_some() {
+            self.config.pbww.clamp(1, 100)
+        } else {
+            0
         }
     }
 
     #[inline(always)]
     fn etp_id(&self) -> Option<&str> {
-        if self.config.distributed.as_ref().is_some_and(|d| d.enabled) {
-            self.config.etp_id.as_deref()
-        } else {
-            None
-        }
+        self.config.etp_id.as_deref()
     }
 
     fn attach_etp(&self, instance: &EtpInstance) -> Result<(), PluginError> {
@@ -132,27 +129,26 @@ impl PreUpstreamPlugin for ApiMeteringPlugin {
         self: Arc<Self>,
         shutdown: tokio::sync::watch::Receiver<bool>,
     ) -> Option<crate::BackgroundTaskFuture> {
-        let dist = match &self.config.distributed {
-            Some(d) if d.enabled => d.clone(),
-            _ => return None,
-        };
+        let etp_id = self.config.etp_id.as_deref()?;
         let etp = match self.etp.get() {
             Some(pool) => Arc::clone(pool),
             None => {
                 let msg = format!(
                     "Plugin '{}' (api_metering) has no attached RedisEtp for etp_id '{}'",
-                    self.id,
-                    self.config.etp_id.as_deref().unwrap_or("")
+                    self.id, etp_id
                 );
                 return Some(Box::pin(async move { Err(PluginError::Config(msg)) }));
             }
         };
         let state = Arc::clone(&self.state);
         let initial_balance = self.config.initial_balance_micro_credits;
+        let sync_interval_ms = self.config.sync_interval_ms;
+        let key_prefix = self.config.key_prefix.clone();
         Some(Box::pin(run_shadow_metering_sync(
             state,
             etp,
-            dist,
+            sync_interval_ms,
+            key_prefix,
             initial_balance,
             shutdown,
         )))

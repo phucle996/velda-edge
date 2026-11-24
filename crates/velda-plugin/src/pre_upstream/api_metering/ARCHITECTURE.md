@@ -10,7 +10,7 @@ Checking a central counter or Redis on every HTTP request creates lock contentio
 
 1. **Tier 1 — Per-Core Desk (`LaneArena`)**: Each CPU core keeps a small, private batch of pre-approved quota ("micro-lease", up to `32` requests) in its own local memory. ~97% of requests only touch their own core's desk — zero cross-core cache fighting.
 2. **Tier 2 — Node Vault (`ShardArena`, 64 shards)**: When a core's micro-lease runs out, it briefly locks one of 64 independent shards to flush what it spent and lease a fresh batch.
-3. **Tier 3 — Background Bank Sync (`RedisEtp`)**: If distributed sync is enabled, a background Shadow Worker periodically batches node deltas to Redis using `HINCRBY`, completely off the request path.
+3. **Tier 3 — Background Bank Sync (`RedisEtp`)**: When `etp_id` is configured, a background Shadow Worker periodically batches node deltas to Redis using `HINCRBY`, completely off the request path; when `etp_id` is `None`, the plugin operates purely in-memory on the local node.
 
 ```mermaid
 flowchart LR
