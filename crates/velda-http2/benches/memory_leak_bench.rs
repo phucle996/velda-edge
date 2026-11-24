@@ -9,7 +9,7 @@ use http::StatusCode;
 use tokio::io::duplex;
 use velda_core::L7Response;
 use velda_http2::config::Http2Config;
-use velda_http2::server::Http2ServerConnection;
+use velda_http2::server::connection::Http2ServerConnection;
 
 #[global_allocator]
 static ALLOCATOR: CountingAllocator = CountingAllocator::new();

@@ -6,13 +6,14 @@ use std::time::Instant;
 
 use bytes::Bytes;
 use common::{CountingAllocator, format_throughput};
+use http::StatusCode;
 use http::header::{CONTENT_TYPE, HeaderValue, USER_AGENT};
-use http::{HeaderMap, StatusCode};
 use tokio::io::duplex;
 use velda_core::{Body, L7Response};
+use velda_http2::client::connection::Http2Client;
 use velda_http2::config::Http2Config;
-use velda_http2::headers::{filter_h2_headers, sanitize_h2_headers};
-use velda_http2::server::Http2ServerConnection;
+use velda_http2::headers::sanitize_workspace_headers;
+use velda_http2::server::connection::Http2ServerConnection;
 
 #[global_allocator]
 static ALLOCATOR: CountingAllocator = CountingAllocator::new();
@@ -38,7 +39,7 @@ fn bench_header_sanitization() {
     println!("| Method | Headers Count | Latency / op | Allocs / op | Throughput |");
     println!("| :--- | :--- | :--- | :--- | :--- |");
 
-    let mut headers = HeaderMap::new();
+    let mut headers = velda_core::buffer::header::HeaderWorkspace::empty(8);
     headers.insert(CONTENT_TYPE, HeaderValue::from_static("application/json"));
     headers.insert(
         USER_AGENT,
@@ -50,27 +51,11 @@ fn bench_header_sanitization() {
 
     const ITERS: u64 = 200_000;
 
-    // 1. In-place sanitize_h2_headers on pre-allocated maps (Isolated 0-alloc verification)
-    let mut maps: Vec<HeaderMap> = (0..ITERS).map(|_| headers.clone()).collect();
-    ALLOCATOR.reset();
-    let start = Instant::now();
-    for map in &mut maps {
-        sanitize_h2_headers(map);
-    }
-    let elapsed = start.elapsed();
-    let (allocs, _) = ALLOCATOR.snapshot();
-    let lat_ns = elapsed.as_nanos() as f64 / ITERS as f64;
-    let allocs_per_op = allocs as f64 / ITERS as f64;
-    println!(
-        "| sanitize_h2_headers (in-place) | 5 | {lat_ns:.2} ns | {allocs_per_op:.1} | {} |",
-        format_throughput(ITERS, elapsed)
-    );
-
-    // 2. Cloned filter_h2_headers
+    // 1. sanitize_workspace_headers on HeaderWorkspace
     ALLOCATOR.reset();
     let start = Instant::now();
     for _ in 0..ITERS {
-        let clean = filter_h2_headers(&headers);
+        let clean = sanitize_workspace_headers(&headers);
         std::hint::black_box(clean);
     }
     let elapsed = start.elapsed();
@@ -78,7 +63,7 @@ fn bench_header_sanitization() {
     let lat_ns = elapsed.as_nanos() as f64 / ITERS as f64;
     let allocs_per_op = allocs as f64 / ITERS as f64;
     println!(
-        "| filter_h2_headers (copy) | 5 | {lat_ns:.2} ns | {allocs_per_op:.1} | {} |\n",
+        "| sanitize_workspace_headers | 5 | {lat_ns:.2} ns | {allocs_per_op:.1} | {} |\n",
         format_throughput(ITERS, elapsed)
     );
 }
@@ -284,8 +269,9 @@ async fn bench_streaming_response_turnaround() {
         .unwrap();
 
     while let Ok(Some((_req, mut responder))) = server_conn.accept_request().await {
+        let empty = velda_core::buffer::header::HeaderWorkspace::empty(0);
         let mut sender = responder
-            .send_stream_response(StatusCode::OK, &HeaderMap::new())
+            .send_stream_response(StatusCode::OK, &empty)
             .unwrap();
         for _ in 0..CHUNKS_PER_STREAM {
             sender.send_chunk(chunk_data.clone()).await.unwrap();
@@ -329,11 +315,9 @@ async fn bench_proxy_pipe_turnaround() {
 
     // 2. Velda Edge Gateway Task
     let gateway_task = tokio::spawn(async move {
-        let (mut upstream_client, h2_conn) =
-            h2::client::handshake(gateway_client_io).await.unwrap();
-        tokio::spawn(async move {
-            let _ = h2_conn.await;
-        });
+        let upstream_client = Http2Client::handshake(gateway_client_io, &TEST_CONFIG)
+            .await
+            .unwrap();
 
         let mut server_conn = Http2ServerConnection::handshake(gateway_server_io, TEST_CONFIG)
             .await
@@ -343,28 +327,29 @@ async fn bench_proxy_pipe_turnaround() {
             server_conn.accept_streaming_request().await
         {
             let body = body_rx.consume_all().await.unwrap();
-            upstream_client = upstream_client.ready().await.unwrap();
             let has_body = !body.is_empty();
-            let mut req = http::Request::new(());
-            *req.method_mut() = head.method.clone();
-            *req.uri_mut() = head.uri.clone();
-            *req.version_mut() = http::Version::HTTP_2;
-            *req.headers_mut() = head.headers.clone();
-            let (resp_fut, mut send_stream) = upstream_client.send_request(req, !has_body).unwrap();
+            let (resp_fut, mut send_stream) = upstream_client
+                .send_request(
+                    head.method.clone(),
+                    head.uri.clone(),
+                    head.headers,
+                    !has_body,
+                )
+                .await
+                .unwrap();
             if let velda_core::Body::Bytes(b) = body {
                 send_stream.send_data(b, true).unwrap();
             }
-            let resp = resp_fut.await.unwrap();
-            let (parts, mut body_stream) = resp.into_parts();
-            let resp_body = if let Some(Ok(chunk)) = body_stream.data().await {
+            let mut resp = resp_fut.await.unwrap();
+            let resp_body = if let Some(chunk) = resp.body.recv_chunk().await.unwrap() {
                 velda_core::Body::Bytes(chunk)
             } else {
                 velda_core::Body::Empty
             };
             let l7_resp = velda_core::L7Response::new(
-                parts.status,
+                resp.status,
                 http::Version::HTTP_2,
-                parts.headers,
+                resp.headers,
                 resp_body,
             );
             responder.send_response(&l7_resp).unwrap();

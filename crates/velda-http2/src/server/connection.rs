@@ -1,75 +1,111 @@
 //! Downstream HTTP/2 Server Connection Driver (RFC 9113).
 //!
-//! Coordinates H2 connection handshake, settings frame negotiation,
-//! and multiplexed stream accept loop.
+//! ```text
+//!  Network IO <──▶ Single-Task Driver (H2Connection::new(H2Role::Server, config))
+//!                     ├─ 1-pass HPACK ingress decode -> HeaderWorkspace
+//!                     ├─ 2-level recv/send flow control & Rapid Reset guard
+//!                     └─ accepts streams -> accept_tx ──▶ Http2ServerConnection
+//!                                        └─ body_tx ────▶ Http2StreamReceiver
+//!                     ◀── cmd_rx (SendResponse / SendData / SendTrailers / Reset / Shutdown)
+//! ```
 
-use bytes::Bytes;
-use h2::server::{Builder, Connection};
+use std::collections::HashMap;
 use std::pin::Pin;
 use std::sync::Arc;
-use std::sync::atomic::{AtomicU64, Ordering};
-use std::task::{Context, Poll};
-use tokio::io::{AsyncRead, AsyncWrite, ReadBuf};
+use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
+
+use bytes::{Buf, Bytes, BytesMut};
+use http::StatusCode;
+use http::header::HeaderValue;
+use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt};
+use tokio::sync::{Notify, mpsc};
 use velda_core::L7Request;
+use velda_core::buffer::header::HeaderWorkspace;
 
 use super::request::{Http2ServerRequest, Http2ServerRequestHead, Http2StreamReceiver};
 use super::response::Http2Responder;
 use crate::config::Http2Config;
 use crate::error::Http2Error;
+use crate::proto::frame::H2ErrorCode;
+use crate::proto::hpack::{H2ForwardingAddrs, H2IngressEnrich};
+use crate::proto::{H2Connection, H2Event, H2Role};
 
 /// Incoming HTTP/2 streaming request tuple: request head, stream receiver, and dedicated responder.
 pub type Http2StreamingParts = (Http2ServerRequestHead, Http2StreamReceiver, Http2Responder);
 
-/// Control Frame Flood Tracker (Anti-DoS Heuristic for HTTP/2).
-///
-/// Tracks total bytes read from transport against actual payload bytes received
-/// across streams. If total control overhead exceeds payload + 1MB, detects flood
-/// and aborts the connection.
+#[derive(Debug)]
+pub(crate) enum ServerBodyEvent {
+    Data { payload: Bytes, end_stream: bool },
+    Trailers(HeaderWorkspace),
+}
+
+pub(crate) enum ServerCmd {
+    SendResponse {
+        stream_id: u32,
+        status: StatusCode,
+        headers: HeaderWorkspace,
+        body: Bytes,
+        end_stream: bool,
+        cancel_upload: bool,
+    },
+    SendEarlyError {
+        stream_id: u32,
+        status: StatusCode,
+        request_id: Option<HeaderValue>,
+        alt_svc: Option<HeaderValue>,
+        cancel_upload: bool,
+    },
+    StartStreamResponse {
+        stream_id: u32,
+        status: StatusCode,
+        headers: HeaderWorkspace,
+        queued_send_bytes: Arc<AtomicUsize>,
+        send_notify: Arc<Notify>,
+    },
+    SendData {
+        stream_id: u32,
+        data: Bytes,
+        end_stream: bool,
+    },
+    SendTrailers {
+        stream_id: u32,
+        trailers: HeaderWorkspace,
+    },
+    ReleaseRecvCapacity {
+        stream_id: u32,
+        bytes: u32,
+    },
+    ResetStream {
+        stream_id: u32,
+        code: H2ErrorCode,
+    },
+    GracefulShutdown,
+}
+
+/// Control frame flood tracker kept for standalone unit tests & telemetry hooks.
 #[derive(Debug, Default)]
 #[repr(C)]
 pub struct Http2FloodTracker {
-    /// Total bytes read from the underlying transport stream.
     pub total_bytes: AtomicU64,
-    /// Total payload/headers bytes accounted from incoming streams.
     pub payload_bytes: AtomicU64,
 }
 
 impl Http2FloodTracker {
-    /// Creates a new flood tracker with zero counters.
     #[inline]
     pub fn new() -> Self {
-        Self {
-            total_bytes: AtomicU64::new(0),
-            payload_bytes: AtomicU64::new(0),
-        }
+        Self::default()
     }
 
-    /// Records bytes read from the transport socket.
     #[inline(always)]
     pub fn on_bytes_read(&self, n: usize) {
         self.total_bytes.fetch_add(n as u64, Ordering::Relaxed);
     }
 
-    /// Records payload bytes received in HEADERS or DATA frames.
     #[inline(always)]
     pub fn on_payload_read(&self, n: usize) {
         self.payload_bytes.fetch_add(n as u64, Ordering::Relaxed);
     }
 
-    /// Returns the total bytes read so far.
-    #[inline(always)]
-    pub fn total_bytes(&self) -> u64 {
-        self.total_bytes.load(Ordering::Relaxed)
-    }
-
-    /// Returns the total payload bytes accounted so far.
-    #[inline(always)]
-    pub fn payload_bytes(&self) -> u64 {
-        self.payload_bytes.load(Ordering::Relaxed)
-    }
-
-    /// Evaluates whether control frame flood exceeds the safety threshold:
-    /// `(total_bytes >> 3) > payload_bytes + 1MB` (1,048,576 bytes).
     #[inline(always)]
     pub fn is_flood_detected(&self) -> bool {
         let total = self.total_bytes.load(Ordering::Relaxed);
@@ -78,262 +114,484 @@ impl Http2FloodTracker {
     }
 }
 
-/// Transparent I/O stream wrapper that records raw transport bytes read
-/// and enforces control frame flood limits before passing frames to `h2`.
-pub struct FloodGuardedStream<IO> {
-    inner: IO,
-    tracker: Arc<Http2FloodTracker>,
+struct ActiveServerStream {
+    body_tx: mpsc::UnboundedSender<Result<ServerBodyEvent, Http2Error>>,
+    queued_send_bytes: Option<Arc<AtomicUsize>>,
+    send_notify: Option<Arc<Notify>>,
 }
 
-impl<IO> FloodGuardedStream<IO> {
-    /// Wraps an underlying I/O stream with flood tracking.
-    #[inline]
-    pub fn new(inner: IO, tracker: Arc<Http2FloodTracker>) -> Self {
-        Self { inner, tracker }
-    }
-
-    /// Returns a reference to the tracker.
-    #[inline]
-    pub fn tracker(&self) -> &Arc<Http2FloodTracker> {
-        &self.tracker
-    }
+/// Active HTTP/2 downstream connection handle consuming accepted multiplexed request streams.
+pub struct Http2ServerConnection {
+    accept_rx: mpsc::UnboundedReceiver<Result<Http2StreamingParts, Http2Error>>,
+    cmd_tx: mpsc::UnboundedSender<ServerCmd>,
+    pub config: Http2Config,
 }
 
-impl<IO: AsyncRead + Unpin> AsyncRead for FloodGuardedStream<IO> {
-    fn poll_read(
-        mut self: Pin<&mut Self>,
-        cx: &mut Context<'_>,
-        buf: &mut ReadBuf<'_>,
-    ) -> Poll<std::io::Result<()>> {
-        let prev_len = buf.filled().len();
-        let res = Pin::new(&mut self.inner).poll_read(cx, buf);
-        if let Poll::Ready(Ok(())) = &res {
-            let n = buf.filled().len().saturating_sub(prev_len);
-            if n > 0 {
-                self.tracker.on_bytes_read(n);
-            }
+impl Http2ServerConnection {
+    /// Performs HTTP/2 server setup over `stream` without proxy forwarding header injection.
+    pub async fn handshake<IO>(stream: IO, config: Http2Config) -> Result<Self, Http2Error>
+    where
+        IO: AsyncRead + AsyncWrite + Unpin + Send + 'static,
+    {
+        Self::handshake_internal(stream, config, None).await
+    }
+
+    /// Performs HTTP/2 server setup over `stream` with 1-pass proxy forwarding enrichment
+    /// (`x-request-id`, `x-real-ip`, `x-forwarded-*`, `forwarded`) during HPACK ingress decode.
+    pub async fn handshake_with_forwarding<IO>(
+        stream: IO,
+        config: Http2Config,
+        forwarding: H2ForwardingAddrs,
+    ) -> Result<Self, Http2Error>
+    where
+        IO: AsyncRead + AsyncWrite + Unpin + Send + 'static,
+    {
+        Self::handshake_internal(stream, config, Some(forwarding)).await
+    }
+
+    async fn handshake_internal<IO>(
+        stream: IO,
+        config: Http2Config,
+        forwarding: Option<H2ForwardingAddrs>,
+    ) -> Result<Self, Http2Error>
+    where
+        IO: AsyncRead + AsyncWrite + Unpin + Send + 'static,
+    {
+        let mut conn = H2Connection::new(H2Role::Server, config);
+        let (rd, mut wr) = tokio::io::split(stream);
+
+        let initial_out = conn.take_outbound();
+        if !initial_out.is_empty() {
+            wr.write_all(&initial_out).await?;
+            wr.flush().await?;
         }
-        res
-    }
-}
 
-impl<IO: AsyncWrite + Unpin> AsyncWrite for FloodGuardedStream<IO> {
-    #[inline]
-    fn poll_write(
-        mut self: Pin<&mut Self>,
-        cx: &mut Context<'_>,
-        buf: &[u8],
-    ) -> Poll<std::io::Result<usize>> {
-        Pin::new(&mut self.inner).poll_write(cx, buf)
-    }
+        let (accept_tx, accept_rx) = mpsc::unbounded_channel();
+        let (cmd_tx, cmd_rx) = mpsc::unbounded_channel();
+        let driver_cmd_tx = cmd_tx.clone();
 
-    #[inline]
-    fn poll_flush(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<std::io::Result<()>> {
-        Pin::new(&mut self.inner).poll_flush(cx)
-    }
+        tokio::spawn(async move {
+            run_server_driver(
+                conn,
+                rd,
+                wr,
+                accept_tx,
+                cmd_rx,
+                driver_cmd_tx,
+                config,
+                forwarding,
+            )
+            .await;
+        });
 
-    #[inline]
-    fn poll_shutdown(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<std::io::Result<()>> {
-        Pin::new(&mut self.inner).poll_shutdown(cx)
-    }
-}
-
-/// An active HTTP/2 downstream connection over an asynchronous stream.
-pub struct Http2ServerConnection<IO>
-where
-    IO: AsyncRead + AsyncWrite + Unpin,
-{
-    connection: Connection<FloodGuardedStream<IO>, Bytes>,
-    config: Http2Config,
-    flood_tracker: Arc<Http2FloodTracker>,
-}
-
-impl<IO> Http2ServerConnection<IO>
-where
-    IO: AsyncRead + AsyncWrite + Unpin,
-{
-    /// Performs the HTTP/2 server handshake over the underlying I/O stream
-    /// configured with [`Http2Config`] and anti-flood protection.
-    pub async fn handshake(stream: IO, config: Http2Config) -> Result<Self, Http2Error> {
-        let mut builder = Builder::default();
-        builder
-            .initial_connection_window_size(config.initial_connection_window_size)
-            .initial_window_size(config.initial_stream_window_size)
-            .max_concurrent_streams(config.max_concurrent_streams)
-            .max_frame_size(config.max_frame_size)
-            .max_header_list_size(config.max_header_list_size)
-            .max_send_buffer_size(config.max_send_buffer_size)
-            .max_concurrent_reset_streams(config.max_consecutive_resets as usize)
-            .max_pending_accept_reset_streams(config.max_consecutive_resets as usize);
-
-        let flood_tracker = Arc::new(Http2FloodTracker::new());
-        let guarded_stream = FloodGuardedStream::new(stream, Arc::clone(&flood_tracker));
-
-        let connection = builder.handshake(guarded_stream).await?;
         Ok(Self {
-            connection,
+            accept_rx,
+            cmd_tx,
             config,
-            flood_tracker,
         })
     }
 
-    /// Returns a reference to the HTTP/2 configuration of this connection.
-    #[inline]
-    pub const fn config(&self) -> &Http2Config {
-        &self.config
-    }
-
-    /// Returns a reference to the flood tracker monitoring this connection.
-    #[inline]
-    pub fn flood_tracker(&self) -> &Arc<Http2FloodTracker> {
-        &self.flood_tracker
-    }
-
-    /// Returns whether control frame flood has been detected on this connection.
-    #[inline]
-    pub fn is_flood_detected(&self) -> bool {
-        self.flood_tracker.is_flood_detected()
-    }
-
-    /// Initiates a graceful shutdown of the HTTP/2 connection by sending a GOAWAY frame (RFC 9113).
-    ///
-    /// Notifies the client that no new streams will be accepted while allowing in-flight streams
-    /// to drain and complete.
+    /// Initiates graceful shutdown by sending `GOAWAY` while draining active streams.
     #[inline]
     pub fn graceful_shutdown(&mut self) {
-        self.connection.graceful_shutdown();
+        let _ = self.cmd_tx.send(ServerCmd::GracefulShutdown);
     }
 
-    /// Accepts the next multiplexed request stream as a native [`Http2ServerRequest`].
+    /// Non-blocking accept returning `Some(...)` if a parsed request stream is queued.
+    #[inline]
+    pub fn try_accept_streaming_request(
+        &mut self,
+    ) -> Option<Result<Option<Http2StreamingParts>, Http2Error>> {
+        match self.accept_rx.try_recv() {
+            Ok(Ok(parts)) => Some(Ok(Some(parts))),
+            Ok(Err(e)) => Some(Err(e)),
+            Err(mpsc::error::TryRecvError::Disconnected) => Some(Ok(None)),
+            Err(mpsc::error::TryRecvError::Empty) => None,
+        }
+    }
+
+    /// Accepts the next multiplexed streaming request head, body receiver, and responder.
+    pub async fn accept_streaming_request(
+        &mut self,
+    ) -> Result<Option<Http2StreamingParts>, Http2Error> {
+        match self.accept_rx.recv().await {
+            Some(Ok(parts)) => Ok(Some(parts)),
+            Some(Err(e)) => Err(e),
+            None => Ok(None),
+        }
+    }
+
+    /// Accepts the next multiplexed request and buffers its body up to `config.max_body_size`.
     pub async fn accept_h2_request(
         &mut self,
     ) -> Result<Option<(Http2ServerRequest, Http2Responder)>, Http2Error> {
-        if self.flood_tracker.is_flood_detected() {
-            return Err(Http2Error::FloodDetected);
-        }
-
-        let Some(res) = self.connection.accept().await else {
+        let Some((head, mut receiver, responder)) = self.accept_streaming_request().await? else {
             return Ok(None);
         };
-
-        let (request, respond) = match res {
-            Ok(pair) => pair,
-            Err(e) => {
-                if self.flood_tracker.is_flood_detected() {
-                    return Err(Http2Error::FloodDetected);
-                }
-                return Err(Http2Error::from(e));
-            }
-        };
-
-        let stream_id = respond.stream_id();
-        let (parts, body_stream) = request.into_parts();
-        let head =
-            Http2ServerRequestHead::new(parts.method, parts.uri, parts.headers, Some(stream_id));
-        self.flood_tracker
-            .on_payload_read(head.estimated_header_bytes());
-
-        let mut receiver = Http2StreamReceiver::new(body_stream, self.config.max_body_size)
-            .with_flood_tracker(Arc::clone(&self.flood_tracker));
         let body = receiver.consume_all().await?;
-        let mut req = Http2ServerRequest::new(head, body);
-        req.head.stream_id = Some(stream_id);
-
-        let responder = Http2Responder::new(respond);
-        Ok(Some((req, responder)))
+        Ok(Some((Http2ServerRequest::new(head, body), responder)))
     }
 
-    /// Accepts the next multiplexed request stream and converts it directly into a canonical [`L7Request`]
-    /// along with its dedicated [`Http2Responder`].
+    /// Accepts the next multiplexed request and converts it into canonical [`L7Request`].
     pub async fn accept_request(
         &mut self,
     ) -> Result<Option<(L7Request, Http2Responder)>, Http2Error> {
         let opt = self.accept_h2_request().await?;
         Ok(opt.map(|(req, responder)| (req.into_l7_request(), responder)))
     }
+}
 
-    /// Opportunistically attempts to accept the next multiplexed request stream without parking the task
-    /// if stream frames are already buffered in the H2 state machine.
-    ///
-    /// Returns:
-    /// - `Some(Ok(Some(head, receiver, responder)))` if an incoming stream was ready immediately.
-    /// - `Some(Ok(None))` if the remote peer closed the connection (EOF).
-    /// - `None` if no stream is currently pending (would park / `Poll::Pending`).
-    /// - `Some(Err(e))` if an H2 framing error or flood was detected.
-    pub fn try_accept_streaming_request(
-        &mut self,
-    ) -> Option<Result<Option<Http2StreamingParts>, Http2Error>> {
-        if self.flood_tracker.is_flood_detected() {
-            return Some(Err(Http2Error::FloodDetected));
+#[allow(clippy::too_many_arguments)]
+async fn run_server_driver<IO>(
+    mut conn: H2Connection,
+    mut rd: tokio::io::ReadHalf<IO>,
+    mut wr: tokio::io::WriteHalf<IO>,
+    accept_tx: mpsc::UnboundedSender<Result<Http2StreamingParts, Http2Error>>,
+    mut cmd_rx: mpsc::UnboundedReceiver<ServerCmd>,
+    cmd_tx: mpsc::UnboundedSender<ServerCmd>,
+    config: Http2Config,
+    forwarding: Option<H2ForwardingAddrs>,
+) where
+    IO: AsyncRead + AsyncWrite + Unpin + Send + 'static,
+{
+    let mut streams: HashMap<u32, ActiveServerStream> = HashMap::new();
+    let mut read_buf = vec![0u8; 32 * 1024];
+    let mut write_buf = BytesMut::with_capacity(16 * 1024);
+    let mut stream_ids_meta: HashMap<u32, (u128, u64, HeaderValue)> = HashMap::new();
+
+    loop {
+        let out = conn.take_outbound();
+        if !out.is_empty() {
+            write_buf.extend_from_slice(&out);
         }
-        let waker = std::task::Waker::noop();
-        let mut cx = std::task::Context::from_waker(waker);
-        match self.connection.poll_accept(&mut cx) {
-            std::task::Poll::Ready(Some(Ok((request, respond)))) => {
-                let stream_id = respond.stream_id();
-                let (parts, body_stream) = request.into_parts();
-                let head = Http2ServerRequestHead::new(
-                    parts.method,
-                    parts.uri,
-                    parts.headers,
-                    Some(stream_id),
-                );
-                self.flood_tracker
-                    .on_payload_read(head.estimated_header_bytes());
 
-                let receiver = Http2StreamReceiver::new(body_stream, self.config.max_body_size)
-                    .with_flood_tracker(Arc::clone(&self.flood_tracker));
-                let responder = Http2Responder::new(respond);
+        if write_buf.is_empty()
+            && ((conn.is_draining() && conn.active_stream_count() == 0)
+                || (accept_tx.is_closed() && streams.is_empty() && conn.active_stream_count() == 0))
+        {
+            break;
+        }
 
-                Some(Ok(Some((head, receiver, responder))))
-            }
-            std::task::Poll::Ready(Some(Err(e))) => {
-                if self.flood_tracker.is_flood_detected() {
-                    return Some(Err(Http2Error::FloodDetected));
+        tokio::select! {
+            biased;
+
+            write_res = write_pending_buf(&mut wr, &mut write_buf), if !write_buf.is_empty() => {
+                if write_res.is_err() {
+                    break;
                 }
-                Some(Err(Http2Error::from(e)))
             }
-            std::task::Poll::Ready(None) => Some(Ok(None)),
-            std::task::Poll::Pending => None,
+
+            read_res = rd.read(&mut read_buf) => {
+                match read_res {
+                    Ok(0) | Err(_) => break,
+                    Ok(n) => {
+                        let res = conn.feed_bytes_ingress(&read_buf[..n], |sid| {
+                            let ingress_nanos = velda_core::clock::now_unix_nanos();
+                            let (req_id, req_id_hdr) = velda_core::request_id::next_request_id(ingress_nanos);
+                            stream_ids_meta.insert(sid, (req_id, ingress_nanos, req_id_hdr.clone()));
+                            H2IngressEnrich {
+                                request_id: req_id_hdr,
+                                forwarding,
+                            }
+                        });
+                        match res {
+                            Ok(events) => {
+                                dispatch_server_events(
+                                    events,
+                                    &mut streams,
+                                    &mut stream_ids_meta,
+                                    &accept_tx,
+                                    &cmd_tx,
+                                    &config,
+                                );
+                            }
+                            Err(proto_err) => {
+                                let err_out = conn.take_outbound();
+                                if !err_out.is_empty() {
+                                    write_buf.extend_from_slice(&err_out);
+                                    let _ = wr.write_all(&write_buf).await;
+                                }
+                                let err = Http2Error::Protocol(proto_err);
+                                fail_all_server_streams(&mut streams, &err);
+                                let _ = accept_tx.send(Err(err));
+                                return;
+                            }
+                        }
+                    }
+                }
+            }
+
+            cmd_opt = cmd_rx.recv() => {
+                let Some(first) = cmd_opt else {
+                    break;
+                };
+                handle_server_cmd(first, &mut conn, &mut streams);
+                for _ in 0..64 {
+                    match cmd_rx.try_recv() {
+                        Ok(cmd) => handle_server_cmd(cmd, &mut conn, &mut streams),
+                        Err(_) => break,
+                    }
+                }
+            }
         }
     }
 
-    /// Accepts the next multiplexed request stream as an incoming head, progressive stream receiver,
-    /// and dedicated responder.
-    pub async fn accept_streaming_request(
-        &mut self,
-    ) -> Result<Option<(Http2ServerRequestHead, Http2StreamReceiver, Http2Responder)>, Http2Error>
-    {
-        if self.flood_tracker.is_flood_detected() {
-            return Err(Http2Error::FloodDetected);
-        }
+    if !write_buf.is_empty() {
+        let _ = wr.write_all(&write_buf).await;
+        let _ = wr.flush().await;
+    }
+    fail_all_server_streams(&mut streams, &Http2Error::ConnectionClosed);
+}
 
-        let Some(res) = self.connection.accept().await else {
-            return Ok(None);
-        };
+#[inline]
+async fn write_pending_buf<W: AsyncWrite + Unpin>(
+    wr: &mut W,
+    buf: &mut BytesMut,
+) -> std::io::Result<()> {
+    let n = std::future::poll_fn(|cx| Pin::new(&mut *wr).poll_write(cx, buf)).await?;
+    if n == 0 {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::WriteZero,
+            "zero byte write to HTTP/2 socket",
+        ));
+    }
+    buf.advance(n);
+    if buf.is_empty() {
+        let _ = std::future::poll_fn(|cx| Pin::new(&mut *wr).poll_flush(cx)).await;
+    }
+    Ok(())
+}
 
-        let (request, respond) = match res {
-            Ok(pair) => pair,
-            Err(e) => {
-                if self.flood_tracker.is_flood_detected() {
-                    return Err(Http2Error::FloodDetected);
+fn dispatch_server_events(
+    events: Vec<H2Event>,
+    streams: &mut HashMap<u32, ActiveServerStream>,
+    meta_map: &mut HashMap<u32, (u128, u64, HeaderValue)>,
+    accept_tx: &mpsc::UnboundedSender<Result<Http2StreamingParts, Http2Error>>,
+    cmd_tx: &mpsc::UnboundedSender<ServerCmd>,
+    config: &Http2Config,
+) {
+    let max_send_buf = config.max_send_buffer_size.max(64 * 1024);
+    for ev in events {
+        match ev {
+            H2Event::RequestHeaders {
+                stream_id,
+                decoded,
+                end_stream,
+            } => {
+                let method = decoded.method.unwrap_or(http::Method::GET);
+                let uri = decoded.uri.unwrap_or_else(|| http::Uri::from_static("/"));
+                let mut head =
+                    Http2ServerRequestHead::new(method, uri, decoded.headers, Some(stream_id));
+                let mut req_id_hdr = None;
+                if let Some((req_id, ingress_nanos, hdr)) = meta_map.remove(&stream_id) {
+                    head.request_id = req_id;
+                    head.ingress_time_nanos = ingress_nanos;
+                    req_id_hdr = Some(hdr);
                 }
-                return Err(Http2Error::from(e));
+
+                let (body_tx, body_rx) = mpsc::unbounded_channel();
+                if end_stream {
+                    drop(body_tx);
+                } else {
+                    streams.insert(
+                        stream_id,
+                        ActiveServerStream {
+                            body_tx,
+                            queued_send_bytes: None,
+                            send_notify: None,
+                        },
+                    );
+                }
+
+                let receiver = Http2StreamReceiver {
+                    stream_id,
+                    body_rx,
+                    cmd_tx: cmd_tx.clone(),
+                    max_body_size: config.max_body_size,
+                    bytes_received: 0,
+                    eof: end_stream,
+                    trailers: None,
+                };
+                let responder = Http2Responder {
+                    cmd_tx: cmd_tx.clone(),
+                    max_send_buffer_size: max_send_buf,
+                    stream_id,
+                    request_id: req_id_hdr,
+                    alt_svc: None,
+                    last_status: 0,
+                    last_bytes_tx: 0,
+                };
+                let _ = accept_tx.send(Ok((head, receiver, responder)));
             }
+            H2Event::Data {
+                stream_id,
+                payload,
+                end_stream,
+            } => {
+                if let Some(st) = streams.get(&stream_id) {
+                    let _ = st.body_tx.send(Ok(ServerBodyEvent::Data {
+                        payload,
+                        end_stream,
+                    }));
+                    if end_stream && st.queued_send_bytes.is_none() {
+                        streams.remove(&stream_id);
+                    }
+                }
+            }
+            H2Event::Trailers {
+                stream_id,
+                trailers,
+            } => {
+                if let Some(st) = streams.get(&stream_id) {
+                    let _ = st.body_tx.send(Ok(ServerBodyEvent::Trailers(trailers)));
+                    if st.queued_send_bytes.is_none() {
+                        streams.remove(&stream_id);
+                    }
+                }
+            }
+            H2Event::StreamReset {
+                stream_id,
+                error_code,
+            } => {
+                if let Some(st) = streams.remove(&stream_id) {
+                    let _ = st.body_tx.send(Err(Http2Error::StreamReset(error_code)));
+                    if let Some(notify) = st.send_notify {
+                        notify.notify_waiters();
+                    }
+                }
+            }
+            H2Event::WindowUpdated { .. }
+            | H2Event::GoAway { .. }
+            | H2Event::ResponseHeaders { .. } => {}
+        }
+    }
+}
+
+fn handle_server_cmd(
+    cmd: ServerCmd,
+    conn: &mut H2Connection,
+    streams: &mut HashMap<u32, ActiveServerStream>,
+) {
+    match cmd {
+        ServerCmd::SendResponse {
+            stream_id,
+            status,
+            headers,
+            body,
+            end_stream,
+            cancel_upload,
+        } => {
+            let has_body = !body.is_empty();
+            let head_end = end_stream && !has_body;
+            let _ = conn.send_response(stream_id, status, &headers, head_end);
+            if has_body {
+                let _ = conn.send_data(stream_id, body, end_stream);
+            }
+            if cancel_upload {
+                conn.send_reset(stream_id, H2ErrorCode::NO_ERROR);
+                streams.remove(&stream_id);
+            } else if end_stream {
+                streams.remove(&stream_id);
+            }
+        }
+        ServerCmd::SendEarlyError {
+            stream_id,
+            status,
+            request_id,
+            alt_svc,
+            cancel_upload,
+        } => {
+            let preencoded = super::early_response::precompiled_early_hpack(status);
+            let _ = conn.send_stateless_early_response(
+                stream_id,
+                status,
+                preencoded,
+                request_id.as_ref().map(|v| v.as_bytes()),
+                alt_svc.as_ref().map(|v| v.as_bytes()),
+            );
+            if cancel_upload {
+                conn.send_reset(stream_id, H2ErrorCode::NO_ERROR);
+            }
+            streams.remove(&stream_id);
+        }
+        ServerCmd::StartStreamResponse {
+            stream_id,
+            status,
+            headers,
+            queued_send_bytes,
+            send_notify,
+        } => {
+            let _ = conn.send_response(stream_id, status, &headers, false);
+            if let Some(st) = streams.get_mut(&stream_id) {
+                st.queued_send_bytes = Some(queued_send_bytes);
+                st.send_notify = Some(send_notify);
+            } else {
+                let (dead_tx, _) = mpsc::unbounded_channel();
+                streams.insert(
+                    stream_id,
+                    ActiveServerStream {
+                        body_tx: dead_tx,
+                        queued_send_bytes: Some(queued_send_bytes),
+                        send_notify: Some(send_notify),
+                    },
+                );
+            }
+        }
+        ServerCmd::SendData {
+            stream_id,
+            data,
+            end_stream,
+        } => {
+            let len = data.len();
+            let _ = conn.send_data(stream_id, data, end_stream);
+            if let Some(st) = streams.get(&stream_id)
+                && let Some(q) = &st.queued_send_bytes
+            {
+                q.fetch_sub(len, Ordering::AcqRel);
+                if let Some(n) = &st.send_notify {
+                    n.notify_one();
+                }
+            }
+            if end_stream {
+                streams.remove(&stream_id);
+            }
+        }
+        ServerCmd::SendTrailers {
+            stream_id,
+            trailers,
+        } => {
+            let _ = conn.send_trailers(stream_id, &trailers);
+            streams.remove(&stream_id);
+        }
+        ServerCmd::ReleaseRecvCapacity { stream_id, bytes } => {
+            conn.release_recv_capacity(stream_id, bytes);
+        }
+        ServerCmd::ResetStream { stream_id, code } => {
+            conn.send_reset(stream_id, code);
+            if let Some(st) = streams.remove(&stream_id)
+                && let Some(n) = st.send_notify
+            {
+                n.notify_waiters();
+            }
+        }
+        ServerCmd::GracefulShutdown => {
+            conn.initiate_graceful_shutdown();
+        }
+    }
+}
+
+fn fail_all_server_streams(streams: &mut HashMap<u32, ActiveServerStream>, err: &Http2Error) {
+    let msg = err.to_string();
+    for (_sid, st) in streams.drain() {
+        let cloned = match err {
+            Http2Error::StreamReset(c) => Http2Error::StreamReset(*c),
+            Http2Error::Protocol(p) => Http2Error::Protocol(p.clone()),
+            _ => Http2Error::Parse(msg.clone()),
         };
-
-        let stream_id = respond.stream_id();
-        let (parts, body_stream) = request.into_parts();
-        let head =
-            Http2ServerRequestHead::new(parts.method, parts.uri, parts.headers, Some(stream_id));
-        self.flood_tracker
-            .on_payload_read(head.estimated_header_bytes());
-
-        let receiver = Http2StreamReceiver::new(body_stream, self.config.max_body_size)
-            .with_flood_tracker(Arc::clone(&self.flood_tracker));
-        let responder = Http2Responder::new(respond);
-
-        Ok(Some((head, receiver, responder)))
+        let _ = st.body_tx.send(Err(cloned));
+        if let Some(n) = st.send_notify {
+            n.notify_waiters();
+        }
     }
 }
 
@@ -346,19 +604,15 @@ mod tests {
         let tracker = Http2FloodTracker::new();
         assert!(!tracker.is_flood_detected());
 
-        // Under 1MB control overhead: not detected
         tracker.on_bytes_read(1_000_000);
         assert!(!tracker.is_flood_detected());
 
-        // 8MB control bytes with 0 payload: (8MB >> 3) = 1MB <= 1MB -> boundary
         tracker.on_bytes_read(7_000_000);
         assert!(!tracker.is_flood_detected());
 
-        // Exceeds 1MB safety threshold without payload: (9MB >> 3) = 1.125MB > 1.0MB
         tracker.on_bytes_read(1_000_000);
         assert!(tracker.is_flood_detected());
 
-        // With legitimate payload of 2MB: (9MB >> 3) = 1.125MB <= 2MB + 1MB -> flood cleared
         tracker.on_payload_read(2 * 1_048_576);
         assert!(!tracker.is_flood_detected());
     }

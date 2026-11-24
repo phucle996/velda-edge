@@ -11,12 +11,13 @@ velda-tls = { path = "../velda-tls" }
 tokio = { version = "1.43", features = ["io-util", "sync", "macros", "rt", "net", "time"] }
 bytes = "1.10"
 http = "1.2"
-h2 = "0.4"
 thiserror = "2.0"
 tracing = "0.1"
+memchr = "2.7"
 libc = "0.2"
 
 [dev-dependencies]
+h2 = "0.4"
 tokio = { version = "1.43", features = ["full"] }
 
 [[bench]]

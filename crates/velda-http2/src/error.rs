@@ -2,6 +2,9 @@
 
 use thiserror::Error;
 
+use crate::proto::H2ProtocolError;
+use crate::proto::frame::H2ErrorCode;
+
 /// Error conditions encountered during HTTP/2 processing.
 #[derive(Debug, Error)]
 pub enum Http2Error {
@@ -9,7 +12,7 @@ pub enum Http2Error {
     Io(#[from] std::io::Error),
 
     #[error("HTTP/2 protocol error: {0}")]
-    H2(#[from] h2::Error),
+    Protocol(#[from] H2ProtocolError),
 
     #[error("HTTP error: {0}")]
     Http(#[from] http::Error),
@@ -20,8 +23,14 @@ pub enum Http2Error {
     #[error("Payload too large: {0} bytes exceeds max_body_size")]
     PayloadTooLarge(usize),
 
-    #[error("Stream reset by peer with reason: {0:?}")]
-    StreamReset(h2::Reason),
+    #[error("Stream reset by peer with error code: {0:?}")]
+    StreamReset(H2ErrorCode),
+
+    #[error("Connection GOAWAY received (last_stream_id={last_stream_id}, code={code:?})")]
+    GoAway {
+        last_stream_id: u32,
+        code: H2ErrorCode,
+    },
 
     #[error("Connection closed unexpectedly")]
     ConnectionClosed,
@@ -42,11 +51,9 @@ impl Http2Error {
     /// making it safe to perform transparent 1-shot self-healing.
     pub fn is_refused_or_goaway(&self) -> bool {
         match self {
-            Http2Error::ConnectionClosed => true,
-            Http2Error::StreamReset(reason) => *reason == h2::Reason::REFUSED_STREAM,
-            Http2Error::H2(e) => {
-                e.reason() == Some(h2::Reason::REFUSED_STREAM) || e.is_go_away() || e.is_io()
-            }
+            Http2Error::ConnectionClosed | Http2Error::GoAway { .. } => true,
+            Http2Error::StreamReset(code) => *code == H2ErrorCode::REFUSED_STREAM,
+            Http2Error::Protocol(p) => p.code == H2ErrorCode::REFUSED_STREAM,
             Http2Error::Io(e) => matches!(
                 e.kind(),
                 std::io::ErrorKind::BrokenPipe

@@ -1,112 +1,31 @@
 //! Downstream HTTP/2 Server Response Entity and Multiplexed Stream Responder (RFC 9113).
 //!
-//! Encodes outgoing HTTP/2 HEADERS and DATA frames back to the client over an
-//! isolated logical stream handle (`SendResponse`). Supports both one-shot
-//! responses and progressive chunk streaming.
+//! Dispatches outgoing HTTP/2 `HEADERS`, `DATA`, `TRAILERS`, and `RST_STREAM` frames directly
+//! from [`HeaderWorkspace`] through the connection driver with zero `HeaderMap` conversions.
+
+use std::sync::Arc;
+use std::sync::atomic::{AtomicUsize, Ordering};
 
 use bytes::Bytes;
-use h2::SendStream;
-use h2::server::SendResponse;
-use http::header::{HeaderName, HeaderValue};
-use http::{HeaderMap, Response, StatusCode, Version};
+use http::StatusCode;
+use http::header::HeaderValue;
+use tokio::sync::{Notify, mpsc};
+use velda_core::buffer::header::{HeaderWorkspace, X_REQUEST_ID};
 use velda_core::{Body, L7Response};
 
+use super::connection::ServerCmd;
 use crate::error::Http2Error;
-use crate::headers::X_REQUEST_ID;
-
-/// Constructs an HTTP/2 response head frame builder with sanitized RFC 9113 headers.
-#[inline]
-pub fn build_h2_response(
-    status: StatusCode,
-    headers: &HeaderMap,
-) -> Result<Response<()>, Http2Error> {
-    let mut http_response = Response::new(());
-    *http_response.status_mut() = status;
-    *http_response.version_mut() = Version::HTTP_2;
-    http_response.headers_mut().reserve(headers.len());
-    for (name, val) in headers {
-        if !crate::headers::is_disallowed_h2_header(name, val) {
-            http_response
-                .headers_mut()
-                .append(name.clone(), val.clone());
-        }
-    }
-    Ok(http_response)
-}
-
-/// Downstream HTTP/2 response head metadata.
-#[derive(Debug, Clone)]
-pub struct Http2ServerResponseHead {
-    /// HTTP status code.
-    pub status: StatusCode,
-    /// Protocol version (HTTP/2.0).
-    pub version: Version,
-    /// Response headers.
-    pub headers: HeaderMap,
-}
-
-impl Http2ServerResponseHead {
-    /// Creates a new HTTP/2 server response head.
-    #[inline]
-    pub fn new(status: StatusCode, headers: HeaderMap) -> Self {
-        Self {
-            status,
-            version: Version::HTTP_2,
-            headers,
-        }
-    }
-}
-
-/// Downstream protocol-owned HTTP/2 response.
-#[derive(Debug, Clone)]
-pub struct Http2ServerResponse {
-    /// Response status code.
-    pub status: StatusCode,
-    /// Protocol version (HTTP/2.0).
-    pub version: Version,
-    /// Response headers.
-    pub headers: HeaderMap,
-    /// Response payload body.
-    pub body: Body,
-}
-
-impl Http2ServerResponse {
-    /// Creates a new HTTP/2 server response.
-    #[inline]
-    pub fn new(status: StatusCode, headers: HeaderMap, body: Body) -> Self {
-        Self {
-            status,
-            version: Version::HTTP_2,
-            headers,
-            body,
-        }
-    }
-
-    /// Fast constructor from raw status code and byte payload.
-    #[inline]
-    pub fn from_bytes(status: StatusCode, bytes: Vec<u8>) -> Self {
-        let body = if bytes.is_empty() {
-            Body::Empty
-        } else {
-            Body::Bytes(bytes.into())
-        };
-        Self::new(status, HeaderMap::new(), body)
-    }
-
-    /// Appends a header using fluent builder pattern.
-    #[inline]
-    pub fn with_header(mut self, name: HeaderName, val: HeaderValue) -> Self {
-        self.headers.insert(name, val);
-        self
-    }
-}
+use crate::headers::sanitize_workspace_headers;
+use crate::proto::frame::H2ErrorCode;
 
 /// Responder handle for an active HTTP/2 multiplexed stream.
 #[derive(Debug)]
 pub struct Http2Responder {
-    respond: SendResponse<Bytes>,
-    request_id: Option<HeaderValue>,
-    alt_svc: Option<HeaderValue>,
+    pub(crate) cmd_tx: mpsc::UnboundedSender<ServerCmd>,
+    pub(crate) max_send_buffer_size: usize,
+    pub stream_id: u32,
+    pub request_id: Option<HeaderValue>,
+    pub alt_svc: Option<HeaderValue>,
     /// Status code of the response sent on this stream (`0` if none sent yet).
     pub last_status: u16,
     /// Total response body bytes sent on this stream (for single-shot responses).
@@ -114,78 +33,16 @@ pub struct Http2Responder {
 }
 
 impl Http2Responder {
-    /// Creates a new [`Http2Responder`] from an underlying H2 stream send handle.
     #[inline]
-    pub fn new(respond: SendResponse<Bytes>) -> Self {
-        Self {
-            respond,
-            request_id: None,
-            alt_svc: None,
-            last_status: 0,
-            last_bytes_tx: 0,
-        }
-    }
-
-    /// Sets an optional W3C Request ID header value to automatically stamp onto downstream responses.
-    #[inline]
-    pub fn with_request_id(mut self, request_id: Option<HeaderValue>) -> Self {
-        self.request_id = request_id;
-        self
-    }
-
-    /// Sets an optional Alt-Svc header value to automatically advertise HTTP/3 on downstream responses.
-    #[inline]
-    pub fn with_alt_svc(mut self, alt_svc: Option<HeaderValue>) -> Self {
-        self.alt_svc = alt_svc;
-        self
-    }
-
-    #[inline]
-    fn prepare_h2_response(
-        &self,
-        status: StatusCode,
-        headers: &HeaderMap,
-    ) -> Result<Response<()>, Http2Error> {
-        let mut response = build_h2_response(status, headers)?;
+    fn inject_metadata_headers(&self, headers: &mut HeaderWorkspace) {
         if let Some(ref req_id) = self.request_id {
-            response.headers_mut().insert(X_REQUEST_ID, req_id.clone());
-        }
-        if let Some(ref alt_svc) = self.alt_svc
-            && !response.headers().contains_key(http::header::ALT_SVC)
-        {
-            response
-                .headers_mut()
-                .insert(http::header::ALT_SVC, alt_svc.clone());
-        }
-        Ok(response)
-    }
-
-    #[inline]
-    fn prepare_h2_response_owned(
-        &self,
-        status: StatusCode,
-        mut headers: HeaderMap,
-    ) -> Result<Response<()>, Http2Error> {
-        crate::headers::sanitize_h2_headers(&mut headers);
-        if let Some(ref req_id) = self.request_id {
-            headers.insert(X_REQUEST_ID, req_id.clone());
+            headers.insert_bypass(X_REQUEST_ID, req_id.clone());
         }
         if let Some(ref alt_svc) = self.alt_svc
             && !headers.contains_key(http::header::ALT_SVC)
         {
             headers.insert(http::header::ALT_SVC, alt_svc.clone());
         }
-        let mut response = Response::new(());
-        *response.status_mut() = status;
-        *response.version_mut() = Version::HTTP_2;
-        *response.headers_mut() = headers;
-        Ok(response)
-    }
-
-    /// Returns the logical HTTP/2 stream ID associated with this responder.
-    #[inline]
-    pub fn stream_id(&self) -> h2::StreamId {
-        self.respond.stream_id()
     }
 
     /// Sends a response using the canonical [`L7Response`] type.
@@ -194,58 +51,27 @@ impl Http2Responder {
     }
 
     /// Sends a pre-compiled canonical early error response directly over this HTTP/2 stream.
-    ///
-    /// # Protocol Ownership & Zero-Body Invariant (RFC 9113)
-    /// Respects the Single Responsibility Principle (SRP) by keeping HTTP/2 binary wire mechanics
-    /// strictly within `velda-http2`. Emits a single `HEADERS` frame with `END_STREAM = true`,
-    /// completely bypassing `DATA` frame overhead and flow control window calculations.
     #[inline]
-    pub fn send_early_error(&mut self, status: StatusCode) -> Result<(), Http2Error> {
-        self.last_status = status.as_u16();
-        super::early_response::send_early_error(
-            &mut self.respond,
-            status,
-            self.request_id.as_ref(),
-            self.alt_svc.as_ref(),
-        )
-    }
-
-    /// Sends a pre-compiled canonical early error response and immediately resets the incoming stream
-    /// to cancel any pending peer upload without hanging connection buffers.
-    #[inline]
-    pub fn send_early_error_and_cancel_upload(
+    pub fn send_early_error(
         &mut self,
         status: StatusCode,
+        cancel_upload: bool,
     ) -> Result<(), Http2Error> {
         self.last_status = status.as_u16();
-        super::early_response::send_early_error_and_cancel_upload(
-            &mut self.respond,
-            status,
-            self.request_id.as_ref(),
-            self.alt_svc.as_ref(),
-        )
+        self.cmd_tx
+            .send(ServerCmd::SendEarlyError {
+                stream_id: self.stream_id,
+                status,
+                request_id: self.request_id.clone(),
+                alt_svc: self.alt_svc.clone(),
+                cancel_upload,
+            })
+            .map_err(|_| Http2Error::ConnectionClosed)
     }
 
-    /// Sends a response using an owned [`L7Response`], avoiding body buffer cloning and header copying.
+    /// Sends a response using an owned [`L7Response`].
     pub fn send_response_owned(&mut self, response: L7Response) -> Result<(), Http2Error> {
-        self.last_status = response.status.as_u16();
-        let is_no_body = response.status.is_informational()
-            || response.status == StatusCode::NO_CONTENT
-            || response.status == StatusCode::NOT_MODIFIED;
-
-        let has_body = !is_no_body && !response.body.is_empty();
-        if has_body {
-            self.last_bytes_tx += response.body.len() as u64;
-        }
-        let http_response =
-            self.prepare_h2_response_owned(response.status, response.headers.into())?;
-        let mut send_stream = self.respond.send_response(http_response, !has_body)?;
-
-        if has_body && !response.body.is_empty() {
-            send_stream.send_data(response.body.to_bytes(), true)?;
-        }
-
-        Ok(())
+        self.send_parts(response.status, &response.headers, &response.body)
     }
 
     /// Sends a response and immediately resets the incoming stream to cancel any pending peer upload.
@@ -253,202 +79,170 @@ impl Http2Responder {
         &mut self,
         response: &L7Response,
     ) -> Result<(), Http2Error> {
-        self.last_status = response.status.as_u16();
-        let is_no_body = response.status.is_informational()
-            || response.status == StatusCode::NO_CONTENT
-            || response.status == StatusCode::NOT_MODIFIED;
-        let has_body = !is_no_body && !response.body.is_empty();
-        if has_body {
-            self.last_bytes_tx += response.body.len() as u64;
-        }
-        let http_response = self.prepare_h2_response(response.status, &response.headers)?;
-        let mut send_stream = self.respond.send_response(http_response, !has_body)?;
-
-        if has_body && !response.body.is_empty() {
-            let _ = send_stream.send_data(response.body.to_bytes(), true);
-        }
-        send_stream.send_reset(h2::Reason::NO_ERROR);
-        Ok(())
+        self.send_internal(response.status, &response.headers, &response.body, true)
     }
 
-    /// Aborts the stream immediately with an HTTP/2 RST_STREAM frame.
+    /// Aborts the stream immediately with an HTTP/2 `RST_STREAM` frame.
     #[inline]
-    pub fn send_reset(&mut self, reason: h2::Reason) {
-        self.respond.send_reset(reason);
+    pub fn send_reset(&mut self, code: H2ErrorCode) {
+        let _ = self.cmd_tx.send(ServerCmd::ResetStream {
+            stream_id: self.stream_id,
+            code,
+        });
     }
 
     /// Sends an HTTP/2 response given discrete parts.
     pub fn send_parts(
         &mut self,
         status: StatusCode,
-        headers: &HeaderMap,
+        headers: &HeaderWorkspace,
         body: &Body,
     ) -> Result<(), Http2Error> {
-        self.last_status = status.as_u16();
-        let is_no_body = status.is_informational()
-            || status == StatusCode::NO_CONTENT
-            || status == StatusCode::NOT_MODIFIED;
-
-        let has_body = !is_no_body && !body.is_empty();
-        if has_body {
-            self.last_bytes_tx += body.len() as u64;
-        }
-        let http_response = self.prepare_h2_response(status, headers)?;
-
-        let mut send_stream = self.respond.send_response(http_response, !has_body)?;
-
-        if has_body && !body.is_empty() {
-            send_stream.send_data(body.to_bytes(), true)?;
-        }
-
-        Ok(())
+        self.send_internal(status, headers, body, false)
     }
 
-    /// Sends an HTTP/2 response given owned discrete parts, eliminating `Bytes` cloning.
-    pub fn send_parts_owned(
+    #[inline]
+    fn send_internal(
         &mut self,
         status: StatusCode,
-        headers: &HeaderMap,
-        body: Body,
+        headers: &HeaderWorkspace,
+        body: &Body,
+        cancel_upload: bool,
     ) -> Result<(), Http2Error> {
         self.last_status = status.as_u16();
         let is_no_body = status.is_informational()
             || status == StatusCode::NO_CONTENT
             || status == StatusCode::NOT_MODIFIED;
-
         let has_body = !is_no_body && !body.is_empty();
-        if has_body {
+        let body_bytes = if has_body {
             self.last_bytes_tx += body.len() as u64;
-        }
-        let http_response = self.prepare_h2_response(status, headers)?;
+            body.to_bytes()
+        } else {
+            Bytes::new()
+        };
 
-        let mut send_stream = self.respond.send_response(http_response, !has_body)?;
+        let mut ws = sanitize_workspace_headers(headers);
+        self.inject_metadata_headers(&mut ws);
 
-        if has_body && !body.is_empty() {
-            send_stream.send_data(body.to_bytes(), true)?;
-        }
-
-        Ok(())
+        self.cmd_tx
+            .send(ServerCmd::SendResponse {
+                stream_id: self.stream_id,
+                status,
+                headers: ws,
+                body: body_bytes,
+                end_stream: true,
+                cancel_upload,
+            })
+            .map_err(|_| Http2Error::ConnectionClosed)
     }
 
-    /// Opens a progressive send stream by sending only the HEADERS frame.
-    pub fn send_head(
-        &mut self,
-        status: StatusCode,
-        headers: &HeaderMap,
-        end_stream: bool,
-    ) -> Result<SendStream<Bytes>, Http2Error> {
-        self.last_status = status.as_u16();
-        let http_response = self.prepare_h2_response(status, headers)?;
-        let send_stream = self.respond.send_response(http_response, end_stream)?;
-        Ok(send_stream)
-    }
-
-    /// Opens a progressive send stream with owned headers, eliminating HeaderMap cloning.
-    pub fn send_head_owned(
-        &mut self,
-        status: StatusCode,
-        headers: HeaderMap,
-        end_stream: bool,
-    ) -> Result<SendStream<Bytes>, Http2Error> {
-        self.last_status = status.as_u16();
-        let http_response = self.prepare_h2_response_owned(status, headers)?;
-        let send_stream = self.respond.send_response(http_response, end_stream)?;
-        Ok(send_stream)
-    }
-
-    /// Sends the response head and returns a progressive stream sender for streaming response chunks.
+    /// Sends the response head and returns a progressive stream sender for response chunks.
     pub fn send_stream_response(
         &mut self,
         status: StatusCode,
-        headers: &HeaderMap,
+        headers: &HeaderWorkspace,
     ) -> Result<Http2StreamSender, Http2Error> {
-        let send_stream = self.send_head(status, headers, false)?;
-        Ok(Http2StreamSender::new(send_stream))
-    }
+        self.last_status = status.as_u16();
+        let mut ws = sanitize_workspace_headers(headers);
+        self.inject_metadata_headers(&mut ws);
 
-    /// Sends the response head with owned headers and returns a progressive stream sender.
-    pub fn send_stream_response_owned(
-        &mut self,
-        status: StatusCode,
-        headers: HeaderMap,
-    ) -> Result<Http2StreamSender, Http2Error> {
-        let send_stream = self.send_head_owned(status, headers, false)?;
-        Ok(Http2StreamSender::new(send_stream))
+        let queued_send_bytes = Arc::new(AtomicUsize::new(0));
+        let send_notify = Arc::new(Notify::new());
+        self.cmd_tx
+            .send(ServerCmd::StartStreamResponse {
+                stream_id: self.stream_id,
+                status,
+                headers: ws,
+                queued_send_bytes: Arc::clone(&queued_send_bytes),
+                send_notify: Arc::clone(&send_notify),
+            })
+            .map_err(|_| Http2Error::ConnectionClosed)?;
+
+        Ok(Http2StreamSender {
+            stream_id: self.stream_id,
+            cmd_tx: self.cmd_tx.clone(),
+            queued_send_bytes,
+            send_notify,
+            max_send_buffer_size: self.max_send_buffer_size,
+            bytes_sent: 0,
+            finished: false,
+        })
     }
 }
 
-/// Progressive stream sender for transmitting HTTP/2 response DATA chunks downstream.
+/// Progressive stream sender for transmitting HTTP/2 response `DATA` chunks downstream.
 #[derive(Debug)]
 pub struct Http2StreamSender {
-    send_stream: SendStream<Bytes>,
-    bytes_sent: u64,
+    stream_id: u32,
+    cmd_tx: mpsc::UnboundedSender<ServerCmd>,
+    queued_send_bytes: Arc<AtomicUsize>,
+    send_notify: Arc<Notify>,
+    max_send_buffer_size: usize,
+    pub bytes_sent: u64,
+    finished: bool,
 }
 
 impl Http2StreamSender {
-    /// Creates a new [`Http2StreamSender`].
-    #[inline]
-    pub fn new(send_stream: SendStream<Bytes>) -> Self {
-        Self {
-            send_stream,
-            bytes_sent: 0,
-        }
-    }
-
-    /// Returns the total number of response DATA bytes transmitted on this stream.
-    #[inline]
-    pub fn bytes_sent(&self) -> u64 {
-        self.bytes_sent
-    }
-
-    /// Sends a DATA frame chunk downstream with RFC 9113 flow-control backpressure.
-    pub async fn send_chunk(&mut self, mut chunk: Bytes) -> Result<(), Http2Error> {
-        if chunk.is_empty() {
+    /// Sends a `DATA` chunk downstream with bounded driver queue backpressure.
+    pub async fn send_chunk(&mut self, chunk: Bytes) -> Result<(), Http2Error> {
+        if chunk.is_empty() || self.finished {
             return Ok(());
         }
-        let avail = self.send_stream.capacity();
-        if avail < chunk.len() {
-            self.send_stream.reserve_capacity(chunk.len() - avail);
-        }
-        while !chunk.is_empty() {
-            let available = self.send_stream.capacity();
-            if available == 0 {
-                let res = std::future::poll_fn(|cx| self.send_stream.poll_capacity(cx)).await;
-                match res {
-                    Some(Ok(_)) => {}
-                    Some(Err(err)) => return Err(err.into()),
-                    None => return Err(Http2Error::ConnectionClosed),
-                }
-                if self.send_stream.capacity() == 0 {
-                    return Err(Http2Error::ConnectionClosed);
-                }
-                continue;
+        while self.queued_send_bytes.load(Ordering::Acquire) >= self.max_send_buffer_size {
+            if self.cmd_tx.is_closed() {
+                return Err(Http2Error::ConnectionClosed);
             }
-
-            let to_send = chunk.len().min(available);
-            let slice = chunk.split_to(to_send);
-            self.send_stream.send_data(slice, false)?;
-            self.bytes_sent += to_send as u64;
+            self.send_notify.notified().await;
         }
+        let len = chunk.len();
+        self.queued_send_bytes.fetch_add(len, Ordering::Release);
+        self.cmd_tx
+            .send(ServerCmd::SendData {
+                stream_id: self.stream_id,
+                data: chunk,
+                end_stream: false,
+            })
+            .map_err(|_| Http2Error::ConnectionClosed)?;
+        self.bytes_sent += len as u64;
         Ok(())
     }
 
-    /// Sends trailing headers to conclude the stream.
-    pub fn send_trailers(&mut self, mut trailers: HeaderMap) -> Result<(), Http2Error> {
-        crate::headers::sanitize_h2_headers(&mut trailers);
-        self.send_stream.send_trailers(trailers)?;
-        Ok(())
+    /// Sends trailing headers directly from [`HeaderWorkspace`] to conclude the stream.
+    pub fn send_trailers(&mut self, trailers: HeaderWorkspace) -> Result<(), Http2Error> {
+        if self.finished {
+            return Ok(());
+        }
+        self.finished = true;
+        self.cmd_tx
+            .send(ServerCmd::SendTrailers {
+                stream_id: self.stream_id,
+                trailers: sanitize_workspace_headers(&trailers),
+            })
+            .map_err(|_| Http2Error::ConnectionClosed)
     }
 
-    /// Explicitly closes the stream by sending an empty DATA frame with END_STREAM flag.
+    /// Explicitly closes the stream by sending an empty `DATA` frame with `END_STREAM`.
     pub fn finish(&mut self) -> Result<(), Http2Error> {
-        self.send_stream.send_data(Bytes::new(), true)?;
-        Ok(())
+        if self.finished {
+            return Ok(());
+        }
+        self.finished = true;
+        self.cmd_tx
+            .send(ServerCmd::SendData {
+                stream_id: self.stream_id,
+                data: Bytes::new(),
+                end_stream: true,
+            })
+            .map_err(|_| Http2Error::ConnectionClosed)
     }
 
-    /// Explicitly resets the stream (e.g. to cancel ongoing client upload after response sent).
+    /// Explicitly resets the stream with an HTTP/2 error code.
     #[inline]
-    pub fn reset(&mut self, reason: h2::Reason) {
-        self.send_stream.send_reset(reason);
+    pub fn reset(&mut self, code: H2ErrorCode) {
+        self.finished = true;
+        let _ = self.cmd_tx.send(ServerCmd::ResetStream {
+            stream_id: self.stream_id,
+            code,
+        });
     }
 }

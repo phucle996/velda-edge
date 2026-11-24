@@ -11,8 +11,7 @@ use http::header::{CONNECTION, CONTENT_LENGTH, CONTENT_TYPE, HeaderValue, TE, UP
 use tokio::io::duplex;
 use velda_http2::config::Http2Config;
 use velda_http2::error::Http2Error;
-use velda_http2::headers::filter_h2_headers;
-use velda_http2::server::Http2ServerConnection;
+use velda_http2::server::connection::Http2ServerConnection;
 
 #[tokio::main]
 async fn main() {
@@ -32,7 +31,8 @@ async fn bench_oversized_payload_rejection() {
 
     const ITERS: u64 = 1_000;
     const MAX_SIZE: usize = 64;
-    let config = Http2Config::from_hardware(1, 512 * 1024 * 1024).with_max_body_size(MAX_SIZE);
+    let mut config = Http2Config::from_hardware(1, 512 * 1024 * 1024);
+    config.max_body_size = MAX_SIZE;
 
     let (client_io, server_io) = duplex(256 * 1024);
     let oversized_chunk = Bytes::from(vec![b'A'; 256]);
@@ -141,7 +141,7 @@ async fn bench_rapid_reset_resilience() {
 fn bench_dirty_header_sanitization() {
     println!("### 3. Dirty / Malicious Hop-by-Hop Header Stripping\n");
 
-    let mut dirty = http::HeaderMap::new();
+    let mut dirty = velda_core::buffer::header::HeaderWorkspace::empty(8);
     dirty.insert(CONTENT_TYPE, HeaderValue::from_static("application/json"));
     dirty.insert(CONTENT_LENGTH, HeaderValue::from_static("1024"));
     dirty.insert(CONNECTION, HeaderValue::from_static("upgrade, keep-alive"));
@@ -153,7 +153,7 @@ fn bench_dirty_header_sanitization() {
     const ITERS: u64 = 100_000;
 
     // Verify filter correctness once outside the hot loop
-    let clean = filter_h2_headers(&dirty);
+    let clean = velda_http2::headers::sanitize_workspace_headers(&dirty);
     assert!(clean.get(CONNECTION).is_none());
     assert!(clean.get(UPGRADE).is_none());
     assert!(clean.get("proxy-connection").is_none());
@@ -162,7 +162,7 @@ fn bench_dirty_header_sanitization() {
 
     let start = Instant::now();
     for _ in 0..ITERS {
-        let clean = filter_h2_headers(&dirty);
+        let clean = velda_http2::headers::sanitize_workspace_headers(&dirty);
         std::hint::black_box(clean);
     }
     let elapsed = start.elapsed();

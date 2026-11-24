@@ -3,10 +3,13 @@ use http::{Method, StatusCode};
 use tokio::io::duplex;
 use tokio::net::TcpListener;
 use velda_core::Body;
-use velda_http2::client::{self, Http2ClientResponse};
+use velda_core::buffer::header::HeaderWorkspace;
+use velda_http2::client::connector;
 use velda_http2::config::Http2Config;
 use velda_http2::error::Http2Error;
-use velda_http2::server::Http2ServerConnection;
+use velda_http2::headers::sanitize_workspace_headers;
+use velda_http2::server::connection::Http2ServerConnection;
+use velda_http2::strategy::Http2PipeStrategy;
 
 const TEST_CONFIG: Http2Config = Http2Config::from_hardware(4, 8 * 1024 * 1024 * 1024);
 
@@ -43,7 +46,7 @@ async fn test_http2_server_and_client_roundtrip() {
     let (req, mut responder) = server_conn.accept_request().await.unwrap().unwrap();
 
     assert_eq!(req.method, Method::POST);
-    assert_eq!(req.path(), "/echo");
+    assert_eq!(req.uri.path(), "/echo");
     if let Body::Bytes(ref b) = req.body {
         assert_eq!(&b[..], b"hello h2");
     } else {
@@ -101,9 +104,12 @@ async fn test_http2_multiplexing_concurrent_streams() {
             let path = h2_req.head.uri.path().to_string();
             let id = path.trim_start_matches("/stream/");
             let resp_bytes = format!("response-{id}").into_bytes();
-            let resp = Http2ClientResponse::from_bytes(StatusCode::OK, resp_bytes);
             responder
-                .send_parts(resp.head.status, &resp.head.headers, &resp.body)
+                .send_parts(
+                    StatusCode::OK,
+                    &HeaderWorkspace::empty(0),
+                    &Body::Bytes(resp_bytes.into()),
+                )
                 .unwrap();
         });
     }
@@ -137,7 +143,8 @@ async fn test_http2_payload_limit_enforcement() {
     });
 
     // Limit maximum body size to 50 bytes
-    let tight_config = TEST_CONFIG.with_max_body_size(50);
+    let mut tight_config = TEST_CONFIG;
+    tight_config.max_body_size = 50;
     let mut server_conn = Http2ServerConnection::handshake(server_io, tight_config)
         .await
         .unwrap();
@@ -170,7 +177,8 @@ async fn test_http2_upstream_connector() {
         }
     });
 
-    let config = TEST_CONFIG.with_max_concurrent_streams(512);
+    let mut config = TEST_CONFIG;
+    config.max_concurrent_streams = 512;
 
     let (ip, port_be) = match backend_addr {
         std::net::SocketAddr::V4(v4) => (
@@ -179,19 +187,22 @@ async fn test_http2_upstream_connector() {
         ),
         std::net::SocketAddr::V6(v6) => (v6.ip().to_bits(), v6.port().to_be()),
     };
-    let mut client = client::connect(ip, port_be, None, &config, None)
+    let client = connector::connect(ip, port_be, None, &config, None)
         .await
         .unwrap();
-    let http_req = http::Request::builder()
-        .method("GET")
-        .uri("http://localhost/health")
-        .body(())
+    let (resp_fut, _) = client
+        .send_request(
+            Method::GET,
+            "http://localhost/health".parse().unwrap(),
+            HeaderWorkspace::empty(0),
+            true,
+        )
+        .await
         .unwrap();
-    let (resp_fut, _) = client.send_request(http_req, true).unwrap();
-    let (parts, mut body) = resp_fut.await.unwrap().into_parts();
+    let mut resp = resp_fut.await.unwrap();
 
-    assert_eq!(parts.status, StatusCode::OK);
-    let chunk = body.data().await.unwrap().unwrap();
+    assert_eq!(resp.status, StatusCode::OK);
+    let chunk = resp.body.recv_chunk().await.unwrap().unwrap();
     assert_eq!(&chunk[..], b"h2 alive");
 }
 
@@ -243,7 +254,7 @@ async fn test_http2_server_streaming_sse() {
 
     let server_task = tokio::spawn(async move {
         let (_req, mut responder) = server_conn.accept_h2_request().await.unwrap().unwrap();
-        let mut sse_headers = http::HeaderMap::new();
+        let mut sse_headers = HeaderWorkspace::empty(0);
         sse_headers.insert("content-type", "text/event-stream".parse().unwrap());
         sse_headers.insert("cache-control", "no-cache".parse().unwrap());
 
@@ -330,9 +341,12 @@ async fn test_http2_client_streaming_upload() {
                 "part-1;part-2;part-3;"
             );
 
-            let resp = Http2ClientResponse::empty(StatusCode::CREATED);
             responder
-                .send_parts(resp.head.status, &resp.head.headers, &resp.body)
+                .send_parts(
+                    StatusCode::CREATED,
+                    &HeaderWorkspace::empty(0),
+                    &Body::Empty,
+                )
                 .unwrap();
         });
 
@@ -348,7 +362,6 @@ async fn test_http2_client_streaming_upload() {
 #[test]
 fn test_http2_pipe_strategy_mapping() {
     use velda_core::StreamingMode;
-    use velda_http2::Http2PipeStrategy;
 
     assert_eq!(
         Http2PipeStrategy::from_streaming(StreamingMode::DISABLED),
@@ -454,8 +467,8 @@ async fn test_head_and_no_body_status_invariants() {
         StatusCode::OK,
         http::Version::HTTP_2,
         {
-            let mut h = http::HeaderMap::new();
-            h.insert("content-length", "1024".parse().unwrap());
+            let mut h = velda_core::HeaderWorkspace::empty(2);
+            h.insert("content-length", http::HeaderValue::from_static("1024"));
             h
         },
         Body::Empty,
@@ -473,7 +486,7 @@ async fn test_head_and_no_body_status_invariants() {
     let resp = velda_core::L7Response::new(
         StatusCode::NOT_MODIFIED,
         http::Version::HTTP_2,
-        http::HeaderMap::new(),
+        velda_core::HeaderWorkspace::empty(0),
         Body::Empty,
     );
     responder.send_response(&resp).unwrap();
@@ -515,7 +528,7 @@ async fn test_streaming_response_and_trailers() {
         .unwrap();
     let (_req, mut responder) = server_conn.accept_request().await.unwrap().unwrap();
 
-    let mut headers = http::HeaderMap::new();
+    let mut headers = HeaderWorkspace::empty(0);
     headers.insert("x-custom-stream", "active".parse().unwrap());
     headers.insert("connection", "keep-alive".parse().unwrap()); // should be stripped
 
@@ -532,7 +545,7 @@ async fn test_streaming_response_and_trailers() {
         .await
         .unwrap();
 
-    let mut trailers = http::HeaderMap::new();
+    let mut trailers = HeaderWorkspace::empty(4);
     trailers.insert("grpc-status", "0".parse().unwrap());
     trailers.insert("connection", "close".parse().unwrap()); // should be stripped
     stream_sender.send_trailers(trailers).unwrap();
@@ -540,7 +553,7 @@ async fn test_streaming_response_and_trailers() {
 
 #[test]
 fn test_build_h2_response_zero_allocation_filtering() {
-    let mut headers = http::HeaderMap::new();
+    let mut headers = HeaderWorkspace::empty(10);
     headers.insert("content-type", "application/json".parse().unwrap());
     headers.insert("connection", "keep-alive".parse().unwrap());
     headers.insert("keep-alive", "timeout=5".parse().unwrap());
@@ -550,8 +563,7 @@ fn test_build_h2_response_zero_allocation_filtering() {
     headers.insert("te", "trailers".parse().unwrap());
     headers.insert("x-custom-header", "velda-edge".parse().unwrap());
 
-    let resp = velda_http2::server::build_h2_response(StatusCode::OK, &headers).unwrap();
-    let resp_headers = resp.headers();
+    let resp_headers = sanitize_workspace_headers(&headers);
 
     assert_eq!(
         resp_headers.get("content-type").unwrap(),
@@ -568,7 +580,7 @@ fn test_build_h2_response_zero_allocation_filtering() {
 
 #[tokio::test]
 async fn test_http2_consume_all_into_slab_lifecycle() {
-    use velda_core::buffer::{PayloadSlabPool, SlabClass};
+    use velda_core::buffer::slab::{PayloadSlabPool, SlabClass};
 
     let (client_io, server_io) = duplex(64 * 1024);
     let slab_pool = PayloadSlabPool::new(2, 2, 2, 2);
@@ -599,10 +611,14 @@ async fn test_http2_consume_all_into_slab_lifecycle() {
         let _ = resp_fut.await;
     });
 
-    let mut h2_server = h2::server::handshake(server_io).await.unwrap();
-    let (request, _respond) = h2_server.accept().await.unwrap().unwrap();
-    let (_parts, body_stream) = request.into_parts();
-    let mut receiver = velda_http2::server::Http2StreamReceiver::new(body_stream, 64 * 1024);
+    let mut server_conn = Http2ServerConnection::handshake(server_io, TEST_CONFIG)
+        .await
+        .unwrap();
+    let (_head, mut receiver, _responder) = server_conn
+        .accept_streaming_request()
+        .await
+        .unwrap()
+        .unwrap();
 
     assert_eq!(slab_pool.active_leases(SlabClass::Small4K), 0);
 
@@ -617,4 +633,78 @@ async fn test_http2_consume_all_into_slab_lifecycle() {
 
     drop(body);
     assert_eq!(slab_pool.active_leases(SlabClass::Small4K), 0);
+}
+
+#[tokio::test]
+async fn test_http2_stateless_early_error_and_normal_interop() {
+    let (client_io, server_io) = duplex(64 * 1024);
+
+    let client_handle = tokio::spawn(async move {
+        let (mut client, h2_conn) = h2::client::handshake(client_io).await.unwrap();
+        tokio::spawn(async move {
+            let _ = h2_conn.await;
+        });
+
+        let req_early = http::Request::builder()
+            .method("POST")
+            .uri("https://example.com/shed")
+            .body(())
+            .unwrap();
+        let (resp1_fut, mut upload1) = client.send_request(req_early, false).unwrap();
+        upload1
+            .send_data(Bytes::from_static(b"partial-body"), false)
+            .unwrap();
+
+        let (parts1, mut body1) = resp1_fut.await.unwrap().into_parts();
+        assert_eq!(parts1.status, StatusCode::TOO_MANY_REQUESTS);
+        assert_eq!(
+            parts1.headers.get("content-type").unwrap(),
+            "text/plain; charset=utf-8"
+        );
+        assert_eq!(parts1.headers.get("cache-control").unwrap(), "no-store");
+        assert_eq!(parts1.headers.get("retry-after").unwrap(), "1");
+        assert_eq!(parts1.headers.get("x-request-id").unwrap(), "rid-429");
+        assert_eq!(parts1.headers.get("alt-svc").unwrap(), "h3=\":443\"; ma=60");
+        assert!(body1.data().await.is_none());
+
+        // Subsequent request on same connection must still work with dynamic HPACK compression
+        let req_ok = http::Request::builder()
+            .method("GET")
+            .uri("https://example.com/ok")
+            .body(())
+            .unwrap();
+        let (resp2_fut, _) = client.send_request(req_ok, true).unwrap();
+        let (parts2, mut body2) = resp2_fut.await.unwrap().into_parts();
+        assert_eq!(parts2.status, StatusCode::OK);
+        assert_eq!(parts2.headers.get("x-custom-ok").unwrap(), "velda-ok");
+        assert_eq!(
+            &body2.data().await.unwrap().unwrap()[..],
+            b"hello-after-early"
+        );
+    });
+
+    let mut server_conn = Http2ServerConnection::handshake(server_io, TEST_CONFIG)
+        .await
+        .unwrap();
+
+    let (_head1, _rx1, mut responder1) = server_conn
+        .accept_streaming_request()
+        .await
+        .unwrap()
+        .unwrap();
+    responder1.request_id = Some(http::HeaderValue::from_static("rid-429"));
+    responder1.alt_svc = Some(http::HeaderValue::from_static("h3=\":443\"; ma=60"));
+    responder1
+        .send_early_error(StatusCode::TOO_MANY_REQUESTS, true)
+        .unwrap();
+
+    let (_head2, mut responder2) = server_conn.accept_request().await.unwrap().unwrap();
+    let mut ok_resp =
+        velda_core::L7Response::from_bytes(StatusCode::OK, b"hello-after-early".as_slice());
+    ok_resp
+        .headers
+        .insert("x-custom-ok", http::HeaderValue::from_static("velda-ok"));
+    responder2.send_response(&ok_resp).unwrap();
+
+    client_handle.await.unwrap();
 }

@@ -40,17 +40,14 @@ pub fn is_clean_path(bytes: &[u8]) -> bool {
     if bytes.is_empty() || bytes[0] != b'/' {
         return false;
     }
-    let mut bad_char_mask: u8 = 0;
-    let mut bad_slash_mask: u8 = 0;
-    let mut prev = b'/';
-
-    for &b in &bytes[1..] {
-        bad_char_mask |= ((b == 0) | (b == b'\\') | (b == b'%')) as u8;
-        bad_slash_mask |= ((prev == b'/') & ((b == b'/') | (b == b'.'))) as u8;
-        prev = b;
+    if memchr::memchr3(b'\0', b'\\', b'%', bytes).is_some() {
+        return false;
     }
-
-    (bad_char_mask | bad_slash_mask) == 0
+    if memchr::memmem::find(bytes, b"//").is_some() || memchr::memmem::find(bytes, b"/.").is_some()
+    {
+        return false;
+    }
+    true
 }
 
 #[cold]

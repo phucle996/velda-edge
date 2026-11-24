@@ -1,12 +1,15 @@
-//! HTTP/2 Downstream Ingress Request Entity (RFC 9113 & RFC 9218).
+//! HTTP/2 Downstream Ingress Request Entity & Progressive Stream Receiver (RFC 9113 & RFC 9218).
 //!
-//! Represents incoming requests initiated by downstream clients across multiplexed streams.
+//! Represents incoming requests decoded natively into [`HeaderWorkspace`] during HPACK parsing.
 
-use http::{HeaderMap, Method, Uri, Version};
-use std::sync::Arc;
+use bytes::{Bytes, BytesMut};
+use http::{Method, Uri, Version};
+use tokio::sync::mpsc;
+use velda_core::buffer::header::HeaderWorkspace;
 use velda_core::{Body, L7Request};
 
-use super::connection::Http2FloodTracker;
+use super::connection::{ServerBodyEvent, ServerCmd};
+use crate::error::Http2Error;
 
 /// Extensible HTTP Prioritization Scheme (RFC 9218).
 ///
@@ -29,15 +32,13 @@ impl Default for Http2Priority {
 }
 
 impl Http2Priority {
-    /// Default HTTP priority according to RFC 9218 (urgency = 3, incremental = false).
+    /// Default HTTP priority according to RFC 9218 (`urgency = 3`, `incremental = false`).
     pub const DEFAULT: Self = Self {
         urgency: 3,
         incremental: false,
     };
 
     /// Parses an RFC 9218 `Priority` header value directly from raw byte slice without heap allocation.
-    ///
-    /// Performs an in-place linear scan with zero heap allocations and branch-friendly parsing.
     #[inline]
     pub fn from_header_bytes(bytes: &[u8]) -> Self {
         let mut urgency = 3u8;
@@ -47,7 +48,6 @@ impl Http2Priority {
         let len = bytes.len();
 
         while i < len {
-            // Skip leading whitespace / delimiters
             while i < len && (bytes[i] == b' ' || bytes[i] == b'\t' || bytes[i] == b',') {
                 i += 1;
             }
@@ -55,7 +55,6 @@ impl Http2Priority {
                 break;
             }
 
-            // Read parameter key
             let key_start = i;
             while i < len
                 && bytes[i] != b'='
@@ -67,14 +66,13 @@ impl Http2Priority {
             }
             let key = &bytes[key_start..i];
 
-            // Skip whitespace after key
             while i < len && (bytes[i] == b' ' || bytes[i] == b'\t') {
                 i += 1;
             }
 
             let mut has_val = false;
             if i < len && bytes[i] == b'=' {
-                i += 1; // skip '='
+                i += 1;
                 while i < len && (bytes[i] == b' ' || bytes[i] == b'\t') {
                     i += 1;
                 }
@@ -93,7 +91,6 @@ impl Http2Priority {
                 }
             } else if key == b"i" {
                 if !has_val {
-                    // Boolean parameter without value in Structured Fields means true
                     incremental = true;
                 } else if i < len {
                     if bytes[i] == b'?' && i + 1 < len {
@@ -106,7 +103,6 @@ impl Http2Priority {
                 }
             }
 
-            // Advance until next comma delimiter or end of input
             while i < len && bytes[i] != b',' {
                 i += 1;
             }
@@ -125,28 +121,19 @@ impl Http2Priority {
 /// Header metadata and stream identity for an incoming HTTP/2 server request.
 #[derive(Debug, Clone)]
 pub struct Http2ServerRequestHead {
-    /// HTTP method (GET, POST, PUT, etc.).
     pub method: Method,
-    /// Target URI / path.
     pub uri: Uri,
-    /// Protocol version (always HTTP/2.0).
     pub version: Version,
-    /// Decompressed headers received in HEADERS frame(s).
-    pub headers: HeaderMap,
-    /// Logical HTTP/2 stream identifier.
-    pub stream_id: Option<h2::StreamId>,
-    /// RFC 9218 extensible HTTP stream priority parsed in-place.
+    pub headers: HeaderWorkspace,
+    pub stream_id: Option<u32>,
     pub priority: Http2Priority,
+    pub request_id: u128,
+    pub ingress_time_nanos: u64,
 }
 
 impl Http2ServerRequestHead {
     /// Creates a new [`Http2ServerRequestHead`].
-    pub fn new(
-        method: Method,
-        uri: Uri,
-        headers: HeaderMap,
-        stream_id: Option<h2::StreamId>,
-    ) -> Self {
+    pub fn new(method: Method, uri: Uri, headers: HeaderWorkspace, stream_id: Option<u32>) -> Self {
         let priority = headers
             .get("priority")
             .map(|val| Http2Priority::from_header_bytes(val.as_bytes()))
@@ -159,74 +146,25 @@ impl Http2ServerRequestHead {
             headers,
             stream_id,
             priority,
+            request_id: 0,
+            ingress_time_nanos: 0,
         }
-    }
-
-    /// Enriches HTTP/2 request headers with RFC 7239 and standard proxy forwarding metadata.
-    #[inline]
-    pub fn enrich_forwarded_headers(
-        &mut self,
-        peer_ip: u128,
-        local_ip: u128,
-        local_port_be: u16,
-        is_tls: bool,
-    ) {
-        super::header::enrich_headers(
-            &mut self.headers,
-            &self.uri,
-            peer_ip,
-            local_ip,
-            local_port_be,
-            is_tls,
-        );
-    }
-
-    /// Returns the approximate wire size of request method, URI path, and headers.
-    #[inline]
-    pub fn estimated_header_bytes(&self) -> usize {
-        let headers_len: usize = self
-            .headers
-            .iter()
-            .map(|(k, v)| k.as_str().len() + v.as_bytes().len() + 4)
-            .sum();
-        headers_len + self.uri.path().len() + self.method.as_str().len() + 32
-    }
-
-    /// Converts this server request head into an outbound upstream [`http::Request<()>`] zero-copy by moving fields.
-    #[inline]
-    pub fn into_http_request(self) -> http::Request<()> {
-        let mut req = http::Request::new(());
-        *req.method_mut() = self.method;
-        *req.uri_mut() = self.uri;
-        *req.version_mut() = Version::HTTP_2;
-        *req.headers_mut() = self.headers;
-        req
     }
 }
 
 /// An incoming HTTP/2 server request received on an active multiplexed stream.
 #[derive(Debug, Clone)]
 pub struct Http2ServerRequest {
-    /// Request head (method, URI, headers, stream ID).
     pub head: Http2ServerRequestHead,
-    /// Request body payload received via DATA frame(s).
     pub body: Body,
 }
 
 impl Http2ServerRequest {
-    /// Creates a new [`Http2ServerRequest`] from parts.
     #[inline]
     pub fn new(head: Http2ServerRequestHead, body: Body) -> Self {
         Self { head, body }
     }
 
-    /// Deconstructs the request into its constituent head and body parts.
-    #[inline]
-    pub fn into_parts(self) -> (Http2ServerRequestHead, Body) {
-        (self.head, self.body)
-    }
-
-    /// Converts this protocol-owned request into canonical [`L7Request`].
     pub fn into_l7_request(self) -> L7Request {
         L7Request::new(
             self.head.method,
@@ -236,327 +174,180 @@ impl Http2ServerRequest {
             self.body,
         )
     }
-
-    /// Constructs an [`Http2ServerRequest`] from a canonical [`L7Request`].
-    pub fn from_l7_request(req: L7Request) -> Self {
-        let head = Http2ServerRequestHead::new(req.method, req.uri, req.headers.into(), None);
-        Self::new(head, req.body)
-    }
 }
 
-/// Progressive stream receiver for an incoming HTTP/2 request or response body.
-///
-/// Reads DATA chunks incrementally with batched flow-control (`release_capacity`)
-/// and maximum payload size limits without buffering the entire body into RAM.
+/// Progressive stream receiver for an incoming HTTP/2 request body.
 #[derive(Debug)]
 pub struct Http2StreamReceiver {
-    body_stream: h2::RecvStream,
-    max_body_size: usize,
-    bytes_received: usize,
-    eof: bool,
-    flood_tracker: Option<Arc<Http2FloodTracker>>,
-}
-
-impl Drop for Http2StreamReceiver {
-    fn drop(&mut self) {
-        // Any unconsumed bytes are automatically handled by h2 when RecvStream is dropped.
-    }
+    pub(crate) stream_id: u32,
+    pub(crate) body_rx: mpsc::UnboundedReceiver<Result<ServerBodyEvent, Http2Error>>,
+    pub(crate) cmd_tx: mpsc::UnboundedSender<ServerCmd>,
+    pub(crate) max_body_size: usize,
+    pub bytes_received: usize,
+    pub(crate) eof: bool,
+    pub(crate) trailers: Option<HeaderWorkspace>,
 }
 
 impl Http2StreamReceiver {
-    /// Creates a new [`Http2StreamReceiver`] with ingress safety limits.
-    #[inline]
-    pub fn new(body_stream: h2::RecvStream, max_body_size: usize) -> Self {
-        let eof = body_stream.is_end_stream();
-        Self {
-            body_stream,
-            max_body_size,
-            bytes_received: 0,
-            eof,
-            flood_tracker: None,
-        }
-    }
-
-    /// Attaches an [`Http2FloodTracker`] to count payload bytes read for anti-DoS accounting.
-    #[inline]
-    pub fn with_flood_tracker(mut self, tracker: Arc<Http2FloodTracker>) -> Self {
-        self.flood_tracker = Some(tracker);
-        self
-    }
-
-    /// Asynchronously receives the next DATA chunk from the incoming stream.
-    pub async fn recv_chunk(&mut self) -> Result<Option<bytes::Bytes>, crate::error::Http2Error> {
-        if self.eof || self.body_stream.is_end_stream() {
-            self.eof = true;
-            return Ok(None);
-        }
-
-        let Some(chunk_res) = self.body_stream.data().await else {
-            self.eof = true;
-            return Ok(None);
-        };
-
-        let chunk = chunk_res?;
-        let len = chunk.len();
-        self.bytes_received += len;
-        if let Some(tracker) = &self.flood_tracker {
-            tracker.on_payload_read(len);
-        }
-
+    #[inline(always)]
+    fn record_chunk(&mut self, len: usize) -> Result<(), Http2Error> {
+        self.bytes_received = self.bytes_received.saturating_add(len);
+        let _ = self.cmd_tx.send(ServerCmd::ReleaseRecvCapacity {
+            stream_id: self.stream_id,
+            bytes: len as u32,
+        });
         if self.bytes_received > self.max_body_size {
-            let _ = self.body_stream.flow_control().release_capacity(len);
-            return Err(crate::error::Http2Error::PayloadTooLarge(
-                self.bytes_received,
-            ));
+            return Err(Http2Error::PayloadTooLarge(self.bytes_received));
         }
-
-        // Proactively release capacity immediately to h2's internal flow-control state machine.
-        // h2 automatically generates WINDOW_UPDATE frames whenever consumed capacity crosses its threshold,
-        // avoiding artificial stalls on client uploads.
-        let _ = self.body_stream.flow_control().release_capacity(len);
-        if self.body_stream.is_end_stream() {
-            self.eof = true;
-        }
-
-        Ok(Some(chunk))
+        Ok(())
     }
 
-    /// Opportunistically attempts to receive the next DATA chunk without parking if data is already queued.
-    pub fn try_recv_chunk(
-        &mut self,
-    ) -> Result<Option<Option<bytes::Bytes>>, crate::error::Http2Error> {
-        if self.eof || self.body_stream.is_end_stream() {
-            self.eof = true;
-            return Ok(Some(None));
+    /// Asynchronously receives the next `DATA` chunk from the incoming stream.
+    pub async fn recv_chunk(&mut self) -> Result<Option<Bytes>, Http2Error> {
+        if self.eof {
+            return Ok(None);
         }
-        let waker = std::task::Waker::noop();
-        let mut cx = std::task::Context::from_waker(waker);
-        match self.body_stream.poll_data(&mut cx) {
-            std::task::Poll::Ready(Some(Ok(chunk))) => {
-                let len = chunk.len();
-                self.bytes_received += len;
-                if let Some(tracker) = &self.flood_tracker {
-                    tracker.on_payload_read(len);
+        loop {
+            match self.body_rx.recv().await {
+                Some(Ok(ServerBodyEvent::Data {
+                    payload,
+                    end_stream,
+                })) => {
+                    if end_stream {
+                        self.eof = true;
+                    }
+                    if !payload.is_empty() {
+                        self.record_chunk(payload.len())?;
+                        return Ok(Some(payload));
+                    }
+                    if self.eof {
+                        return Ok(None);
+                    }
                 }
-                if self.bytes_received > self.max_body_size {
-                    let _ = self.body_stream.flow_control().release_capacity(len);
-                    return Err(crate::error::Http2Error::PayloadTooLarge(
-                        self.bytes_received,
-                    ));
-                }
-                let _ = self.body_stream.flow_control().release_capacity(len);
-                if self.body_stream.is_end_stream() {
+                Some(Ok(ServerBodyEvent::Trailers(tr))) => {
+                    self.trailers = Some(tr);
                     self.eof = true;
+                    return Ok(None);
                 }
-                Ok(Some(Some(chunk)))
+                Some(Err(e)) => {
+                    self.eof = true;
+                    return Err(e);
+                }
+                None => {
+                    self.eof = true;
+                    return Ok(None);
+                }
             }
-            std::task::Poll::Ready(None) => {
-                self.eof = true;
-                Ok(Some(None))
-            }
-            std::task::Poll::Ready(Some(Err(e))) => Err(crate::error::Http2Error::from(e)),
-            std::task::Poll::Pending => Ok(None),
         }
     }
 
-    /// Receives a chunk, opportunistically coalescing any immediately available subsequent chunks
-    /// up to `max_coalesce_bytes` without parking the task or clobbering the stream waker.
+    /// Receives a chunk and coalesces immediately queued chunks up to `max_coalesce_bytes`.
     pub async fn recv_coalesced_chunk(
         &mut self,
         max_coalesce_bytes: usize,
-    ) -> Result<Option<bytes::Bytes>, crate::error::Http2Error> {
+    ) -> Result<Option<Bytes>, Http2Error> {
         let Some(first) = self.recv_chunk().await? else {
             return Ok(None);
         };
-        if first.len() >= max_coalesce_bytes || self.is_end_stream() {
+        if first.len() >= max_coalesce_bytes || self.eof {
             return Ok(Some(first));
         }
 
-        let mut first_opt = Some(first);
-        std::future::poll_fn(|cx| {
-            let first = first_opt.take().unwrap();
-            let second = match self.body_stream.poll_data(cx) {
-                std::task::Poll::Ready(Some(Ok(chunk))) => {
-                    let len = chunk.len();
-                    self.bytes_received += len;
-                    if let Some(tracker) = &self.flood_tracker {
-                        tracker.on_payload_read(len);
-                    }
-                    if self.bytes_received > self.max_body_size {
-                        let _ = self.body_stream.flow_control().release_capacity(len);
-                        return std::task::Poll::Ready(Err(
-                            crate::error::Http2Error::PayloadTooLarge(self.bytes_received),
-                        ));
-                    }
-                    let _ = self.body_stream.flow_control().release_capacity(len);
-                    if self.body_stream.is_end_stream() {
+        let mut buf: Option<BytesMut> = None;
+        while buf.as_ref().map_or(first.len(), BytesMut::len) < max_coalesce_bytes && !self.eof {
+            match self.body_rx.try_recv() {
+                Ok(Ok(ServerBodyEvent::Data {
+                    payload,
+                    end_stream,
+                })) => {
+                    if end_stream {
                         self.eof = true;
                     }
-                    chunk
+                    if !payload.is_empty() {
+                        self.record_chunk(payload.len())?;
+                        let b = buf.get_or_insert_with(|| {
+                            let mut bm = BytesMut::with_capacity(
+                                (first.len() + payload.len() + 16_384).min(max_coalesce_bytes),
+                            );
+                            bm.extend_from_slice(&first);
+                            bm
+                        });
+                        b.extend_from_slice(&payload);
+                    }
                 }
-                std::task::Poll::Ready(None) => {
+                Ok(Ok(ServerBodyEvent::Trailers(tr))) => {
+                    self.trailers = Some(tr);
                     self.eof = true;
-                    return std::task::Poll::Ready(Ok(Some(first)));
+                    break;
                 }
-                std::task::Poll::Ready(Some(Err(e))) => {
-                    return std::task::Poll::Ready(Err(crate::error::Http2Error::from(e)));
+                Ok(Err(e)) => {
+                    self.eof = true;
+                    return Err(e);
                 }
-                std::task::Poll::Pending => {
-                    return std::task::Poll::Ready(Ok(Some(first)));
+                Err(mpsc::error::TryRecvError::Disconnected) => {
+                    self.eof = true;
+                    break;
                 }
-            };
-
-            if second.is_empty() && self.is_end_stream() {
-                return std::task::Poll::Ready(Ok(Some(first)));
+                Err(mpsc::error::TryRecvError::Empty) => break,
             }
+        }
 
-            let initial_cap = (first.len() + second.len() + 16_384)
-                .min(max_coalesce_bytes.max(first.len() + second.len()));
-            let mut buf = bytes::BytesMut::with_capacity(initial_cap);
-            buf.extend_from_slice(&first);
-            buf.extend_from_slice(&second);
-
-            while buf.len() < max_coalesce_bytes && !self.is_end_stream() {
-                match self.body_stream.poll_data(cx) {
-                    std::task::Poll::Ready(Some(Ok(chunk))) => {
-                        let len = chunk.len();
-                        self.bytes_received += len;
-                        if let Some(tracker) = &self.flood_tracker {
-                            tracker.on_payload_read(len);
-                        }
-                        if self.bytes_received > self.max_body_size {
-                            let _ = self.body_stream.flow_control().release_capacity(len);
-                            return std::task::Poll::Ready(Err(
-                                crate::error::Http2Error::PayloadTooLarge(self.bytes_received),
-                            ));
-                        }
-                        let _ = self.body_stream.flow_control().release_capacity(len);
-                        if self.body_stream.is_end_stream() {
-                            self.eof = true;
-                        }
-                        buf.extend_from_slice(&chunk);
-                    }
-                    std::task::Poll::Ready(None) => {
-                        self.eof = true;
-                        break;
-                    }
-                    std::task::Poll::Ready(Some(Err(e))) => {
-                        return std::task::Poll::Ready(Err(crate::error::Http2Error::from(e)));
-                    }
-                    std::task::Poll::Pending => break,
-                }
-            }
-
-            std::task::Poll::Ready(Ok(Some(buf.freeze())))
-        })
-        .await
-    }
-
-    /// Returns the total number of body bytes received so far on this stream.
-    #[inline]
-    pub fn bytes_received(&self) -> usize {
-        self.bytes_received
+        match buf {
+            Some(bm) => Ok(Some(bm.freeze())),
+            None => Ok(Some(first)),
+        }
     }
 
     /// Returns whether the stream has reached the end of stream.
     #[inline]
     pub fn is_end_stream(&self) -> bool {
-        self.eof || self.body_stream.is_end_stream()
+        self.eof
+    }
+
+    /// Takes trailing headers received with EOF, if any.
+    #[inline]
+    pub fn take_trailers(&mut self) -> Option<HeaderWorkspace> {
+        self.trailers.take()
     }
 
     /// Accumulates all remaining chunks into a [`Body`] while enforcing `max_body_size`.
-    pub async fn consume_all(&mut self) -> Result<Body, crate::error::Http2Error> {
+    pub async fn consume_all(&mut self) -> Result<Body, Http2Error> {
         self.consume_all_into_slab(None).await
     }
 
-    /// Accumulates all remaining chunks into a pre-warmed [`velda_core::buffer::PayloadSlabPool`] slab
-    /// when payload size is $\le 64\text{ KB}$, falling back to heap [`bytes::BytesMut`] for larger bodies.
+    /// Accumulates all remaining chunks into a pre-warmed [`PayloadSlabPool`] slab when $\le 64\text{ KB}$,
+    /// falling back to heap [`BytesMut`] for larger bodies.
     pub async fn consume_all_into_slab(
         &mut self,
-        slab_pool: Option<&std::sync::Arc<velda_core::buffer::PayloadSlabPool>>,
-    ) -> Result<Body, crate::error::Http2Error> {
-        let first_chunk = loop {
-            if self.is_end_stream() {
-                return Ok(Body::Empty);
-            }
-            match self.body_stream.data().await {
-                Some(Ok(chunk)) => {
-                    let len = chunk.len();
-                    self.bytes_received += len;
-                    if let Some(tracker) = &self.flood_tracker {
-                        tracker.on_payload_read(len);
-                    }
-                    if self.bytes_received > self.max_body_size {
-                        let _ = self.body_stream.flow_control().release_capacity(len);
-                        return Err(crate::error::Http2Error::PayloadTooLarge(
-                            self.bytes_received,
-                        ));
-                    }
-                    let _ = self.body_stream.flow_control().release_capacity(len);
-                    if self.body_stream.is_end_stream() {
-                        self.eof = true;
-                    }
-                    if !chunk.is_empty() {
-                        break chunk;
-                    }
-                }
-                Some(Err(e)) => return Err(crate::error::Http2Error::from(e)),
-                None => {
-                    self.eof = true;
-                    return Ok(Body::Empty);
-                }
-            }
+        slab_pool: Option<&std::sync::Arc<velda_core::buffer::slab::PayloadSlabPool>>,
+    ) -> Result<Body, Http2Error> {
+        let Some(first_chunk) = self.recv_chunk().await? else {
+            return Ok(Body::Empty);
         };
+        if self.eof {
+            if let Some(pool) = slab_pool
+                && let Some(mut lease) = pool.acquire_for_size(first_chunk.len())
+            {
+                let len = first_chunk.len();
+                lease[..len].copy_from_slice(&first_chunk);
+                return Ok(Body::from_slab(lease, len));
+            }
+            return Ok(Body::Bytes(first_chunk));
+        }
 
-        let second_chunk = loop {
-            if self.is_end_stream() {
-                if let Some(pool) = slab_pool
-                    && let Some(mut lease) = pool.acquire_for_size(first_chunk.len())
-                {
-                    let len = first_chunk.len();
-                    lease[..len].copy_from_slice(&first_chunk);
-                    return Ok(Body::from_slab(lease, len));
-                }
-                return Ok(Body::Bytes(first_chunk));
+        let Some(second_chunk) = self.recv_chunk().await? else {
+            if let Some(pool) = slab_pool
+                && let Some(mut lease) = pool.acquire_for_size(first_chunk.len())
+            {
+                let len = first_chunk.len();
+                lease[..len].copy_from_slice(&first_chunk);
+                return Ok(Body::from_slab(lease, len));
             }
-            match self.body_stream.data().await {
-                Some(Ok(chunk)) => {
-                    let len = chunk.len();
-                    self.bytes_received += len;
-                    if let Some(tracker) = &self.flood_tracker {
-                        tracker.on_payload_read(len);
-                    }
-                    if self.bytes_received > self.max_body_size {
-                        let _ = self.body_stream.flow_control().release_capacity(len);
-                        return Err(crate::error::Http2Error::PayloadTooLarge(
-                            self.bytes_received,
-                        ));
-                    }
-                    let _ = self.body_stream.flow_control().release_capacity(len);
-                    if self.body_stream.is_end_stream() {
-                        self.eof = true;
-                    }
-                    if !chunk.is_empty() {
-                        break chunk;
-                    }
-                }
-                Some(Err(e)) => return Err(crate::error::Http2Error::from(e)),
-                None => {
-                    self.eof = true;
-                    if let Some(pool) = slab_pool
-                        && let Some(mut lease) = pool.acquire_for_size(first_chunk.len())
-                    {
-                        let len = first_chunk.len();
-                        lease[..len].copy_from_slice(&first_chunk);
-                        return Ok(Body::from_slab(lease, len));
-                    }
-                    return Ok(Body::Bytes(first_chunk));
-                }
-            }
+            return Ok(Body::Bytes(first_chunk));
         };
 
         let two_len = first_chunk.len() + second_chunk.len();
-        if self.is_end_stream()
+        if self.eof
             && let Some(pool) = slab_pool
             && let Some(mut lease) = pool.acquire_for_size(two_len)
         {
@@ -565,10 +356,10 @@ impl Http2StreamReceiver {
             return Ok(Body::from_slab(lease, two_len));
         }
 
-        if !self.is_end_stream()
-            && two_len <= velda_core::buffer::SlabClass::Large64K.byte_size()
+        if !self.eof
+            && two_len <= velda_core::buffer::slab::SlabClass::Large64K.byte_size()
             && let Some(pool) = slab_pool
-            && let Some(mut lease) = pool.acquire(velda_core::buffer::SlabClass::Large64K)
+            && let Some(mut lease) = pool.acquire(velda_core::buffer::slab::SlabClass::Large64K)
         {
             lease[..first_chunk.len()].copy_from_slice(&first_chunk);
             lease[first_chunk.len()..two_len].copy_from_slice(&second_chunk);
@@ -576,76 +367,41 @@ impl Http2StreamReceiver {
             drop(second_chunk);
             let mut offset = two_len;
 
-            while !self.is_end_stream() {
-                match self.body_stream.data().await {
-                    Some(Ok(chunk)) => {
-                        let len = chunk.len();
-                        self.bytes_received += len;
-                        if let Some(tracker) = &self.flood_tracker {
-                            tracker.on_payload_read(len);
-                        }
-                        if self.bytes_received > self.max_body_size {
-                            let _ = self.body_stream.flow_control().release_capacity(len);
-                            return Err(crate::error::Http2Error::PayloadTooLarge(
-                                self.bytes_received,
-                            ));
-                        }
-                        let _ = self.body_stream.flow_control().release_capacity(len);
-                        if self.body_stream.is_end_stream() {
-                            self.eof = true;
-                        }
-                        if chunk.is_empty() {
-                            continue;
-                        }
-                        if offset + len <= lease.len() {
-                            lease[offset..offset + len].copy_from_slice(&chunk);
-                            offset += len;
-                        } else {
-                            // Spillover beyond 64KB: migrate to heap BytesMut and immediately release slab
-                            let mut body_buf = bytes::BytesMut::with_capacity((offset + len) * 2);
-                            body_buf.extend_from_slice(&lease[..offset]);
-                            body_buf.extend_from_slice(&chunk);
-                            drop(lease);
-                            while let Some(rem) = self.recv_chunk().await? {
-                                body_buf.extend_from_slice(&rem);
-                            }
-                            return Ok(Body::Bytes(body_buf.freeze()));
-                        }
+            while let Some(chunk) = self.recv_chunk().await? {
+                if offset + chunk.len() <= lease.len() {
+                    lease[offset..offset + chunk.len()].copy_from_slice(&chunk);
+                    offset += chunk.len();
+                } else {
+                    let mut body_buf = BytesMut::with_capacity((offset + chunk.len()) * 2);
+                    body_buf.extend_from_slice(&lease[..offset]);
+                    body_buf.extend_from_slice(&chunk);
+                    drop(lease);
+                    while let Some(rem) = self.recv_chunk().await? {
+                        body_buf.extend_from_slice(&rem);
                     }
-                    Some(Err(e)) => return Err(crate::error::Http2Error::from(e)),
-                    None => {
-                        self.eof = true;
-                        break;
-                    }
+                    return Ok(Body::Bytes(body_buf.freeze()));
                 }
             }
-
             return Ok(Body::from_slab(lease, offset));
         }
 
-        let mut body_buf = bytes::BytesMut::with_capacity(two_len * 2);
+        let mut body_buf = BytesMut::with_capacity(two_len * 2);
         body_buf.extend_from_slice(&first_chunk);
         body_buf.extend_from_slice(&second_chunk);
-
         while let Some(chunk) = self.recv_chunk().await? {
             body_buf.extend_from_slice(&chunk);
         }
-
         Ok(Body::Bytes(body_buf.freeze()))
     }
 }
 
-/// Decodes an incoming multiplexed HTTP/2 request frame into a protocol-owned [`Http2ServerRequest`].
-pub async fn decode_request(
-    request: http::Request<h2::RecvStream>,
-    config: &crate::config::Http2Config,
-) -> Result<Http2ServerRequest, crate::error::Http2Error> {
-    let (parts, body_stream) = request.into_parts();
-    let head = Http2ServerRequestHead::new(parts.method, parts.uri, parts.headers, None);
-    let mut receiver = Http2StreamReceiver::new(body_stream, config.max_body_size);
-    let body = receiver.consume_all().await?;
-
-    Ok(Http2ServerRequest::new(head, body))
+/// Extracts effective `Host` or authority string from request headers (`host`) or URI.
+#[inline]
+pub fn extract_host<'a>(headers: &'a HeaderWorkspace, uri: &'a Uri) -> Option<&'a str> {
+    headers
+        .get(http::header::HOST)
+        .and_then(|v| v.to_str().ok())
+        .or_else(|| uri.authority().map(|a| a.as_str()).or_else(|| uri.host()))
 }
 
 #[cfg(test)]
@@ -680,7 +436,6 @@ mod tests {
         assert_eq!(p.urgency, 7);
         assert!(!p.incremental);
 
-        // Invalid urgency > 7 falls back to default 3
         let p = Http2Priority::from_header_bytes(b"u=9");
         assert_eq!(p.urgency, 3);
     }
@@ -713,5 +468,21 @@ mod tests {
         let p = Http2Priority::from_header_bytes(b"u=5, i=?0");
         assert_eq!(p.urgency, 5);
         assert!(!p.incremental);
+    }
+
+    #[test]
+    fn test_extract_host_precedence() {
+        let mut ws = HeaderWorkspace::empty(4);
+        let uri: Uri = "https://authority.example.com:8443/path".parse().unwrap();
+        assert_eq!(
+            super::extract_host(&ws, &uri),
+            Some("authority.example.com:8443")
+        );
+
+        ws.insert(
+            http::header::HOST,
+            http::HeaderValue::from_static("header.example.com"),
+        );
+        assert_eq!(super::extract_host(&ws, &uri), Some("header.example.com"));
     }
 }
