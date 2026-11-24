@@ -10,10 +10,11 @@
 
 use std::hash::Hasher;
 
-use http::{HeaderMap, Method};
+use http::Method;
 use rustc_hash::FxHasher;
 
 use crate::http_cache::constants::{X_CACHE, X_VELDA_CACHE_HASH, X_VELDA_CACHE_KEY};
+use velda_core::HeaderWorkspace;
 use velda_core::buffer::header::X_REQUEST_ID;
 
 const STACK_KEY_BYTES_CAP: usize = 512;
@@ -261,7 +262,7 @@ pub fn compute_cache_key_with_headers(
 }
 
 /// Strips dynamic, session-specific, and hop-by-hop headers from an upstream response.
-pub fn filter_cacheable_headers(headers: &HeaderMap) -> HeaderMap {
+pub fn filter_cacheable_headers(headers: &HeaderWorkspace) -> HeaderWorkspace {
     use http::header::{
         CONNECTION, PROXY_AUTHENTICATE, PROXY_AUTHORIZATION, SET_COOKIE, TE, TRAILER,
         TRANSFER_ENCODING, UPGRADE,

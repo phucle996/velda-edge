@@ -466,8 +466,8 @@ impl PreUpstreamPlugin for CanaryPlugin {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use http::{HeaderMap, Method, Uri, Version};
-    use velda_core::Body;
+    use http::{Method, Uri, Version};
+    use velda_core::{Body, HeaderWorkspace};
 
     #[test]
     fn test_canary_rule_based_override_and_operators() {
@@ -510,7 +510,7 @@ mod tests {
             Uri::from_static("/v1/pay"),
             Version::HTTP_11,
             {
-                let mut h = HeaderMap::new();
+                let mut h = HeaderWorkspace::empty(4);
                 h.insert("x-canary", HeaderValue::from_static("always"));
                 h
             },
@@ -527,7 +527,7 @@ mod tests {
             Uri::from_static("/v1/pay"),
             Version::HTTP_11,
             {
-                let mut h = HeaderMap::new();
+                let mut h = HeaderWorkspace::empty(4);
                 h.insert("x-user-email", HeaderValue::from_static("dev@velda.io"));
                 h
             },
@@ -543,7 +543,7 @@ mod tests {
             Uri::from_static("/v1/pay"),
             Version::HTTP_11,
             {
-                let mut h = HeaderMap::new();
+                let mut h = HeaderWorkspace::empty(4);
                 h.insert("x-client-version", HeaderValue::from_static("v2-beta"));
                 h
             },
@@ -559,7 +559,7 @@ mod tests {
             Uri::from_static("/v1/pay"),
             Version::HTTP_11,
             {
-                let mut h = HeaderMap::new();
+                let mut h = HeaderWorkspace::empty(4);
                 h.insert(
                     "user-agent",
                     HeaderValue::from_static("Mozilla-Mobile-Safari"),
@@ -578,7 +578,7 @@ mod tests {
             Uri::from_static("/v1/pay"),
             Version::HTTP_11,
             {
-                let mut h = HeaderMap::new();
+                let mut h = HeaderWorkspace::empty(4);
                 h.insert("x-debug", HeaderValue::from_static("any-value"));
                 h
             },
@@ -594,7 +594,7 @@ mod tests {
             Uri::from_static("/v1/pay"),
             Version::HTTP_11,
             {
-                let mut h = HeaderMap::new();
+                let mut h = HeaderWorkspace::empty(4);
                 h.insert("x-velda-canary", HeaderValue::from_static("true"));
                 h
             },
@@ -633,7 +633,7 @@ mod tests {
             Uri::from_static("/test?tenant_id=123"),
             Version::HTTP_11,
             {
-                let mut h = HeaderMap::new();
+                let mut h = HeaderWorkspace::empty(4);
                 h.insert("x-user-id", HeaderValue::from_static("user-999"));
                 h
             },
@@ -649,7 +649,7 @@ mod tests {
             Uri::from_static("/test?tenant_id=123"),
             Version::HTTP_11,
             {
-                let mut h = HeaderMap::new();
+                let mut h = HeaderWorkspace::empty(4);
                 h.insert(
                     COOKIE,
                     HeaderValue::from_static("theme=dark; session_token=tok_456; lang=en"),
@@ -667,7 +667,7 @@ mod tests {
             Method::GET,
             Uri::from_static("/test?other=1&tenant_id=corp_alpha"),
             Version::HTTP_11,
-            HeaderMap::new(),
+            HeaderWorkspace::empty(0),
             Body::Empty,
         );
         let pct_q1 = plugin.evaluate_percentage(&req_query);
@@ -696,7 +696,7 @@ mod tests {
             Uri::from_static("/"),
             Version::HTTP_11,
             {
-                let mut h = HeaderMap::new();
+                let mut h = HeaderWorkspace::empty(4);
                 h.insert("x-tenant-id", HeaderValue::from_static("tenant-42"));
                 h.insert("x-real-ip", HeaderValue::from_static("192.168.1.100"));
                 h

@@ -22,8 +22,8 @@ use http::header::{
     ACCESS_CONTROL_ALLOW_ORIGIN, ACCESS_CONTROL_MAX_AGE, ACCESS_CONTROL_REQUEST_HEADERS,
     ACCESS_CONTROL_REQUEST_METHOD, CONTENT_LENGTH, ORIGIN, VARY,
 };
-use http::{HeaderMap, HeaderValue, Method, StatusCode};
-use velda_core::{Action, L7Request, L7Response, RejectReason};
+use http::{HeaderValue, Method, StatusCode, Version};
+use velda_core::{Action, Body, HeaderWorkspace, L7Request, L7Response, RejectReason};
 
 use crate::capability::{AccessLevel, Direction, PluginCapability, SupportedProtocols};
 use crate::error::PluginError;
@@ -72,7 +72,7 @@ pub struct CorsPreflightPlugin {
     pub allowed_origins: Vec<OriginPattern>,
     pub allow_all_origins: bool,
     pub allowed_methods_mask: u16,
-    pub base_headers: HeaderMap,
+    pub base_headers: HeaderWorkspace,
     pub allow_all_headers: bool,
     pub allow_credentials: bool,
 }
@@ -101,7 +101,7 @@ impl CorsPreflightPlugin {
         }
 
         // Pre-bake static headers template (eliminates runtime if-else checks)
-        let mut base_headers = HeaderMap::with_capacity(6);
+        let mut base_headers = HeaderWorkspace::default();
         base_headers.insert(ACCESS_CONTROL_ALLOW_METHODS, allowed_methods_val);
         if allow_credentials {
             base_headers.insert(
@@ -190,24 +190,12 @@ impl CorsPreflightPlugin {
             max_age_val,
         ))
     }
-}
-
-impl PreRoutePlugin for CorsPreflightPlugin {
-    #[inline(always)]
-    fn id(&self) -> &str {
-        &self.id
-    }
-
-    #[inline(always)]
-    fn pbww(&self) -> u32 {
-        0
-    }
-
-    fn on_request(&self, req: &mut L7Request) -> Action {
-        // 1. Fast path: Must be HTTP OPTIONS method
-        if req.method != Method::OPTIONS {
-            return Action::Continue;
-        }
+    /// Isolates full CORS preflight inspection and response allocation so non-`OPTIONS`
+    /// requests never spill registers or reserve response-building stack space.
+    #[cold]
+    #[inline(never)]
+    fn handle_preflight(&self, req: &L7Request) -> Action {
+        const WILDCARD_ORIGIN: HeaderValue = HeaderValue::from_static("*");
 
         // 2. Must contain Origin header (RFC 6454)
         let Some(origin_val) = req.headers.get(ORIGIN) else {
@@ -242,14 +230,18 @@ impl PreRoutePlugin for CorsPreflightPlugin {
         }
 
         // 6. Zero-Branch Response Assembly via Pre-Baked Header Template
-        let mut resp =
-            L7Response::empty(StatusCode::NO_CONTENT).with_headers(self.base_headers.clone());
+        let mut resp = L7Response::new(
+            StatusCode::NO_CONTENT,
+            Version::HTTP_11,
+            self.base_headers.clone(),
+            Body::Empty,
+        );
 
         // Reflect Origin: When credentials are true, W3C CORS prohibits wildcard '*'
         let allow_origin_val = if self.allow_credentials || !self.allow_all_origins {
             origin_val.clone()
         } else {
-            HeaderValue::from_static("*")
+            WILDCARD_ORIGIN
         };
         resp.headers
             .insert(ACCESS_CONTROL_ALLOW_ORIGIN, allow_origin_val);
@@ -263,6 +255,27 @@ impl PreRoutePlugin for CorsPreflightPlugin {
         }
 
         Action::Respond(resp)
+    }
+}
+
+impl PreRoutePlugin for CorsPreflightPlugin {
+    #[inline(always)]
+    fn id(&self) -> &str {
+        &self.id
+    }
+
+    #[inline(always)]
+    fn pbww(&self) -> u32 {
+        0
+    }
+
+    #[inline]
+    fn on_request(&self, req: &mut L7Request) -> Action {
+        // 1. Fast path: Must be HTTP OPTIONS method
+        if req.method != Method::OPTIONS {
+            return Action::Continue;
+        }
+        self.handle_preflight(req)
     }
 
     #[inline(always)]
@@ -284,12 +297,11 @@ impl PreRoutePlugin for CorsPreflightPlugin {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use http::HeaderMap;
     use http::{Uri, Version};
     use serde_json::json;
-    use velda_core::Body;
+    use velda_core::{Body, HeaderWorkspace};
 
-    fn build_request(method: Method, uri: &str, headers: HeaderMap) -> L7Request {
+    fn build_request(method: Method, uri: &str, headers: HeaderWorkspace) -> L7Request {
         L7Request::new(
             method,
             uri.parse::<Uri>().unwrap(),
@@ -311,7 +323,7 @@ mod tests {
             Some(HeaderValue::from_static("86400")),
         );
 
-        let mut headers = HeaderMap::new();
+        let mut headers = HeaderWorkspace::empty(4);
         headers.insert(ORIGIN, "https://app.velda.io".parse().unwrap());
         headers.insert(ACCESS_CONTROL_REQUEST_METHOD, "POST".parse().unwrap());
         headers.insert(
@@ -360,7 +372,7 @@ mod tests {
             None,
         );
 
-        let mut headers = HeaderMap::new();
+        let mut headers = HeaderWorkspace::empty(4);
         headers.insert(ORIGIN, "https://malicious.evil.com".parse().unwrap());
         headers.insert(ACCESS_CONTROL_REQUEST_METHOD, "POST".parse().unwrap());
 
@@ -385,7 +397,7 @@ mod tests {
             None,
         );
 
-        let mut headers = HeaderMap::new();
+        let mut headers = HeaderWorkspace::empty(4);
         headers.insert(ORIGIN, "https://app.velda.io".parse().unwrap());
         // Requested method DELETE is not in allowed methods (GET, POST, OPTIONS)
         headers.insert(ACCESS_CONTROL_REQUEST_METHOD, "DELETE".parse().unwrap());
@@ -411,7 +423,7 @@ mod tests {
             None,
         );
 
-        let mut headers = HeaderMap::new();
+        let mut headers = HeaderWorkspace::empty(4);
         headers.insert(ORIGIN, "https://external.org".parse().unwrap());
         headers.insert(ACCESS_CONTROL_REQUEST_METHOD, "GET".parse().unwrap());
 
@@ -441,12 +453,12 @@ mod tests {
         );
 
         // OPTIONS request without Origin header (e.g. cURL -X OPTIONS)
-        let headers = HeaderMap::new();
+        let headers = HeaderWorkspace::empty(4);
         let mut req = build_request(Method::OPTIONS, "*", headers);
         assert!(matches!(plugin.on_request(&mut req), Action::Continue));
 
         // OPTIONS request with Origin but missing Access-Control-Request-Method
-        let mut headers2 = HeaderMap::new();
+        let mut headers2 = HeaderWorkspace::empty(4);
         headers2.insert(ORIGIN, "https://app.velda.io".parse().unwrap());
         let mut req2 = build_request(Method::OPTIONS, "/api/v1/orders", headers2);
         assert!(matches!(plugin.on_request(&mut req2), Action::Continue));
@@ -464,7 +476,7 @@ mod tests {
             None,
         );
 
-        let mut headers = HeaderMap::new();
+        let mut headers = HeaderWorkspace::empty(4);
         headers.insert(ORIGIN, "https://app.velda.io".parse().unwrap());
         let mut req = build_request(Method::GET, "/api/v1/orders", headers);
         assert!(matches!(plugin.on_request(&mut req), Action::Continue));

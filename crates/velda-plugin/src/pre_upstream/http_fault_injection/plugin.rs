@@ -221,9 +221,9 @@ impl PreUpstreamPlugin for HttpFaultInjectionPlugin {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use http::{HeaderMap, HeaderValue, Method, StatusCode, Uri, Version};
+    use http::{HeaderValue, Method, StatusCode, Uri, Version};
     use std::time::Duration;
-    use velda_core::Body;
+    use velda_core::{Body, HeaderWorkspace};
 
     use crate::pre_upstream::http_fault_injection::condition::{HeaderMatchRule, IpRangeMatcher};
 
@@ -238,7 +238,7 @@ mod tests {
         let plugin = HttpFaultInjectionPlugin::new("fault-test", condition, None, Some(abort));
 
         // Request from public Internet (203.0.113.1) -> Must bypass immediately!
-        let mut headers = HeaderMap::new();
+        let mut headers = HeaderWorkspace::empty(4);
         headers.insert(
             HeaderName::from_static("x-forwarded-for"),
             HeaderValue::from_static("203.0.113.1"),
@@ -267,7 +267,7 @@ mod tests {
             Method::GET,
             Uri::from_static("/api/users"),
             Version::HTTP_11,
-            HeaderMap::new(),
+            HeaderWorkspace::empty(4),
             Body::Empty,
         );
 
@@ -293,7 +293,7 @@ mod tests {
             Method::GET,
             Uri::from_static("/api/users"),
             Version::HTTP_11,
-            HeaderMap::new(),
+            HeaderWorkspace::empty(4),
             Body::Empty,
         );
 
@@ -324,7 +324,7 @@ mod tests {
             Method::GET,
             Uri::from_static("/api/users"),
             Version::HTTP_11,
-            HeaderMap::new(),
+            HeaderWorkspace::empty(4),
             Body::Empty,
         );
 
@@ -362,7 +362,7 @@ mod tests {
         let plugin =
             HttpFaultInjectionPlugin::new("fault-test", condition, Some(delay), Some(abort));
 
-        let mut headers = HeaderMap::new();
+        let mut headers = HeaderWorkspace::empty(4);
         headers.insert(
             HeaderName::from_static("x-chaos-test"),
             HeaderValue::from_static("enabled"),

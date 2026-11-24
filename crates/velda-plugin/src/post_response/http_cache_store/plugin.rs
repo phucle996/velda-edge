@@ -207,8 +207,12 @@ impl PostResponsePlugin for HttpCacheStorePlugin {
             return;
         }
 
-        // 2. Resolve hash from fast numeric workspace register or fallback header, then strip internals
-        let precomputed_hash = req_headers.get_u64(&X_VELDA_CACHE_HASH);
+        // 2. Resolve hash from fast numeric metadata field or fallback headers, then strip internals
+        let precomputed_hash = if req_headers.cache_hash != 0 {
+            Some(req_headers.cache_hash)
+        } else {
+            req_headers.get_u64(&X_VELDA_CACHE_HASH)
+        };
         let resp_fallback_key = resp.headers.remove(&X_VELDA_CACHE_KEY);
         resp.headers.remove(&X_VELDA_CACHE_HASH);
 

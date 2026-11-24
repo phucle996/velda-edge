@@ -154,12 +154,12 @@ impl HmacAuthPlugin {
         })
     }
 
-    #[inline(always)]
+    #[cold]
+    #[inline(never)]
     fn reject_unauthorized(req: &mut L7Request) -> Action {
-        req.headers.insert_bypass(
-            http::header::WWW_AUTHENTICATE,
-            HeaderValue::from_static("HMAC realm=\"velda-edge\""),
-        );
+        const WWW_AUTH_HMAC: HeaderValue = HeaderValue::from_static("HMAC realm=\"velda-edge\"");
+        req.headers
+            .insert_bypass(http::header::WWW_AUTHENTICATE, WWW_AUTH_HMAC);
         Action::Reject(RejectReason::Unauthorized)
     }
 
@@ -375,8 +375,8 @@ impl PreUpstreamPlugin for HmacAuthPlugin {
 
         // 10. Inject Pre-materialized Consumer ID Header (Zero string parsing on hot path)
         if let Some(hval) = consumer_hval_opt {
-            req.headers
-                .insert(HeaderName::from_static("x-consumer-id"), hval.clone());
+            const X_CONSUMER_ID: HeaderName = HeaderName::from_static("x-consumer-id");
+            req.headers.insert(X_CONSUMER_ID, hval.clone());
         }
 
         Action::Continue
@@ -401,7 +401,7 @@ impl PreUpstreamPlugin for HmacAuthPlugin {
 mod tests {
     use super::super::validation::HmacCredentialConfig;
     use super::*;
-    use http::{HeaderMap, Method, Uri, Version};
+    use http::{Method, Uri, Version};
     use velda_core::Body;
 
     fn to_hex(bytes: &[u8]) -> String {
@@ -451,7 +451,7 @@ mod tests {
     ) -> L7Request {
         let now = velda_core::clock::coarse_sec();
         let payload_hash = to_hex(&compute_sha256(body_bytes));
-        let mut headers = HeaderMap::new();
+        let mut headers = velda_core::HeaderWorkspace::default();
         let uri: Uri = uri_str.parse().unwrap();
 
         if version <= Version::HTTP_11 {

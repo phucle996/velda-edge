@@ -172,15 +172,15 @@ pub fn hash_key(key: &str) -> u64 {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use http::{HeaderMap, HeaderValue, Method, Uri, Version};
-    use velda_core::Body;
+    use http::{HeaderValue, Method, Uri, Version};
+    use velda_core::{Body, HeaderWorkspace};
 
     #[test]
     fn test_priority_key_resolution() {
         let strategy = KeyStrategy::Priority;
         let keys = vec!["x-api-key".to_string(), "client_ip".to_string()];
 
-        let mut headers = HeaderMap::new();
+        let mut headers = HeaderWorkspace::empty(4);
         headers.insert("x-api-key", HeaderValue::from_static("key-12345"));
         headers.insert("x-forwarded-for", HeaderValue::from_static("1.2.3.4"));
 
@@ -199,7 +199,7 @@ mod tests {
         let strategy = KeyStrategy::Composite;
         let keys = vec!["x-user-id".to_string(), "client_ip".to_string()];
 
-        let mut headers = HeaderMap::new();
+        let mut headers = HeaderWorkspace::empty(4);
         headers.insert("x-user-id", HeaderValue::from_static("user_42"));
         headers.insert("x-forwarded-for", HeaderValue::from_static("1.2.3.4"));
 

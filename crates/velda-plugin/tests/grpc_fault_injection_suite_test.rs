@@ -10,10 +10,10 @@
 use std::sync::Arc;
 use std::time::Duration;
 
-use http::{HeaderMap, Method, StatusCode, Uri, Version};
+use http::{Method, StatusCode, Uri, Version};
 use rustc_hash::FxHashMap;
 use serde_json::json;
-use velda_core::{Action, Body, L7Request, ProtocolFamily, StreamingMode};
+use velda_core::{Action, Body, HeaderWorkspace, L7Request, ProtocolFamily, StreamingMode};
 use velda_plugin::PluginConfig;
 use velda_plugin::factory::{LoadedPlugin, build_route_plugin_plan};
 use velda_plugin::pre_upstream::{
@@ -22,7 +22,7 @@ use velda_plugin::pre_upstream::{
 };
 
 fn build_grpc_request(path: &str) -> L7Request {
-    let mut headers = HeaderMap::new();
+    let mut headers = HeaderWorkspace::empty(4);
     headers.insert(
         http::header::CONTENT_TYPE,
         http::HeaderValue::from_static("application/grpc"),
@@ -87,7 +87,7 @@ fn test_suite_grpc_fault_abort_trailers_only() {
                 resp.headers.get("grpc-message").unwrap(),
                 "upstream overloaded"
             );
-            assert!(!resp.has_body());
+            assert!(resp.body.is_empty());
         }
         _ => panic!("Expected Action::Respond"),
     }

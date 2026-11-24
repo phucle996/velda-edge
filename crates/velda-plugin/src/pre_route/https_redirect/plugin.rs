@@ -16,8 +16,8 @@
 //! ```
 
 use http::header::{CONTENT_LENGTH, HOST, LOCATION};
-use http::{HeaderMap, HeaderName, HeaderValue, StatusCode};
-use velda_core::{Action, Body, L7Request, L7Response, RejectReason};
+use http::{HeaderName, HeaderValue, StatusCode};
+use velda_core::{Action, Body, HeaderWorkspace, L7Request, L7Response, RejectReason};
 
 use crate::capability::{AccessLevel, PluginCapability, SupportedProtocols};
 use crate::config::PluginConfig;
@@ -172,7 +172,7 @@ impl HttpsRedirectPlugin {
             }
         };
 
-        let mut headers = HeaderMap::with_capacity(2);
+        let mut headers = HeaderWorkspace::default();
         headers.insert(LOCATION, location_val);
         headers.insert(CONTENT_LENGTH, HeaderValue::from_static("0"));
 
@@ -235,7 +235,7 @@ mod tests {
         host: Option<&'static str>,
         proto: Option<&'static str>,
     ) -> L7Request {
-        let mut headers = HeaderMap::new();
+        let mut headers = HeaderWorkspace::default();
         if let Some(h) = host {
             headers.insert(HOST, HeaderValue::from_static(h));
         }

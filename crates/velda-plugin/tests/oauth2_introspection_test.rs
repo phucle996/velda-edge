@@ -9,8 +9,8 @@ use std::thread;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use http::header::HeaderValue;
-use http::{HeaderMap, Method, Uri, Version};
-use velda_core::{Action, Body, L7Request, RejectReason};
+use http::{Method, Uri, Version};
+use velda_core::{Action, Body, HeaderWorkspace, L7Request, RejectReason};
 use velda_plugin::pre_upstream::PreUpstreamPlugin;
 use velda_plugin::pre_upstream::{
     ClaimToHeaderConfig, Oauth2IntrospectionConfig, Oauth2IntrospectionPlugin,
@@ -24,7 +24,7 @@ fn current_epoch_secs() -> u64 {
 }
 
 fn test_req(method: Method, uri: &str, headers: &[(&str, &str)]) -> L7Request {
-    let mut map = HeaderMap::new();
+    let mut map = HeaderWorkspace::new(4);
     for (k, v) in headers {
         map.insert(
             http::header::HeaderName::from_str(k).unwrap(),

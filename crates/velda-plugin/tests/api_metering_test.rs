@@ -9,16 +9,16 @@
 use std::sync::Arc;
 
 use http::header::CONTENT_TYPE;
-use http::{HeaderMap, HeaderName, HeaderValue, Method, StatusCode, Uri, Version};
+use http::{HeaderName, HeaderValue, Method, StatusCode, Uri, Version};
 use rustc_hash::FxHashMap;
-use velda_core::{Action, Body, L7Request, RejectReason};
+use velda_core::{Action, Body, HeaderWorkspace, L7Request, RejectReason};
 use velda_plugin::pre_upstream::PreUpstreamPlugin;
 use velda_plugin::pre_upstream::api_metering::{
     ApiMeteringConfig, ApiMeteringPlugin, ExhaustedAction, TierConfig,
 };
 use velda_plugin::pre_upstream::consumer_quota::{QuotaAlgorithm, QuotaWindowConfig};
 
-fn build_test_request(headers: HeaderMap) -> L7Request {
+fn build_test_request(headers: HeaderWorkspace) -> L7Request {
     L7Request::new(
         Method::POST,
         Uri::from_static("/v1/models/generate"),
@@ -58,7 +58,7 @@ fn test_api_metering_free_tier_rejection_402() {
     let mut target = 1;
 
     // Request 1: Allowed, remaining = 1
-    let mut h1 = HeaderMap::new();
+    let mut h1 = HeaderWorkspace::empty(4);
     h1.insert(
         HeaderName::from_static("x-tenant-id"),
         HeaderValue::from_static("tenant_startup_inc"),
@@ -67,12 +67,11 @@ fn test_api_metering_free_tier_rejection_402() {
     let act1 = plugin.on_upstream_request(&mut r1, &mut target);
     assert!(matches!(act1, Action::Continue));
     assert_eq!(r1.headers.get_u64("x-metering-remaining"), Some(1));
-    r1.headers.render();
     assert_eq!(r1.headers.get("x-metering-tier").unwrap(), "free");
     assert_eq!(r1.headers.get("x-metering-remaining").unwrap(), "1");
 
     // Request 2: Allowed, remaining = 0
-    let mut h2 = HeaderMap::new();
+    let mut h2 = HeaderWorkspace::empty(4);
     h2.insert(
         HeaderName::from_static("x-tenant-id"),
         HeaderValue::from_static("tenant_startup_inc"),
@@ -81,11 +80,10 @@ fn test_api_metering_free_tier_rejection_402() {
     let act2 = plugin.on_upstream_request(&mut r2, &mut target);
     assert!(matches!(act2, Action::Continue));
     assert_eq!(r2.headers.get_u64("x-metering-remaining"), Some(0));
-    r2.headers.render();
     assert_eq!(r2.headers.get("x-metering-remaining").unwrap(), "0");
 
     // Request 3: Quota exhausted -> Action::Respond(402 Payment Required)
-    let mut h3 = HeaderMap::new();
+    let mut h3 = HeaderWorkspace::empty(4);
     h3.insert(
         HeaderName::from_static("x-tenant-id"),
         HeaderValue::from_static("tenant_startup_inc"),
@@ -148,7 +146,7 @@ fn test_api_metering_pro_tier_rejection_429() {
     let mut target = 1;
 
     // Request 1: Allowed
-    let mut h1 = HeaderMap::new();
+    let mut h1 = HeaderWorkspace::empty(4);
     h1.insert(
         HeaderName::from_static("x-tenant-id"),
         HeaderValue::from_static("pro_corp"),
@@ -164,7 +162,7 @@ fn test_api_metering_pro_tier_rejection_429() {
     ));
 
     // Request 2: Rejected with 429 and Bit-1 bypass
-    let mut h2 = HeaderMap::new();
+    let mut h2 = HeaderWorkspace::empty(4);
     h2.insert(
         HeaderName::from_static("x-tenant-id"),
         HeaderValue::from_static("pro_corp"),
@@ -178,7 +176,6 @@ fn test_api_metering_pro_tier_rejection_429() {
     match act2 {
         Action::Reject(reason) => {
             assert_eq!(reason, RejectReason::TooManyRequests);
-            r2.headers.render();
             assert!(r2.headers.bypass_headers().count() >= 2);
             assert_eq!(r2.headers.get("x-metering-tier").unwrap(), "pro");
             assert_eq!(r2.headers.get("x-metering-exhausted").unwrap(), "true");
@@ -217,7 +214,7 @@ fn test_api_metering_enterprise_overage_passthrough() {
     let mut target = 1;
 
     // Request 1: Consumes the 100_000 credit -> balance = 0
-    let mut h1 = HeaderMap::new();
+    let mut h1 = HeaderWorkspace::empty(4);
     h1.insert(
         HeaderName::from_static("x-tenant-id"),
         HeaderValue::from_static("mega_corp"),
@@ -226,12 +223,11 @@ fn test_api_metering_enterprise_overage_passthrough() {
     let act1 = plugin.on_upstream_request(&mut r1, &mut target);
     assert!(matches!(act1, Action::Continue));
     assert_eq!(r1.headers.get_u64("x-metering-balance"), Some(0));
-    r1.headers.render();
     assert_eq!(r1.headers.get("x-metering-balance").unwrap(), "0");
 
     // Request 2: Balance 0 < 100_000 cost, but Passthrough policy kicks in!
     // Balance drops to -100_000 (debt), request passes through with x-metering-overage
-    let mut h2 = HeaderMap::new();
+    let mut h2 = HeaderWorkspace::empty(4);
     h2.insert(
         HeaderName::from_static("x-tenant-id"),
         HeaderValue::from_static("mega_corp"),
@@ -268,7 +264,7 @@ fn test_api_metering_prepaid_micro_credits_deduction() {
     let mut target = 1;
 
     // Request 1: Consumes 500_000, remaining balance = 500_000
-    let mut h1 = HeaderMap::new();
+    let mut h1 = HeaderWorkspace::empty(4);
     h1.insert(
         HeaderName::from_static("x-tenant-id"),
         HeaderValue::from_static("ai_startup"),
@@ -277,11 +273,10 @@ fn test_api_metering_prepaid_micro_credits_deduction() {
     let act1 = plugin.on_upstream_request(&mut r1, &mut target);
     assert!(matches!(act1, Action::Continue));
     assert_eq!(r1.headers.get_u64("x-metering-balance"), Some(500_000));
-    r1.headers.render();
     assert_eq!(r1.headers.get("x-metering-balance").unwrap(), "500000");
 
     // Request 2: Consumes 500_000, remaining balance = 0
-    let mut h2 = HeaderMap::new();
+    let mut h2 = HeaderWorkspace::empty(4);
     h2.insert(
         HeaderName::from_static("x-tenant-id"),
         HeaderValue::from_static("ai_startup"),
@@ -290,11 +285,10 @@ fn test_api_metering_prepaid_micro_credits_deduction() {
     let act2 = plugin.on_upstream_request(&mut r2, &mut target);
     assert!(matches!(act2, Action::Continue));
     assert_eq!(r2.headers.get_u64("x-metering-balance"), Some(0));
-    r2.headers.render();
     assert_eq!(r2.headers.get("x-metering-balance").unwrap(), "0");
 
     // Request 3: Insufficient credits (0 < 500_000) -> 402 Payment Required
-    let mut h3 = HeaderMap::new();
+    let mut h3 = HeaderWorkspace::empty(4);
     h3.insert(
         HeaderName::from_static("x-tenant-id"),
         HeaderValue::from_static("ai_startup"),

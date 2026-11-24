@@ -15,9 +15,9 @@
 use crate::config::PluginConfig;
 use bytes::Bytes;
 use http::header::{CONTENT_LENGTH, CONTENT_TYPE, HeaderName, HeaderValue};
-use http::{HeaderMap, StatusCode, Version};
+use http::{StatusCode, Version};
 use velda_core::buffer::header::X_REQUEST_ID;
-use velda_core::{Action, Body, L7Request, L7Response};
+use velda_core::{Action, Body, HeaderWorkspace, L7Request, L7Response};
 
 use crate::capability::{AccessLevel, PluginCapability, SupportedProtocols};
 use crate::error::PluginError;
@@ -121,25 +121,25 @@ impl RequestTerminationPlugin {
             }
         };
 
-        let mut header_map = HeaderMap::with_capacity(config.headers.len() + 2);
+        let mut header_ws = HeaderWorkspace::new(config.headers.len() + 3);
         let mut has_content_type = false;
         for (name, val) in &config.headers {
             if name == CONTENT_TYPE {
                 has_content_type = true;
             }
-            header_map.insert(name.clone(), val.clone());
+            header_ws.insert(name.clone(), val.clone());
         }
 
         // If body is non-empty and user did not specify Content-Type, default to text/plain; charset=utf-8
         if !body_bytes.is_empty() && !has_content_type {
-            header_map.insert(
+            header_ws.insert(
                 CONTENT_TYPE,
                 HeaderValue::from_static("text/plain; charset=utf-8"),
             );
         }
 
         // Ensure Content-Length matches the actual body length
-        header_map.insert(
+        header_ws.insert(
             CONTENT_LENGTH,
             HeaderValue::from_str(&body_bytes.len().to_string())
                 .unwrap_or_else(|_| HeaderValue::from_static("0")),
@@ -151,7 +151,7 @@ impl RequestTerminationPlugin {
             Body::Bytes(body_bytes)
         };
 
-        let base_response = L7Response::new(status, Version::HTTP_11, header_map, body);
+        let base_response = L7Response::new(status, Version::HTTP_11, header_ws, body);
 
         Ok(Self {
             id: id.into(),
@@ -254,7 +254,7 @@ impl PreUpstreamPlugin for RequestTerminationPlugin {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use http::{HeaderMap, Method, Uri};
+    use http::{Method, Uri};
 
     #[test]
     fn test_default_termination_200_ok() {
@@ -262,7 +262,7 @@ mod tests {
             RequestTerminationPlugin::new("terminate-default", RequestTerminationConfig::default())
                 .expect("should construct default plugin");
 
-        let mut headers = HeaderMap::new();
+        let mut headers = velda_core::HeaderWorkspace::empty(4);
         headers.insert(
             HeaderName::from_static("x-request-id"),
             HeaderValue::from_static("req-abc-123"),
@@ -314,7 +314,7 @@ mod tests {
 
         let plugin = RequestTerminationPlugin::new("maint-503", cfg).unwrap();
 
-        let mut headers = HeaderMap::new();
+        let mut headers = velda_core::HeaderWorkspace::empty(4);
         headers.insert(
             HeaderName::from_static("x-request-id"),
             HeaderValue::from_static("req-maint-503"),
@@ -367,7 +367,7 @@ mod tests {
 
         let plugin = RequestTerminationPlugin::new("redirect-login", cfg).unwrap();
 
-        let mut headers = HeaderMap::new();
+        let mut headers = velda_core::HeaderWorkspace::empty(4);
         headers.insert(
             HeaderName::from_static("x-request-id"),
             HeaderValue::from_static("req-redirect-301"),

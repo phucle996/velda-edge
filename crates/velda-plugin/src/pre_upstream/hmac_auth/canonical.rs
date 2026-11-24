@@ -7,9 +7,9 @@
 use std::str::FromStr;
 
 use base64::prelude::*;
-use http::HeaderMap;
 use http::header::HeaderName;
 use ring::{digest, hmac};
+use velda_core::HeaderWorkspace;
 
 use crate::error::PluginError;
 
@@ -18,7 +18,7 @@ pub struct CanonicalRequest<'a> {
     pub method: &'a str,
     pub path: &'a str,
     pub query: Option<&'a str>,
-    pub headers: &'a HeaderMap,
+    pub headers: &'a HeaderWorkspace,
     pub authority: Option<&'a [u8]>,
     pub payload_hash: &'a [u8],
 }
@@ -46,7 +46,7 @@ impl SignedHeadersSpec {
         let mut h2_has_host = false;
         let mut joined_names = Vec::with_capacity(signed_headers.len());
 
-        let host_name = HeaderName::from_static("host");
+        let host_name = http::header::HOST;
 
         for h in signed_headers {
             let lower = h.trim().to_ascii_lowercase();
@@ -401,7 +401,7 @@ mod tests {
         method: &str,
         uri_path: &str,
         query_opt: Option<&str>,
-        headers: &HeaderMap,
+        headers: &HeaderWorkspace,
         signed_header_names: &[String],
         payload_hash_hex: &str,
     ) -> String {
@@ -449,10 +449,10 @@ mod tests {
 
     #[test]
     fn test_streaming_sign_canonical_request_identical_to_string() {
-        let mut headers = HeaderMap::new();
-        headers.insert("host", HeaderValue::from_static("api.velda.io"));
-        headers.insert("x-timestamp", HeaderValue::from_static("1729600000"));
-        headers.insert("x-nonce", HeaderValue::from_static("abc-123"));
+        let mut ws = HeaderWorkspace::empty(4);
+        ws.insert("host", HeaderValue::from_static("api.velda.io"));
+        ws.insert("x-timestamp", HeaderValue::from_static("1729600000"));
+        ws.insert("x-nonce", HeaderValue::from_static("abc-123"));
 
         let signed_headers = vec![
             "host".to_string(),
@@ -466,7 +466,7 @@ mod tests {
             "POST",
             "/v1/payments",
             Some("currency=VND&amount=100000"),
-            &headers,
+            &ws,
             &signed_headers,
             payload_hash_hex,
         );
@@ -479,7 +479,7 @@ mod tests {
             method: "POST",
             path: "/v1/payments",
             query: Some("currency=VND&amount=100000"),
-            headers: &headers,
+            headers: &ws,
             authority: None,
             payload_hash: payload_hash_hex.as_bytes(),
         };
@@ -490,12 +490,12 @@ mod tests {
 
     #[test]
     fn test_h2_canonical_signing_with_authority_matches_h1_host() {
-        let mut h1_headers = HeaderMap::new();
+        let mut h1_headers = HeaderWorkspace::default();
         h1_headers.insert("host", HeaderValue::from_static("api.velda.io"));
         h1_headers.insert("x-timestamp", HeaderValue::from_static("1729600000"));
         h1_headers.insert("x-nonce", HeaderValue::from_static("abc-123"));
 
-        let mut h2_headers = HeaderMap::new();
+        let mut h2_headers = HeaderWorkspace::default();
         h2_headers.insert("x-timestamp", HeaderValue::from_static("1729600000"));
         h2_headers.insert("x-nonce", HeaderValue::from_static("abc-123"));
         // Notice: h2_headers has NO "host" header!

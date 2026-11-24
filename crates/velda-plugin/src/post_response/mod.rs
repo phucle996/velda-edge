@@ -95,7 +95,6 @@ pub fn run_post_response_plugins(
     for plugin in chain {
         plugin.on_response(req_headers, resp);
     }
-    resp.headers.render();
 }
 
 /// Compile-time registry check for plugins owned by the `post_response` stage.

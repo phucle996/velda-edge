@@ -14,8 +14,8 @@ use std::sync::atomic::{AtomicU64, Ordering};
 
 use bytes::Bytes;
 use http::header::{CONTENT_LENGTH, CONTENT_TYPE, HeaderName, HeaderValue};
-use http::{HeaderMap, StatusCode, Version};
-use velda_core::{Body, L7Response};
+use http::{StatusCode, Version};
+use velda_core::{Body, HeaderWorkspace, L7Response};
 
 static GLOBAL_SEED: AtomicU64 = AtomicU64::new(0x243f6a8885a308d3);
 
@@ -117,16 +117,16 @@ impl HttpAbortConfig {
         let content_length_val =
             HeaderValue::from_str(&len_str).unwrap_or_else(|_| HeaderValue::from_static("0"));
 
-        let mut header_map = HeaderMap::with_capacity(headers.len() + 1);
+        let mut header_ws = HeaderWorkspace::new(headers.len() + 2);
         for (name, val) in &headers {
-            header_map.insert(name.clone(), val.clone());
+            header_ws.insert(name.clone(), val.clone());
         }
-        header_map.insert(CONTENT_LENGTH, content_length_val.clone());
+        header_ws.insert(CONTENT_LENGTH, content_length_val.clone());
 
         let default_response = L7Response::new(
             status,
             Version::HTTP_11,
-            header_map,
+            header_ws,
             Body::Bytes(body.clone()),
         );
 
@@ -170,16 +170,16 @@ impl HttpAbortConfig {
     /// Constructs an [`L7Response`] with pre-allocated headers and body.
     #[inline]
     fn build_response(&self, status: StatusCode) -> L7Response {
-        let mut header_map = HeaderMap::with_capacity(self.headers.len() + 1);
+        let mut header_ws = HeaderWorkspace::new(self.headers.len() + 2);
         for (name, val) in &self.headers {
-            header_map.insert(name.clone(), val.clone());
+            header_ws.insert(name.clone(), val.clone());
         }
-        header_map.insert(CONTENT_LENGTH, self.content_length_val.clone());
+        header_ws.insert(CONTENT_LENGTH, self.content_length_val.clone());
 
         L7Response::new(
             status,
             Version::HTTP_11,
-            header_map,
+            header_ws,
             Body::Bytes(self.body.clone()),
         )
     }

@@ -320,7 +320,7 @@ impl PostResponsePlugin for OpenAiTokenQuotaPlugin {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use http::{HeaderMap, StatusCode};
+    use http::StatusCode;
     use serde_json::json;
 
     #[test]
@@ -334,9 +334,8 @@ mod tests {
         };
 
         let plugin = OpenAiTokenQuotaPlugin::from_config(&cfg).unwrap();
-        let mut req_hdrs = HeaderMap::new();
-        req_hdrs.insert("x-tenant-id", HeaderValue::from_static("tenant-a"));
-        let req_ws = HeaderWorkspace::from(req_hdrs);
+        let mut req_ws = HeaderWorkspace::empty(4);
+        req_ws.insert("x-tenant-id", HeaderValue::from_static("tenant-a"));
 
         let body = br#"{"id":"1","model":"deepseek-chat","usage":{"prompt_tokens":1540,"completion_tokens":320,"total_tokens":1860}}"#;
         let mut resp = L7Response::from_bytes(StatusCode::OK, body.as_slice());
@@ -365,10 +364,9 @@ mod tests {
         };
 
         let plugin = OpenAiTokenQuotaPlugin::from_config(&cfg).unwrap();
-        let mut req_hdrs = HeaderMap::new();
-        req_hdrs.insert("x-tenant-id", HeaderValue::from_static("abc"));
-        req_hdrs.insert("x-user-id", HeaderValue::from_static("123"));
-        let req_ws = HeaderWorkspace::from(req_hdrs);
+        let mut req_ws = HeaderWorkspace::empty(4);
+        req_ws.insert("x-tenant-id", HeaderValue::from_static("abc"));
+        req_ws.insert("x-user-id", HeaderValue::from_static("123"));
 
         let body1 = br#"{"usage":{"prompt_tokens":10,"completion_tokens":5,"total_tokens":15}}"#;
         let body2 = br#"{"usage":{"prompt_tokens":20,"completion_tokens":10,"total_tokens":30,"prompt_tokens_details":{"cached_tokens":4}}}"#;

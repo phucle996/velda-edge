@@ -134,17 +134,12 @@ pub fn run_pre_upstream_plugins(
                     let next = run_pre_upstream_plugins(&chain[idx + 1..], req, target_upstream);
                     return Action::delay(duration, next);
                 } else {
-                    req.headers.render();
                     return Action::Delay { duration, and_then };
                 }
             }
-            action => {
-                req.headers.render();
-                return action;
-            }
+            action => return action,
         }
     }
-    req.headers.render();
     Action::Continue
 }
 
@@ -211,8 +206,8 @@ pub fn instantiate(
 mod tests {
     use super::*;
     use http::header::HeaderName;
-    use http::{HeaderMap, HeaderValue, Method, StatusCode, Uri, Version};
-    use velda_core::{Body, RejectReason};
+    use http::{HeaderValue, Method, StatusCode, Uri, Version};
+    use velda_core::{Body, HeaderWorkspace, RejectReason};
 
     #[test]
     fn test_pre_upstream_header_mutation() {
@@ -235,7 +230,7 @@ mod tests {
         let plugin = Arc::new(HeaderMutationPlugin::new("mutation-1", config));
         let chain: Vec<Arc<dyn PreUpstreamPlugin>> = vec![plugin];
 
-        let mut headers = HeaderMap::new();
+        let mut headers = HeaderWorkspace::empty(4);
         headers.insert(
             HeaderName::from_static("x-internal-secret"),
             HeaderValue::from_static("classified"),
@@ -269,7 +264,7 @@ mod tests {
             Method::GET,
             Uri::from_static("/v1/items"),
             Version::HTTP_11,
-            HeaderMap::new(),
+            HeaderWorkspace::empty(4),
             Body::Empty,
         );
         let mut target1 = 1;
@@ -280,7 +275,7 @@ mod tests {
             Method::GET,
             Uri::from_static("/v1/items"),
             Version::HTTP_11,
-            HeaderMap::new(),
+            HeaderWorkspace::empty(4),
             Body::Empty,
         );
         let mut target2 = 1;
@@ -319,7 +314,7 @@ mod tests {
             Method::GET,
             Uri::from_static("/api/v1/customers/100?tab=overview"),
             Version::HTTP_11,
-            HeaderMap::new(),
+            HeaderWorkspace::empty(4),
             Body::Empty,
         );
 
@@ -348,7 +343,7 @@ mod tests {
         );
         let chain: Vec<Arc<dyn PreUpstreamPlugin>> = vec![plugin];
 
-        let mut headers = HeaderMap::new();
+        let mut headers = HeaderWorkspace::empty(4);
         headers.insert(
             HeaderName::from_static("x-request-id"),
             HeaderValue::from_static("req-term-999"),

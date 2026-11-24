@@ -24,8 +24,8 @@ use crate::capability::{AccessLevel, PluginCapability, SupportedProtocols};
 use crate::config::PluginConfig;
 use crate::error::PluginError;
 use crate::http_cache::{
-    HttpCacheRegistry, HttpCacheStorage, LookupOutcome, X_VELDA_CACHE_HASH,
-    hash_request_key_zero_alloc, parse_cache_control_fast,
+    HttpCacheRegistry, HttpCacheStorage, LookupOutcome, hash_request_key_zero_alloc,
+    parse_cache_control_fast,
 };
 use crate::pre_upstream::PreUpstreamPlugin;
 
@@ -188,6 +188,12 @@ impl HttpCacheLookupPlugin {
             );
         }
 
+        self.compute_hash_heap(req, host)
+    }
+
+    #[cold]
+    #[inline(never)]
+    fn compute_hash_heap(&self, req: &L7Request, host: Option<&str>) -> u64 {
         let mut extracted = Vec::with_capacity(self.config.key_headers.len());
         for hdr_name in &self.config.key_headers {
             if let Some(val) = req.headers.get(hdr_name).and_then(|v| v.to_str().ok()) {
@@ -265,14 +271,14 @@ impl PreUpstreamPlugin for HttpCacheLookupPlugin {
             )),
             LookupOutcome::AuthBypass => Action::Continue,
             LookupOutcome::Miss => {
-                req.headers.set_u64(X_VELDA_CACHE_HASH, key_hash);
+                req.headers.cache_hash = if key_hash == 0 { 1 } else { key_hash };
                 Action::Continue
             }
         }
     }
 
     fn capability(&self) -> PluginCapability {
-        PluginCapability::header_only(AccessLevel::Write)
+        PluginCapability::header_only(AccessLevel::Read)
     }
 
     fn supported_protocols(&self) -> SupportedProtocols {

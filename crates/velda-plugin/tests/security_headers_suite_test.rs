@@ -29,14 +29,6 @@ fn test_suite_default_owasp_hardening() {
 
     plugin.on_response(&req_headers, &mut resp);
 
-    // Verify dual-representation: short headers <= 16 bytes are in numeric integer registers
-    assert!(
-        resp.headers.numeric_len > 0,
-        "Short headers must be written directly to HeaderWorkspace numeric registers"
-    );
-
-    resp.headers.render();
-
     assert_eq!(
         resp.headers.get("strict-transport-security").unwrap(),
         "max-age=31536000; includeSubDomains"
@@ -103,8 +95,6 @@ fn test_suite_modern_browser_isolation_full_stack() {
     assert_eq!(register_count, 8);
     // HSTS (36B), CSP (>16B), Permissions (>16B) -> 3 standard pointers!
     assert_eq!(pointer_count, 3);
-
-    resp.headers.render();
 
     assert_eq!(
         resp.headers.get("strict-transport-security").unwrap(),
@@ -191,7 +181,6 @@ fn test_suite_from_config_full_manifest_roundtrip() {
     let mut resp = L7Response::from_bytes(StatusCode::OK, "{\"ok\":true}");
     let req_headers = HeaderWorkspace::default();
     plugin.on_response(&req_headers, &mut resp);
-    resp.headers.render();
 
     assert_eq!(
         resp.headers.get("cross-origin-opener-policy").unwrap(),
@@ -268,7 +257,6 @@ fn test_suite_selective_disabled_state() {
     let mut resp = L7Response::from_bytes(StatusCode::OK, "");
     let req_headers = HeaderWorkspace::default();
     plugin.on_response(&req_headers, &mut resp);
-    resp.headers.render();
 
     assert!(!resp.headers.contains_key("strict-transport-security"));
     assert!(!resp.headers.contains_key("x-content-type-options"));
@@ -333,7 +321,6 @@ fn test_suite_extreme_heavyweight_headers_and_partitioning() {
     let mut resp = L7Response::from_bytes(StatusCode::OK, "{\"status\":\"extreme\"}");
     let req_headers = HeaderWorkspace::default();
     plugin.on_response(&req_headers, &mut resp);
-    resp.headers.render();
 
     assert_eq!(
         resp.headers.get("content-security-policy").unwrap(),
@@ -376,11 +363,8 @@ fn test_default_security_headers_injection() {
 
     plugin.on_response(&req_headers, &mut resp);
 
-    assert!(resp.headers.numeric_len > 0);
     assert!(resp.headers.contains_key("x-content-type-options"));
     assert!(resp.headers.contains_key("x-frame-options"));
-
-    resp.headers.render();
 
     assert_eq!(
         resp.headers.get("strict-transport-security").unwrap(),
@@ -442,7 +426,6 @@ fn test_custom_hsts_preload_and_csp() {
     let req_headers = HeaderWorkspace::default();
 
     plugin.on_response(&req_headers, &mut resp);
-    resp.headers.render();
 
     assert_eq!(
         resp.headers.get("strict-transport-security").unwrap(),
@@ -481,7 +464,6 @@ fn test_modern_coop_coep_corp_injection() {
     let req_headers = HeaderWorkspace::default();
 
     plugin.on_response(&req_headers, &mut resp);
-    resp.headers.render();
 
     assert_eq!(
         resp.headers.get("cross-origin-opener-policy").unwrap(),
@@ -530,7 +512,6 @@ fn test_selective_disabling() {
     let req_headers = HeaderWorkspace::default();
 
     plugin.on_response(&req_headers, &mut resp);
-    resp.headers.render();
 
     assert_eq!(plugin.compiled_headers().len(), 0);
     assert_eq!(plugin.op_mask, 0);
@@ -561,7 +542,6 @@ fn test_explicit_none_values_are_omitted() {
     let req_headers = HeaderWorkspace::default();
 
     plugin.on_response(&req_headers, &mut resp);
-    resp.headers.render();
 
     assert!(resp.headers.contains_key("strict-transport-security"));
     assert!(resp.headers.contains_key("x-content-type-options"));
@@ -613,7 +593,6 @@ fn test_from_config_json_deserialization() {
     let mut resp = L7Response::from_bytes(StatusCode::OK, "");
     let req_headers = HeaderWorkspace::default();
     plugin.on_response(&req_headers, &mut resp);
-    resp.headers.render();
 
     assert_eq!(
         resp.headers.get("strict-transport-security").unwrap(),

@@ -110,16 +110,16 @@ impl PreUpstreamPlugin for Ja4FilterPlugin {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use http::{HeaderMap, Method, Uri, Version};
+    use http::{Method, Uri, Version};
     use serde_json::json;
-    use velda_core::{Body, ja4_fingerprint_id};
+    use velda_core::{Body, HeaderWorkspace, ja4_fingerprint_id};
 
     fn make_req(ja4: u64) -> L7Request {
         let mut req = L7Request::new(
             Method::GET,
             Uri::from_static("/login"),
             Version::HTTP_11,
-            HeaderMap::new(),
+            HeaderWorkspace::empty(0),
             Body::Empty,
         );
         req.state.ja4 = ja4;

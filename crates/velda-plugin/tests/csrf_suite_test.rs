@@ -8,10 +8,12 @@ use std::sync::Arc;
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use http::header::{CONTENT_TYPE, COOKIE, HOST, ORIGIN};
-use http::{HeaderMap, HeaderValue, Method, Uri, Version};
+use http::{HeaderValue, Method, Uri, Version};
 use ring::hmac;
 use rustc_hash::FxHashMap;
-use velda_core::{Action, Body, L7Request, ProtocolFamily, RejectReason, StreamingMode};
+use velda_core::{
+    Action, Body, HeaderWorkspace, L7Request, ProtocolFamily, RejectReason, StreamingMode,
+};
 use velda_plugin::factory::{LoadedPlugin, build_route_plugin_plan};
 use velda_plugin::pre_route::{CorsPreflightPlugin, OriginPattern};
 use velda_plugin::pre_upstream::PreUpstreamPlugin;
@@ -24,7 +26,7 @@ fn current_epoch_secs() -> u64 {
         .unwrap_or(0)
 }
 
-fn build_test_request(method: Method, uri_str: &str, headers: HeaderMap) -> L7Request {
+fn build_test_request(method: Method, uri_str: &str, headers: HeaderWorkspace) -> L7Request {
     L7Request::new(
         method,
         uri_str.parse::<Uri>().unwrap(),
@@ -89,7 +91,7 @@ fn test_csrf_neutralizes_w3c_simple_request_trap() {
     .unwrap();
 
     // 1. Attacker sends HTML <form> POST (Simple Request): No Preflight, has victim's cookie, NO custom header
-    let mut attacker_headers = HeaderMap::new();
+    let mut attacker_headers = HeaderWorkspace::empty(4);
     attacker_headers.insert(HOST, HeaderValue::from_static("api.example.com"));
     attacker_headers.insert(
         ORIGIN,
@@ -133,7 +135,7 @@ fn test_csrf_neutralizes_w3c_simple_request_trap() {
     let now = current_epoch_secs();
     let valid_token = CsrfPlugin::mint_token(&key, &nonce, now);
 
-    let mut legit_headers = HeaderMap::new();
+    let mut legit_headers = HeaderWorkspace::empty(4);
     legit_headers.insert(HOST, HeaderValue::from_static("api.example.com"));
     legit_headers.insert(ORIGIN, HeaderValue::from_static("https://app.example.com"));
     legit_headers.insert(
@@ -182,7 +184,7 @@ fn test_subdomain_cookie_tossing_defense() {
     // Attacker on sub.example.com tossed a cookie with a fabricated token
     let forged_token = "000000006718a999.aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa.ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff";
 
-    let mut headers = HeaderMap::new();
+    let mut headers = HeaderWorkspace::empty(4);
     headers.insert(HOST, HeaderValue::from_static("example.com"));
     headers.insert(ORIGIN, HeaderValue::from_static("https://example.com"));
     headers.insert(
@@ -216,7 +218,7 @@ fn test_fetch_metadata_and_origin_enforcement() {
     let mut target = 1;
 
     // Case 1: Origin mismatch against Host and trusted_origins
-    let mut headers_mismatch = HeaderMap::new();
+    let mut headers_mismatch = HeaderWorkspace::empty(4);
     headers_mismatch.insert(HOST, HeaderValue::from_static("api.example.com"));
     headers_mismatch.insert(ORIGIN, HeaderValue::from_static("https://untrusted.com"));
     headers_mismatch.insert(COOKIE, HeaderValue::from_static("csrf_cookie=token123"));
@@ -230,7 +232,7 @@ fn test_fetch_metadata_and_origin_enforcement() {
     ));
 
     // Case 2: Origin matching Host header -> Passes origin gate
-    let mut headers_valid = HeaderMap::new();
+    let mut headers_valid = HeaderWorkspace::empty(4);
     headers_valid.insert(HOST, HeaderValue::from_static("api.example.com"));
     headers_valid.insert(ORIGIN, HeaderValue::from_static("https://api.example.com"));
     headers_valid.insert(COOKIE, HeaderValue::from_static("csrf_cookie=token123"));
@@ -261,7 +263,7 @@ fn test_csrf_e2e_short_referer_and_empty_tokens() {
     let mut target = 1;
 
     // 1. Short Referer with 1 byte ("x") must NOT panic
-    let mut headers_short_ref = HeaderMap::new();
+    let mut headers_short_ref = HeaderWorkspace::empty(4);
     headers_short_ref.insert(HOST, HeaderValue::from_static("app.example.com"));
     headers_short_ref.insert(http::header::REFERER, HeaderValue::from_static("x"));
     headers_short_ref.insert(COOKIE, HeaderValue::from_static("__Host-csrf=tok123"));
@@ -275,7 +277,7 @@ fn test_csrf_e2e_short_referer_and_empty_tokens() {
     );
 
     // 2. Empty tokens must be rejected
-    let mut headers_empty = HeaderMap::new();
+    let mut headers_empty = HeaderWorkspace::empty(4);
     headers_empty.insert(HOST, HeaderValue::from_static("app.example.com"));
     headers_empty.insert(ORIGIN, HeaderValue::from_static("https://app.example.com"));
     headers_empty.insert(COOKIE, HeaderValue::from_static("__Host-csrf="));

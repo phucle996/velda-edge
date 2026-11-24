@@ -379,74 +379,92 @@ impl PreUpstreamPlugin for ApiMeteringPlugin {
                     req.headers
                         .set_u64(X_METERING_BALANCE.clone(), balance_micro_credits as u64);
                 } else {
-                    let mut itoa_buf = itoa::Buffer::new();
-                    let balance_val = HeaderValue::from_str(itoa_buf.format(balance_micro_credits))
-                        .unwrap_or_else(|_| HeaderValue::from_static("0"));
-                    req.headers.insert(&X_METERING_BALANCE, balance_val);
+                    insert_negative_balance(req, balance_micro_credits);
                 }
                 Action::Continue
             }
             MeteringDecision::OverageAllowed { negative_balance } => {
-                if let Ok(val) = HeaderValue::from_str(&tier_cfg.name) {
-                    req.headers.insert(&X_METERING_TIER, val);
-                }
-                req.headers
-                    .insert(&X_METERING_OVERAGE, HeaderValue::from_static("true"));
-                let mut itoa_buf = itoa::Buffer::new();
-                let balance_val = HeaderValue::from_str(itoa_buf.format(negative_balance))
-                    .unwrap_or_else(|_| HeaderValue::from_static("0"));
-                req.headers.insert(&X_METERING_BALANCE, balance_val);
-                Action::Continue
+                handle_overage_allowed(req, &tier_cfg.name, negative_balance)
             }
             MeteringDecision::Exhausted {
                 action,
                 window_name,
                 reset_seconds,
-            } => match action {
-                ExhaustedAction::Reject402 => {
-                    let json_payload = format!(
-                        r#"{{"error":"payment_required","message":"API tier quota or prepaid credit balance exhausted","tier":"{}","window":"{}","reset_seconds":{}}}"#,
-                        tier_cfg.name, window_name, reset_seconds
-                    );
-                    let body_bytes = Bytes::from(json_payload);
-                    let len = body_bytes.len();
-
-                    let mut resp = L7Response::from_bytes(StatusCode::PAYMENT_REQUIRED, body_bytes);
-                    resp.headers.insert(
-                        CONTENT_TYPE,
-                        HeaderValue::from_static("application/json; charset=utf-8"),
-                    );
-                    resp.headers.set_u64(CONTENT_LENGTH, len as u64);
-                    if let Ok(val) = HeaderValue::from_str(&tier_cfg.name) {
-                        resp.headers.insert(&X_METERING_TIER, val);
-                    }
-                    if let Ok(val) = HeaderValue::from_str(&window_name) {
-                        resp.headers.insert(&X_METERING_EXHAUSTED_WINDOW, val);
-                    }
-                    if reset_seconds > 0 {
-                        resp.headers.set_u64(RETRY_AFTER, reset_seconds);
-                    }
-                    resp.headers.render();
-
-                    Action::Respond(resp)
-                }
-                ExhaustedAction::Reject429 => {
-                    if reset_seconds > 0 {
-                        req.headers.insert_bypass_u64(RETRY_AFTER, reset_seconds);
-                    }
-                    if let Ok(val) = HeaderValue::from_str(&tier_cfg.name) {
-                        req.headers.insert_bypass(X_METERING_TIER.clone(), val);
-                    }
-                    req.headers.insert_bypass(
-                        X_METERING_EXHAUSTED.clone(),
-                        HeaderValue::from_static("true"),
-                    );
-
-                    Action::Reject(RejectReason::TooManyRequests)
-                }
-                ExhaustedAction::Passthrough => Action::Continue,
-            },
+            } => handle_exhausted(req, action, &tier_cfg.name, &window_name, reset_seconds),
         }
+    }
+}
+
+#[cold]
+#[inline(never)]
+fn insert_negative_balance(req: &mut L7Request, balance_micro_credits: i64) {
+    const ZERO_VAL: HeaderValue = HeaderValue::from_static("0");
+    let mut itoa_buf = itoa::Buffer::new();
+    let balance_val =
+        HeaderValue::from_str(itoa_buf.format(balance_micro_credits)).unwrap_or(ZERO_VAL);
+    req.headers.insert(&X_METERING_BALANCE, balance_val);
+}
+
+#[cold]
+#[inline(never)]
+fn handle_overage_allowed(req: &mut L7Request, tier_name: &str, negative_balance: i64) -> Action {
+    const TRUE_VAL: HeaderValue = HeaderValue::from_static("true");
+    if let Ok(val) = HeaderValue::from_str(tier_name) {
+        req.headers.insert(&X_METERING_TIER, val);
+    }
+    req.headers.insert(&X_METERING_OVERAGE, TRUE_VAL);
+    insert_negative_balance(req, negative_balance);
+    Action::Continue
+}
+
+#[cold]
+#[inline(never)]
+fn handle_exhausted(
+    req: &mut L7Request,
+    action: ExhaustedAction,
+    tier_name: &str,
+    window_name: &str,
+    reset_seconds: u64,
+) -> Action {
+    const JSON_CT: HeaderValue = HeaderValue::from_static("application/json; charset=utf-8");
+    const TRUE_VAL: HeaderValue = HeaderValue::from_static("true");
+    match action {
+        ExhaustedAction::Reject402 => {
+            let json_payload = format!(
+                r#"{{"error":"payment_required","message":"API tier quota or prepaid credit balance exhausted","tier":"{}","window":"{}","reset_seconds":{}}}"#,
+                tier_name, window_name, reset_seconds
+            );
+            let body_bytes = Bytes::from(json_payload);
+            let len = body_bytes.len();
+
+            let mut resp = L7Response::from_bytes(StatusCode::PAYMENT_REQUIRED, body_bytes);
+            resp.headers.insert(CONTENT_TYPE, JSON_CT);
+            resp.headers.set_u64(CONTENT_LENGTH, len as u64);
+            if let Ok(val) = HeaderValue::from_str(tier_name) {
+                resp.headers.insert(&X_METERING_TIER, val);
+            }
+            if let Ok(val) = HeaderValue::from_str(window_name) {
+                resp.headers.insert(&X_METERING_EXHAUSTED_WINDOW, val);
+            }
+            if reset_seconds > 0 {
+                resp.headers.set_u64(RETRY_AFTER, reset_seconds);
+            }
+
+            Action::Respond(resp)
+        }
+        ExhaustedAction::Reject429 => {
+            if reset_seconds > 0 {
+                req.headers.insert_bypass_u64(RETRY_AFTER, reset_seconds);
+            }
+            if let Ok(val) = HeaderValue::from_str(tier_name) {
+                req.headers.insert_bypass(X_METERING_TIER.clone(), val);
+            }
+            req.headers
+                .insert_bypass(X_METERING_EXHAUSTED.clone(), TRUE_VAL);
+
+            Action::Reject(RejectReason::TooManyRequests)
+        }
+        ExhaustedAction::Passthrough => Action::Continue,
     }
 }
 

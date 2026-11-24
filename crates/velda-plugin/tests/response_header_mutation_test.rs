@@ -1,7 +1,7 @@
 //! Integration Tests for `response_header_mutation` Post-Response Plugin.
 
 use http::header::HeaderName;
-use http::{HeaderMap, HeaderValue, StatusCode};
+use http::{HeaderValue, StatusCode};
 use velda_core::{HeaderWorkspace, L7Response};
 use velda_plugin::config::PluginConfig;
 use velda_plugin::post_response::PostResponsePlugin;
@@ -17,7 +17,7 @@ fn test_remove_sensitive_headers() {
 
     let plugin = ResponseHeaderMutationPlugin::new("mut-1", config);
 
-    let mut headers = HeaderMap::new();
+    let mut headers = HeaderWorkspace::empty(4);
     headers.insert("x-powered-by", HeaderValue::from_static("Express"));
     headers.insert("server", HeaderValue::from_static("Apache/2.4"));
     headers.insert("content-type", HeaderValue::from_static("application/json"));
@@ -44,7 +44,7 @@ fn test_remove_with_simd_probe_optimization_and_over_32_fallback() {
 
     let plugin = ResponseHeaderMutationPlugin::new("mut-simd-remove", config);
 
-    let mut headers_a = HeaderMap::new();
+    let mut headers_a = HeaderWorkspace::new(4);
     headers_a.insert("content-type", HeaderValue::from_static("text/plain"));
     headers_a.insert("content-length", HeaderValue::from_static("12"));
 
@@ -54,7 +54,7 @@ fn test_remove_with_simd_probe_optimization_and_over_32_fallback() {
     assert!(resp_a.headers.contains_key("content-type"));
     assert_eq!(resp_a.headers.len(), 3);
 
-    let mut headers_b = HeaderMap::new();
+    let mut headers_b = HeaderWorkspace::empty(4);
     headers_b.insert("server", HeaderValue::from_static("nginx"));
     let mut resp_b = L7Response::from_bytes(StatusCode::OK, "hello").with_headers(headers_b);
     plugin.on_response(&req_headers, &mut resp_b);
@@ -67,7 +67,7 @@ fn test_remove_with_simd_probe_optimization_and_over_32_fallback() {
         big_cfg.remove.push(name);
     }
     let big_plugin = ResponseHeaderMutationPlugin::new("mut-over-32", big_cfg);
-    let mut headers_c = HeaderMap::new();
+    let mut headers_c = HeaderWorkspace::empty(4);
     headers_c.insert("x-strip-hdr-32", HeaderValue::from_static("secret"));
     let mut resp_c = L7Response::from_bytes(StatusCode::OK, "ok").with_headers(headers_c);
     big_plugin.on_response(&req_headers, &mut resp_c);
@@ -96,7 +96,7 @@ fn test_set_and_dynamic_variables() {
 
     let plugin = ResponseHeaderMutationPlugin::new("mut-set", config);
 
-    let headers = HeaderMap::new();
+    let headers = HeaderWorkspace::empty(4);
     let mut resp = L7Response::from_bytes(StatusCode::CREATED, "{}").with_headers(headers);
     let req_headers = HeaderWorkspace::default();
 
@@ -104,15 +104,13 @@ fn test_set_and_dynamic_variables() {
 
     assert_eq!(
         resp.headers.get_hex128("x-request-id"),
-        Some(req_headers.request_id_raw)
+        req_headers.get_hex128("x-request-id")
     );
     assert_eq!(resp.headers.get_u64("x-status-reflected"), Some(201));
     assert_eq!(
         resp.headers.get_u64("x-timestamp"),
         Some(req_headers.ingress_time_sec())
     );
-
-    resp.headers.render();
     assert_eq!(resp.headers.get("server").unwrap(), "velda-edge");
     assert_eq!(
         resp.headers.get("x-request-id").unwrap(),
@@ -136,7 +134,7 @@ fn test_set_if_missing() {
 
     let plugin = ResponseHeaderMutationPlugin::new("mut-sim", config);
 
-    let mut headers = HeaderMap::new();
+    let mut headers = HeaderWorkspace::empty(4);
     headers.insert("x-existing", HeaderValue::from_static("original-val"));
 
     let mut resp = L7Response::from_bytes(StatusCode::OK, "{}").with_headers(headers);
@@ -161,7 +159,7 @@ fn test_add_multi_value_headers() {
 
     let plugin = ResponseHeaderMutationPlugin::new("mut-add", config);
 
-    let mut headers = HeaderMap::new();
+    let mut headers = HeaderWorkspace::empty(4);
     headers.insert("vary", HeaderValue::from_static("Accept-Encoding"));
 
     let mut resp = L7Response::from_bytes(StatusCode::OK, "{}").with_headers(headers);

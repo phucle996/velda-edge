@@ -3,9 +3,9 @@
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use http::header::HeaderValue;
-use http::{HeaderMap, Method, Uri, Version};
+use http::{Method, Uri, Version};
 use ring::hmac;
-use velda_core::{Action, Body, L7Request, RejectReason};
+use velda_core::{Action, Body, HeaderWorkspace, L7Request, RejectReason};
 use velda_plugin::pre_upstream::PreUpstreamPlugin;
 use velda_plugin::pre_upstream::hmac_auth::canonical::{
     CanonicalRequest, SignedHeadersSpec, compute_sha256, sign_canonical_request, to_base64,
@@ -84,7 +84,7 @@ fn make_test_signed_request(
     let payload_hash = to_hex(&compute_sha256(body_bytes));
 
     let uri: Uri = uri_str.parse().unwrap();
-    let mut headers = HeaderMap::new();
+    let mut headers = velda_core::HeaderWorkspace::default();
     headers.insert("host", HeaderValue::from_static("api.velda.io"));
     headers.insert(
         "x-timestamp",
@@ -209,7 +209,7 @@ fn test_hmac_auth_missing_access_key() {
         Method::POST,
         Uri::from_static("/v1/transfers"),
         Version::HTTP_11,
-        HeaderMap::new(),
+        HeaderWorkspace::empty(4),
         Body::Empty,
     );
 
@@ -228,7 +228,7 @@ fn test_hmac_auth_missing_access_key() {
 #[test]
 fn test_hmac_auth_invalid_access_key() {
     let plugin = build_test_plugin("hmac-sha256", "hex", true, true);
-    let mut headers = HeaderMap::new();
+    let mut headers = HeaderWorkspace::empty(4);
     headers.insert(
         "x-access-key-id",
         HeaderValue::from_static("unknown_caller_999"),

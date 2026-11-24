@@ -194,12 +194,13 @@ impl ShardedMeteringState {
         }
 
         // 3. Check wallet credit balance if tier has a cost per request
-        let cost = tier_cfg.cost_per_req_micro_credits as i64;
+        let cost = i64::try_from(tier_cfg.cost_per_req_micro_credits).unwrap_or(i64::MAX);
         if cost > 0 && state.balance_micro_credits < cost {
             match tier_cfg.exhausted_action {
                 ExhaustedAction::Passthrough => {
-                    state.balance_micro_credits -= cost;
-                    state.delta_micro_credits_deducted += cost;
+                    state.balance_micro_credits = state.balance_micro_credits.saturating_sub(cost);
+                    state.delta_micro_credits_deducted =
+                        state.delta_micro_credits_deducted.saturating_add(cost);
                     return MeteringDecision::OverageAllowed {
                         negative_balance: state.balance_micro_credits,
                     };
@@ -244,8 +245,9 @@ impl ShardedMeteringState {
 
         // 5. Commit pass: deduct cost and increment window counters
         if cost > 0 {
-            state.balance_micro_credits -= cost;
-            state.delta_micro_credits_deducted += cost;
+            state.balance_micro_credits = state.balance_micro_credits.saturating_sub(cost);
+            state.delta_micro_credits_deducted =
+                state.delta_micro_credits_deducted.saturating_add(cost);
         }
 
         for (i, cfg) in tier_cfg.windows.iter().enumerate() {

@@ -187,12 +187,7 @@ impl PostResponsePlugin for ResponseCompressionPlugin {
         ) {
             Ok(bytes) => bytes,
             Err(e) => {
-                tracing::debug!(
-                    plugin = %self.id,
-                    error = %e,
-                    algorithm = %selected_algo.as_str(),
-                    "Failed to compress response payload; falling back to uncompressed body"
-                );
+                log_compression_failure(&self.id, selected_algo, &e);
                 return;
             }
         };
@@ -211,10 +206,8 @@ impl PostResponsePlugin for ResponseCompressionPlugin {
         resp.headers.set_u64(CONTENT_LENGTH, new_len as u64);
 
         // Inject Content-Encoding
-        resp.headers.insert(
-            CONTENT_ENCODING,
-            HeaderValue::from_static(selected_algo.as_str()),
-        );
+        resp.headers
+            .insert(CONTENT_ENCODING, selected_algo.as_header_value());
 
         // Inject Vary: Accept-Encoding (RFC 9110 § 12.5.5)
         // Prevents downstream caching proxies from serving compressed variants to uncompressed clients.
@@ -224,28 +217,11 @@ impl PostResponsePlugin for ResponseCompressionPlugin {
             });
 
             if !has_vary {
-                const SUFFIX: &[u8] = b", Accept-Encoding";
-                let eb = existing_vary.as_bytes();
-                let mut stack_buf = [0u8; 512];
-                let total = eb.len().saturating_add(SUFFIX.len());
-                let hv = if let Some(dst) = stack_buf.get_mut(..total) {
-                    let (dst_head, dst_tail) = dst.split_at_mut(eb.len());
-                    dst_head.copy_from_slice(eb);
-                    dst_tail.copy_from_slice(SUFFIX);
-                    HeaderValue::from_bytes(dst).ok()
-                } else {
-                    let mut heap = String::with_capacity(eb.len() + SUFFIX.len());
-                    heap.push_str(existing_vary);
-                    heap.push_str(", Accept-Encoding");
-                    HeaderValue::from_str(&heap).ok()
-                };
-                if let Some(hv) = hv {
-                    resp.headers.insert(VARY, hv);
-                }
+                append_vary_accept_encoding(resp);
             }
         } else {
-            resp.headers
-                .insert(VARY, HeaderValue::from_static("Accept-Encoding"));
+            const VARY_ACCEPT_ENCODING: HeaderValue = HeaderValue::from_static("Accept-Encoding");
+            resp.headers.insert(VARY, VARY_ACCEPT_ENCODING);
         }
     }
 
@@ -260,5 +236,46 @@ impl PostResponsePlugin for ResponseCompressionPlugin {
     #[inline(always)]
     fn supported_protocols(&self) -> SupportedProtocols {
         SupportedProtocols::ALL_HTTP
+    }
+}
+
+#[cold]
+#[inline(never)]
+fn log_compression_failure(
+    plugin_id: &str,
+    selected_algo: CompressionAlgorithm,
+    err: &dyn std::fmt::Display,
+) {
+    tracing::debug!(
+        plugin = %plugin_id,
+        error = %err,
+        algorithm = %selected_algo.as_str(),
+        "Failed to compress response payload; falling back to uncompressed body"
+    );
+}
+
+#[cold]
+#[inline(never)]
+fn append_vary_accept_encoding(resp: &mut L7Response) {
+    let Some(existing_vary) = resp.headers.get(VARY).and_then(|v| v.to_str().ok()) else {
+        return;
+    };
+    const SUFFIX: &[u8] = b", Accept-Encoding";
+    let eb = existing_vary.as_bytes();
+    let mut stack_buf = [0u8; 512];
+    let total = eb.len().saturating_add(SUFFIX.len());
+    let hv = if let Some(dst) = stack_buf.get_mut(..total) {
+        let (dst_head, dst_tail) = dst.split_at_mut(eb.len());
+        dst_head.copy_from_slice(eb);
+        dst_tail.copy_from_slice(SUFFIX);
+        HeaderValue::from_bytes(dst).ok()
+    } else {
+        let mut heap = String::with_capacity(eb.len() + SUFFIX.len());
+        heap.push_str(existing_vary);
+        heap.push_str(", Accept-Encoding");
+        HeaderValue::from_str(&heap).ok()
+    };
+    if let Some(hv) = hv {
+        resp.headers.insert(VARY, hv);
     }
 }

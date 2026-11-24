@@ -20,9 +20,9 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use crate::config::PluginConfig;
 use bytes::Bytes;
 use http::header::{HeaderName, HeaderValue};
-use http::{HeaderMap, Method, Uri};
+use http::{Method, Uri};
 use tokio::sync::mpsc;
-use velda_core::{Action, L7Request};
+use velda_core::{Action, HeaderWorkspace, L7Request};
 
 use crate::capability::{AccessLevel, PluginCapability, SupportedProtocols};
 use crate::error::PluginError;
@@ -60,7 +60,7 @@ pub struct MirroredRequest {
     /// Request URI.
     pub uri: Uri,
     /// Cloned headers including the mandatory `x-velda-mirror: true`.
-    pub headers: HeaderMap,
+    pub headers: HeaderWorkspace,
     /// Zero-copy shared body payload bytes.
     pub body: Bytes,
 }
@@ -230,7 +230,7 @@ impl PreUpstreamPlugin for RequestMirrorPlugin {
                 target_upstream: self.config.mirror_upstream.clone(),
                 method: req.method.clone(),
                 uri: req.uri.clone(),
-                headers: shadow_headers.into(),
+                headers: shadow_headers,
                 body: body_bytes,
             };
 
@@ -324,10 +324,10 @@ async fn dispatch_mirror_request(target: String, req: MirroredRequest) {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use http::{HeaderMap, Version};
-    use velda_core::Body;
+    use http::Version;
+    use velda_core::{Body, HeaderWorkspace};
 
-    fn build_test_request(method: Method, headers: HeaderMap, body: Bytes) -> L7Request {
+    fn build_test_request(method: Method, headers: HeaderWorkspace, body: Bytes) -> L7Request {
         L7Request::new(
             method,
             Uri::from_static("/api/v1/orders"),
@@ -350,7 +350,7 @@ mod tests {
 
         let plugin = RequestMirrorPlugin::with_sender("mirror-1", config, tx).unwrap();
 
-        let mut headers = HeaderMap::new();
+        let mut headers = HeaderWorkspace::empty(4);
         headers.insert("x-user-id", HeaderValue::from_static("usr-42"));
         let mut req = build_test_request(
             Method::POST,
@@ -390,13 +390,15 @@ mod tests {
 
         let plugin = RequestMirrorPlugin::with_sender("mirror-ignore", config, tx).unwrap();
 
-        let mut req_del = build_test_request(Method::DELETE, HeaderMap::new(), Bytes::new());
+        let mut req_del =
+            build_test_request(Method::DELETE, HeaderWorkspace::empty(4), Bytes::new());
         let mut target_del = 1;
         plugin.on_upstream_request(&mut req_del, &mut target_del);
 
         assert!(rx.try_recv().is_err(), "DELETE must be ignored");
 
-        let mut req_post = build_test_request(Method::POST, HeaderMap::new(), Bytes::new());
+        let mut req_post =
+            build_test_request(Method::POST, HeaderWorkspace::empty(4), Bytes::new());
         let mut target_post = 1;
         plugin.on_upstream_request(&mut req_post, &mut target_post);
 
@@ -417,11 +419,11 @@ mod tests {
 
         let plugin = RequestMirrorPlugin::with_sender("mirror-drop", config, tx).unwrap();
 
-        let mut req1 = build_test_request(Method::GET, HeaderMap::new(), Bytes::new());
+        let mut req1 = build_test_request(Method::GET, HeaderWorkspace::empty(4), Bytes::new());
         let mut target1 = 1;
         plugin.on_upstream_request(&mut req1, &mut target1); // fills buffer (1/1)
 
-        let mut req2 = build_test_request(Method::GET, HeaderMap::new(), Bytes::new());
+        let mut req2 = build_test_request(Method::GET, HeaderWorkspace::empty(4), Bytes::new());
         let mut target2 = 1;
         let action = plugin.on_upstream_request(&mut req2, &mut target2); // buffer full -> dropped!
 
@@ -478,7 +480,7 @@ mod tests {
         // Later in lifecycle, global mirror queue is initialized
         let mut rx = init_mirror_queue(10);
 
-        let mut req = build_test_request(Method::GET, HeaderMap::new(), Bytes::new());
+        let mut req = build_test_request(Method::GET, HeaderWorkspace::empty(4), Bytes::new());
         let mut target = 1;
         let action = plugin.on_upstream_request(&mut req, &mut target);
 

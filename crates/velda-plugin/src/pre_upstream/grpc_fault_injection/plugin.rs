@@ -24,7 +24,7 @@ use crate::config::PluginConfig;
 use http::header::CONTENT_TYPE;
 use http::{HeaderValue, StatusCode, Version};
 use velda_core::{Action, Body, GrpcStatus, HeaderWorkspace, L7Request, L7Response};
-use velda_grpc::GrpcWire;
+use velda_grpc::wire::GrpcWire;
 
 use crate::capability::{AccessLevel, PluginCapability, SupportedProtocols};
 use crate::error::PluginError;
@@ -322,7 +322,7 @@ impl PreUpstreamPlugin for GrpcFaultInjectionPlugin {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use http::{HeaderMap, Method, StatusCode, Uri, Version};
+    use http::{Method, StatusCode, Uri, Version};
     use serde_json::json;
 
     #[test]
@@ -355,7 +355,7 @@ mod tests {
             Method::POST,
             Uri::from_static("/order.v1.OrderService/CreateOrder"),
             Version::HTTP_2,
-            HeaderMap::new(),
+            velda_core::HeaderWorkspace::empty(0),
             Body::Empty,
         );
 
@@ -379,7 +379,7 @@ mod tests {
             Method::POST,
             Uri::from_static("/order.v1.OrderService/CreateOrder"),
             Version::HTTP_2,
-            HeaderMap::new(),
+            velda_core::HeaderWorkspace::empty(0),
             Body::Empty,
         );
 
@@ -413,7 +413,7 @@ mod tests {
             Method::POST,
             Uri::from_static("/order.v1.OrderService/CreateOrder"),
             Version::HTTP_2,
-            HeaderMap::new(),
+            velda_core::HeaderWorkspace::empty(0),
             Body::Empty,
         );
 
@@ -443,7 +443,7 @@ mod tests {
             Method::POST,
             Uri::from_static("/order.v1.OrderService/CreateOrder"),
             Version::HTTP_2,
-            HeaderMap::new(),
+            velda_core::HeaderWorkspace::empty(0),
             Body::Empty,
         );
 

@@ -10,8 +10,8 @@ use http::header::{
     ACCESS_CONTROL_REQUEST_HEADERS, ACCESS_CONTROL_REQUEST_METHOD, CONTENT_LENGTH, CONTENT_TYPE,
     ORIGIN, VARY,
 };
-use http::{HeaderMap, HeaderValue, Method, StatusCode, Uri, Version};
-use velda_core::{Action, Body, L7Request, L7Response, RejectReason};
+use http::{HeaderValue, Method, StatusCode, Uri, Version};
+use velda_core::{Action, Body, HeaderWorkspace, L7Request, L7Response, RejectReason};
 use velda_plugin::post_response::{
     CorsConfig, CorsOriginPattern, CorsResponsePlugin, PostResponsePlugin,
 };
@@ -24,7 +24,7 @@ fn make_test_request(
     request_method: Option<&str>,
     request_headers: Option<&str>,
 ) -> L7Request {
-    let mut headers = HeaderMap::new();
+    let mut headers = HeaderWorkspace::empty(4);
     if let Some(orig) = origin {
         headers.insert(ORIGIN, HeaderValue::from_str(orig).unwrap());
     }
@@ -424,7 +424,7 @@ fn test_vary_header_idempotency() {
         .insert(VARY, HeaderValue::from_static("Origin"));
     response_plugin.on_response(&req.headers, &mut resp1);
 
-    let vary_count = resp1.headers.get_all(VARY).iter().count();
+    let vary_count = resp1.headers.get_all(VARY).count();
     assert_eq!(vary_count, 1, "Must not append duplicate Vary: Origin");
 
     // Case 2: Upstream already emitted combined "Vary: Accept-Encoding, Origin"
@@ -434,7 +434,7 @@ fn test_vary_header_idempotency() {
         .insert(VARY, HeaderValue::from_static("Accept-Encoding, origin"));
     response_plugin.on_response(&req.headers, &mut resp2);
 
-    let vary_count = resp2.headers.get_all(VARY).iter().count();
+    let vary_count = resp2.headers.get_all(VARY).count();
     assert_eq!(vary_count, 1, "Must detect origin in comma-separated list");
 }
 

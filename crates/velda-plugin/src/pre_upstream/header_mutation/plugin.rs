@@ -364,24 +364,10 @@ impl PreUpstreamPlugin for HeaderMutationPlugin {
         // Single-value fast path avoids get_all count traversal when there is at most 1 value (99.99% of requests)
         for (from_name, to_name) in &self.config.rename {
             if from_name != to_name {
-                let mut vals = req.headers.get_all(from_name).iter();
+                let mut vals = req.headers.get_all(from_name);
                 if let Some(first) = vals.next() {
-                    if let Some(second) = vals.next() {
-                        let mut stack_vals = [const { None }; 8];
-                        stack_vals[0] = Some(first.clone());
-                        stack_vals[1] = Some(second.clone());
-                        let mut count = 2;
-                        for v in vals {
-                            if count < stack_vals.len() {
-                                stack_vals[count] = Some(v.clone());
-                                count += 1;
-                            }
-                        }
-                        req.headers.remove(from_name);
-                        req.headers.remove(to_name);
-                        for item in stack_vals.into_iter().flatten() {
-                            req.headers.append(to_name.clone(), item);
-                        }
+                    if vals.next().is_some() {
+                        rename_multi_value_headers(&mut req.headers, from_name, to_name);
                     } else {
                         let val = first.clone();
                         req.headers.remove(from_name);
@@ -416,8 +402,13 @@ impl PreUpstreamPlugin for HeaderMutationPlugin {
                         req.headers.set_ip_u128(name.clone(), ip);
                     }
                     DynamicVar::RequestId => {
-                        req.headers
-                            .set_hex128(name.clone(), req.headers.request_id_raw);
+                        if let Some(val) = req
+                            .headers
+                            .get(&velda_core::buffer::header::X_REQUEST_ID)
+                            .cloned()
+                        {
+                            req.headers.insert(name.clone(), val);
+                        }
                     }
                     DynamicVar::Scheme => {
                         let is_https = req.uri.scheme_str() == Some("https")
@@ -476,8 +467,13 @@ impl PreUpstreamPlugin for HeaderMutationPlugin {
                         req.headers.append_ip_u128(name.clone(), ip);
                     }
                     DynamicVar::RequestId => {
-                        req.headers
-                            .append_hex128(name.clone(), req.headers.request_id_raw);
+                        if let Some(val) = req
+                            .headers
+                            .get(&velda_core::buffer::header::X_REQUEST_ID)
+                            .cloned()
+                        {
+                            req.headers.append(name.clone(), val);
+                        }
                     }
                     DynamicVar::Scheme => {
                         let is_https = req.uri.scheme_str() == Some("https")
@@ -539,13 +535,35 @@ impl PreUpstreamPlugin for HeaderMutationPlugin {
     }
 }
 
+#[cold]
+#[inline(never)]
+fn rename_multi_value_headers(
+    headers: &mut velda_core::HeaderWorkspace,
+    from_name: &http::HeaderName,
+    to_name: &http::HeaderName,
+) {
+    let mut stack_vals = [const { None }; 8];
+    let mut count = 0;
+    for v in headers.get_all(from_name) {
+        if count < stack_vals.len() {
+            stack_vals[count] = Some(v.clone());
+            count += 1;
+        }
+    }
+    headers.remove(from_name);
+    headers.remove(to_name);
+    for item in stack_vals.into_iter().flatten() {
+        headers.append(to_name.clone(), item);
+    }
+}
+
 // ── Tests ────────────────────────────────────────────────────────────
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use http::{HeaderMap, Method, Uri, Version};
-    use velda_core::Body;
+    use http::{Method, Uri, Version};
+    use velda_core::{Body, HeaderWorkspace};
 
     #[test]
     fn test_strip_hop_by_hop_and_cve_protection() {
@@ -632,7 +650,7 @@ mod tests {
         };
         let plugin = HeaderMutationPlugin::new("hm-rename", config);
 
-        let mut headers = HeaderMap::new();
+        let mut headers = HeaderWorkspace::new(4);
         // Client attempted to pre-inject malicious target header
         headers.insert(
             HeaderName::from_static("authorization"),
@@ -695,7 +713,7 @@ mod tests {
         };
         let plugin = HeaderMutationPlugin::new("hm-dynamic", config);
 
-        let mut headers = HeaderMap::new();
+        let mut headers = HeaderWorkspace::new(4);
         headers.insert(
             HeaderName::from_static("x-real-ip"),
             HeaderValue::from_static("198.51.100.25"),
@@ -723,10 +741,8 @@ mod tests {
         );
         assert_eq!(
             req.headers.get_hex128("x-req-id"),
-            Some(req.headers.request_id_raw)
+            req.headers.get_hex128("x-request-id")
         );
-
-        req.headers.render();
 
         // Edge x-real-ip takes precedence over untrusted xff prefix
         assert_eq!(req.headers.get("x-client-ip").unwrap(), "198.51.100.25");
@@ -757,7 +773,7 @@ mod tests {
         };
         let plugin = HeaderMutationPlugin::new("hm-1", config);
 
-        let mut headers = HeaderMap::new();
+        let mut headers = HeaderWorkspace::new(4);
         headers.insert(
             HeaderName::from_static("x-sensitive"),
             HeaderValue::from_static("secret"),

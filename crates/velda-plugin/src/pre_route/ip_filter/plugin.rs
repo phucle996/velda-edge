@@ -216,7 +216,7 @@ mod tests {
             Method::GET,
             Uri::from_static("/api/data"),
             Version::HTTP_11,
-            http::HeaderMap::new(),
+            velda_core::HeaderWorkspace::empty(4),
             Body::Empty,
         );
         req.headers
@@ -450,7 +450,7 @@ mod tests {
             Method::GET,
             Uri::from_static("/api/data"),
             Version::HTTP_11,
-            http::HeaderMap::new(),
+            velda_core::HeaderWorkspace::empty(4),
             Body::Empty,
         );
         req_dup
@@ -469,7 +469,7 @@ mod tests {
             Method::GET,
             Uri::from_static("/api/data"),
             Version::HTTP_11,
-            http::HeaderMap::new(),
+            velda_core::HeaderWorkspace::empty(4),
             Body::Empty,
         );
         req_comma.headers.insert(

@@ -9,14 +9,14 @@
 use std::sync::Arc;
 
 use http::header::RETRY_AFTER;
-use http::{HeaderMap, HeaderName, HeaderValue, Method, Uri, Version};
-use velda_core::{Action, Body, L7Request, RejectReason};
+use http::{HeaderName, HeaderValue, Method, Uri, Version};
+use velda_core::{Action, Body, HeaderWorkspace, L7Request, RejectReason};
 use velda_plugin::pre_upstream::PreUpstreamPlugin;
 use velda_plugin::pre_upstream::consumer_quota::{
     ConsumerQuotaConfig, ConsumerQuotaPlugin, QuotaAlgorithm, QuotaWindowConfig,
 };
 
-fn build_test_request(headers: HeaderMap) -> L7Request {
+fn build_test_request(headers: HeaderWorkspace) -> L7Request {
     L7Request::new(
         Method::POST,
         Uri::from_static("/v1/chat/completions"),
@@ -42,7 +42,7 @@ fn test_consumer_quota_sliding_window_burst_and_exhaustion() {
     let mut target = 1;
 
     // Request 1: Allowed, remaining = 2
-    let mut h1 = HeaderMap::new();
+    let mut h1 = HeaderWorkspace::empty(4);
     h1.insert(
         HeaderName::from_static("x-user-id"),
         HeaderValue::from_static("user_alice"),
@@ -51,12 +51,11 @@ fn test_consumer_quota_sliding_window_burst_and_exhaustion() {
     let act1 = plugin.on_upstream_request(&mut r1, &mut target);
     assert!(matches!(act1, Action::Continue));
     assert_eq!(r1.headers.get_u64("x-quota-remaining"), Some(2));
-    r1.headers.render();
     assert_eq!(r1.headers.get("x-quota-remaining").unwrap(), "2");
     assert_eq!(r1.headers.get("x-quota-window").unwrap(), "burst_limit");
 
     // Request 2: Allowed, remaining = 1
-    let mut h2 = HeaderMap::new();
+    let mut h2 = HeaderWorkspace::empty(4);
     h2.insert(
         HeaderName::from_static("x-user-id"),
         HeaderValue::from_static("user_alice"),
@@ -65,11 +64,10 @@ fn test_consumer_quota_sliding_window_burst_and_exhaustion() {
     let act2 = plugin.on_upstream_request(&mut r2, &mut target);
     assert!(matches!(act2, Action::Continue));
     assert_eq!(r2.headers.get_u64("x-quota-remaining"), Some(1));
-    r2.headers.render();
     assert_eq!(r2.headers.get("x-quota-remaining").unwrap(), "1");
 
     // Request 3: Allowed, remaining = 0
-    let mut h3 = HeaderMap::new();
+    let mut h3 = HeaderWorkspace::empty(4);
     h3.insert(
         HeaderName::from_static("x-user-id"),
         HeaderValue::from_static("user_alice"),
@@ -78,11 +76,10 @@ fn test_consumer_quota_sliding_window_burst_and_exhaustion() {
     let act3 = plugin.on_upstream_request(&mut r3, &mut target);
     assert!(matches!(act3, Action::Continue));
     assert_eq!(r3.headers.get_u64("x-quota-remaining"), Some(0));
-    r3.headers.render();
     assert_eq!(r3.headers.get("x-quota-remaining").unwrap(), "0");
 
     // Request 4: Exhausted -> Action::Reject(TooManyRequests) with Bit-1 bypass headers
-    let mut h4 = HeaderMap::new();
+    let mut h4 = HeaderWorkspace::empty(4);
     h4.insert(
         HeaderName::from_static("x-user-id"),
         HeaderValue::from_static("user_alice"),
@@ -94,7 +91,6 @@ fn test_consumer_quota_sliding_window_burst_and_exhaustion() {
             assert_eq!(reason, RejectReason::TooManyRequests);
             assert_eq!(r4.headers.get_u64("x-quota-remaining"), Some(0));
             assert!(r4.headers.contains_key(RETRY_AFTER));
-            r4.headers.render();
             assert!(r4.headers.bypass_headers().count() >= 2);
             assert_eq!(r4.headers.get("x-quota-remaining").unwrap(), "0");
             assert_eq!(r4.headers.get("x-quota-window").unwrap(), "burst_limit");
@@ -120,7 +116,7 @@ fn test_consumer_quota_multi_tenant_member_isolation() {
 
     // Alice consumes 2 requests (exhausts her quota)
     for _ in 0..2 {
-        let mut h = HeaderMap::new();
+        let mut h = HeaderWorkspace::empty(4);
         h.insert(
             HeaderName::from_static("x-user-id"),
             HeaderValue::from_static("alice"),
@@ -133,7 +129,7 @@ fn test_consumer_quota_multi_tenant_member_isolation() {
     }
 
     // Alice 3rd request is blocked
-    let mut h_alice = HeaderMap::new();
+    let mut h_alice = HeaderWorkspace::empty(4);
     h_alice.insert(
         HeaderName::from_static("x-user-id"),
         HeaderValue::from_static("alice"),
@@ -145,7 +141,7 @@ fn test_consumer_quota_multi_tenant_member_isolation() {
     ));
 
     // Bob still has full quota available
-    let mut h_bob = HeaderMap::new();
+    let mut h_bob = HeaderWorkspace::empty(4);
     h_bob.insert(
         HeaderName::from_static("x-user-id"),
         HeaderValue::from_static("bob"),
@@ -154,7 +150,6 @@ fn test_consumer_quota_multi_tenant_member_isolation() {
     let act_bob = plugin.on_upstream_request(&mut req_bob, &mut target);
     assert!(matches!(act_bob, Action::Continue));
     assert_eq!(req_bob.headers.get_u64("x-quota-remaining"), Some(1));
-    req_bob.headers.render();
     assert_eq!(req_bob.headers.get("x-quota-remaining").unwrap(), "1");
 }
 
@@ -174,7 +169,7 @@ fn test_consumer_quota_fallback_to_client_ip() {
     let mut target = 1;
 
     // No x-user-id header, should fallback to x-forwarded-for
-    let mut h1 = HeaderMap::new();
+    let mut h1 = HeaderWorkspace::empty(4);
     h1.insert(
         HeaderName::from_static("x-forwarded-for"),
         HeaderValue::from_static("198.51.100.42"),
@@ -186,7 +181,7 @@ fn test_consumer_quota_fallback_to_client_ip() {
     ));
 
     // Second request from same IP is blocked
-    let mut h2 = HeaderMap::new();
+    let mut h2 = HeaderWorkspace::empty(4);
     h2.insert(
         HeaderName::from_static("x-forwarded-for"),
         HeaderValue::from_static("198.51.100.42"),
@@ -198,7 +193,7 @@ fn test_consumer_quota_fallback_to_client_ip() {
     ));
 
     // Different IP is permitted
-    let mut h3 = HeaderMap::new();
+    let mut h3 = HeaderWorkspace::empty(4);
     h3.insert(
         HeaderName::from_static("x-forwarded-for"),
         HeaderValue::from_static("203.0.113.88"),

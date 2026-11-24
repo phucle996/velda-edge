@@ -69,13 +69,9 @@ pub fn run_pre_route_plugins(chain: &[Arc<dyn PreRoutePlugin>], req: &mut L7Requ
     for plugin in chain {
         match plugin.on_request(req) {
             Action::Continue => continue,
-            action => {
-                req.headers.render();
-                return action;
-            }
+            action => return action,
         }
     }
-    req.headers.render();
     Action::Continue
 }
 
@@ -118,7 +114,7 @@ pub fn instantiate(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use http::{HeaderMap, Method, Uri, Version};
+    use http::{Method, Uri, Version};
     use velda_core::Body;
 
     #[test]
@@ -136,7 +132,7 @@ mod tests {
         let plugin = instantiate(&config).expect("instantiate ip_filter");
         let chain: Vec<Arc<dyn PreRoutePlugin>> = vec![plugin];
 
-        let mut headers = HeaderMap::new();
+        let mut headers = velda_core::HeaderWorkspace::empty(2);
         headers.insert("x-forwarded-for", "192.168.1.100".parse().unwrap());
 
         let mut req = L7Request::new(

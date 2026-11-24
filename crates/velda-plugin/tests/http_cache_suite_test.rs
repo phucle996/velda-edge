@@ -5,14 +5,14 @@ use std::time::Duration;
 
 use bytes::Bytes;
 use http::header::{CACHE_CONTROL, CONTENT_TYPE, SET_COOKIE};
-use http::{HeaderMap, HeaderValue, Method, StatusCode, Uri, Version};
+use http::{HeaderValue, Method, StatusCode, Uri, Version};
 use serde_json::json;
 use velda_core::clock::coarse_sec;
 use velda_core::{Action, Body, HeaderWorkspace, L7Request, L7Response};
 use velda_plugin::PluginConfig;
 use velda_plugin::http_cache::{
     CacheEntry, CompressedVariants, HttpCacheStorage, LookupOutcome, SLAB_SIZE, StoreVariantParams,
-    X_VELDA_CACHE_HASH, X_VELDA_CACHE_KEY, compute_cache_key, compute_cache_key_with_headers,
+    X_VELDA_CACHE_KEY, compute_cache_key, compute_cache_key_with_headers,
     create_dram_confined_bytes, filter_cacheable_headers, hash_key, hash_request_key_zero_alloc,
     normalize_query, parse_cache_control_fast, parse_cache_control_ttl,
 };
@@ -109,11 +109,11 @@ fn test_compute_cache_key_with_headers_and_zero_alloc_equivalence() {
 
 #[test]
 fn test_filter_cacheable_headers() {
-    let mut headers = HeaderMap::new();
+    let mut headers = velda_core::HeaderWorkspace::default();
     headers.insert(CONTENT_TYPE, HeaderValue::from_static("application/json"));
     headers.insert(SET_COOKIE, HeaderValue::from_static("session_id=secret"));
     headers.insert(
-        &X_VELDA_CACHE_KEY,
+        X_VELDA_CACHE_KEY,
         HeaderValue::from_static("GET:api.example.com:/path"),
     );
 
@@ -492,7 +492,7 @@ fn test_http_cache_lookup_miss_and_hit() {
     let uri: Uri = "http://api.example.com/products?sort=asc&page=1"
         .parse()
         .unwrap();
-    let mut headers = HeaderMap::new();
+    let mut headers = HeaderWorkspace::empty(4);
     headers.insert(http::header::HOST, "api.example.com".parse().unwrap());
     let mut req = L7Request::new(Method::GET, uri, Version::HTTP_11, headers, Body::Empty);
 
@@ -500,10 +500,7 @@ fn test_http_cache_lookup_miss_and_hit() {
     let action = plugin.on_upstream_request(&mut req, &mut target1);
     assert!(action.is_continue());
     let expected_hash = hash_key("GET:api.example.com:/products?page=1&sort=asc");
-    assert_eq!(
-        req.headers.get_u64(&X_VELDA_CACHE_HASH),
-        Some(expected_hash)
-    );
+    assert_eq!(req.headers.cache_hash, expected_hash);
 
     storage.store(
         expected_hash,
@@ -519,7 +516,7 @@ fn test_http_cache_lookup_miss_and_hit() {
     let alt_uri: Uri = "http://api.example.com/products?page=1&sort=asc"
         .parse()
         .unwrap();
-    let mut alt_headers = HeaderMap::new();
+    let mut alt_headers = HeaderWorkspace::empty(4);
     alt_headers.insert(http::header::HOST, "api.example.com".parse().unwrap());
     let mut req2 = L7Request::new(
         Method::GET,
@@ -583,7 +580,7 @@ fn test_http_cache_lookup_negotiates_precompressed_and_lazy_variants() {
     });
     storage.store(hash, entry);
 
-    let mut headers = HeaderMap::new();
+    let mut headers = HeaderWorkspace::empty(4);
     headers.insert(http::header::HOST, "api.example.com".parse().unwrap());
     headers.insert(
         http::header::ACCEPT_ENCODING,
@@ -610,7 +607,7 @@ fn test_http_cache_lookup_negotiates_precompressed_and_lazy_variants() {
         _ => panic!("Expected Action::ServeCached"),
     }
 
-    let mut headers_br = HeaderMap::new();
+    let mut headers_br = HeaderWorkspace::empty(4);
     headers_br.insert(http::header::HOST, "api.example.com".parse().unwrap());
     headers_br.insert(
         http::header::ACCEPT_ENCODING,
@@ -654,7 +651,7 @@ fn test_http_cache_lookup_negotiates_precompressed_and_lazy_variants() {
     lazy_entry.variants.brotli = Some(Bytes::from_static(b"brotli-cached-bytes-145B"));
     storage.store(lazy_hash, lazy_entry);
 
-    let mut headers_gzip_only = HeaderMap::new();
+    let mut headers_gzip_only = HeaderWorkspace::empty(4);
     headers_gzip_only.insert(http::header::HOST, "api.example.com".parse().unwrap());
     headers_gzip_only.insert(http::header::ACCEPT_ENCODING, "gzip".parse().unwrap());
     let mut req_miss = L7Request::new(
@@ -670,10 +667,7 @@ fn test_http_cache_lookup_negotiates_precompressed_and_lazy_variants() {
             .on_upstream_request(&mut req_miss, &mut target_miss)
             .is_continue()
     );
-    assert_eq!(
-        req_miss.headers.get_u64(&X_VELDA_CACHE_HASH),
-        Some(lazy_hash)
-    );
+    assert_eq!(req_miss.headers.cache_hash, lazy_hash);
 }
 
 #[test]
@@ -694,7 +688,7 @@ fn test_http_cache_lookup_auth_post_and_per_user_isolation() {
         Method::POST,
         "http://api.example.com/products".parse().unwrap(),
         Version::HTTP_11,
-        HeaderMap::new(),
+        HeaderWorkspace::empty(4),
         Body::Bytes(Bytes::from_static(b"{}")),
     );
     let mut t = 1;
@@ -703,7 +697,7 @@ fn test_http_cache_lookup_auth_post_and_per_user_isolation() {
             .on_upstream_request(&mut req_post, &mut t)
             .is_continue()
     );
-    assert!(req_post.headers.get_u64(&X_VELDA_CACHE_HASH).is_none());
+    assert!(req_post.headers.cache_hash == 0);
 
     // Private Authorization entry bypasses without attaching hash
     let (_, priv_hash) = compute_cache_key(
@@ -723,7 +717,7 @@ fn test_http_cache_lookup_auth_post_and_per_user_isolation() {
             Duration::from_secs(60),
         ),
     );
-    let mut auth_headers = HeaderMap::new();
+    let mut auth_headers = HeaderWorkspace::empty(4);
     auth_headers.insert(http::header::HOST, "api.example.com".parse().unwrap());
     auth_headers.insert(
         http::header::AUTHORIZATION,
@@ -741,7 +735,7 @@ fn test_http_cache_lookup_auth_post_and_per_user_isolation() {
             .on_upstream_request(&mut req_auth, &mut t)
             .is_continue()
     );
-    assert!(req_auth.headers.get_u64(&X_VELDA_CACHE_HASH).is_none());
+    assert!(req_auth.headers.cache_hash == 0);
 
     // Public entry serves Authorization requests
     let (_, pub_hash) = compute_cache_key(
@@ -860,9 +854,9 @@ fn test_http_cache_store_gates_and_precompression() {
     let cache_key = "GET:api.example.com:/sync-data";
     let hash = hash_key(cache_key);
     let mut req_headers = HeaderWorkspace::default();
-    req_headers.set_u64(X_VELDA_CACHE_HASH, hash);
+    req_headers.cache_hash = hash;
 
-    let mut resp_headers = HeaderMap::new();
+    let mut resp_headers = HeaderWorkspace::empty(4);
     resp_headers.insert(CONTENT_TYPE, "application/json".parse().unwrap());
     resp_headers.insert(CACHE_CONTROL, "public, s-maxage=3600".parse().unwrap());
     let payload = vec![b'A'; 512];
@@ -885,7 +879,7 @@ fn test_http_cache_store_gates_and_precompression() {
     // 2. Oversized payload bypasses
     let big_hash = hash_key("GET:api.example.com:/too-big");
     let mut big_req = HeaderWorkspace::default();
-    big_req.set_u64(X_VELDA_CACHE_HASH, big_hash);
+    big_req.cache_hash = big_hash;
     let mut big_resp = L7Response::from_bytes(StatusCode::OK, vec![b'X'; 4096]);
     plugin.on_response(&big_req, &mut big_resp);
     assert_eq!(big_resp.headers.get("x-cache").unwrap(), "BYPASS");
@@ -894,7 +888,7 @@ fn test_http_cache_store_gates_and_precompression() {
     // 3. Authenticated request without public -> BYPASS
     let auth_hash = hash_key("GET:api.example.com:/private");
     let mut auth_req = HeaderWorkspace::default();
-    auth_req.set_u64(X_VELDA_CACHE_HASH, auth_hash);
+    auth_req.cache_hash = auth_hash;
     auth_req.insert(
         http::header::AUTHORIZATION,
         HeaderValue::from_static("Bearer token"),
@@ -924,9 +918,9 @@ async fn test_http_cache_store_async_precompression() {
 
     let hash = hash_key("GET:api.example.com:/async-data");
     let mut req_headers = HeaderWorkspace::default();
-    req_headers.set_u64(X_VELDA_CACHE_HASH, hash);
+    req_headers.cache_hash = hash;
 
-    let mut headers = HeaderMap::new();
+    let mut headers = HeaderWorkspace::empty(4);
     headers.insert(CONTENT_TYPE, "application/json".parse().unwrap());
     headers.insert(CACHE_CONTROL, "public, max-age=300".parse().unwrap());
     let payload = b"{\"message\":\"testing asynchronous background precompression for high throughput\",\"items\":[1,2,3,4,5]}".repeat(5);
@@ -968,7 +962,7 @@ fn test_end_to_end_http_cache_flow() {
     let uri1: Uri = "http://api.example.com/v1/products?sort=desc&limit=10"
         .parse()
         .unwrap();
-    let mut headers1 = HeaderMap::new();
+    let mut headers1 = HeaderWorkspace::empty(4);
     headers1.insert(http::header::HOST, "api.example.com".parse().unwrap());
     let mut req1 = L7Request::new(Method::GET, uri1, Version::HTTP_11, headers1, Body::Empty);
     let mut target = 1;
@@ -978,13 +972,10 @@ fn test_end_to_end_http_cache_flow() {
             .is_continue()
     );
     let expected_hash = hash_key("GET:api.example.com:/v1/products?limit=10&sort=desc");
-    assert_eq!(
-        req1.headers.get_u64(&X_VELDA_CACHE_HASH),
-        Some(expected_hash)
-    );
+    assert_eq!(req1.headers.cache_hash, expected_hash);
 
     // Step 2: Upstream response with Set-Cookie -> stored without Set-Cookie
-    let mut resp_headers = HeaderMap::new();
+    let mut resp_headers = HeaderWorkspace::empty(4);
     resp_headers.insert(CONTENT_TYPE, "application/json".parse().unwrap());
     resp_headers.insert(
         SET_COOKIE,
@@ -1001,7 +992,7 @@ fn test_end_to_end_http_cache_flow() {
     let uri2: Uri = "http://api.example.com/v1/products?limit=10&sort=desc"
         .parse()
         .unwrap();
-    let mut headers2 = HeaderMap::new();
+    let mut headers2 = HeaderWorkspace::empty(4);
     headers2.insert(http::header::HOST, "api.example.com".parse().unwrap());
     let mut req2 = L7Request::new(Method::GET, uri2, Version::HTTP_11, headers2, Body::Empty);
     match lookup_plugin.on_upstream_request(&mut req2, &mut target) {

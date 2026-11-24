@@ -158,11 +158,11 @@ impl PreRoutePlugin for ResourceLimitPlugin {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use http::{HeaderMap, Method, Uri, Version};
+    use http::{Method, Uri, Version};
     use serde_json::json;
-    use velda_core::Body;
+    use velda_core::{Body, HeaderWorkspace};
 
-    fn build_test_request(path_and_query: &str, headers: HeaderMap) -> L7Request {
+    fn build_test_request(path_and_query: &str, headers: HeaderWorkspace) -> L7Request {
         L7Request::new(
             Method::GET,
             path_and_query.parse::<Uri>().unwrap(),
@@ -175,7 +175,7 @@ mod tests {
     #[test]
     fn test_normal_request_within_limits_passes() {
         let plugin = ResourceLimitPlugin::new("resource_limit", ResourceLimits::default());
-        let mut headers = HeaderMap::new();
+        let mut headers = HeaderWorkspace::empty(4);
         headers.insert("accept", "application/json".parse().unwrap());
         headers.insert("user-agent", "Mozilla/5.0".parse().unwrap());
 
@@ -194,7 +194,10 @@ mod tests {
         let plugin = ResourceLimitPlugin::new("resource_limit", limits);
 
         // Path (14) + '?' + Query (20) = 35 bytes > 30 bytes
-        let mut req = build_test_request("/api/v1/orders?filter_date=2026-10-19", HeaderMap::new());
+        let mut req = build_test_request(
+            "/api/v1/orders?filter_date=2026-10-19",
+            HeaderWorkspace::empty(4),
+        );
         let action = plugin.on_request(&mut req);
         assert!(matches!(action, Action::Reject(RejectReason::UriTooLong)));
     }
@@ -210,7 +213,7 @@ mod tests {
         // Absolute-form URI with huge authority string: http://very-long-gateway-domain-name-exceeding-limit.example.com/api
         let mut req = build_test_request(
             "http://very-long-gateway-domain-name-exceeding-limit.example.com/api",
-            HeaderMap::new(),
+            HeaderWorkspace::empty(4),
         );
         let action = plugin.on_request(&mut req);
         assert!(matches!(action, Action::Reject(RejectReason::UriTooLong)));
@@ -224,7 +227,7 @@ mod tests {
         };
         let plugin = ResourceLimitPlugin::new("resource_limit", limits);
 
-        let mut headers = HeaderMap::new();
+        let mut headers = HeaderWorkspace::empty(4);
         headers.insert("h1", "v1".parse().unwrap());
         headers.insert("h2", "v2".parse().unwrap());
         headers.insert("h3", "v3".parse().unwrap());
@@ -245,7 +248,7 @@ mod tests {
         };
         let plugin = ResourceLimitPlugin::new("resource_limit", limits);
 
-        let mut headers = HeaderMap::new();
+        let mut headers = HeaderWorkspace::empty(4);
         // name (11) + ": " (2) + val (20) + "\r\n" (2) = 35
         headers.insert("x-custom-h1", "01234567890123456789".parse().unwrap());
         // Second header pushes it well beyond 40 bytes
@@ -267,7 +270,7 @@ mod tests {
         };
         let plugin = ResourceLimitPlugin::new("resource_limit", limits);
 
-        let mut headers = HeaderMap::new();
+        let mut headers = HeaderWorkspace::empty(4);
         // Single value of 25 bytes > 20 bytes threshold
         headers.insert(
             "x-large-cookie",
@@ -291,7 +294,7 @@ mod tests {
         };
         let plugin = ResourceLimitPlugin::new("resource_limit", limits);
 
-        let mut headers = HeaderMap::new();
+        let mut headers = HeaderWorkspace::empty(4);
         // Header name of 35 bytes > 30 byte max_single_header_bytes, even though value is only 1 byte
         let long_name = "x-an-extremely-long-header-name-bomb";
         headers.insert(
@@ -316,7 +319,7 @@ mod tests {
         };
         let plugin = ResourceLimitPlugin::new("resource_limit", limits);
 
-        let mut headers = HeaderMap::new();
+        let mut headers = HeaderWorkspace::empty(4);
         // Attacker sends 2 separate Cookie headers, each 18 bytes (<= 30 byte threshold),
         // but combined logical header is 18 + 2 + 18 = 38 bytes (> 30 byte threshold)
         headers.append("cookie", "session_token=1234".parse().unwrap());

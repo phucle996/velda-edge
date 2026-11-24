@@ -183,7 +183,7 @@ fn eval_real_ip(
     allow: &IpFilterEngine,
     deny: &IpFilterEngine,
 ) -> StreamStatus {
-    let mut iter = req.headers.get_all(&X_REAL_IP).iter();
+    let mut iter = req.headers.get_all(&X_REAL_IP);
     let Some(val) = iter.next() else {
         return StreamStatus::HeaderMissing;
     };
@@ -227,7 +227,7 @@ fn eval_xff(
     allow: &IpFilterEngine,
     deny: &IpFilterEngine,
 ) -> StreamStatus {
-    let mut iter = req.headers.get_all(&X_FORWARDED_FOR).iter();
+    let mut iter = req.headers.get_all(&X_FORWARDED_FOR);
     let Some(first_hdr) = iter.next() else {
         return StreamStatus::HeaderMissing;
     };

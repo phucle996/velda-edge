@@ -363,10 +363,10 @@ impl PreUpstreamPlugin for CsrfPlugin {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use http::{HeaderMap, HeaderValue, Uri, Version};
-    use velda_core::Body;
+    use http::{HeaderValue, Uri, Version};
+    use velda_core::{Body, HeaderWorkspace};
 
-    fn build_test_request(method: Method, uri_str: &str, headers: HeaderMap) -> L7Request {
+    fn build_test_request(method: Method, uri_str: &str, headers: HeaderWorkspace) -> L7Request {
         L7Request::new(
             method,
             uri_str.parse::<Uri>().unwrap(),
@@ -393,7 +393,7 @@ mod tests {
 
         let safe_methods = [Method::GET, Method::HEAD, Method::OPTIONS];
         for m in safe_methods {
-            let mut req = build_test_request(m, "/api/data", HeaderMap::new());
+            let mut req = build_test_request(m, "/api/data", HeaderWorkspace::empty(4));
             let action = plugin.on_upstream_request(&mut req, &mut target);
             assert!(matches!(action, Action::Continue));
         }
@@ -414,7 +414,7 @@ mod tests {
         let plugin = CsrfPlugin::new("csrf_test", config).unwrap();
         let mut target = 1;
 
-        let mut headers = HeaderMap::new();
+        let mut headers = HeaderWorkspace::empty(4);
         headers.insert(HOST, HeaderValue::from_static("api.example.com"));
         headers.insert(ORIGIN, HeaderValue::from_static("https://app.example.com"));
         headers.insert(
@@ -443,7 +443,7 @@ mod tests {
         let plugin = CsrfPlugin::new("csrf_test", config).unwrap();
         let mut target = 1;
 
-        let mut headers = HeaderMap::new();
+        let mut headers = HeaderWorkspace::empty(4);
         headers.insert(COOKIE, HeaderValue::from_static("aurora_csrf=token_legit"));
         headers.insert(
             "X-CSRF-Token",
@@ -480,7 +480,7 @@ mod tests {
         let valid_token = CsrfPlugin::mint_token(&key, &nonce, now);
 
         // 1. Valid signed token succeeds
-        let mut headers = HeaderMap::new();
+        let mut headers = HeaderWorkspace::empty(4);
         headers.insert(
             COOKIE,
             HeaderValue::from_str(&format!("__Host-velda_csrf={valid_token}")).unwrap(),
@@ -493,7 +493,7 @@ mod tests {
 
         // 2. Subdomain Cookie Tossing: attacker injects a matching cookie & header, but lacks secret key signature
         let fake_token = "000000006718a123.42424242424242424242424242424242.0000000000000000000000000000000000000000000000000000000000000000";
-        let mut headers_tossed = HeaderMap::new();
+        let mut headers_tossed = HeaderWorkspace::empty(4);
         headers_tossed.insert(COOKIE, HeaderValue::from_static(fake_token));
         headers_tossed.insert("X-CSRF-Token", HeaderValue::from_static(fake_token));
 
@@ -507,7 +507,7 @@ mod tests {
         // 3. Expired token rejected
         let expired_ts = now - 7201; // Past 7200s TTL
         let expired_token = CsrfPlugin::mint_token(&key, &nonce, expired_ts);
-        let mut headers_expired = HeaderMap::new();
+        let mut headers_expired = HeaderWorkspace::empty(4);
         headers_expired.insert(
             COOKIE,
             HeaderValue::from_str(&format!("__Host-velda_csrf={expired_token}")).unwrap(),
@@ -541,7 +541,7 @@ mod tests {
         let mut target = 1;
 
         // Case 1: Browser marks cross-site from untrusted origin -> Instant 403
-        let mut headers = HeaderMap::new();
+        let mut headers = HeaderWorkspace::empty(4);
         headers.insert("sec-fetch-site", HeaderValue::from_static("cross-site"));
         headers.insert(
             ORIGIN,
@@ -553,7 +553,7 @@ mod tests {
         assert!(matches!(action, Action::Reject(RejectReason::Forbidden)));
 
         // Case 2: Cross-site from explicitly trusted partner -> Proceeds to token check
-        let mut headers_trusted = HeaderMap::new();
+        let mut headers_trusted = HeaderWorkspace::empty(4);
         headers_trusted.insert("sec-fetch-site", HeaderValue::from_static("cross-site"));
         headers_trusted.insert(
             ORIGIN,
@@ -583,7 +583,7 @@ mod tests {
         let mut target = 1;
 
         for short_ref in ["x", "http:", "https", "1234567"] {
-            let mut headers = HeaderMap::new();
+            let mut headers = HeaderWorkspace::empty(4);
             headers.insert(HOST, HeaderValue::from_static("api.example.com"));
             headers.insert(REFERER, HeaderValue::from_str(short_ref).unwrap());
             headers.insert(COOKIE, HeaderValue::from_static("__Host-csrf=tok123"));
@@ -611,12 +611,12 @@ mod tests {
         let mut target = 1;
 
         for m in [Method::GET, Method::HEAD, Method::OPTIONS] {
-            let mut req = build_test_request(m, "/api/data", HeaderMap::new());
+            let mut req = build_test_request(m, "/api/data", HeaderWorkspace::empty(4));
             let action = plugin.on_upstream_request(&mut req, &mut target);
             assert!(matches!(action, Action::Continue));
         }
 
-        let mut req_post = build_test_request(Method::POST, "/api/data", HeaderMap::new());
+        let mut req_post = build_test_request(Method::POST, "/api/data", HeaderWorkspace::empty(4));
         let action_post = plugin.on_upstream_request(&mut req_post, &mut target);
         assert!(matches!(
             action_post,
@@ -639,7 +639,7 @@ mod tests {
         let plugin = CsrfPlugin::new("csrf_test", config).unwrap();
         let mut target = 1;
 
-        let mut headers = HeaderMap::new();
+        let mut headers = HeaderWorkspace::empty(4);
         headers.insert(COOKIE, HeaderValue::from_static("__Host-csrf="));
         headers.insert("X-CSRF-Token", HeaderValue::from_static(""));
 
@@ -663,7 +663,7 @@ mod tests {
         let plugin = CsrfPlugin::new("csrf_test", config).unwrap();
         let mut target = 1;
 
-        let mut headers = HeaderMap::new();
+        let mut headers = HeaderWorkspace::empty(4);
         headers.insert(HOST, HeaderValue::from_static("api.example.com"));
         headers.insert(ORIGIN, HeaderValue::from_static("api.example.com"));
         headers.insert(COOKIE, HeaderValue::from_static("__Host-csrf=tok123"));

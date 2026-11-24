@@ -191,12 +191,12 @@ impl PreUpstreamPlugin for ApiKeyAuthPlugin {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use http::{HeaderMap, Method, Uri, Version};
+    use http::{Method, Uri, Version};
     use serde_json::json;
     use velda_core::Body;
 
     fn make_req(header_val: Option<&'static str>) -> L7Request {
-        let mut headers = HeaderMap::new();
+        let mut headers = velda_core::HeaderWorkspace::empty(4);
         if let Some(v) = header_val {
             headers.insert(
                 HeaderName::from_static("x-api-key"),

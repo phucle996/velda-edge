@@ -220,8 +220,12 @@ impl PostResponsePlugin for ResponseHeaderMutationPlugin {
                 for (name, var) in &self.dynamic_sets {
                     match *var {
                         ResponseDynamicVar::RequestId => {
-                            resp.headers
-                                .set_hex128(name.clone(), req_headers.request_id_raw);
+                            if let Some(val) = req_headers
+                                .get(&velda_core::buffer::header::X_REQUEST_ID)
+                                .cloned()
+                            {
+                                resp.headers.insert(name.clone(), val);
+                            }
                         }
                         ResponseDynamicVar::Status => {
                             resp.headers
@@ -239,8 +243,12 @@ impl PostResponsePlugin for ResponseHeaderMutationPlugin {
                 for (name, var) in &self.dynamic_adds {
                     match *var {
                         ResponseDynamicVar::RequestId => {
-                            resp.headers
-                                .append_hex128(name.clone(), req_headers.request_id_raw);
+                            if let Some(val) = req_headers
+                                .get(&velda_core::buffer::header::X_REQUEST_ID)
+                                .cloned()
+                            {
+                                resp.headers.append(name.clone(), val);
+                            }
                         }
                         ResponseDynamicVar::Status => {
                             resp.headers
@@ -259,8 +267,12 @@ impl PostResponsePlugin for ResponseHeaderMutationPlugin {
                     if !resp.headers.contains_key(name) {
                         match *var {
                             ResponseDynamicVar::RequestId => {
-                                resp.headers
-                                    .set_hex128(name.clone(), req_headers.request_id_raw);
+                                if let Some(val) = req_headers
+                                    .get(&velda_core::buffer::header::X_REQUEST_ID)
+                                    .cloned()
+                                {
+                                    resp.headers.insert(name.clone(), val);
+                                }
                             }
                             ResponseDynamicVar::Status => {
                                 resp.headers

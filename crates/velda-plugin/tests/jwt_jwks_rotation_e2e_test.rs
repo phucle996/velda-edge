@@ -18,11 +18,11 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use base64::prelude::*;
 use http::header::HeaderValue;
-use http::{HeaderMap, Method, Uri, Version};
+use http::{Method, Uri, Version};
 use ring::hmac;
 use rustc_hash::FxHashMap;
 use serde_json::json;
-use velda_core::{Action, Body, L7Request, RejectReason};
+use velda_core::{Action, Body, HeaderWorkspace, L7Request, RejectReason};
 use velda_plugin::background::BackgroundPlugin;
 use velda_plugin::background::jwks_rotator::JwksRotatorPlugin;
 use velda_plugin::config::PluginConfig;
@@ -218,7 +218,7 @@ fn make_jwt_plugin_config(id: &str, secret: &str) -> PluginConfig {
 }
 
 fn make_auth_request(token: &str) -> L7Request {
-    let mut headers = HeaderMap::new();
+    let mut headers = HeaderWorkspace::empty(4);
     headers.insert(
         http::header::AUTHORIZATION,
         HeaderValue::from_str(&format!("Bearer {token}")).unwrap(),

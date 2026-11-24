@@ -356,9 +356,9 @@ mod tests {
     use super::*;
     use base64::prelude::*;
     use http::header::AUTHORIZATION;
-    use http::{HeaderMap, Method, Uri, Version};
+    use http::{Method, Uri, Version};
     use ring::hmac;
-    use velda_core::Body;
+    use velda_core::{Body, HeaderWorkspace};
 
     fn create_hs256_token(secret: &str, payload_json: &str) -> String {
         let header = r#"{"alg":"HS256","typ":"JWT"}"#;
@@ -410,7 +410,7 @@ mod tests {
             Method::GET,
             Uri::from_static("/api/resource"),
             Version::HTTP_11,
-            HeaderMap::new(),
+            HeaderWorkspace::empty(4),
             Body::Empty,
         );
 
@@ -443,7 +443,7 @@ mod tests {
             r#"{"sub":"user_123","roles":["admin","billing"],"exp":2500000000}"#,
         );
 
-        let mut headers = HeaderMap::new();
+        let mut headers = HeaderWorkspace::empty(4);
         headers.insert(
             AUTHORIZATION,
             HeaderValue::from_str(&format!("Bearer {token}")).unwrap(),
@@ -469,7 +469,7 @@ mod tests {
             Method::GET,
             Uri::from_static("/api/resource"),
             Version::HTTP_11,
-            HeaderMap::from_iter([(
+            HeaderWorkspace::from_iter([(
                 AUTHORIZATION,
                 HeaderValue::from_str(&format!("Bearer {token}")).unwrap(),
             )]),
@@ -494,7 +494,7 @@ mod tests {
         let plugin = JwtAuthPlugin::from_config(&config).unwrap();
         let bad_token = "invalid.token.signature";
 
-        let mut headers = HeaderMap::new();
+        let mut headers = HeaderWorkspace::empty(4);
         headers.insert(
             AUTHORIZATION,
             HeaderValue::from_str(&format!("Bearer {bad_token}")).unwrap(),
@@ -560,7 +560,7 @@ mod tests {
         let token = create_hs256_token(secret, r#"{"sub":"cookie_user","exp":2500000000}"#);
 
         // Test cookie extraction
-        let mut headers = HeaderMap::new();
+        let mut headers = HeaderWorkspace::empty(4);
         headers.insert(
             http::header::COOKIE,
             HeaderValue::from_str(&format!("theme=dark; auth_cookie={token}; lang=en")).unwrap(),
@@ -585,7 +585,7 @@ mod tests {
             Method::GET,
             query_uri,
             Version::HTTP_11,
-            HeaderMap::new(),
+            HeaderWorkspace::empty(4),
             Body::Empty,
         );
         let mut target_q = 1;
@@ -618,7 +618,7 @@ mod tests {
         let plugin = JwtAuthPlugin::from_config(&config).unwrap();
 
         // 3-byte UTF-8 character (e.g. 'Tiếng Việt' or '日') at the boundary
-        let mut headers = HeaderMap::new();
+        let mut headers = HeaderWorkspace::empty(4);
         headers.insert(
             AUTHORIZATION,
             HeaderValue::from_str("Tiếng_Việt_Bearer_Token").unwrap(),

@@ -9,10 +9,9 @@
 //!         └─► literal text                ──► Static(HeaderValue)
 //! ```
 //!
-//! Dynamic variables (`$request_id`, `$status`, `$timestamp_epoch`) are written directly
-//! as raw arithmetic values (`u128`, `u16`, `u64`) into [`velda_core::HeaderWorkspace`],
-//! deferring string materialization until the single-pass batch [`velda_core::HeaderWorkspace::render`]
-//! at the end of the `post_response` pipeline.
+//! Dynamic variables (`$request_id`, `$status`, `$timestamp_epoch`) are copied or formatted
+//! directly into [`velda_core::buffer::header::HeaderWorkspace`]: `$request_id` clones the
+//! incoming `x-request-id` header value directly without re-formatting.
 
 use http::header::HeaderValue;
 
@@ -21,7 +20,7 @@ use crate::error::PluginError;
 /// Dynamic runtime variables evaluated against outgoing response and incoming request workspace.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ResponseDynamicVar {
-    /// In-flight 128-bit request ID (`req_headers.request_id_raw`).
+    /// Incoming `x-request-id` header value from `req_headers`.
     RequestId,
     /// HTTP status code as a 16-bit integer (e.g. `200`, `404`).
     Status,
@@ -82,7 +81,7 @@ mod tests {
             StatusCode::SERVICE_UNAVAILABLE,
         ];
         for code in test_codes {
-            let hv = velda_core::buffer::resolve_u64_header_value(code.as_u16() as u64);
+            let hv = velda_core::buffer::header::resolve_u64_header_value(code.as_u16() as u64);
             assert_eq!(hv.to_str().unwrap(), code.as_str());
         }
     }

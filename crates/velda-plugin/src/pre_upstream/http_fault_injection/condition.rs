@@ -181,7 +181,7 @@ pub enum HeaderMatchRule {
 impl HeaderMatchRule {
     /// Evaluates this rule against request headers.
     #[inline]
-    pub fn matches(&self, headers: &http::HeaderMap) -> bool {
+    pub fn matches(&self, headers: &velda_core::HeaderWorkspace) -> bool {
         match self {
             Self::Present(name) => headers.contains_key(name),
             Self::Exact(name, expected) => headers
@@ -299,8 +299,8 @@ fn extract_client_ip(req: &L7Request) -> Option<u128> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use http::{HeaderMap, HeaderValue, Method, Uri, Version};
-    use velda_core::Body;
+    use http::{HeaderValue, Method, Uri, Version};
+    use velda_core::{Body, HeaderWorkspace};
 
     #[test]
     fn test_ip_range_matcher_single_cidr() {
@@ -346,7 +346,7 @@ mod tests {
             ..Default::default()
         };
 
-        let mut headers = HeaderMap::new();
+        let mut headers = HeaderWorkspace::empty(4);
         headers.insert(
             HeaderName::from_static("x-chaos-token"),
             HeaderValue::from_static("secret-qa-xyz"),
@@ -360,7 +360,7 @@ mod tests {
         );
         assert!(condition.matches(&req));
 
-        let mut invalid_headers = HeaderMap::new();
+        let mut invalid_headers = HeaderWorkspace::empty(4);
         invalid_headers.insert(
             HeaderName::from_static("x-chaos-token"),
             HeaderValue::from_static("wrong-token"),
@@ -383,7 +383,7 @@ mod tests {
             ..Default::default()
         };
 
-        let mut headers = HeaderMap::new();
+        let mut headers = HeaderWorkspace::empty(4);
         headers.insert(
             HeaderName::from_static("x-fault-delay-ms"),
             HeaderValue::from_static("999999"), // Exceeds clamp!
@@ -408,7 +408,7 @@ mod tests {
     #[test]
     fn test_dynamic_overrides_disabled_by_default() {
         let condition = HttpFaultCondition::default();
-        let mut headers = HeaderMap::new();
+        let mut headers = HeaderWorkspace::empty(4);
         headers.insert(
             HeaderName::from_static("x-fault-delay-ms"),
             HeaderValue::from_static("200"),
@@ -438,7 +438,7 @@ mod tests {
         };
 
         // Case 1: Attacker forges 10.0.0.1 in XFF left prefix, but edge set X-Real-IP: 203.0.113.5
-        let mut headers = HeaderMap::new();
+        let mut headers = HeaderWorkspace::empty(4);
         headers.insert(
             HeaderName::from_static("x-forwarded-for"),
             HeaderValue::from_static("10.0.0.1, 198.51.100.1"),
@@ -458,7 +458,7 @@ mod tests {
         assert!(!condition.matches(&req));
 
         // Case 2: No X-Real-IP, but XFF has right-most proxy IP
-        let mut headers2 = HeaderMap::new();
+        let mut headers2 = HeaderWorkspace::empty(4);
         headers2.insert(
             HeaderName::from_static("x-forwarded-for"),
             HeaderValue::from_static("198.51.100.1, 10.1.2.3"),

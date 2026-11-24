@@ -53,6 +53,21 @@ impl CompressionAlgorithm {
         }
     }
 
+    /// Returns a pre-validated [`http::HeaderValue`] for `Content-Encoding` (zero byte validation).
+    #[inline(always)]
+    pub fn as_header_value(&self) -> http::HeaderValue {
+        const GZIP_VAL: http::HeaderValue = http::HeaderValue::from_static("gzip");
+        const DEFLATE_VAL: http::HeaderValue = http::HeaderValue::from_static("deflate");
+        const BR_VAL: http::HeaderValue = http::HeaderValue::from_static("br");
+        const ZSTD_VAL: http::HeaderValue = http::HeaderValue::from_static("zstd");
+        match self {
+            Self::Gzip => GZIP_VAL,
+            Self::Deflate => DEFLATE_VAL,
+            Self::Brotli => BR_VAL,
+            Self::Zstd => ZSTD_VAL,
+        }
+    }
+
     /// Returns the single-bit mask representation for this algorithm.
     #[inline(always)]
     pub const fn bitmask(&self) -> u8 {

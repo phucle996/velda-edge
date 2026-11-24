@@ -289,6 +289,23 @@ impl RateLimitPlugin {
             .key_strategy
             .resolve_key(&self.config.key_headers, req)
     }
+
+    #[cold]
+    #[inline(never)]
+    fn reject_rate_limited(&self, req: &mut L7Request, retry_after: u64) -> Action {
+        const X_RATELIMIT_RESET: HeaderName = HeaderName::from_static("x-ratelimit-reset");
+        const X_RATELIMIT_LIMIT: HeaderName = HeaderName::from_static("x-ratelimit-limit");
+        const X_RATELIMIT_REMAINING: HeaderName = HeaderName::from_static("x-ratelimit-remaining");
+
+        req.headers.insert_bypass_u64(RETRY_AFTER, retry_after);
+        req.headers
+            .insert_bypass_u64(X_RATELIMIT_RESET, retry_after);
+        req.headers
+            .insert_bypass_u64(X_RATELIMIT_LIMIT, self.config.rate_per_second);
+        req.headers.insert_bypass_u64(X_RATELIMIT_REMAINING, 0);
+
+        Action::Reject(RejectReason::TooManyRequests)
+    }
 }
 
 impl PreUpstreamPlugin for RateLimitPlugin {
@@ -368,17 +385,7 @@ impl PreUpstreamPlugin for RateLimitPlugin {
         if allowed {
             Action::Continue
         } else {
-            req.headers.insert_bypass_u64(RETRY_AFTER, retry_after);
-            req.headers
-                .insert_bypass_u64(HeaderName::from_static("x-ratelimit-reset"), retry_after);
-            req.headers.insert_bypass_u64(
-                HeaderName::from_static("x-ratelimit-limit"),
-                self.config.rate_per_second,
-            );
-            req.headers
-                .insert_bypass_u64(HeaderName::from_static("x-ratelimit-remaining"), 0);
-
-            Action::Reject(RejectReason::TooManyRequests)
+            self.reject_rate_limited(req, retry_after)
         }
     }
 
@@ -396,10 +403,10 @@ impl PreUpstreamPlugin for RateLimitPlugin {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use http::{HeaderMap, HeaderValue, Method, Uri, Version};
-    use velda_core::Body;
+    use http::{HeaderValue, Method, Uri, Version};
+    use velda_core::{Body, HeaderWorkspace};
 
-    fn make_test_request(headers: HeaderMap) -> L7Request {
+    fn make_test_request(headers: HeaderWorkspace) -> L7Request {
         L7Request::new(
             Method::GET,
             Uri::from_static("/v1/resource"),
@@ -414,7 +421,7 @@ mod tests {
         // 2 requests per second with burst capacity of 2
         let plugin = RateLimitPlugin::new("rate-tb", 2);
 
-        let mut req = make_test_request(HeaderMap::new());
+        let mut req = make_test_request(HeaderWorkspace::empty(4));
 
         let mut target = 1;
 
@@ -435,7 +442,6 @@ mod tests {
                 assert_eq!(req.headers.get_u64("x-ratelimit-remaining"), Some(0));
                 assert_eq!(req.headers.get_u64("x-ratelimit-limit"), Some(2));
                 assert!(req.headers.contains_key("retry-after"));
-                req.headers.render();
                 assert_eq!(req.headers.get("x-ratelimit-remaining").unwrap(), "0");
                 assert_eq!(req.headers.get("x-ratelimit-limit").unwrap(), "2");
                 assert!(req.headers.bypass_headers().count() >= 2);
@@ -453,7 +459,7 @@ mod tests {
             ..RateLimitConfig::default()
         };
         let plugin = RateLimitPlugin::with_config("rate-fw", config);
-        let mut req = make_test_request(HeaderMap::new());
+        let mut req = make_test_request(HeaderWorkspace::empty(4));
         let mut target = 1;
 
         // 1st request -> PASS
@@ -484,19 +490,19 @@ mod tests {
         let plugin = RateLimitPlugin::with_config("rate-prio", config);
 
         // Request 1: has x-device-id
-        let mut h1 = HeaderMap::new();
+        let mut h1 = HeaderWorkspace::empty(4);
         h1.insert("x-device-id", HeaderValue::from_static("device-alpha"));
         let req1 = make_test_request(h1);
         assert_eq!(plugin.resolve_key(&req1), "x-device-id:device-alpha");
 
         // Request 2: no device-id, has x-api-key
-        let mut h2 = HeaderMap::new();
+        let mut h2 = HeaderWorkspace::empty(4);
         h2.insert("x-api-key", HeaderValue::from_static("secret-key-1"));
         let req2 = make_test_request(h2);
         assert_eq!(plugin.resolve_key(&req2), "x-api-key:secret-key-1");
 
         // Request 3: no headers, has x-forwarded-for
-        let mut h3 = HeaderMap::new();
+        let mut h3 = HeaderWorkspace::empty(4);
         h3.insert("x-forwarded-for", HeaderValue::from_static("192.168.1.100"));
         let req3 = make_test_request(h3);
         assert_eq!(plugin.resolve_key(&req3), "ip:192.168.1.100");
@@ -515,7 +521,7 @@ mod tests {
         };
         let plugin = RateLimitPlugin::with_config("rate-comp", config);
 
-        let mut headers = HeaderMap::new();
+        let mut headers = HeaderWorkspace::empty(4);
         headers.insert("x-forwarded-for", HeaderValue::from_static("10.0.0.1"));
         headers.insert("x-device-id", HeaderValue::from_static("phone-42"));
         // x-api-key is missing
@@ -539,7 +545,7 @@ mod tests {
         // Simulate Redis disconnection
         plugin.redis_pool.set_connected(false);
 
-        let mut req = make_test_request(HeaderMap::new());
+        let mut req = make_test_request(HeaderWorkspace::empty(4));
         let mut target = 1;
         // 1st request -> PASS via memory fallback
         assert!(matches!(
@@ -567,7 +573,7 @@ mod tests {
         // Disconnect redis
         plugin.redis_pool.set_connected(false);
 
-        let mut req = make_test_request(HeaderMap::new());
+        let mut req = make_test_request(HeaderWorkspace::empty(4));
         let mut target = 1;
         // Should continuously pass through (fail-open)
         assert!(matches!(

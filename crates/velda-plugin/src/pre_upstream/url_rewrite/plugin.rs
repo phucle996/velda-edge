@@ -200,15 +200,15 @@ impl PreUpstreamPlugin for UrlRewritePlugin {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use http::{HeaderMap, Method, Version};
-    use velda_core::Body;
+    use http::{Method, Version};
+    use velda_core::{Body, HeaderWorkspace};
 
     fn make_test_request(uri_str: &str) -> L7Request {
         L7Request::new(
             Method::GET,
             uri_str.parse().unwrap(),
             Version::HTTP_11,
-            HeaderMap::new(),
+            HeaderWorkspace::empty(0),
             Body::Empty,
         )
     }

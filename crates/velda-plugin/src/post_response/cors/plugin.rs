@@ -282,7 +282,7 @@ impl PostResponsePlugin for CorsResponsePlugin {
         // Step 2 (write): `Vary: Origin` for origin-dependent policies (RFC 9110 §12.5.5),
         // emitted for allowed, disallowed and missing `Origin` alike.
         if (self.flags & CORS_FLAG_NEEDS_VARY_ORIGIN) != 0 {
-            let mut vary_iter = resp.headers.get_all(VARY).iter();
+            let mut vary_iter = resp.headers.get_all(VARY);
             match vary_iter.next() {
                 None => {
                     resp.headers

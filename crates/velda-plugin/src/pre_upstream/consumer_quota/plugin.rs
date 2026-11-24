@@ -325,16 +325,19 @@ impl PreUpstreamPlugin for ConsumerQuotaPlugin {
             QuotaDecision::Exhausted {
                 window_name,
                 reset_seconds,
-            } => {
-                // Bit-1 Bypass Arithmetic Header Injection on Rejection (RFC 6585)
-                req.headers.insert_bypass_u64(RETRY_AFTER, reset_seconds);
-                req.headers.insert_bypass_u64(X_QUOTA_REMAINING.clone(), 0);
-                if let Ok(val) = HeaderValue::from_str(&window_name) {
-                    req.headers.insert_bypass(X_QUOTA_WINDOW.clone(), val);
-                }
-
-                Action::Reject(RejectReason::TooManyRequests)
-            }
+            } => reject_exhausted(req, &window_name, reset_seconds),
         }
     }
+}
+
+#[cold]
+#[inline(never)]
+fn reject_exhausted(req: &mut L7Request, window_name: &str, reset_seconds: u64) -> Action {
+    // Bit-1 Bypass Arithmetic Header Injection on Rejection (RFC 6585)
+    req.headers.insert_bypass_u64(RETRY_AFTER, reset_seconds);
+    req.headers.insert_bypass_u64(X_QUOTA_REMAINING.clone(), 0);
+    if let Ok(val) = HeaderValue::from_str(window_name) {
+        req.headers.insert_bypass(X_QUOTA_WINDOW.clone(), val);
+    }
+    Action::Reject(RejectReason::TooManyRequests)
 }

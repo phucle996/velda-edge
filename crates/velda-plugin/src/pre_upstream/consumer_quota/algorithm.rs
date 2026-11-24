@@ -182,19 +182,22 @@ impl WindowState {
                     *curr_epoch = actual_epoch;
                 }
 
-                // Integer Basis-Points Interpolation:
+                // Integer Basis-Points Interpolation (u128 intermediate prevents u64 multiplication overflow):
+                let window_secs = cfg.window_seconds as u128;
                 let elapsed_in_window = now_sec % cfg.window_seconds;
-                let current_weight_bp = (elapsed_in_window * 10_000) / cfg.window_seconds;
+                let current_weight_bp =
+                    ((elapsed_in_window as u128).saturating_mul(10_000) / window_secs) as u64;
                 let prev_weight_bp = 10_000u64.saturating_sub(current_weight_bp);
-                let estimated_prev = (*prev_count * prev_weight_bp) / 10_000;
-                let total_estimated = *curr_count + estimated_prev;
+                let estimated_prev =
+                    ((*prev_count as u128).saturating_mul(prev_weight_bp as u128) / 10_000) as u64;
+                let total_estimated = curr_count.saturating_add(estimated_prev);
 
                 let reset_seconds = cfg.window_seconds.saturating_sub(elapsed_in_window).max(1);
 
                 if total_estimated < cfg.limit {
                     *curr_count = curr_count.saturating_add(1);
                     *delta_consumed = delta_consumed.saturating_add(1);
-                    let remaining = cfg.limit.saturating_sub(total_estimated + 1);
+                    let remaining = cfg.limit.saturating_sub(total_estimated.saturating_add(1));
                     (true, remaining, reset_seconds)
                 } else {
                     (false, 0, reset_seconds)
@@ -230,15 +233,19 @@ impl WindowState {
             } => {
                 let elapsed_nanos = now_instant
                     .saturating_duration_since(*last_refill)
-                    .as_nanos() as u64;
+                    .as_nanos();
+                let window_secs = cfg.window_seconds.max(1) as u128;
 
                 let max_nano = cfg.limit.saturating_mul(NANO_TOKENS_PER_UNIT);
-                // Fill rate per nanosecond in integer fixed-point:
-                let fill_rate_per_sec = cfg.limit / cfg.window_seconds.max(1);
-                let refill_nano = elapsed_nanos.saturating_mul(fill_rate_per_sec);
-
-                *nano_tokens = nano_tokens.saturating_add(refill_nano).min(max_nano);
-                *last_refill = now_instant;
+                // Exact fixed-point refill: (elapsed_ns * limit) / window_seconds.
+                // Works accurately even when limit < window_seconds (e.g. 50 req / 5 hours).
+                let refill_nano_u128 =
+                    elapsed_nanos.saturating_mul(cfg.limit as u128) / window_secs;
+                if refill_nano_u128 > 0 {
+                    let refill_nano = refill_nano_u128.min(u64::MAX as u128) as u64;
+                    *nano_tokens = nano_tokens.saturating_add(refill_nano).min(max_nano);
+                    *last_refill = now_instant;
+                }
 
                 let cost_nano = NANO_TOKENS_PER_UNIT;
                 if *nano_tokens >= cost_nano {
@@ -248,8 +255,14 @@ impl WindowState {
                     (true, remaining, 0)
                 } else {
                     let needed_nano = cost_nano.saturating_sub(*nano_tokens);
-                    let wait_secs = if fill_rate_per_sec > 0 {
-                        (needed_nano / (fill_rate_per_sec * NANO_TOKENS_PER_UNIT)).max(1)
+                    let wait_secs = if cfg.limit > 0 {
+                        let denom =
+                            (cfg.limit as u128).saturating_mul(NANO_TOKENS_PER_UNIT as u128);
+                        ((needed_nano as u128)
+                            .saturating_mul(window_secs)
+                            .div_ceil(denom)
+                            .min(u64::MAX as u128) as u64)
+                            .max(1)
                     } else {
                         cfg.window_seconds
                     };
@@ -422,5 +435,56 @@ impl ShardedQuotaState {
                 win.reconcile_global(global_count);
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::time::Duration;
+
+    #[test]
+    fn test_sub_rps_token_bucket_refill_precision() {
+        let cfg = QuotaWindowConfig {
+            name: "5h_ai_limit".to_string(),
+            window_seconds: 18_000, // 5 hours
+            limit: 50,              // 50 requests / 18000s (0.00277 RPS < 1 RPS)
+            algorithm: QuotaAlgorithm::TokenBucket,
+        };
+        let t0 = Instant::now();
+        let mut state = WindowState::new(&cfg, 1_000_000, t0);
+
+        for _ in 0..50 {
+            let (allowed, _, _) = state.evaluate(&cfg, 1_000_000, t0);
+            assert!(allowed);
+        }
+        // Exhausted: wait should be ~360s, not stuck at 18000s
+        let (allowed, _, wait_secs) = state.evaluate(&cfg, 1_000_000, t0);
+        assert!(!allowed);
+        assert_eq!(wait_secs, 360);
+
+        // After 360 seconds, exactly 1 token must have refilled (50 / 18000 * 360 = 1.0)
+        let t1 = t0 + Duration::from_secs(360);
+        let (allowed, _, _) = state.evaluate(&cfg, 1_000_360, t1);
+        assert!(allowed);
+    }
+
+    #[test]
+    fn test_sliding_window_large_count_no_overflow() {
+        let cfg = QuotaWindowConfig {
+            name: "large".to_string(),
+            window_seconds: 3600,
+            limit: u64::MAX / 2,
+            algorithm: QuotaAlgorithm::SlidingWindow,
+        };
+        let t0 = Instant::now();
+        let mut state = WindowState::Sliding {
+            curr_epoch: 10,
+            curr_count: 100,
+            prev_count: u64::MAX / 4,
+            delta_consumed: 0,
+        };
+        let (allowed, _, _) = state.evaluate(&cfg, 10 * 3600 + 1800, t0);
+        assert!(allowed);
     }
 }
