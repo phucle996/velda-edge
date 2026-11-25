@@ -1,9 +1,7 @@
 //! Integration tests for the flat single-allocation [`HeaderWorkspace`].
 
-use http::header::{AUTHORIZATION, CONTENT_TYPE, HeaderName, HeaderValue, RETRY_AFTER};
+use http::header::{AUTHORIZATION, CONTENT_TYPE, HeaderName, HeaderValue};
 use velda_core::buffer::header::{DEFAULT_HEADER_CAPACITY, MAX_WIRE_HEADERS};
-use velda_core::error::RejectReason;
-use velda_core::lut::{GrpcStatus, get_reject_meta};
 use velda_core::{HeaderWorkspace, TAG_BYPASS_BIT, header_key};
 
 #[test]
@@ -82,7 +80,7 @@ fn test_header_workspace_direct_reads_and_writes() {
 }
 
 #[test]
-fn test_header_workspace_bypass_bit_and_in_place_rejection() {
+fn test_header_workspace_bypass_bit_and_retain_bypass_only() {
     let mut ws = HeaderWorkspace::new(32);
     let req_id_str = ws.request_id().to_str().unwrap().to_string();
 
@@ -91,56 +89,99 @@ fn test_header_workspace_bypass_bit_and_in_place_rejection() {
         http::header::COOKIE,
         HeaderValue::from_static("session=abc"),
     );
+    ws.insert(
+        http::header::USER_AGENT,
+        HeaderValue::from_static("curl/8.0"),
+    );
     let h_ratelimit = HeaderName::from_static("x-ratelimit-remaining");
     ws.insert_bypass_u64(h_ratelimit.clone(), 0);
     assert_eq!(ws.bypass_headers().count(), 2);
     assert_ne!(header_key(b"host") & TAG_BYPASS_BIT, TAG_BYPASS_BIT);
 
-    let meta = get_reject_meta(RejectReason::TooManyRequests);
-    ws.prepare_for_rejection(meta, true);
+    ws.retain_bypass_only();
 
+    assert_eq!(ws.len(), 2);
     assert!(!ws.contains_key(http::header::HOST));
     assert!(!ws.contains_key(http::header::COOKIE));
-    assert_eq!(
-        ws.get(&HeaderWorkspace::X_REQUEST_ID).unwrap(),
-        req_id_str.as_str()
-    );
-    assert_eq!(ws.get(&h_ratelimit).unwrap(), "0");
-    assert_eq!(ws.get(http::header::CACHE_CONTROL).unwrap(), "no-store");
-    assert_eq!(
-        ws.get(http::header::CONTENT_TYPE).unwrap(),
-        "text/plain; charset=utf-8"
-    );
-    assert_eq!(ws.get(http::header::CONTENT_LENGTH).unwrap(), "22");
-    assert_eq!(ws.get(RETRY_AFTER).unwrap(), "1");
-}
-
-#[test]
-fn test_header_workspace_grpc_rejection_in_place() {
-    let mut ws = HeaderWorkspace::new(32);
-    let req_id_str = ws.request_id().to_str().unwrap().to_string();
-
-    ws.insert(
-        http::header::HOST,
-        HeaderValue::from_static("grpc.example.com"),
-    );
-    ws.insert(
-        http::header::USER_AGENT,
-        HeaderValue::from_static("grpc-go/1.64"),
-    );
-
-    ws.prepare_for_grpc_rejection(GrpcStatus::ResourceExhausted, Some("quota exceeded"));
-
-    assert!(!ws.contains_key(http::header::HOST));
     assert!(!ws.contains_key(http::header::USER_AGENT));
     assert_eq!(
         ws.get(&HeaderWorkspace::X_REQUEST_ID).unwrap(),
         req_id_str.as_str()
     );
-    assert_eq!(
-        ws.get(http::header::CONTENT_TYPE).unwrap(),
-        "application/grpc"
+    assert_eq!(ws.get(&h_ratelimit).unwrap(), "0");
+}
+
+#[test]
+fn test_header_workspace_prehashed_key_and_simd_boundaries() {
+    use velda_core::HeaderKey;
+
+    const KEY_SFS: HeaderKey = HeaderKey::from_static("sec-fetch-site");
+    const KEY_007: HeaderKey = HeaderKey::from_static("x-boundary-007");
+    const KEY_031: HeaderKey = HeaderKey::from_static("x-boundary-031");
+    const KEY_063: HeaderKey = HeaderKey::from_static("x-boundary-063");
+    const KEY_255: HeaderKey = HeaderKey::from_static("x-boundary-255");
+    const KEY_MISS: HeaderKey = HeaderKey::from_static("x-boundary-missing");
+    const KEY_COOKIE: HeaderKey = HeaderKey::from_static("cookie");
+
+    let mut ws = HeaderWorkspace::empty(DEFAULT_HEADER_CAPACITY);
+    for i in 0..256usize {
+        let name_str = format!("x-boundary-{i:03}");
+        let name = HeaderName::from_bytes(name_str.as_bytes()).unwrap();
+        let val = HeaderValue::from_str(&format!("v-{i}")).unwrap();
+        assert!(ws.push_prehashed(header_key(name_str.as_bytes()), name, val));
+    }
+
+    assert_eq!(ws.capacity(), MAX_WIRE_HEADERS);
+    assert_eq!(ws.get_prehashed(&KEY_007).unwrap(), "v-7");
+    assert_eq!(ws.get_prehashed(&KEY_031).unwrap(), "v-31");
+    assert_eq!(ws.get_prehashed(&KEY_063).unwrap(), "v-63");
+    assert_eq!(ws.get_prehashed(&KEY_255).unwrap(), "v-255");
+    assert!(!ws.contains_prehashed(&KEY_MISS));
+    assert!(!ws.contains_prehashed(&KEY_SFS));
+
+    // Overwrite and duplicate cleanup via insert_prehashed
+    let prev = ws.insert_prehashed(&KEY_031, HeaderValue::from_static("updated-31"));
+    assert_eq!(prev.unwrap(), "v-31");
+    assert_eq!(ws.get_prehashed(&KEY_031).unwrap(), "updated-31");
+
+    // Multi-value get_all_prehashed across slots
+    let mut multi = HeaderWorkspace::empty(DEFAULT_HEADER_CAPACITY);
+    multi.append(http::header::COOKIE, HeaderValue::from_static("a=1"));
+    multi.append(http::header::HOST, HeaderValue::from_static("example.com"));
+    multi.append(http::header::COOKIE, HeaderValue::from_static("b=2"));
+    let cookies: Vec<&str> = multi
+        .get_all_prehashed(&KEY_COOKIE)
+        .map(|v| v.to_str().unwrap())
+        .collect();
+    assert_eq!(cookies, vec!["a=1", "b=2"]);
+
+    // Verify clear() followed by repopulation masks stale tail tags cleanly
+    multi.clear();
+    assert!(!multi.contains_prehashed(&KEY_COOKIE));
+    multi.insert_prehashed(&KEY_SFS, HeaderValue::from_static("same-origin"));
+    assert_eq!(multi.get_prehashed(&KEY_SFS).unwrap(), "same-origin");
+    assert!(!multi.contains_prehashed(&KEY_COOKIE));
+}
+
+#[test]
+fn test_header_workspace_7bit_collision_safety() {
+    use velda_core::HeaderKey;
+
+    // Intentionally craft a bogus HeaderKey whose tag7 matches "authorization"'s tag7
+    // while `name` differs, ensuring exact HeaderName verification rejects false positives.
+    let mut ws = HeaderWorkspace::empty(DEFAULT_HEADER_CAPACITY);
+    ws.insert(
+        HeaderName::from_static("x-decoy"),
+        HeaderValue::from_static("decoy-secret"),
     );
-    assert_eq!(ws.get("grpc-status").unwrap(), "8");
-    assert_eq!(ws.get("grpc-message").unwrap(), "quota exceeded");
+    let decoy_tag7 = velda_core::fold_tag_hash7(header_key(b"x-decoy"));
+    let forged_key = HeaderKey {
+        hash64: header_key(b"x-decoy"),
+        tag7: decoy_tag7,
+        name: AUTHORIZATION.clone(),
+    };
+    assert!(
+        ws.get_prehashed(&forged_key).is_none(),
+        "7-bit tag match alone must never return a mismatched header name"
+    );
 }

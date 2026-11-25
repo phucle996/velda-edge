@@ -1,92 +1,95 @@
 # Header Mutation Plugin (`header_mutation`) — Architectural Specification
 
-This document details the internal architecture, zero-allocation algorithms, memory layout, and request transformation pipeline of the **`header_mutation`** plugin in Velda Edge.
+Technical specification of memory layout, compile-time pre-hashing, SIMD tag-filtered `HeaderWorkspace` operations, and complexity bounds in `header_mutation`.
 
 ---
 
-## 1. Architectural Philosophy & Invariants
+## 1. Execution Model & Invariants
 
-The `header_mutation` plugin operates at the **`pre_upstream`** pipeline phase immediately after route matching and load balancing, transforming the outgoing `L7Request` before upstream socket transmission.
+`header_mutation` runs on Frontline Traffic Workers (`velda-worker-{i}`) in `pre_upstream` against `req.headers: HeaderWorkspace`.
 
-```mermaid
-flowchart TD
-    Req["Incoming L7Request"] --> HopByHop{"strip_hop_by_hop = true?"}
-    
-    HopByHop -->|Yes| FastHop["1. Combined CONNECTION check & removal\n2. Strip custom connection-listed tokens\n3. Remove RFC Hop-by-Hop headers"]
-    HopByHop -->|No| RemoveBlacklist
-    FastHop --> RemoveBlacklist
-    
-    RemoveBlacklist["Remove Blacklisted Headers\n(remove_headers: O(1) HeaderMap probes)"]
-    
-    RemoveBlacklist --> Rename["Rename Headers In-Place\n• Single-value fast path (99.99%)\n• Anti-shadowing destination cleanup"]
-    
-    Rename --> StaticSet["Static Sets\n(100% direct insert, 0 match branches)"]
-    
-    StaticSet --> StaticAppend["Static Appends\n(100% direct append)"]
-    
-    StaticAppend --> DynamicCheck{"Any Dynamic Variables?"}
-    DynamicCheck -->|Yes| DynCtx["DynamicContext (Stack-Cached)\n• $client_ip (cached on first resolve)\n• $scheme (cached on first resolve)\n• $request_id (W3C Slot 0)\n• $host, $method, $path"]
-    DynamicCheck -->|No| Finish["Action::Continue\n(Forward to Upstream)"]
-    
-    DynCtx --> Finish
+```text
++------------------------------------------------------------------------------+
+|  HeaderMutationPlugin (#[repr(C, align(64))])                                |
+|  [+0] op_mask: u8  (bit 0: OP_REMOVE | bit 1: OP_SET | bit 2: OP_APPEND)    |
++------------------------------------------------------------------------------+
+        |
+        v  op_mask & OP_REMOVE
++------------------------------------------------------------------------------+
+|  For each key: &HeaderKey in remove_keys                                     |
+|    1. req.headers.contains_prehashed(key)  <-- AVX2/SSE2/NEON/SWAR tag7 scan |
+|    2. If hit: req.headers.remove(&key.name) <-- removes ALL matching slots   |
++------------------------------------------------------------------------------+
+        |
+        v  op_mask & OP_SET
++------------------------------------------------------------------------------+
+|  For each (key, val) in sets                                                 |
+|    req.headers.insert_prehashed(key, val.clone())                            |
+|    - Updates first matching slot in place (clears bypass bit to 0)           |
+|    - Removes any trailing duplicate slots                                    |
+|    - Or pushes new slot with tag = key.tag7                                  |
++------------------------------------------------------------------------------+
+        |
+        v  op_mask & OP_APPEND
++------------------------------------------------------------------------------+
+|  For each (name, val) in appends                                             |
+|    req.headers.append(name.clone(), val.clone())                             |
++------------------------------------------------------------------------------+
+        |
+        v
+  Action::Continue
 ```
 
-### Core Invariants:
-1. **Pre-Partitioned Static & Dynamic Arrays**: Static header specifications are segregated into `static_sets` and `static_appends` during initialization. The request hot path inserts them directly into `HeaderMap` without executing `match` branching.
-2. **Single-Pass Hop-by-Hop Removal**: `headers.remove(http::header::CONNECTION)` combines the presence check and table removal in a single hash probe. In clean HTTP/2, HTTP/3, or keep-alive requests without `Connection`, token splitting is completely bypassed.
-3. **Anti-Hop-by-Hop Strip Abuse (CVE-2022-26143)**: Fast length-bucket dispatch guarantees that essential protocol headers (`Host`, `Authorization`, `x-request-id`, `x-real-ip`, etc.) cannot be deleted by client-supplied `Connection` tokens.
-4. **Anti-Shadowing Header Renaming**: Before a header is renamed from `source` to `target`, the destination `target` is wiped clean to prevent malicious client-injected shadow headers.
-5. **Stack-Cached Dynamic Context**: When a request references dynamic variables (e.g. both `x-real-ip` and `x-forwarded-for` referencing `$client_ip`), resolution runs once and caches the `HeaderValue` on the stack, eliminating redundant string operations.
-6. **Zero Allocation for Static Headers**: Pre-computes `HeaderName` and `HeaderValue` during configuration compilation, requiring zero heap allocation during request serving.
+### Core Architectural Invariants
+
+1. **Zero Implicit Header Touches**: Unconfigured headers are never read, validated, or mutated. There is no hop-by-hop scanner, no `is_protected_*` / `is_forbidden_*` filter, and no fallback across headers.
+2. **Bypass-Tag Agnostic Deletion & Overwrite**: `HeaderWorkspace::remove_by_name` and `HeaderWorkspace::insert_internal_tag7` match slots via `(tag & TAG_BYTE_HASH_MASK) == tag7` (`TAG_BYTE_HASH_MASK = 0x7F`), ignoring bit 7 (`TAG_BYTE_BYPASS_BIT = 0x80`). Configured rules can delete or overwrite bypass-tagged entries such as `x-request-id` or `host`.
+3. **Deterministic Compile-Time Ordering**: During `HeaderMutationPlugin::from_config`, `remove_headers`, `set_headers`, and `append_headers` are parsed into strongly typed `HeaderName` / `HeaderValue` values and sorted lexicographically (`sort_unstable_by`), eliminating `HashMap` iteration-order variance across restarts.
+4. **Compile-Time / Init-Time FNV-1a Pre-Hashing**: `remove_keys` and `sets` compute `HeaderKey { hash64, tag7, name }` once at plugin construction (`HeaderKey::from_name`), avoiding repeated FNV-1a hashing for `contains_prehashed` and `insert_prehashed` on the serving hot path.
 
 ---
 
-## 2. Memory Layout & Data Structures
+## 2. Memory Layout (`HeaderMutationPlugin`)
 
-```mermaid
-classDiagram
-    class HeaderMutationPlugin {
-        +String id
-        +HeaderMutationConfig config
-        -Vec~HeaderName, HeaderValue~ static_sets
-        -Vec~HeaderName, DynamicVar~ dynamic_sets
-        -Vec~HeaderName, HeaderValue~ static_appends
-        -Vec~HeaderName, DynamicVar~ dynamic_appends
-    }
+Defined in [plugin.rs](plugin.rs) with `#[repr(C, align(64))]`:
 
-    class HeaderMutationConfig {
-        +bool strip_hop_by_hop
-        +Vec~HeaderName~ remove
-        +Vec~HeaderName, HeaderName~ rename
-        +Vec~HeaderName, HeaderValueSpec~ set
-        +Vec~HeaderName, HeaderValueSpec~ append
-    }
-
-    class HeaderValueSpec {
-        <<enumeration>>
-        Static(HeaderValue)
-        Variable(DynamicVar)
-    }
-
-    class DynamicVar {
-        <<enumeration>>
-        ClientIp
-        RequestId
-        Scheme
-        Host
-        Method
-        Path
-    }
-
-    HeaderMutationPlugin *-- HeaderMutationConfig
-    HeaderMutationConfig *-- HeaderValueSpec
-    HeaderValueSpec *-- DynamicVar
+```text
+Offset 0 (Cache Line 0 - Hot Dispatch Metadata & Vec Headers)
++------------------+----------------------------------------------------------+
+| op_mask: u8      | Bitmask of enabled ops (0 => immediate return Continue) |
+| (padding: 7B)    | Aligns first Vec descriptor to 8-byte boundary           |
+| remove_keys      | Vec<HeaderKey>            (24B ptr/cap/len)              |
+| sets             | Vec<(HeaderKey, HeaderValue)> (24B ptr/cap/len)          |
+| appends          | Vec<(HeaderName, HeaderValue)> (24B ptr/cap/len)         |
++------------------+----------------------------------------------------------+
+Cold Introspection Region
++------------------+----------------------------------------------------------+
+| id: String       | Plugin identifier                                        |
+| config           | HeaderMutationConfig (remove, set, append retained cfg)  |
++------------------+----------------------------------------------------------+
 ```
 
 ---
 
-## 3. Hot-Path Complexity & Performance
+## 3. SIMD Tag Filtering & Multi-Target Dispatch
 
-- **Static Insertion / Removal**: $O(1)$ amortized hash table lookup via `http::HeaderMap`.
-- **Hop-by-Hop Stripping**: $O(K)$ where $K$ is the number of hop-by-hop headers present (typically 0 or 1).
-- **Dynamic Context**: $O(1)$ stack allocation, caching `client_ip` and `scheme` pointers.
+When `contains_prehashed(key)` and `insert_prehashed(key, val)` probe `HeaderWorkspace::tags`, `velda-core` dispatches at compile time (`crates/velda-core/src/buffer/header.rs`) across the active target matrix:
+
+- **`x86_64` + `avx2`**: Probes 32 `tags` bytes per cycle (`_mm256_and_si256` with `0x7F` + `_mm256_cmpeq_epi8` + `_mm256_movemask_epi8`).
+- **`x86_64` + `sse2` (baseline)**: Probes 16 `tags` bytes per cycle (`_mm_and_si128` + `_mm_cmpeq_epi8` + `_mm_movemask_epi8`).
+- **`aarch64` (`neon`)**: Probes 16 `tags` bytes per cycle (`vandq_u8` + `vceqq_u8` + 128-bit lane reduction).
+- **Portable 64-bit SWAR fallback (`not(avx2|sse2|aarch64)`)**: Probes 8 `tags` bytes per cycle via general-purpose 64-bit ALU mask arithmetic.
+
+False positive `tag7` hits (rate $\le 1/127$ for a uniform 7-bit tag modulo `{1..127}`) are verified immediately against exact `HeaderName` before returning or mutating a slot.
+
+---
+
+## 4. Complexity Bounds
+
+Let $L$ be the current header count in `HeaderWorkspace` ($L \le 256$ hard ceiling), $R$ be `remove_keys.len()`, $S$ be `sets.len()`, and $A$ be `appends.len()`:
+
+- **No-op (`op_mask == 0`)**: $O(1)$ — single byte load + branch.
+- **Remove (`OP_REMOVE`)**: $O(R \cdot \lceil L / W \rceil)$ tag scan (where SIMD width $W \in \{32, 16, 8\}$), plus $O(L)$ contiguous slot shift only when a header is actually present and deleted.
+- **Set (`OP_SET`)**: $O(S \cdot \lceil L / W \rceil)$ tag scan for overwrite lookup, or $O(1)$ append to end of `slots` when the header does not exist (until capacity doubling at `32 -> 64 -> 128 -> 256`).
+- **Append (`OP_APPEND`)**: $O(A)$ amortized slot append (`HeaderWorkspace::append`).
+- **Heap Allocations in `on_upstream_request`**: Zero function-local heap allocations in `HeaderMutationPlugin` itself; `HeaderName`/`HeaderValue` clones are reference-counted `Bytes` increments (`bytes::Bytes::clone`) or inline `HeaderName` copies. Dynamic heap growth only occurs inside `HeaderWorkspace` if `append`/`insert_prehashed` crosses a geometric block capacity boundary (`32 -> 64 -> 128 -> 256`).

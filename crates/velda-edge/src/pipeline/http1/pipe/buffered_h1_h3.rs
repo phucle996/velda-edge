@@ -48,6 +48,7 @@ pub async fn serve<IO>(
     framing: Http1BodyFraming,
     upstream: &Arc<Http3Upstream>,
     meta: &DownstreamMeta,
+    req_state: &velda_core::RequestState,
     plan: &velda_plugin::RoutePluginPlan,
 ) -> Result<(), Http1Error>
 where
@@ -174,7 +175,12 @@ where
             }
             // Fast-path guard: Bypasses post-response plugin chain if route has no hooks.
             if let Some(post_hooks) = &plan.post_response_hooks {
-                velda_plugin::run_post_response_plugins(post_hooks, &l7_req.headers, &mut l7_resp);
+                velda_plugin::run_post_response_plugins(
+                    post_hooks,
+                    req_state,
+                    &l7_req.headers,
+                    &mut l7_resp,
+                );
             }
             meta.inject_response_headers(&mut l7_resp.headers);
             let server_resp = Http1ServerResponse::new(

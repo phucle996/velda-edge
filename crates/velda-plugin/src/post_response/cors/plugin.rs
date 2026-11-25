@@ -273,7 +273,12 @@ impl PostResponsePlugin for CorsResponsePlugin {
     }
 
     #[inline]
-    fn on_response(&self, req_headers: &HeaderWorkspace, resp: &mut L7Response) {
+    fn on_response(
+        &self,
+        _req_state: &velda_core::RequestState,
+        req_headers: &HeaderWorkspace,
+        resp: &mut L7Response,
+    ) {
         // Step 1 (read-only): decide everything before touching the response.
         let allowed_origin = req_headers
             .get(ORIGIN)
@@ -363,7 +368,11 @@ mod tests {
         let mut req_headers = HeaderWorkspace::default();
         req_headers.insert(ORIGIN, HeaderValue::from_static("https://random.com"));
 
-        plugin.on_response(&req_headers, &mut resp);
+        plugin.on_response(
+            &velda_core::RequestState::default(),
+            &req_headers,
+            &mut resp,
+        );
 
         assert_eq!(resp.headers.get(ACCESS_CONTROL_ALLOW_ORIGIN).unwrap(), "*");
         assert!(!resp.headers.contains_key(ACCESS_CONTROL_ALLOW_CREDENTIALS));
@@ -388,7 +397,11 @@ mod tests {
                 req_headers.insert(ORIGIN, HeaderValue::from_static(o));
             }
 
-            plugin.on_response(&req_headers, &mut resp);
+            plugin.on_response(
+                &velda_core::RequestState::default(),
+                &req_headers,
+                &mut resp,
+            );
 
             assert!(!resp.headers.contains_key(ACCESS_CONTROL_ALLOW_ORIGIN));
             assert!(!resp.headers.contains_key(ACCESS_CONTROL_ALLOW_CREDENTIALS));
@@ -408,7 +421,11 @@ mod tests {
         let mut req_headers = HeaderWorkspace::default();
         req_headers.insert(ORIGIN, HeaderValue::from_static("https://app.velda.io"));
 
-        plugin.on_response(&req_headers, &mut resp);
+        plugin.on_response(
+            &velda_core::RequestState::default(),
+            &req_headers,
+            &mut resp,
+        );
 
         assert_eq!(
             resp.headers.get(ACCESS_CONTROL_ALLOW_ORIGIN).unwrap(),
@@ -441,7 +458,11 @@ mod tests {
             HeaderValue::from_static("https://portal.partner.io"),
         );
 
-        plugin.on_response(&req_headers, &mut resp);
+        plugin.on_response(
+            &velda_core::RequestState::default(),
+            &req_headers,
+            &mut resp,
+        );
 
         assert_eq!(
             resp.headers.get(ACCESS_CONTROL_ALLOW_ORIGIN).unwrap(),

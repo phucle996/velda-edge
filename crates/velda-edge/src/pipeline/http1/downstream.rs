@@ -425,6 +425,13 @@ pub async fn run_http1_loop<IO>(
 
         let route_idx = route.id as usize;
         let mut target_upstream: u16 = rt.route_to_upstream.get(route_idx).copied().unwrap_or(0);
+        let mut req_state = velda_core::RequestState::new(request_id)
+            .with_ingress_time(ingress_nanos)
+            .with_method(log_method);
+        req_state.client_ip = meta.peer_ip;
+        req_state.ja4 = meta.ja4;
+        req_state.set_route(route.id);
+        req_state.set_upstream(target_upstream);
 
         let plan = rt.plugins.get_plan(route.id);
         if !plan.is_empty() {
@@ -442,9 +449,7 @@ pub async fn run_http1_loop<IO>(
                     headers,
                     velda_core::Body::Empty,
                 );
-                l7_req.state.request_id = request_id;
-                l7_req.state.client_ip = meta.peer_ip;
-                l7_req.state.ja4 = meta.ja4;
+                l7_req.state = req_state.clone();
 
                 if let Some(hooks) = &plan.pre_route_hooks {
                     let mut action = velda_plugin::run_pre_route_plugins(hooks, &mut l7_req);
@@ -458,23 +463,14 @@ pub async fn run_http1_loop<IO>(
                         Action::Respond(resp) => {
                             short_circuit_resp = Some(resp);
                         }
-                        Action::ServeCached(cached) => {
-                            short_circuit_resp = Some(cached.into_l7_response());
-                        }
                         Action::Reject(reason) => {
                             // FAST-FAIL INVARIANT: Rejections terminate immediately at the Edge boundary.
                             // Strictly bypasses post_response_hooks (anti-CPDoS & Zero-DDoS CPU burn),
-                            // transforming HeaderWorkspace in-place to preserve only Bit-1 bypass headers.
-                            let reject_meta = velda_core::lut::get_reject_meta(reason);
-                            l7_req.headers.prepare_for_rejection(reject_meta, true);
-                            let resp = velda_core::L7Response {
-                                status: reject_meta.status,
-                                version: http::Version::HTTP_11,
-                                headers: l7_req.headers,
-                                body: velda_core::Body::Bytes(bytes::Bytes::from_static(
-                                    reject_meta.body,
-                                )),
-                            };
+                            // retaining only MSB bypass headers while velda-http1 stamps HTTP/1.1 rejection fields.
+                            let resp = velda_http1::server::early_response::reject_response(
+                                reason,
+                                l7_req.headers,
+                            );
 
                             let mut server_resp = Http1ServerResponse::from_l7_response(resp);
                             meta.inject_response_headers(&mut server_resp.headers);
@@ -538,6 +534,7 @@ pub async fn run_http1_loop<IO>(
                         &mut l7_req,
                         &mut target_upstream,
                     );
+                    l7_req.state.set_upstream(target_upstream);
                     while let Action::Delay { duration, and_then } = action {
                         tokio::time::sleep(duration).await;
                         action = *and_then;
@@ -548,23 +545,14 @@ pub async fn run_http1_loop<IO>(
                         Action::Respond(resp) => {
                             short_circuit_resp = Some(resp);
                         }
-                        Action::ServeCached(cached) => {
-                            short_circuit_resp = Some(cached.into_l7_response());
-                        }
                         Action::Reject(reason) => {
                             // FAST-FAIL INVARIANT: Rejections terminate immediately at the Edge boundary.
                             // Strictly bypasses post_response_hooks (anti-CPDoS & Zero-DDoS CPU burn),
-                            // transforming HeaderWorkspace in-place to preserve only Bit-1 bypass headers.
-                            let reject_meta = velda_core::lut::get_reject_meta(reason);
-                            l7_req.headers.prepare_for_rejection(reject_meta, true);
-                            let resp = velda_core::L7Response {
-                                status: reject_meta.status,
-                                version: http::Version::HTTP_11,
-                                headers: l7_req.headers,
-                                body: velda_core::Body::Bytes(bytes::Bytes::from_static(
-                                    reject_meta.body,
-                                )),
-                            };
+                            // retaining only MSB bypass headers while velda-http1 stamps HTTP/1.1 rejection fields.
+                            let resp = velda_http1::server::early_response::reject_response(
+                                reason,
+                                l7_req.headers,
+                            );
 
                             let mut server_resp = Http1ServerResponse::from_l7_response(resp);
                             meta.inject_response_headers(&mut server_resp.headers);
@@ -633,6 +621,7 @@ pub async fn run_http1_loop<IO>(
                     if let Some(post_hooks) = &plan.post_response_hooks {
                         velda_plugin::run_post_response_plugins(
                             post_hooks,
+                            &l7_req.state,
                             &l7_req.headers,
                             &mut resp,
                         );
@@ -681,6 +670,7 @@ pub async fn run_http1_loop<IO>(
                     }
                 }
 
+                req_state = l7_req.state;
                 req_head.headers = l7_req.headers;
                 req_head.uri = l7_req.uri;
                 req_head.method = l7_req.method;
@@ -813,7 +803,7 @@ pub async fn run_http1_loop<IO>(
                         global_metrics().record_stream_start(PIPE);
                         (
                             pipe::buffered_h1_h1::serve(
-                                &mut conn, req_head, framing, upstream, &meta, plan,
+                                &mut conn, req_head, framing, upstream, &meta, &req_state, plan,
                             )
                             .await,
                             PIPE,
@@ -824,7 +814,7 @@ pub async fn run_http1_loop<IO>(
                         global_metrics().record_stream_start(PIPE);
                         (
                             pipe::server_stream_h1_h1::serve(
-                                &mut conn, req_head, framing, upstream, &meta, plan,
+                                &mut conn, req_head, framing, upstream, &meta, &req_state, plan,
                             )
                             .await,
                             PIPE,
@@ -835,7 +825,7 @@ pub async fn run_http1_loop<IO>(
                         global_metrics().record_stream_start(PIPE);
                         (
                             pipe::client_stream_h1_h1::serve(
-                                &mut conn, req_head, framing, upstream, &meta, plan,
+                                &mut conn, req_head, framing, upstream, &meta, &req_state, plan,
                             )
                             .await,
                             PIPE,
@@ -846,7 +836,7 @@ pub async fn run_http1_loop<IO>(
                         global_metrics().record_stream_start(PIPE);
                         (
                             pipe::duplex_h1_h1::serve(
-                                &mut conn, req_head, framing, upstream, &meta, plan,
+                                &mut conn, req_head, framing, upstream, &meta, &req_state, plan,
                             )
                             .await,
                             PIPE,
@@ -861,7 +851,7 @@ pub async fn run_http1_loop<IO>(
                         global_metrics().record_stream_start(PIPE);
                         (
                             pipe::buffered_h1_h2::serve(
-                                &mut conn, req_head, framing, upstream, &meta, plan,
+                                &mut conn, req_head, framing, upstream, &meta, &req_state, plan,
                             )
                             .await,
                             PIPE,
@@ -872,7 +862,7 @@ pub async fn run_http1_loop<IO>(
                         global_metrics().record_stream_start(PIPE);
                         (
                             pipe::server_stream_h1_h2::serve(
-                                &mut conn, req_head, framing, upstream, &meta, plan,
+                                &mut conn, req_head, framing, upstream, &meta, &req_state, plan,
                             )
                             .await,
                             PIPE,
@@ -883,7 +873,7 @@ pub async fn run_http1_loop<IO>(
                         global_metrics().record_stream_start(PIPE);
                         (
                             pipe::client_stream_h1_h2::serve(
-                                &mut conn, req_head, framing, upstream, &meta, plan,
+                                &mut conn, req_head, framing, upstream, &meta, &req_state, plan,
                             )
                             .await,
                             PIPE,
@@ -894,7 +884,7 @@ pub async fn run_http1_loop<IO>(
                         global_metrics().record_stream_start(PIPE);
                         (
                             pipe::duplex_h1_h2::serve(
-                                &mut conn, req_head, framing, upstream, &meta, plan,
+                                &mut conn, req_head, framing, upstream, &meta, &req_state, plan,
                             )
                             .await,
                             PIPE,
@@ -909,7 +899,7 @@ pub async fn run_http1_loop<IO>(
                         global_metrics().record_stream_start(PIPE);
                         (
                             pipe::buffered_h1_h3::serve(
-                                &mut conn, req_head, framing, upstream, &meta, plan,
+                                &mut conn, req_head, framing, upstream, &meta, &req_state, plan,
                             )
                             .await,
                             PIPE,
@@ -920,7 +910,7 @@ pub async fn run_http1_loop<IO>(
                         global_metrics().record_stream_start(PIPE);
                         (
                             pipe::server_stream_h1_h3::serve(
-                                &mut conn, req_head, framing, upstream, &meta, plan,
+                                &mut conn, req_head, framing, upstream, &meta, &req_state, plan,
                             )
                             .await,
                             PIPE,
@@ -931,7 +921,7 @@ pub async fn run_http1_loop<IO>(
                         global_metrics().record_stream_start(PIPE);
                         (
                             pipe::client_stream_h1_h3::serve(
-                                &mut conn, req_head, framing, upstream, &meta, plan,
+                                &mut conn, req_head, framing, upstream, &meta, &req_state, plan,
                             )
                             .await,
                             PIPE,
@@ -942,7 +932,7 @@ pub async fn run_http1_loop<IO>(
                         global_metrics().record_stream_start(PIPE);
                         (
                             pipe::duplex_h1_h3::serve(
-                                &mut conn, req_head, framing, upstream, &meta, plan,
+                                &mut conn, req_head, framing, upstream, &meta, &req_state, plan,
                             )
                             .await,
                             PIPE,

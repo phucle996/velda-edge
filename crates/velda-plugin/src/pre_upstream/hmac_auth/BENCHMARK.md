@@ -1,430 +1,68 @@
-# Performance Benchmark Report: HMAC Request Signature Authentication Plugin (`hmac_auth`)
+# Performance Benchmark Report: HMAC Authentication Plugin (`hmac_auth`)
 
-Performance benchmark specification and evaluation framework for the `hmac_auth` plugin across **Velda Edge**, **Kong Gateway 3.9**, **Apache APISIX 3.10**, and **Envoy Proxy 1.31**.
-
----
-
-## 1. Test Environment & Measurement Methodology
-
-### 1.1 Production-Grade Hardware & Network Testbed
-
-*[TBD]*
+Performance specification and verified `x86-64-v3` release assembly audit for the rewritten `hmac_auth` pre-upstream plugin.
 
 ---
 
-### 1.2 Standardized 5-Tier Metric Taxonomy
+## 1. Test Environment & Standardized 5-Tier Metric Taxonomy
 
-All benchmark scenarios are evaluated across five standardized, non-abbreviated metric tiers:
+### 1.1 Hardware & Network Testbed
 
-1. **Tier 1: Macro Network, L7 & HMAC Authentication Delivery Metrics**:
-   - **Duration (seconds)**: Continuous execution duration of the benchmark session (standard 15.00 seconds).
-   - **Total Requests**: Total downstream requests successfully served.
-   - **Throughput (requests/second)**: Processing throughput rate.
-   - **Wire Bandwidth (Megabytes/second)**: Aggregate data transfer rate across the network interface.
-   - **Total Requests Authenticated**: Total requests evaluated against HMAC-SHA256 signatures.
-   - **Signature Verification Success Count**: Total requests with valid cryptographic HMAC signatures.
-   - **HMAC Verification Throughput (verifications/second)**: Rate of canonical string assembly and HMAC calculation.
-   - **Mean Latency (milliseconds)**: Average time from request receipt to response completion.
-   - **Min Latency (milliseconds)**: Minimum recorded latency.
-   - **Median Latency P50 (milliseconds)**: 50th percentile response latency.
-   - **P75 Latency (milliseconds)**: 75th percentile response latency.
-   - **P90 Latency (milliseconds)**: 90th percentile response latency.
-   - **P99 Tail Latency (milliseconds)**: 99th percentile response latency.
-   - **P99.9 Tail Latency (milliseconds)**: 99.9th percentile deep tail latency.
-   - **Max Latency (milliseconds)**: Maximum recorded response latency.
-   - **Latency Standard Deviation (milliseconds)**: Jitter and dispersion of response latency.
-   - **Connect Time Average (milliseconds)**: Downstream connection handshake duration.
-   - **HTTP Status Code Distribution (2xx / 4xx / 5xx)**: Proportional breakdown of response status codes.
-   - **Success Rate (%)**: Percentage of requests successfully completed without connection resets or drops.
-2. **Tier 2: System Resource Footprint**:
-   - **Total CPU Utilization (% CPU)**: Normalized aggregate CPU utilization across all allocated processor cores.
-   - **User CPU (% User CPU)**: CPU time spent in userspace logic.
-   - **System / Kernel CPU (% System / Kernel CPU)**: CPU time spent in kernel syscalls and socket I/O.
-   - **SoftIRQ CPU (% SoftIRQ CPU)**: CPU time spent processing network interrupt handlers.
-   - **Frontline Worker 0 CPU (%)**: Core 0 request-serving worker CPU load.
-   - **Frontline Worker 1 CPU (%)**: Core 1 request-serving worker CPU load.
-   - **Shadow Logistics Worker CPU (%)**: Dedicated background worker CPU load running under `SCHED_IDLE`.
-   - **Peak Resident Set Size (Megabytes)**: Maximum non-swapped physical memory footprint (`VmHWM`).
-   - **RAM Usage (%)**: Percentage of total system memory consumed.
-   - **Heap Allocations per Request (Bytes / Count)**: Dynamic memory allocation rate on the serving hot-path.
-   - **Memory Leak Rate (Megabytes / minute)**: Long-term memory drift over sustained execution.
-3. **Tier 3: Micro Linux Kernel & OS Telemetry via `perf stat` & tracepoints**:
-   - **System Calls per Request (System Calls / Request)**: Average syscall overhead per request.
-   - **Context Switches per Request (Context Switches / Request)**: Average thread/process context switch rate.
-   - **Total System Calls**: Aggregate transitions into the Linux kernel.
-   - **Total Context Switches**: Aggregate involuntary and voluntary scheduler context switches.
-   - **Kernel Time (seconds)**: Total cumulative time spent inside the Linux kernel.
-   - **Futex Calls**: Number of user-space locking and synchronization sleep/wake syscalls.
-   - **Futex Percentage of Total System Calls (%)**: Ratio of futex contention syscalls to total syscalls.
-4. **Tier 4: Micro High-Performance Computing & CPU Hardware Counters via `perf stat`**:
-   - **Total CPU Instructions**: Aggregate retired machine instructions executed by the CPU.
-   - **Instructions per Request (Instructions / Request)**: Average retired instructions per request.
-   - **Total CPU Cycles**: Aggregate unhalted hardware clock cycles consumed.
-   - **Cycles per Request (Cycles / Request)**: Average CPU clock cycles consumed per request.
-   - **Instructions Per Cycle (IPC)**: Hardware instruction pipeline execution efficiency.
-   - **Total Branches**: Aggregate hardware conditional and unconditional branch instructions.
-   - **Branches per Request (Branches / Request)**: Average branch instructions per request.
-   - **Branch Mispredictions**: Hardware branch prediction misses.
-   - **Branch Misprediction Rate (%)**: Ratio of branch misses to total branches.
-   - **L1 Data Cache Miss Rate (%)**: Level 1 data cache miss ratio.
-   - **Last Level Cache Miss Rate (%)**: Level 3 (LLC) cache miss ratio.
-5. **Tier 5: Plugin-Specific Mechanics & Wire Efficiency**:
-   - **HMAC-SHA256 Cryptographic Calculation Throughput (Megabytes/second)**: Cryptographic hashing throughput of HMAC-SHA256 over canonical request strings.
-   - **Canonical String-to-Sign Assembly Latency (nanoseconds)**: Duration to assemble method, URI, headers, and body digest into canonical string.
-   - **Constant-Time Signature Comparison Duration via subtle (nanoseconds)**: Time to compare calculated signature against received signature resisting timing attacks.
-   - **Timestamp Replay Window Drift Validation Overhead (nanoseconds)**: CPU cost to verify `Date` or `X-Date` header against allowed clock drift window.
-   - **Base64 / Hex Signature Decode Latency (nanoseconds)**: Duration to decode client signature from Base64 or Hex format.
-   - **Immediate 401 Unauthorized Rejection Synthesis Latency (nanoseconds)**: Duration to synthesize and transmit 401 Unauthorized response.
-   - **Zero-Allocation Canonical Buffer Reuse Rate (%)**: Percentage of canonical string-to-sign buffers recycled from memory slabs.
+*[TBD]* — Live end-to-end cluster throughput measurements remain pending until benchmark execution on dedicated hardware. Compiler-verified release assembly (`x86-64-v3`) is audited in Section 4.
+
+### 1.2 5-Tier Diagnostic Matrix
+
+1. **Tier 1 (Macro Network & L7 Delivery)**: Duration (s), Total Requests, Throughput (req/s), Wire Bandwidth (MB/s), Mean/P50/P75/P90/P99/P99.9/Max Latency (ms), Latency StdDev (ms), Status Code Distribution (`200` / `401`), Success Rate (%).
+2. **Tier 2 (System Resource Footprint)**: Total/User/System/SoftIRQ CPU (%), Frontline Worker CPU (%), Shadow Worker CPU (%), Peak RSS (MB), Heap Allocations / Request.
+3. **Tier 3 (Kernel & OS Telemetry via `perf stat`)**: System Calls / Request, Context Switches / Request, Futex Calls / % of Total Syscalls.
+4. **Tier 4 (CPU Microarchitecture Counters via `perf stat`)**: Instructions / Request, Cycles / Request, IPC, Branch Mispredictions, Branch Misprediction Rate (%), L1D / LLC Cache Miss Rate (%).
+5. **Tier 5 (Plugin Mechanics)**: `CredentialTable::lookup` latency (`pext` / byte-shift vs `RadixBuckets`), `HeaderWorkspace::get_prehashed` cycles, streaming `hmac::Context` sign latency, `NonceCache::check_and_record_fp` shard lock contention, `x-consumer-id` overwrite/scrub cycles.
 
 ---
 
-## 2. Focused Benchmark Scenarios
+## 2. Benchmark Scenarios
 
-To focus directly on essential operational requirements, the evaluation framework defines five targeted scenarios:
-- **Scenario 01: Baseline HMAC-SHA256 Authentication (5,000 req/s)** — Measure added baseline latency overhead when assembling canonical strings and validating HMAC signatures under light load.
-- **Scenario 02: Nominal Production HMAC Verification (40,000 req/s, 2KB Payloads)** — Evaluate sustained serving stability, tail latency, and resource footprint when hashing 2KB request bodies under nominal traffic.
-- **Scenario 03: Peak Hot-Path Cryptographic Verification (100,000+ req/s)** — Extreme stress testing to verify hardware-accelerated SHA-256 throughput and confirm non-blocking frontline worker guarantees.
-- **Scenario 04: Canonical String-to-Sign Construction with Query / Header Sorting** — Evaluate sorting and concatenation overhead when constructing canonical strings from multiple query parameters and headers.
-- **Scenario 05: Invalid Signature / Expired Timestamp Replay Attack Rejection** — Simulate replay attacks with expired timestamps and forged signatures to verify immediate 401 short-circuit.
-
----
-
-## 3. Detailed Benchmark Results
+- **Scenario 01 — Baseline Header-Only HMAC-SHA256 (`validate_request_body: false`, `enforce_nonce: false`)**: Verify signature over method, path, empty query, and 3 signed headers with 1–8 static credentials.
+- **Scenario 02 — Full Body SHA-256 + Single-Lock Nonce (`validate_request_body: true`, `enforce_nonce: true`)**: Full canonical signing on buffered JSON request bodies with `NonceCache` commit after verification.
+- **Scenario 03 — Multi-Credential Scaling (`64` credentials, BitGather `_pext_u64` dispatch)**: Verify `CredentialTable` lookup stability across shared-prefix keys (`partner_*`).
+- **Scenario 04 — Forged Signature Flood (Stateless Early Reject)**: Verify `reject_unauthorized` path before `NonceCache` mutex acquisition under invalid signature load.
+- **Scenario 05 — Complex Query Parameter Canonicalization (`<= 16` vs `> 16` params)**: Stack sort path vs heap overflow fallback.
 
 ---
 
-### Scenario 01: Baseline HMAC-SHA256 Authentication (5,000 req/s)
-- **Objective**: Determine baseline latency addition and CPU footprint when verifying HMAC signatures under low concurrency.
-- **Execution Command**: `oha -z 15s -q 5000 -c 50 -H "Authorization: hmac username=\"user01\", algorithm=\"hmac-sha256\", headers=\"date request-line\", signature=\"base64_sig\"" http://<gateway_host>:<port>/api/v1/ping`
+## 3. Macro Cluster Benchmark Results
 
-| Detailed Measurement Metric | **Velda Edge** (Rust 2024) | **Kong Gateway 3.9** (LuaJIT) | **Apache APISIX 3.10** (LuaJIT) | **Envoy Proxy 1.31** (C++) |
-| :--- | :---: | :---: | :---: | :---: |
-| **Duration (seconds)** | **15.00** | **15.00** | **15.00** | **15.00** |
-| **Total Requests** | *[TBD]* | *[TBD]* | *[TBD]* | *[TBD]* |
-| **Throughput (requests/second)** | *[TBD]* | *[TBD]* | *[TBD]* | *[TBD]* |
-| **Wire Bandwidth (Megabytes/second)** | *[TBD]* | *[TBD]* | *[TBD]* | *[TBD]* |
-| **Total Requests Authenticated** | *[TBD]* | *[TBD]* | *[TBD]* | *[TBD]* |
-| **Signature Verification Success Count** | *[TBD]* | *[TBD]* | *[TBD]* | *[TBD]* |
-| **HMAC Verification Throughput (verifications/second)** | *[TBD]* | *[TBD]* | *[TBD]* | *[TBD]* |
-| **Mean Latency (milliseconds)** | *[TBD]* | *[TBD]* | *[TBD]* | *[TBD]* |
-| **Min Latency (milliseconds)** | *[TBD]* | *[TBD]* | *[TBD]* | *[TBD]* |
-| **Median Latency P50 (milliseconds)** | *[TBD]* | *[TBD]* | *[TBD]* | *[TBD]* |
-| **P75 Latency (milliseconds)** | *[TBD]* | *[TBD]* | *[TBD]* | *[TBD]* |
-| **P90 Latency (milliseconds)** | *[TBD]* | *[TBD]* | *[TBD]* | *[TBD]* |
-| **P99 Tail Latency (milliseconds)** | *[TBD]* | *[TBD]* | *[TBD]* | *[TBD]* |
-| **P99.9 Tail Latency (milliseconds)** | *[TBD]* | *[TBD]* | *[TBD]* | *[TBD]* |
-| **Max Latency (milliseconds)** | *[TBD]* | *[TBD]* | *[TBD]* | *[TBD]* |
-| **Latency Standard Deviation (milliseconds)** | *[TBD]* | *[TBD]* | *[TBD]* | *[TBD]* |
-| **Connect Time Average (milliseconds)** | *[TBD]* | *[TBD]* | *[TBD]* | *[TBD]* |
-| **HTTP Status Code Distribution (2xx / 4xx / 5xx)** | *[TBD]* | *[TBD]* | *[TBD]* | *[TBD]* |
-| **Success Rate (%)** | *[TBD]* | *[TBD]* | *[TBD]* | *[TBD]* |
-| **Total CPU Utilization (% CPU)** | *[TBD]* | *[TBD]* | *[TBD]* | *[TBD]* |
-| **User CPU (% User CPU)** | *[TBD]* | *[TBD]* | *[TBD]* | *[TBD]* |
-| **System / Kernel CPU (% System / Kernel CPU)** | *[TBD]* | *[TBD]* | *[TBD]* | *[TBD]* |
-| **SoftIRQ CPU (% SoftIRQ CPU)** | *[TBD]* | *[TBD]* | *[TBD]* | *[TBD]* |
-| **Frontline Worker 0 CPU (%)** | *[TBD]* | *[TBD]* | *[TBD]* | *[TBD]* |
-| **Frontline Worker 1 CPU (%)** | *[TBD]* | *[TBD]* | *[TBD]* | *[TBD]* |
-| **Shadow Logistics Worker CPU (%)** | *[TBD]* | N/A | N/A | N/A |
-| **Peak Resident Set Size (Megabytes)** | *[TBD]* | *[TBD]* | *[TBD]* | *[TBD]* |
-| **RAM Usage (%)** | *[TBD]* | *[TBD]* | *[TBD]* | *[TBD]* |
-| **Heap Allocations per Request (Bytes / Count)** | *[TBD]* | *[TBD]* | *[TBD]* | *[TBD]* |
-| **Memory Leak Rate (Megabytes / minute)** | *[TBD]* | *[TBD]* | *[TBD]* | *[TBD]* |
-| **System Calls per Request (System Calls / Request)** | *[TBD]* | *[TBD]* | *[TBD]* | *[TBD]* |
-| **Context Switches per Request (Context Switches / Request)** | *[TBD]* | *[TBD]* | *[TBD]* | *[TBD]* |
-| **Total System Calls** | *[TBD]* | *[TBD]* | *[TBD]* | *[TBD]* |
-| **Total Context Switches** | *[TBD]* | *[TBD]* | *[TBD]* | *[TBD]* |
-| **Kernel Time (seconds)** | *[TBD]* | *[TBD]* | *[TBD]* | *[TBD]* |
-| **Futex Calls** | *[TBD]* | *[TBD]* | *[TBD]* | *[TBD]* |
-| **Futex Percentage of Total System Calls (%)** | *[TBD]* | *[TBD]* | *[TBD]* | *[TBD]* |
-| **Total CPU Instructions** | *[TBD]* | *[TBD]* | *[TBD]* | *[TBD]* |
-| **Instructions per Request (Instructions / Request)** | *[TBD]* | *[TBD]* | *[TBD]* | *[TBD]* |
-| **Total CPU Cycles** | *[TBD]* | *[TBD]* | *[TBD]* | *[TBD]* |
-| **Cycles per Request (Cycles / Request)** | *[TBD]* | *[TBD]* | *[TBD]* | *[TBD]* |
-| **Instructions Per Cycle (IPC)** | *[TBD]* | *[TBD]* | *[TBD]* | *[TBD]* |
-| **Total Branches** | *[TBD]* | *[TBD]* | *[TBD]* | *[TBD]* |
-| **Branches per Request (Branches / Request)** | *[TBD]* | *[TBD]* | *[TBD]* | *[TBD]* |
-| **Branch Mispredictions** | *[TBD]* | *[TBD]* | *[TBD]* | *[TBD]* |
-| **Branch Misprediction Rate (%)** | *[TBD]* | *[TBD]* | *[TBD]* | *[TBD]* |
-| **L1 Data Cache Miss Rate (%)** | *[TBD]* | *[TBD]* | *[TBD]* | *[TBD]* |
-| **Last Level Cache Miss Rate (%)** | *[TBD]* | *[TBD]* | *[TBD]* | *[TBD]* |
-| **HMAC-SHA256 Cryptographic Calculation Throughput (Megabytes/second)** | *[TBD]* | *[TBD]* | *[TBD]* | *[TBD]* |
-| **Canonical String-to-Sign Assembly Latency (nanoseconds)** | *[TBD]* | *[TBD]* | *[TBD]* | *[TBD]* |
-| **Constant-Time Signature Comparison Duration via subtle (nanoseconds)** | *[TBD]* | *[TBD]* | *[TBD]* | *[TBD]* |
-| **Timestamp Replay Window Drift Validation Overhead (nanoseconds)** | *[TBD]* | *[TBD]* | *[TBD]* | *[TBD]* |
-| **Base64 / Hex Signature Decode Latency (nanoseconds)** | *[TBD]* | *[TBD]* | *[TBD]* | *[TBD]* |
-| **Immediate 401 Unauthorized Rejection Synthesis Latency (nanoseconds)** | *[TBD]* | *[TBD]* | *[TBD]* | *[TBD]* |
-| **Zero-Allocation Canonical Buffer Reuse Rate (%)** | *[TBD]* | *[TBD]* | *[TBD]* | *[TBD]* |
+| Metric | Scenario 01 | Scenario 02 | Scenario 03 | Scenario 04 | Scenario 05 |
+| :--- | :---: | :---: | :---: | :---: | :---: |
+| **Throughput (req/s)** | *[TBD]* | *[TBD]* | *[TBD]* | *[TBD]* | *[TBD]* |
+| **Median Latency P50 (ms)** | *[TBD]* | *[TBD]* | *[TBD]* | *[TBD]* | *[TBD]* |
+| **Tail Latency P99 (ms)** | *[TBD]* | *[TBD]* | *[TBD]* | *[TBD]* | *[TBD]* |
+| **Instructions / Request** | *[TBD]* | *[TBD]* | *[TBD]* | *[TBD]* | *[TBD]* |
+| **IPC** | *[TBD]* | *[TBD]* | *[TBD]* | *[TBD]* | *[TBD]* |
 
 ---
 
-### Scenario 02: Nominal Production HMAC Verification (40,000 req/s, 2KB Payloads)
-- **Objective**: Measure sustained throughput, latency profile, and resource consumption when computing HMAC over request payloads.
-- **Execution Command**: `oha -z 15s -q 40000 -c 100 -m POST -d "sample_payload_data" http://<gateway_host>:<port>/api/v1/secure`
+## 4. Verified Release Assembly & Symbol Audit (`x86-64-v3`)
 
-| Detailed Measurement Metric | **Velda Edge** (Rust 2024) | **Kong Gateway 3.9** (LuaJIT) | **Apache APISIX 3.10** (LuaJIT) | **Envoy Proxy 1.31** (C++) |
-| :--- | :---: | :---: | :---: | :---: |
-| **Duration (seconds)** | **15.00** | **15.00** | **15.00** | **15.00** |
-| **Total Requests** | *[TBD]* | *[TBD]* | *[TBD]* | *[TBD]* |
-| **Throughput (requests/second)** | *[TBD]* | *[TBD]* | *[TBD]* | *[TBD]* |
-| **Wire Bandwidth (Megabytes/second)** | *[TBD]* | *[TBD]* | *[TBD]* | *[TBD]* |
-| **Total Requests Authenticated** | *[TBD]* | *[TBD]* | *[TBD]* | *[TBD]* |
-| **Signature Verification Success Count** | *[TBD]* | *[TBD]* | *[TBD]* | *[TBD]* |
-| **HMAC Verification Throughput (verifications/second)** | *[TBD]* | *[TBD]* | *[TBD]* | *[TBD]* |
-| **Mean Latency (milliseconds)** | *[TBD]* | *[TBD]* | *[TBD]* | *[TBD]* |
-| **Min Latency (milliseconds)** | *[TBD]* | *[TBD]* | *[TBD]* | *[TBD]* |
-| **Median Latency P50 (milliseconds)** | *[TBD]* | *[TBD]* | *[TBD]* | *[TBD]* |
-| **P75 Latency (milliseconds)** | *[TBD]* | *[TBD]* | *[TBD]* | *[TBD]* |
-| **P90 Latency (milliseconds)** | *[TBD]* | *[TBD]* | *[TBD]* | *[TBD]* |
-| **P99 Tail Latency (milliseconds)** | *[TBD]* | *[TBD]* | *[TBD]* | *[TBD]* |
-| **P99.9 Tail Latency (milliseconds)** | *[TBD]* | *[TBD]* | *[TBD]* | *[TBD]* |
-| **Max Latency (milliseconds)** | *[TBD]* | *[TBD]* | *[TBD]* | *[TBD]* |
-| **Latency Standard Deviation (milliseconds)** | *[TBD]* | *[TBD]* | *[TBD]* | *[TBD]* |
-| **Connect Time Average (milliseconds)** | *[TBD]* | *[TBD]* | *[TBD]* | *[TBD]* |
-| **HTTP Status Code Distribution (2xx / 4xx / 5xx)** | *[TBD]* | *[TBD]* | *[TBD]* | *[TBD]* |
-| **Success Rate (%)** | *[TBD]* | *[TBD]* | *[TBD]* | *[TBD]* |
-| **Total CPU Utilization (% CPU)** | *[TBD]* | *[TBD]* | *[TBD]* | *[TBD]* |
-| **User CPU (% User CPU)** | *[TBD]* | *[TBD]* | *[TBD]* | *[TBD]* |
-| **System / Kernel CPU (% System / Kernel CPU)** | *[TBD]* | *[TBD]* | *[TBD]* | *[TBD]* |
-| **SoftIRQ CPU (% SoftIRQ CPU)** | *[TBD]* | *[TBD]* | *[TBD]* | *[TBD]* |
-| **Frontline Worker 0 CPU (%)** | *[TBD]* | *[TBD]* | *[TBD]* | *[TBD]* |
-| **Frontline Worker 1 CPU (%)** | *[TBD]* | *[TBD]* | *[TBD]* | *[TBD]* |
-| **Shadow Logistics Worker CPU (%)** | *[TBD]* | N/A | N/A | N/A |
-| **Peak Resident Set Size (Megabytes)** | *[TBD]* | *[TBD]* | *[TBD]* | *[TBD]* |
-| **RAM Usage (%)** | *[TBD]* | *[TBD]* | *[TBD]* | *[TBD]* |
-| **Heap Allocations per Request (Bytes / Count)** | *[TBD]* | *[TBD]* | *[TBD]* | *[TBD]* |
-| **Memory Leak Rate (Megabytes / minute)** | *[TBD]* | *[TBD]* | *[TBD]* | *[TBD]* |
-| **System Calls per Request (System Calls / Request)** | *[TBD]* | *[TBD]* | *[TBD]* | *[TBD]* |
-| **Context Switches per Request (Context Switches / Request)** | *[TBD]* | *[TBD]* | *[TBD]* | *[TBD]* |
-| **Total System Calls** | *[TBD]* | *[TBD]* | *[TBD]* | *[TBD]* |
-| **Total Context Switches** | *[TBD]* | *[TBD]* | *[TBD]* | *[TBD]* |
-| **Kernel Time (seconds)** | *[TBD]* | *[TBD]* | *[TBD]* | *[TBD]* |
-| **Futex Calls** | *[TBD]* | *[TBD]* | *[TBD]* | *[TBD]* |
-| **Futex Percentage of Total System Calls (%)** | *[TBD]* | *[TBD]* | *[TBD]* | *[TBD]* |
-| **Total CPU Instructions** | *[TBD]* | *[TBD]* | *[TBD]* | *[TBD]* |
-| **Instructions per Request (Instructions / Request)** | *[TBD]* | *[TBD]* | *[TBD]* | *[TBD]* |
-| **Total CPU Cycles** | *[TBD]* | *[TBD]* | *[TBD]* | *[TBD]* |
-| **Cycles per Request (Cycles / Request)** | *[TBD]* | *[TBD]* | *[TBD]* | *[TBD]* |
-| **Instructions Per Cycle (IPC)** | *[TBD]* | *[TBD]* | *[TBD]* | *[TBD]* |
-| **Total Branches** | *[TBD]* | *[TBD]* | *[TBD]* | *[TBD]* |
-| **Branches per Request (Branches / Request)** | *[TBD]* | *[TBD]* | *[TBD]* | *[TBD]* |
-| **Branch Mispredictions** | *[TBD]* | *[TBD]* | *[TBD]* | *[TBD]* |
-| **Branch Misprediction Rate (%)** | *[TBD]* | *[TBD]* | *[TBD]* | *[TBD]* |
-| **L1 Data Cache Miss Rate (%)** | *[TBD]* | *[TBD]* | *[TBD]* | *[TBD]* |
-| **Last Level Cache Miss Rate (%)** | *[TBD]* | *[TBD]* | *[TBD]* | *[TBD]* |
-| **HMAC-SHA256 Cryptographic Calculation Throughput (Megabytes/second)** | *[TBD]* | *[TBD]* | *[TBD]* | *[TBD]* |
-| **Canonical String-to-Sign Assembly Latency (nanoseconds)** | *[TBD]* | *[TBD]* | *[TBD]* | *[TBD]* |
-| **Constant-Time Signature Comparison Duration via subtle (nanoseconds)** | *[TBD]* | *[TBD]* | *[TBD]* | *[TBD]* |
-| **Timestamp Replay Window Drift Validation Overhead (nanoseconds)** | *[TBD]* | *[TBD]* | *[TBD]* | *[TBD]* |
-| **Base64 / Hex Signature Decode Latency (nanoseconds)** | *[TBD]* | *[TBD]* | *[TBD]* | *[TBD]* |
-| **Immediate 401 Unauthorized Rejection Synthesis Latency (nanoseconds)** | *[TBD]* | *[TBD]* | *[TBD]* | *[TBD]* |
-| **Zero-Allocation Canonical Buffer Reuse Rate (%)** | *[TBD]* | *[TBD]* | *[TBD]* | *[TBD]* |
+Audited directly from compiler output emitted with:
 
----
+```bash
+cargo rustc --release -p velda-plugin --lib -- --emit=asm -C llvm-args=-x86-asm-syntax=intel -C target-cpu=x86-64-v3
+```
 
-### Scenario 03: Peak Hot-Path Cryptographic Verification (100,000+ req/s)
-- **Objective**: Confirm maximum possible throughput when verifying valid HMAC signatures across heavy multi-core concurrency.
-- **Execution Command**: `oha -z 15s -c 256 http://<gateway_host>:<port>/api/v1/ping`
+### Symbol Profile
 
-| Detailed Measurement Metric | **Velda Edge** (Rust 2024) | **Kong Gateway 3.9** (LuaJIT) | **Apache APISIX 3.10** (LuaJIT) | **Envoy Proxy 1.31** (C++) |
-| :--- | :---: | :---: | :---: | :---: |
-| **Duration (seconds)** | **15.00** | **15.00** | **15.00** | **15.00** |
-| **Total Requests** | *[TBD]* | *[TBD]* | *[TBD]* | *[TBD]* |
-| **Throughput (requests/second)** | *[TBD]* | *[TBD]* | *[TBD]* | *[TBD]* |
-| **Wire Bandwidth (Megabytes/second)** | *[TBD]* | *[TBD]* | *[TBD]* | *[TBD]* |
-| **Total Requests Authenticated** | *[TBD]* | *[TBD]* | *[TBD]* | *[TBD]* |
-| **Signature Verification Success Count** | *[TBD]* | *[TBD]* | *[TBD]* | *[TBD]* |
-| **HMAC Verification Throughput (verifications/second)** | *[TBD]* | *[TBD]* | *[TBD]* | *[TBD]* |
-| **Mean Latency (milliseconds)** | *[TBD]* | *[TBD]* | *[TBD]* | *[TBD]* |
-| **Min Latency (milliseconds)** | *[TBD]* | *[TBD]* | *[TBD]* | *[TBD]* |
-| **Median Latency P50 (milliseconds)** | *[TBD]* | *[TBD]* | *[TBD]* | *[TBD]* |
-| **P75 Latency (milliseconds)** | *[TBD]* | *[TBD]* | *[TBD]* | *[TBD]* |
-| **P90 Latency (milliseconds)** | *[TBD]* | *[TBD]* | *[TBD]* | *[TBD]* |
-| **P99 Tail Latency (milliseconds)** | *[TBD]* | *[TBD]* | *[TBD]* | *[TBD]* |
-| **P99.9 Tail Latency (milliseconds)** | *[TBD]* | *[TBD]* | *[TBD]* | *[TBD]* |
-| **Max Latency (milliseconds)** | *[TBD]* | *[TBD]* | *[TBD]* | *[TBD]* |
-| **Latency Standard Deviation (milliseconds)** | *[TBD]* | *[TBD]* | *[TBD]* | *[TBD]* |
-| **Connect Time Average (milliseconds)** | *[TBD]* | *[TBD]* | *[TBD]* | *[TBD]* |
-| **HTTP Status Code Distribution (2xx / 4xx / 5xx)** | *[TBD]* | *[TBD]* | *[TBD]* | *[TBD]* |
-| **Success Rate (%)** | *[TBD]* | *[TBD]* | *[TBD]* | *[TBD]* |
-| **Total CPU Utilization (% CPU)** | *[TBD]* | *[TBD]* | *[TBD]* | *[TBD]* |
-| **User CPU (% User CPU)** | *[TBD]* | *[TBD]* | *[TBD]* | *[TBD]* |
-| **System / Kernel CPU (% System / Kernel CPU)** | *[TBD]* | *[TBD]* | *[TBD]* | *[TBD]* |
-| **SoftIRQ CPU (% SoftIRQ CPU)** | *[TBD]* | *[TBD]* | *[TBD]* | *[TBD]* |
-| **Frontline Worker 0 CPU (%)** | *[TBD]* | *[TBD]* | *[TBD]* | *[TBD]* |
-| **Frontline Worker 1 CPU (%)** | *[TBD]* | *[TBD]* | *[TBD]* | *[TBD]* |
-| **Shadow Logistics Worker CPU (%)** | *[TBD]* | N/A | N/A | N/A |
-| **Peak Resident Set Size (Megabytes)** | *[TBD]* | *[TBD]* | *[TBD]* | *[TBD]* |
-| **RAM Usage (%)** | *[TBD]* | *[TBD]* | *[TBD]* | *[TBD]* |
-| **Heap Allocations per Request (Bytes / Count)** | *[TBD]* | *[TBD]* | *[TBD]* | *[TBD]* |
-| **Memory Leak Rate (Megabytes / minute)** | *[TBD]* | *[TBD]* | *[TBD]* | *[TBD]* |
-| **System Calls per Request (System Calls / Request)** | *[TBD]* | *[TBD]* | *[TBD]* | *[TBD]* |
-| **Context Switches per Request (Context Switches / Request)** | *[TBD]* | *[TBD]* | *[TBD]* | *[TBD]* |
-| **Total System Calls** | *[TBD]* | *[TBD]* | *[TBD]* | *[TBD]* |
-| **Total Context Switches** | *[TBD]* | *[TBD]* | *[TBD]* | *[TBD]* |
-| **Kernel Time (seconds)** | *[TBD]* | *[TBD]* | *[TBD]* | *[TBD]* |
-| **Futex Calls** | *[TBD]* | *[TBD]* | *[TBD]* | *[TBD]* |
-| **Futex Percentage of Total System Calls (%)** | *[TBD]* | *[TBD]* | *[TBD]* | *[TBD]* |
-| **Total CPU Instructions** | *[TBD]* | *[TBD]* | *[TBD]* | *[TBD]* |
-| **Instructions per Request (Instructions / Request)** | *[TBD]* | *[TBD]* | *[TBD]* | *[TBD]* |
-| **Total CPU Cycles** | *[TBD]* | *[TBD]* | *[TBD]* | *[TBD]* |
-| **Cycles per Request (Cycles / Request)** | *[TBD]* | *[TBD]* | *[TBD]* | *[TBD]* |
-| **Instructions Per Cycle (IPC)** | *[TBD]* | *[TBD]* | *[TBD]* | *[TBD]* |
-| **Total Branches** | *[TBD]* | *[TBD]* | *[TBD]* | *[TBD]* |
-| **Branches per Request (Branches / Request)** | *[TBD]* | *[TBD]* | *[TBD]* | *[TBD]* |
-| **Branch Mispredictions** | *[TBD]* | *[TBD]* | *[TBD]* | *[TBD]* |
-| **Branch Misprediction Rate (%)** | *[TBD]* | *[TBD]* | *[TBD]* | *[TBD]* |
-| **L1 Data Cache Miss Rate (%)** | *[TBD]* | *[TBD]* | *[TBD]* | *[TBD]* |
-| **Last Level Cache Miss Rate (%)** | *[TBD]* | *[TBD]* | *[TBD]* | *[TBD]* |
-| **HMAC-SHA256 Cryptographic Calculation Throughput (Megabytes/second)** | *[TBD]* | *[TBD]* | *[TBD]* | *[TBD]* |
-| **Canonical String-to-Sign Assembly Latency (nanoseconds)** | *[TBD]* | *[TBD]* | *[TBD]* | *[TBD]* |
-| **Constant-Time Signature Comparison Duration via subtle (nanoseconds)** | *[TBD]* | *[TBD]* | *[TBD]* | *[TBD]* |
-| **Timestamp Replay Window Drift Validation Overhead (nanoseconds)** | *[TBD]* | *[TBD]* | *[TBD]* | *[TBD]* |
-| **Base64 / Hex Signature Decode Latency (nanoseconds)** | *[TBD]* | *[TBD]* | *[TBD]* | *[TBD]* |
-| **Immediate 401 Unauthorized Rejection Synthesis Latency (nanoseconds)** | *[TBD]* | *[TBD]* | *[TBD]* | *[TBD]* |
-| **Zero-Allocation Canonical Buffer Reuse Rate (%)** | *[TBD]* | *[TBD]* | *[TBD]* | *[TBD]* |
+- **Artifact**: `target/release/deps/velda_plugin-d4e3c06c5e5398a9.s`
+- **Compiler**: `rustc 1.98.0 (88d9e12ae 2026-08-18)`
+- **Hot-Path Symbol**: `_RNvXs_NtNtNtCs43Oa2zYOuG3_12velda_plugin12pre_upstream9hmac_auth6pluginNtB4_14HmacAuthPluginNtB8_17PreUpstreamPlugin19on_upstream_request` (lines `709729..=713463`)
+- **Cold Reject Symbol**: `_RNvMNtNtNtCs43Oa2zYOuG3_12velda_plugin12pre_upstream9hmac_auth6pluginNtB2_14HmacAuthPlugin19reject_unauthorized` (`.text.unlikely`, lines `362038..=362122`)
 
----
+### Observed Instruction Invariants
 
-### Scenario 04: Canonical String-to-Sign Construction with Query / Header Sorting
-- **Objective**: Measure canonical string assembly speed and buffer allocation behavior under multi-attribute signatures.
-- **Execution Command**: `oha -z 15s -q 50000 -c 128 http://<gateway_host>:<port>/api/v1/search?alpha=1&beta=2&gamma=3`
-
-| Detailed Measurement Metric | **Velda Edge** (Rust 2024) | **Kong Gateway 3.9** (LuaJIT) | **Apache APISIX 3.10** (LuaJIT) | **Envoy Proxy 1.31** (C++) |
-| :--- | :---: | :---: | :---: | :---: |
-| **Duration (seconds)** | **15.00** | **15.00** | **15.00** | **15.00** |
-| **Total Requests** | *[TBD]* | *[TBD]* | *[TBD]* | *[TBD]* |
-| **Throughput (requests/second)** | *[TBD]* | *[TBD]* | *[TBD]* | *[TBD]* |
-| **Wire Bandwidth (Megabytes/second)** | *[TBD]* | *[TBD]* | *[TBD]* | *[TBD]* |
-| **Total Requests Authenticated** | *[TBD]* | *[TBD]* | *[TBD]* | *[TBD]* |
-| **Signature Verification Success Count** | *[TBD]* | *[TBD]* | *[TBD]* | *[TBD]* |
-| **HMAC Verification Throughput (verifications/second)** | *[TBD]* | *[TBD]* | *[TBD]* | *[TBD]* |
-| **Mean Latency (milliseconds)** | *[TBD]* | *[TBD]* | *[TBD]* | *[TBD]* |
-| **Min Latency (milliseconds)** | *[TBD]* | *[TBD]* | *[TBD]* | *[TBD]* |
-| **Median Latency P50 (milliseconds)** | *[TBD]* | *[TBD]* | *[TBD]* | *[TBD]* |
-| **P75 Latency (milliseconds)** | *[TBD]* | *[TBD]* | *[TBD]* | *[TBD]* |
-| **P90 Latency (milliseconds)** | *[TBD]* | *[TBD]* | *[TBD]* | *[TBD]* |
-| **P99 Tail Latency (milliseconds)** | *[TBD]* | *[TBD]* | *[TBD]* | *[TBD]* |
-| **P99.9 Tail Latency (milliseconds)** | *[TBD]* | *[TBD]* | *[TBD]* | *[TBD]* |
-| **Max Latency (milliseconds)** | *[TBD]* | *[TBD]* | *[TBD]* | *[TBD]* |
-| **Latency Standard Deviation (milliseconds)** | *[TBD]* | *[TBD]* | *[TBD]* | *[TBD]* |
-| **Connect Time Average (milliseconds)** | *[TBD]* | *[TBD]* | *[TBD]* | *[TBD]* |
-| **HTTP Status Code Distribution (2xx / 4xx / 5xx)** | *[TBD]* | *[TBD]* | *[TBD]* | *[TBD]* |
-| **Success Rate (%)** | *[TBD]* | *[TBD]* | *[TBD]* | *[TBD]* |
-| **Total CPU Utilization (% CPU)** | *[TBD]* | *[TBD]* | *[TBD]* | *[TBD]* |
-| **User CPU (% User CPU)** | *[TBD]* | *[TBD]* | *[TBD]* | *[TBD]* |
-| **System / Kernel CPU (% System / Kernel CPU)** | *[TBD]* | *[TBD]* | *[TBD]* | *[TBD]* |
-| **SoftIRQ CPU (% SoftIRQ CPU)** | *[TBD]* | *[TBD]* | *[TBD]* | *[TBD]* |
-| **Frontline Worker 0 CPU (%)** | *[TBD]* | *[TBD]* | *[TBD]* | *[TBD]* |
-| **Frontline Worker 1 CPU (%)** | *[TBD]* | *[TBD]* | *[TBD]* | *[TBD]* |
-| **Shadow Logistics Worker CPU (%)** | *[TBD]* | N/A | N/A | N/A |
-| **Peak Resident Set Size (Megabytes)** | *[TBD]* | *[TBD]* | *[TBD]* | *[TBD]* |
-| **RAM Usage (%)** | *[TBD]* | *[TBD]* | *[TBD]* | *[TBD]* |
-| **Heap Allocations per Request (Bytes / Count)** | *[TBD]* | *[TBD]* | *[TBD]* | *[TBD]* |
-| **Memory Leak Rate (Megabytes / minute)** | *[TBD]* | *[TBD]* | *[TBD]* | *[TBD]* |
-| **System Calls per Request (System Calls / Request)** | *[TBD]* | *[TBD]* | *[TBD]* | *[TBD]* |
-| **Context Switches per Request (Context Switches / Request)** | *[TBD]* | *[TBD]* | *[TBD]* | *[TBD]* |
-| **Total System Calls** | *[TBD]* | *[TBD]* | *[TBD]* | *[TBD]* |
-| **Total Context Switches** | *[TBD]* | *[TBD]* | *[TBD]* | *[TBD]* |
-| **Kernel Time (seconds)** | *[TBD]* | *[TBD]* | *[TBD]* | *[TBD]* |
-| **Futex Calls** | *[TBD]* | *[TBD]* | *[TBD]* | *[TBD]* |
-| **Futex Percentage of Total System Calls (%)** | *[TBD]* | *[TBD]* | *[TBD]* | *[TBD]* |
-| **Total CPU Instructions** | *[TBD]* | *[TBD]* | *[TBD]* | *[TBD]* |
-| **Instructions per Request (Instructions / Request)** | *[TBD]* | *[TBD]* | *[TBD]* | *[TBD]* |
-| **Total CPU Cycles** | *[TBD]* | *[TBD]* | *[TBD]* | *[TBD]* |
-| **Cycles per Request (Cycles / Request)** | *[TBD]* | *[TBD]* | *[TBD]* | *[TBD]* |
-| **Instructions Per Cycle (IPC)** | *[TBD]* | *[TBD]* | *[TBD]* | *[TBD]* |
-| **Total Branches** | *[TBD]* | *[TBD]* | *[TBD]* | *[TBD]* |
-| **Branches per Request (Branches / Request)** | *[TBD]* | *[TBD]* | *[TBD]* | *[TBD]* |
-| **Branch Mispredictions** | *[TBD]* | *[TBD]* | *[TBD]* | *[TBD]* |
-| **Branch Misprediction Rate (%)** | *[TBD]* | *[TBD]* | *[TBD]* | *[TBD]* |
-| **L1 Data Cache Miss Rate (%)** | *[TBD]* | *[TBD]* | *[TBD]* | *[TBD]* |
-| **Last Level Cache Miss Rate (%)** | *[TBD]* | *[TBD]* | *[TBD]* | *[TBD]* |
-| **HMAC-SHA256 Cryptographic Calculation Throughput (Megabytes/second)** | *[TBD]* | *[TBD]* | *[TBD]* | *[TBD]* |
-| **Canonical String-to-Sign Assembly Latency (nanoseconds)** | *[TBD]* | *[TBD]* | *[TBD]* | *[TBD]* |
-| **Constant-Time Signature Comparison Duration via subtle (nanoseconds)** | *[TBD]* | *[TBD]* | *[TBD]* | *[TBD]* |
-| **Timestamp Replay Window Drift Validation Overhead (nanoseconds)** | *[TBD]* | *[TBD]* | *[TBD]* | *[TBD]* |
-| **Base64 / Hex Signature Decode Latency (nanoseconds)** | *[TBD]* | *[TBD]* | *[TBD]* | *[TBD]* |
-| **Immediate 401 Unauthorized Rejection Synthesis Latency (nanoseconds)** | *[TBD]* | *[TBD]* | *[TBD]* | *[TBD]* |
-| **Zero-Allocation Canonical Buffer Reuse Rate (%)** | *[TBD]* | *[TBD]* | *[TBD]* | *[TBD]* |
-
----
-
-### Scenario 05: Invalid Signature / Expired Timestamp Replay Attack Rejection
-- **Objective**: Confirm that invalid HMAC signatures are rejected at wire speed with zero upstream leakage.
-- **Execution Command**: `oha -z 15s -q 80000 -c 128 -H "X-Date: Sun, 06 Nov 1994 08:49:37 GMT" http://<gateway_host>:<port>/api/v1/ping`
-
-| Detailed Measurement Metric | **Velda Edge** (Rust 2024) | **Kong Gateway 3.9** (LuaJIT) | **Apache APISIX 3.10** (LuaJIT) | **Envoy Proxy 1.31** (C++) |
-| :--- | :---: | :---: | :---: | :---: |
-| **Duration (seconds)** | **15.00** | **15.00** | **15.00** | **15.00** |
-| **Total Requests** | *[TBD]* | *[TBD]* | *[TBD]* | *[TBD]* |
-| **Throughput (requests/second)** | *[TBD]* | *[TBD]* | *[TBD]* | *[TBD]* |
-| **Wire Bandwidth (Megabytes/second)** | *[TBD]* | *[TBD]* | *[TBD]* | *[TBD]* |
-| **Total Requests Authenticated** | *[TBD]* | *[TBD]* | *[TBD]* | *[TBD]* |
-| **Signature Verification Success Count** | *[TBD]* | *[TBD]* | *[TBD]* | *[TBD]* |
-| **HMAC Verification Throughput (verifications/second)** | *[TBD]* | *[TBD]* | *[TBD]* | *[TBD]* |
-| **Mean Latency (milliseconds)** | *[TBD]* | *[TBD]* | *[TBD]* | *[TBD]* |
-| **Min Latency (milliseconds)** | *[TBD]* | *[TBD]* | *[TBD]* | *[TBD]* |
-| **Median Latency P50 (milliseconds)** | *[TBD]* | *[TBD]* | *[TBD]* | *[TBD]* |
-| **P75 Latency (milliseconds)** | *[TBD]* | *[TBD]* | *[TBD]* | *[TBD]* |
-| **P90 Latency (milliseconds)** | *[TBD]* | *[TBD]* | *[TBD]* | *[TBD]* |
-| **P99 Tail Latency (milliseconds)** | *[TBD]* | *[TBD]* | *[TBD]* | *[TBD]* |
-| **P99.9 Tail Latency (milliseconds)** | *[TBD]* | *[TBD]* | *[TBD]* | *[TBD]* |
-| **Max Latency (milliseconds)** | *[TBD]* | *[TBD]* | *[TBD]* | *[TBD]* |
-| **Latency Standard Deviation (milliseconds)** | *[TBD]* | *[TBD]* | *[TBD]* | *[TBD]* |
-| **Connect Time Average (milliseconds)** | *[TBD]* | *[TBD]* | *[TBD]* | *[TBD]* |
-| **HTTP Status Code Distribution (2xx / 4xx / 5xx)** | *[TBD]* | *[TBD]* | *[TBD]* | *[TBD]* |
-| **Success Rate (%)** | *[TBD]* | *[TBD]* | *[TBD]* | *[TBD]* |
-| **Total CPU Utilization (% CPU)** | *[TBD]* | *[TBD]* | *[TBD]* | *[TBD]* |
-| **User CPU (% User CPU)** | *[TBD]* | *[TBD]* | *[TBD]* | *[TBD]* |
-| **System / Kernel CPU (% System / Kernel CPU)** | *[TBD]* | *[TBD]* | *[TBD]* | *[TBD]* |
-| **SoftIRQ CPU (% SoftIRQ CPU)** | *[TBD]* | *[TBD]* | *[TBD]* | *[TBD]* |
-| **Frontline Worker 0 CPU (%)** | *[TBD]* | *[TBD]* | *[TBD]* | *[TBD]* |
-| **Frontline Worker 1 CPU (%)** | *[TBD]* | *[TBD]* | *[TBD]* | *[TBD]* |
-| **Shadow Logistics Worker CPU (%)** | *[TBD]* | N/A | N/A | N/A |
-| **Peak Resident Set Size (Megabytes)** | *[TBD]* | *[TBD]* | *[TBD]* | *[TBD]* |
-| **RAM Usage (%)** | *[TBD]* | *[TBD]* | *[TBD]* | *[TBD]* |
-| **Heap Allocations per Request (Bytes / Count)** | *[TBD]* | *[TBD]* | *[TBD]* | *[TBD]* |
-| **Memory Leak Rate (Megabytes / minute)** | *[TBD]* | *[TBD]* | *[TBD]* | *[TBD]* |
-| **System Calls per Request (System Calls / Request)** | *[TBD]* | *[TBD]* | *[TBD]* | *[TBD]* |
-| **Context Switches per Request (Context Switches / Request)** | *[TBD]* | *[TBD]* | *[TBD]* | *[TBD]* |
-| **Total System Calls** | *[TBD]* | *[TBD]* | *[TBD]* | *[TBD]* |
-| **Total Context Switches** | *[TBD]* | *[TBD]* | *[TBD]* | *[TBD]* |
-| **Kernel Time (seconds)** | *[TBD]* | *[TBD]* | *[TBD]* | *[TBD]* |
-| **Futex Calls** | *[TBD]* | *[TBD]* | *[TBD]* | *[TBD]* |
-| **Futex Percentage of Total System Calls (%)** | *[TBD]* | *[TBD]* | *[TBD]* | *[TBD]* |
-| **Total CPU Instructions** | *[TBD]* | *[TBD]* | *[TBD]* | *[TBD]* |
-| **Instructions per Request (Instructions / Request)** | *[TBD]* | *[TBD]* | *[TBD]* | *[TBD]* |
-| **Total CPU Cycles** | *[TBD]* | *[TBD]* | *[TBD]* | *[TBD]* |
-| **Cycles per Request (Cycles / Request)** | *[TBD]* | *[TBD]* | *[TBD]* | *[TBD]* |
-| **Instructions Per Cycle (IPC)** | *[TBD]* | *[TBD]* | *[TBD]* | *[TBD]* |
-| **Total Branches** | *[TBD]* | *[TBD]* | *[TBD]* | *[TBD]* |
-| **Branches per Request (Branches / Request)** | *[TBD]* | *[TBD]* | *[TBD]* | *[TBD]* |
-| **Branch Mispredictions** | *[TBD]* | *[TBD]* | *[TBD]* | *[TBD]* |
-| **Branch Misprediction Rate (%)** | *[TBD]* | *[TBD]* | *[TBD]* | *[TBD]* |
-| **L1 Data Cache Miss Rate (%)** | *[TBD]* | *[TBD]* | *[TBD]* | *[TBD]* |
-| **Last Level Cache Miss Rate (%)** | *[TBD]* | *[TBD]* | *[TBD]* | *[TBD]* |
-| **HMAC-SHA256 Cryptographic Calculation Throughput (Megabytes/second)** | *[TBD]* | *[TBD]* | *[TBD]* | *[TBD]* |
-| **Canonical String-to-Sign Assembly Latency (nanoseconds)** | *[TBD]* | *[TBD]* | *[TBD]* | *[TBD]* |
-| **Constant-Time Signature Comparison Duration via subtle (nanoseconds)** | *[TBD]* | *[TBD]* | *[TBD]* | *[TBD]* |
-| **Timestamp Replay Window Drift Validation Overhead (nanoseconds)** | *[TBD]* | *[TBD]* | *[TBD]* | *[TBD]* |
-| **Base64 / Hex Signature Decode Latency (nanoseconds)** | *[TBD]* | *[TBD]* | *[TBD]* | *[TBD]* |
-| **Immediate 401 Unauthorized Rejection Synthesis Latency (nanoseconds)** | *[TBD]* | *[TBD]* | *[TBD]* | *[TBD]* |
-| **Zero-Allocation Canonical Buffer Reuse Rate (%)** | *[TBD]* | *[TBD]* | *[TBD]* | *[TBD]* |
-
----
-
-## 4. Comprehensive Architecture Comparison: Velda Edge vs Kong vs APISIX vs Envoy
-
-| Architecture Evaluation Criterion | Velda Edge (Rust Edition 2024) | Kong Gateway 3.9 (LuaJIT) | Apache APISIX 3.10 (LuaJIT) | Envoy Proxy 1.31 (C++) |
-| :--- | :--- | :--- | :--- | :--- |
-| **Implementation Language** | **Rust (Edition 2024, Zero-Cost Abstractions)** | C (OpenResty) + LuaJIT 2.1 | C (OpenResty) + LuaJIT 2.1 | C++ 20 |
-| **Thread Model** | **Thread-Per-Core (Shared-Nothing)** | Multi-Process (Nginx Master-Worker) | Multi-Process (Nginx Master-Worker) | Thread-Per-Core (Worker EventLoop) |
-| **Primary Execution Mechanism** | **Hardware SHA-NI Acceleration + Subtle Constant-Time Compare** | Kong hmac-auth plugin via Lua openssl FFI | APISIX hmac-auth plugin via Lua resty.sha256 | Envoy hmac_auth filter in HTTP filter chain |
-| **Heap Allocations** | **Zero allocations (Pre-allocated canonical buffers)** | Lua string allocation per canonical string | Lua string allocation per canonical string | C++ string allocations per canonical assembly |
-| **Garbage Collection (GC) Impact** | None (Zero GC Pauses by design) | Periodic Lua GC collection cycles | Periodic Lua GC collection cycles | None (TCMalloc heap churn) |
-| **Hot-Path Request Serving Impact** | **SHA-NI vector hash + constant-time cmp (< 80 ns)** | Lua OpenSSL FFI call in access phase | Lua OpenSSL FFI call in access phase | C++ OpenSSL EVP calculation |
-| **Backpressure / Failure Mechanism** | **Immediate 401 local reply** | Lua ngx.exit(401) | Lua ngx.exit(401) | Envoy local reply 401 |
-| **Worker Execution Allocation** | **Frontline Worker 0/1 (`velda-worker-{id}`)** | Main Nginx worker thread | Main Nginx worker thread | Main Envoy worker threads |
-| **HTTP/3 Support (QUIC Ingress)** | **Native RFC 9114 / RFC 9000 (H3 Production)** | Not Supported | Experimental | Native HTTP/3 Production |
-| **Resident Memory Footprint (Peak RSS)** | *[TBD]* | *[TBD]* | *[TBD]* | *[TBD]* |
+| Audit Check | Status | Evidence in Emitted Assembly |
+| :--- | :---: | :--- |
+| **BMI2 `pext` Credential Dispatch** | **Verified** | Emits hardware `pext rdi, rdx, qword ptr [r8 + 32]` for `BitGather` alongside `shl`/`shlx` AGU indexing for byte-window plans (`0` runtime hash calls). |
+| **Pre-Hashed `HeaderWorkspace` Lookups** | **Verified** | All configured header probes (`access_key_header`, `timestamp_header`, `nonce_header`, `signature_header`, `content_sha256_header`, `content-length`, `transfer-encoding`) use AVX2 `vpand` + `shlx`/`tzcnt`/`blsr` tag scanning. |
+| **Direct Streaming HMAC Context** | **Verified** | Invokes `ring::hmac::Context::with_key` and `Context::update` directly with zero intermediate `CanonicalBuffer` copy. |
+| **Isolated Cold Reject Path** | **Verified** | Unauthorized rejections jump to `.text.unlikely` `HmacAuthPlugin::reject_unauthorized`. |
+| **Conditional Alloc Restricted to `> 16` Query Overflow** | **Verified** | `__rust_alloc` in `on_upstream_request` appears only on the query overflow branch when a request contains `> 16` `&`-separated parameters. |

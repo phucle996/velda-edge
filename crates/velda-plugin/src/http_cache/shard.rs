@@ -23,6 +23,7 @@ use crate::http_cache::entity::{
     VARIANT_BIT_ZSTD, VariantKind, negotiate_variant_kind,
 };
 use crate::http_cache::slab::{SlabArena, SlabPool, SpanHandle};
+use crate::post_response::response_compression::CompressionAlgorithm;
 
 /// Number of lock-striped index shards (power of two).
 pub const NUM_SHARDS: usize = 64;
@@ -226,6 +227,7 @@ impl ShardInner {
         hash: u64,
         arena: &Arc<SlabArena>,
         accept_encoding: Option<&http::HeaderValue>,
+        preferred_encodings: &[CompressionAlgorithm],
         bypass_auth: bool,
     ) -> LookupOutcome {
         let Some(idx) = self.find_slot_idx(hash) else {
@@ -244,9 +246,12 @@ impl ShardInner {
             return LookupOutcome::AuthBypass;
         }
 
-        let Some(kind) =
-            negotiate_variant_kind(slot.variant_mask, slot.raw.is_present(), accept_encoding)
-        else {
+        let Some(kind) = negotiate_variant_kind(
+            slot.variant_mask,
+            slot.raw.is_present(),
+            accept_encoding,
+            preferred_encodings,
+        ) else {
             return LookupOutcome::Miss;
         };
 
@@ -450,12 +455,19 @@ impl CacheShard {
         hash: u64,
         arena: &Arc<SlabArena>,
         accept_encoding: Option<&http::HeaderValue>,
+        preferred_encodings: &[CompressionAlgorithm],
         bypass_auth: bool,
     ) -> LookupOutcome {
         let Ok(guard) = self.inner.read() else {
             return LookupOutcome::Miss;
         };
-        guard.lookup_variant(hash, arena, accept_encoding, bypass_auth)
+        guard.lookup_variant(
+            hash,
+            arena,
+            accept_encoding,
+            preferred_encodings,
+            bypass_auth,
+        )
     }
 
     #[inline]

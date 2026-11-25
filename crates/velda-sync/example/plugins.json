@@ -90,7 +90,6 @@
     {
       "id": "header_mutation",
       "config": {
-        "strip_hop_by_hop": true,
         "set_headers": {
           "x-gateway-proxy": "velda-edge",
           "x-forwarded-proto": "https"
@@ -99,7 +98,6 @@
           "x-powered-by",
           "server"
         ],
-        "rename_headers": {},
         "append_headers": {}
       }
     },

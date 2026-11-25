@@ -325,6 +325,15 @@ async fn dispatch_grpc_tcp_request_stream(
 
     let route_idx = route.id as usize;
     let mut target_upstream: u16 = rt.route_to_upstream.get(route_idx).copied().unwrap_or(0);
+    let mut req_state = velda_core::RequestState::new(request_id)
+        .with_ingress_time(ingress_nanos)
+        .with_method(velda_core::lut::HttpMethod::from_http_method(
+            &server_stream.head.method,
+        ));
+    req_state.client_ip = meta.peer_ip;
+    req_state.ja4 = meta.ja4;
+    req_state.set_route(route.id);
+    req_state.set_upstream(target_upstream);
 
     // ========================================================================
     // [Route Plugin Pipeline Evaluation: pre_route & pre_upstream hooks]
@@ -341,9 +350,7 @@ async fn dispatch_grpc_tcp_request_stream(
                 std::mem::take(&mut server_stream.head.headers),
                 velda_core::Body::Empty,
             );
-            l7_req.state.request_id = request_id;
-            l7_req.state.client_ip = meta.peer_ip;
-            l7_req.state.ja4 = meta.ja4;
+            l7_req.state = req_state.clone();
 
             if let Some(hooks) = &plan.pre_route_hooks {
                 let mut action = velda_plugin::run_pre_route_plugins(hooks, &mut l7_req);
@@ -357,13 +364,11 @@ async fn dispatch_grpc_tcp_request_stream(
                     Action::Respond(resp) => {
                         short_circuit_resp = Some(resp);
                     }
-                    Action::ServeCached(cached) => {
-                        short_circuit_resp = Some(cached.into_l7_response());
-                    }
                     Action::Reject(reason) => {
                         let grpc_status = GrpcStatus::from_reject_reason(reason);
                         let log_grpc_status = grpc_status;
-                        l7_req.headers.prepare_for_grpc_rejection(
+                        velda_grpc::GrpcWire::prepare_rejection_headers(
+                            &mut l7_req.headers,
                             grpc_status,
                             Some(reason.canonical_phrase()),
                         );
@@ -417,6 +422,7 @@ async fn dispatch_grpc_tcp_request_stream(
                     &mut l7_req,
                     &mut target_upstream,
                 );
+                l7_req.state.set_upstream(target_upstream);
                 while let Action::Delay { duration, and_then } = action {
                     tokio::time::sleep(duration).await;
                     action = *and_then;
@@ -427,13 +433,11 @@ async fn dispatch_grpc_tcp_request_stream(
                     Action::Respond(resp) => {
                         short_circuit_resp = Some(resp);
                     }
-                    Action::ServeCached(cached) => {
-                        short_circuit_resp = Some(cached.into_l7_response());
-                    }
                     Action::Reject(reason) => {
                         let grpc_status = GrpcStatus::from_reject_reason(reason);
                         let log_grpc_status = grpc_status;
-                        l7_req.headers.prepare_for_grpc_rejection(
+                        velda_grpc::GrpcWire::prepare_rejection_headers(
+                            &mut l7_req.headers,
                             grpc_status,
                             Some(reason.canonical_phrase()),
                         );
@@ -483,7 +487,12 @@ async fn dispatch_grpc_tcp_request_stream(
                 resp.headers
                     .set_request_id(l7_req.headers.request_id().clone());
                 if let Some(post_hooks) = &plan.post_response_hooks {
-                    velda_plugin::run_post_response_plugins(post_hooks, &l7_req.headers, &mut resp);
+                    velda_plugin::run_post_response_plugins(
+                        post_hooks,
+                        &l7_req.state,
+                        &l7_req.headers,
+                        &mut resp,
+                    );
                 }
                 let _ = server_stream.respond.inner.send_parts(
                     http::StatusCode::OK,
@@ -493,6 +502,8 @@ async fn dispatch_grpc_tcp_request_stream(
                 return;
             }
 
+            req_state = l7_req.state;
+            let _ = &req_state;
             server_stream.head.headers = l7_req.headers;
             server_stream.head.uri = l7_req.uri;
             server_stream.head.method = l7_req.method;

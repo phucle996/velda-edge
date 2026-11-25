@@ -40,9 +40,14 @@ pub trait PostResponsePlugin: Send + Sync {
 
     /// Evaluated on outgoing response before downstream encoding.
     ///
-    /// The borrowed `req_headers` workspace strictly belongs to THIS specific in-flight
-    /// request (enforcing zero cross-request contamination in pipelined/multiplexed streams).
-    fn on_response(&self, req_headers: &velda_core::HeaderWorkspace, resp: &mut L7Response);
+    /// Receives the request's lifecycle [`velda_core::RequestState`] and borrowed `req_headers`
+    /// workspace strictly belonging to this specific in-flight request.
+    fn on_response(
+        &self,
+        req_state: &velda_core::RequestState,
+        req_headers: &velda_core::HeaderWorkspace,
+        resp: &mut L7Response,
+    );
 
     /// Declares the reverse-permission capabilities required by this plugin.
     fn capability(&self) -> PluginCapability;
@@ -89,11 +94,12 @@ pub trait PostResponsePlugin: Send + Sync {
 #[inline]
 pub fn run_post_response_plugins(
     chain: &[Arc<dyn PostResponsePlugin>],
+    req_state: &velda_core::RequestState,
     req_headers: &velda_core::HeaderWorkspace,
     resp: &mut L7Response,
 ) {
     for plugin in chain {
-        plugin.on_response(req_headers, resp);
+        plugin.on_response(req_state, req_headers, resp);
     }
 }
 
@@ -146,9 +152,10 @@ mod tests {
         let chain: Vec<Arc<dyn PostResponsePlugin>> = vec![plugin];
 
         let mut resp = L7Response::from_bytes(StatusCode::OK, "{\"status\":\"ok\"}");
+        let req_state = velda_core::RequestState::default();
         let req_headers = velda_core::HeaderWorkspace::default();
 
-        run_post_response_plugins(&chain, &req_headers, &mut resp);
+        run_post_response_plugins(&chain, &req_state, &req_headers, &mut resp);
 
         assert!(resp.headers.contains_key("strict-transport-security"));
         assert_eq!(
@@ -169,13 +176,14 @@ mod tests {
         let chain: Vec<Arc<dyn PostResponsePlugin>> = vec![plugin];
 
         let mut resp = L7Response::empty(StatusCode::NO_CONTENT);
+        let req_state = velda_core::RequestState::default();
         let mut req_headers = velda_core::HeaderWorkspace::default();
         req_headers.insert(
             "origin",
             http::HeaderValue::from_static("https://app.example.com"),
         );
 
-        run_post_response_plugins(&chain, &req_headers, &mut resp);
+        run_post_response_plugins(&chain, &req_state, &req_headers, &mut resp);
 
         assert_eq!(
             resp.headers.get("access-control-allow-origin").unwrap(),

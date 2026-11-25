@@ -22,6 +22,7 @@ use crate::pipeline::{DownstreamMeta, PipeOutcome};
 use crate::upstream::Http2Upstream;
 
 /// Forward a request over active H2 client and stream response chunks downstream.
+#[allow(clippy::too_many_arguments)]
 async fn forward_server_stream(
     req_head: &Http2ServerRequestHead,
     body: &Body,
@@ -29,6 +30,7 @@ async fn forward_server_stream(
     client: &Http2Client,
     meta: &DownstreamMeta,
     config: &Http2Config,
+    req_state: &velda_core::RequestState,
     plan: &velda_plugin::RoutePluginPlan,
 ) -> Result<(), Http2Error> {
     let is_head = req_head.method == http::Method::HEAD;
@@ -49,7 +51,12 @@ async fn forward_server_stream(
     let mut resp_ws = response.headers;
     if let Some(post_hooks) = &plan.post_response_hooks {
         let mut l7_resp = L7Response::new(response.status, Version::HTTP_2, resp_ws, Body::Empty);
-        velda_plugin::run_post_response_plugins(post_hooks, &req_head.headers, &mut l7_resp);
+        velda_plugin::run_post_response_plugins(
+            post_hooks,
+            req_state,
+            &req_head.headers,
+            &mut l7_resp,
+        );
         response.status = l7_resp.status;
         resp_ws = l7_resp.headers;
     }
@@ -114,6 +121,7 @@ async fn forward_server_stream(
 }
 
 /// Serves a server-streaming HTTP/2 downstream stream forwarded to an HTTP/2 upstream backend.
+#[allow(clippy::too_many_arguments)]
 pub async fn serve(
     req_head: Http2ServerRequestHead,
     mut receiver: Http2StreamReceiver,
@@ -121,6 +129,7 @@ pub async fn serve(
     meta: Arc<DownstreamMeta>,
     config: Http2Config,
     upstream: &Arc<Http2Upstream>,
+    req_state: &velda_core::RequestState,
     plan: &velda_plugin::RoutePluginPlan,
 ) -> PipeOutcome {
     // 1. Consume downstream body
@@ -186,6 +195,7 @@ pub async fn serve(
         &client,
         &meta,
         &config,
+        req_state,
         plan,
     )
     .await;
@@ -206,6 +216,7 @@ pub async fn serve(
                 &fresh_client,
                 &meta,
                 &config,
+                req_state,
                 plan,
             )
             .await;

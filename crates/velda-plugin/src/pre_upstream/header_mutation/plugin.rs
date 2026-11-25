@@ -1,281 +1,88 @@
 //! Header Mutation Pre-Upstream Plugin (`header_mutation`).
 //!
-//! Enforces edge hygiene and request transformation before upstream backend forwarding:
-//! - Strips RFC 9110 / RFC 7230 hop-by-hop headers while defending against CVE-2022-26143 abuse.
-//! - Removes sensitive, untrusted, or unneeded client headers.
-//! - Renames headers in-place on the stack with anti-shadowing protection.
-//! - Evaluates and interpolates dynamic runtime variables (`$client_ip`, `$request_id`, etc.).
-//! - Appends values to existing headers (e.g. multi-value `X-Forwarded-For`).
+//! Operates strictly on `req.headers` ([`velda_core::HeaderWorkspace`]) to apply
+//! configured static delete (`remove`), overwrite (`set`), and add (`append`)
+//! rules verbatim, including entries tagged with `TAG_BYTE_BYPASS_BIT`.
+//!
+//! ```text
+//!   req.headers: HeaderWorkspace
+//!     │
+//!     ├─► 0. op_mask == 0 ──► Action::Continue
+//!     ├─► 1. OP_REMOVE: `contains_prehashed(&key)` ─► `remove(&key.name)`
+//!     ├─► 2. OP_SET:    `insert_prehashed(&key, val)` (static HeaderValue)
+//!     └─► 3. OP_APPEND: `append(name, val)` (static HeaderValue)
+//! ```
 
-use crate::config::PluginConfig;
 use http::header::{HeaderName, HeaderValue};
-use velda_core::{Action, HeaderWorkspace, L7Request};
+use velda_core::{Action, HeaderKey, L7Request};
 
 use crate::capability::{AccessLevel, PluginCapability, SupportedProtocols};
+use crate::config::PluginConfig;
 use crate::error::PluginError;
 use crate::pre_upstream::PreUpstreamPlugin;
 
-// Pre-parsed static hop-by-hop header names to avoid dynamic string parsing on the hot path.
-const KEEP_ALIVE: HeaderName = HeaderName::from_static("keep-alive");
-const PROXY_CONNECTION: HeaderName = HeaderName::from_static("proxy-connection");
+const OP_REMOVE: u8 = 1 << 0;
+const OP_SET: u8 = 1 << 1;
+const OP_APPEND: u8 = 1 << 2;
 
-// ── Dynamic Variables & Value Specifications ─────────────────────────
-
-/// Canonical dynamic runtime variables interpolatable into upstream request headers.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum DynamicVar {
-    /// Client IP address (authoritatively resolved from edge `x-real-ip` first, falling back to nearest proxy).
-    ClientIp,
-    /// Monotonic W3C request identifier (zero-allocation reference from Slot 0 of `HeaderWorkspace`).
-    RequestId,
-    /// Downstream request scheme (`"http"` or `"https"`).
-    Scheme,
-    /// Host authority header or URI authority.
-    Host,
-    /// HTTP request method (`"GET"`, `"POST"`, etc.).
-    Method,
-    /// Request URI path.
-    Path,
-}
-
-/// Header value specification: pre-compiled static value or dynamic request variable.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub enum HeaderValueSpec {
-    /// Static header value pre-computed at configuration compile time.
-    Static(HeaderValue),
-    /// Dynamic variable resolved per request on the hot path.
-    Variable(DynamicVar),
-}
-
-impl HeaderValueSpec {
-    /// Parses a header value specification from string.
-    /// Supports `$$` to escape a literal `$`.
-    pub fn parse(s: &str) -> Result<Self, PluginError> {
-        if let Some(rest) = s.strip_prefix('$') {
-            if rest == "$" {
-                return Ok(Self::Static(HeaderValue::from_static("$")));
-            }
-            let var = match rest {
-                "client_ip" => DynamicVar::ClientIp,
-                "request_id" => DynamicVar::RequestId,
-                "scheme" => DynamicVar::Scheme,
-                "host" => DynamicVar::Host,
-                "method" => DynamicVar::Method,
-                "path" => DynamicVar::Path,
-                _ => {
-                    return Err(PluginError::Config(format!(
-                        "Unknown dynamic variable '{s}'; supported variables are: $client_ip, $request_id, $scheme, $host, $method, $path (use '$$' to escape literal '$')"
-                    )));
-                }
-            };
-            Ok(Self::Variable(var))
-        } else {
-            let val = HeaderValue::from_str(s).map_err(|e| {
-                PluginError::Config(format!("Invalid header value string '{s}': {e}"))
-            })?;
-            Ok(Self::Static(val))
-        }
-    }
-
-    /// Resolves the header value against the incoming request and authoritative target upstream.
-    #[inline]
-    pub fn resolve(&self, req: &L7Request, _target_upstream: &str) -> Option<HeaderValue> {
-        match self {
-            Self::Static(val) => Some(val.clone()),
-            Self::Variable(var) => match var {
-                DynamicVar::ClientIp => {
-                    // Security Invariant: Prefer edge-authoritative x-real-ip (injected from physical socket peer)
-                    // over untrusted client-supplied x-forwarded-for to eliminate IP spoofing attacks.
-                    if let Some(real_ip) = req.headers.get("x-real-ip") {
-                        Some(real_ip.clone())
-                    } else if let Some(xff) = req
-                        .headers
-                        .get("x-forwarded-for")
-                        .and_then(|v| v.to_str().ok())
-                    {
-                        // Fall back to nearest proxy (right-most IP)
-                        let nearest = xff
-                            .rsplit(',')
-                            .next()
-                            .map(|s| s.trim())
-                            .unwrap_or("127.0.0.1");
-                        HeaderValue::from_str(nearest).ok()
-                    } else {
-                        Some(HeaderValue::from_static("127.0.0.1"))
-                    }
-                }
-                DynamicVar::RequestId => {
-                    // Always O(1) zero-allocation from Slot 0 authoritative W3C ID
-                    Some(req.headers.request_id().clone())
-                }
-                DynamicVar::Scheme => {
-                    let is_https = req.uri.scheme_str() == Some("https")
-                        || req
-                            .headers
-                            .get("x-forwarded-proto")
-                            .is_some_and(|v| v.as_bytes().eq_ignore_ascii_case(b"https"));
-                    if is_https {
-                        Some(HeaderValue::from_static("https"))
-                    } else {
-                        Some(HeaderValue::from_static("http"))
-                    }
-                }
-                DynamicVar::Host => req
-                    .headers
-                    .get(http::header::HOST)
-                    .cloned()
-                    .or_else(|| req.uri.host().and_then(|h| HeaderValue::from_str(h).ok())),
-                DynamicVar::Method => match req.method {
-                    http::Method::GET => Some(HeaderValue::from_static("GET")),
-                    http::Method::POST => Some(HeaderValue::from_static("POST")),
-                    http::Method::PUT => Some(HeaderValue::from_static("PUT")),
-                    http::Method::DELETE => Some(HeaderValue::from_static("DELETE")),
-                    http::Method::HEAD => Some(HeaderValue::from_static("HEAD")),
-                    http::Method::OPTIONS => Some(HeaderValue::from_static("OPTIONS")),
-                    http::Method::PATCH => Some(HeaderValue::from_static("PATCH")),
-                    ref m => HeaderValue::from_str(m.as_str()).ok(),
-                },
-                DynamicVar::Path => HeaderValue::from_str(req.uri.path()).ok(),
-            },
-        }
-    }
-}
-
-// ── Hop-by-Hop Stripping & Anti-Abuse Protection ─────────────────────
-
-/// Checks whether a header name is a protected edge/protocol header that must NEVER
-/// be stripped via client-supplied `Connection` tokens (defends against CVE-2022-26143 / Hop-by-Hop Abuse).
-/// Uses zero-allocation length-bucket dispatch for hot-path efficiency.
-#[inline]
-pub fn is_protected_from_connection_strip(name: &HeaderName) -> bool {
-    let s = name.as_str();
-    if s.starts_with(':') {
-        return true;
-    }
-    match s.len() {
-        4 => s == "host",
-        6 => s == "cookie",
-        9 => s == "x-real-ip",
-        10 => s == "set-cookie",
-        12 => s == "content-type" || s == "x-request-id",
-        13 => s == "authorization",
-        14 => s == "content-length",
-        15 => s == "x-forwarded-for",
-        16 => s == "x-forwarded-host" || s == "x-forwarded-port",
-        17 => s == "x-forwarded-proto",
-        _ => false,
-    }
-}
-
-/// Strips RFC 9110 / RFC 7230 hop-by-hop headers from a mutable headers map.
-/// Scans ALL Connection header lines (supports RFC 9110 §5.3 header splitting / multi-line headers).
-#[inline]
-pub fn strip_hop_by_hop_headers(headers: &mut HeaderWorkspace) {
-    // 1. Scan and extract tokens across ALL Connection header lines
-    if headers.contains_key(http::header::CONNECTION) {
-        let mut custom_tokens = [const { None }; 16];
-        let mut count = 0;
-        for val in headers.get_all(http::header::CONNECTION) {
-            if let Ok(raw) = val.to_str() {
-                for token in raw.split(',') {
-                    let trimmed = token.trim();
-                    if !trimmed.is_empty()
-                        && !trimmed.eq_ignore_ascii_case("close")
-                        && !trimmed.eq_ignore_ascii_case("keep-alive")
-                        && let Ok(name) = HeaderName::from_bytes(trimmed.as_bytes())
-                        && !is_protected_from_connection_strip(&name)
-                        && count < custom_tokens.len()
-                    {
-                        custom_tokens[count] = Some(name);
-                        count += 1;
-                    }
-                }
-            }
-        }
-        headers.remove(http::header::CONNECTION);
-        for name in custom_tokens.into_iter().flatten() {
-            headers.remove(name);
-        }
-    }
-
-    // 2. Standard RFC Hop-by-Hop headers
-    headers.remove(&KEEP_ALIVE);
-    headers.remove(&PROXY_CONNECTION);
-    headers.remove(http::header::PROXY_AUTHENTICATE);
-    headers.remove(http::header::PROXY_AUTHORIZATION);
-    headers.remove(http::header::TE);
-    headers.remove(http::header::TRAILER);
-    headers.remove(http::header::TRANSFER_ENCODING);
-    headers.remove(http::header::UPGRADE);
-}
-
-// ── Plugin Definition & Implementation ───────────────────────────────
-
-/// Configuration settings for the header mutation plugin.
-#[derive(Debug, Clone, PartialEq, Eq)]
+/// Explicit static mutation rules on `HeaderWorkspace`: remove, set (overwrite), and append (add).
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct HeaderMutationConfig {
-    /// Strips RFC 9110 / RFC 7230 hop-by-hop headers before upstream forwarding.
-    pub strip_hop_by_hop: bool,
-    /// Headers to be explicitly stripped before upstream dispatch.
+    /// Header names to delete from `HeaderWorkspace` (including bypass-tagged entries).
     pub remove: Vec<HeaderName>,
-    /// Headers to be renamed from `(source_name, target_name)`.
-    pub rename: Vec<(HeaderName, HeaderName)>,
-    /// Headers to be set or overwritten.
-    pub set: Vec<(HeaderName, HeaderValueSpec)>,
-    /// Headers to be appended to existing values.
-    pub append: Vec<(HeaderName, HeaderValueSpec)>,
+    /// Static header entries to set or overwrite (`insert_prehashed`).
+    pub set: Vec<(HeaderName, HeaderValue)>,
+    /// Static header entries to append (`append`).
+    pub append: Vec<(HeaderName, HeaderValue)>,
 }
 
-impl Default for HeaderMutationConfig {
-    fn default() -> Self {
-        Self {
-            strip_hop_by_hop: true,
-            remove: Vec::new(),
-            rename: Vec::new(),
-            set: Vec::new(),
-            append: Vec::new(),
-        }
-    }
-}
-
-/// Pre-Upstream Header Mutation Plugin.
+/// Pre-Upstream Header Mutation Plugin centered directly on `HeaderWorkspace`.
+#[repr(C, align(64))]
 #[derive(Debug, Clone)]
 pub struct HeaderMutationPlugin {
+    /// Bitmask of enabled operations (`0` = no-op fast path).
+    op_mask: u8,
+    remove_keys: Vec<HeaderKey>,
+    sets: Vec<(HeaderKey, HeaderValue)>,
+    appends: Vec<(HeaderName, HeaderValue)>,
     pub id: String,
     pub config: HeaderMutationConfig,
-    static_sets: Vec<(HeaderName, HeaderValue)>,
-    dynamic_sets: Vec<(HeaderName, DynamicVar)>,
-    static_appends: Vec<(HeaderName, HeaderValue)>,
-    dynamic_appends: Vec<(HeaderName, DynamicVar)>,
 }
 
 impl HeaderMutationPlugin {
     pub fn new(id: impl Into<String>, config: HeaderMutationConfig) -> Self {
-        let mut static_sets = Vec::new();
-        let mut dynamic_sets = Vec::new();
-        for (name, spec) in &config.set {
-            match spec {
-                HeaderValueSpec::Static(val) => static_sets.push((name.clone(), val.clone())),
-                HeaderValueSpec::Variable(var) => dynamic_sets.push((name.clone(), *var)),
-            }
-        }
+        let remove_keys: Vec<HeaderKey> = config
+            .remove
+            .iter()
+            .map(|name| HeaderKey::from_name(name.clone()))
+            .collect();
 
-        let mut static_appends = Vec::new();
-        let mut dynamic_appends = Vec::new();
-        for (name, spec) in &config.append {
-            match spec {
-                HeaderValueSpec::Static(val) => static_appends.push((name.clone(), val.clone())),
-                HeaderValueSpec::Variable(var) => dynamic_appends.push((name.clone(), *var)),
-            }
+        let sets: Vec<(HeaderKey, HeaderValue)> = config
+            .set
+            .iter()
+            .map(|(name, val)| (HeaderKey::from_name(name.clone()), val.clone()))
+            .collect();
+
+        let appends = config.append.clone();
+
+        let mut op_mask = 0u8;
+        if !remove_keys.is_empty() {
+            op_mask |= OP_REMOVE;
+        }
+        if !sets.is_empty() {
+            op_mask |= OP_SET;
+        }
+        if !appends.is_empty() {
+            op_mask |= OP_APPEND;
         }
 
         Self {
+            op_mask,
+            remove_keys,
+            sets,
+            appends,
             id: id.into(),
             config,
-            static_sets,
-            dynamic_sets,
-            static_appends,
-            dynamic_appends,
         }
     }
 
@@ -296,41 +103,35 @@ impl HeaderMutationPlugin {
             })?;
             remove.push(name);
         }
+        remove.sort_unstable_by(|a, b| a.as_str().cmp(b.as_str()));
 
         let mut set = Vec::with_capacity(cfg.set_headers.len());
         for (k, v) in &cfg.set_headers {
             let name = HeaderName::from_bytes(k.as_bytes())
                 .map_err(|e| PluginError::Config(format!("Invalid set header name '{k}': {e}")))?;
-            let spec = HeaderValueSpec::parse(v)?;
-            set.push((name, spec));
+            let val = HeaderValue::from_str(v).map_err(|e| {
+                PluginError::Config(format!("Invalid set header value for '{k}': {e}"))
+            })?;
+            set.push((name, val));
         }
+        set.sort_unstable_by(|a, b| a.0.as_str().cmp(b.0.as_str()));
 
         let mut append = Vec::with_capacity(cfg.append_headers.len());
         for (k, v) in &cfg.append_headers {
             let name = HeaderName::from_bytes(k.as_bytes()).map_err(|e| {
                 PluginError::Config(format!("Invalid append header name '{k}': {e}"))
             })?;
-            let spec = HeaderValueSpec::parse(v)?;
-            append.push((name, spec));
-        }
-
-        let mut rename = Vec::with_capacity(cfg.rename_headers.len());
-        for (from_k, to_v) in &cfg.rename_headers {
-            let from_name = HeaderName::from_bytes(from_k.as_bytes()).map_err(|e| {
-                PluginError::Config(format!("Invalid rename source header '{from_k}': {e}"))
+            let val = HeaderValue::from_str(v).map_err(|e| {
+                PluginError::Config(format!("Invalid append header value for '{k}': {e}"))
             })?;
-            let to_name = HeaderName::from_bytes(to_v.as_bytes()).map_err(|e| {
-                PluginError::Config(format!("Invalid rename target header '{to_v}': {e}"))
-            })?;
-            rename.push((from_name, to_name));
+            append.push((name, val));
         }
+        append.sort_unstable_by(|a, b| a.0.as_str().cmp(b.0.as_str()));
 
         Ok(Self::new(
             &config.id,
             HeaderMutationConfig {
-                strip_hop_by_hop: cfg.strip_hop_by_hop,
                 remove,
-                rename,
                 set,
                 append,
             },
@@ -350,174 +151,31 @@ impl PreUpstreamPlugin for HeaderMutationPlugin {
     }
 
     fn on_upstream_request(&self, req: &mut L7Request, _target_upstream: &mut u16) -> Action {
-        // Step 1: Strip RFC Hop-by-hop headers if configured
-        if self.config.strip_hop_by_hop {
-            strip_hop_by_hop_headers(&mut req.headers);
+        let mask = self.op_mask;
+        if mask == 0 {
+            return Action::Continue;
         }
 
-        // Step 2: Remove blacklisted / unneeded headers
-        for name in &self.config.remove {
-            req.headers.remove(name);
-        }
-
-        // Step 3: Rename headers
-        // Single-value fast path avoids get_all count traversal when there is at most 1 value (99.99% of requests)
-        for (from_name, to_name) in &self.config.rename {
-            if from_name != to_name {
-                let mut vals = req.headers.get_all(from_name);
-                if let Some(first) = vals.next() {
-                    if vals.next().is_some() {
-                        rename_multi_value_headers(&mut req.headers, from_name, to_name);
-                    } else {
-                        let val = first.clone();
-                        req.headers.remove(from_name);
-                        req.headers.remove(to_name);
-                        req.headers.append(to_name.clone(), val);
-                    }
+        // Step 1: Delete configured headers (including bypass-tagged entries)
+        if (mask & OP_REMOVE) != 0 {
+            for key in &self.remove_keys {
+                if req.headers.contains_prehashed(key) {
+                    req.headers.remove(&key.name);
                 }
             }
         }
 
-        // Step 4: Set / overwrite static headers (100% direct, 0 dynamic branches)
-        for (name, val) in &self.static_sets {
-            req.headers.insert(name.clone(), val.clone());
-        }
-
-        // Step 5: Append static headers
-        for (name, val) in &self.static_appends {
-            req.headers.append(name.clone(), val.clone());
-        }
-
-        // Step 6: Dynamic mutations using arithmetic HeaderWorkspace registers
-        if !self.dynamic_sets.is_empty() || !self.dynamic_appends.is_empty() {
-            for (name, var) in &self.dynamic_sets {
-                match *var {
-                    DynamicVar::ClientIp => {
-                        let ip = req
-                            .headers
-                            .get_ip_u128("x-real-ip")
-                            .or_else(|| req.headers.get_ip_u128("x-forwarded-for"))
-                            .or_else(|| (req.state.client_ip != 0).then_some(req.state.client_ip))
-                            .unwrap_or_else(|| velda_core::lut::ip::encode_ipv4_u128(0x7F00_0001));
-                        req.headers.set_ip_u128(name.clone(), ip);
-                    }
-                    DynamicVar::RequestId => {
-                        if let Some(val) = req
-                            .headers
-                            .get(&velda_core::buffer::header::X_REQUEST_ID)
-                            .cloned()
-                        {
-                            req.headers.insert(name.clone(), val);
-                        }
-                    }
-                    DynamicVar::Scheme => {
-                        let is_https = req.uri.scheme_str() == Some("https")
-                            || req
-                                .headers
-                                .get("x-forwarded-proto")
-                                .is_some_and(|v| v.as_bytes().eq_ignore_ascii_case(b"https"));
-                        let scheme = if is_https {
-                            b"https" as &[u8]
-                        } else {
-                            b"http" as &[u8]
-                        };
-                        req.headers.set_inline_ascii(name.clone(), scheme);
-                    }
-                    DynamicVar::Host => {
-                        if let Some(val) =
-                            req.headers.get(http::header::HOST).cloned().or_else(|| {
-                                req.uri.host().and_then(|h| HeaderValue::from_str(h).ok())
-                            })
-                        {
-                            req.headers.insert(name.clone(), val);
-                        }
-                    }
-                    DynamicVar::Method => {
-                        let val = match req.method {
-                            http::Method::GET => Some(HeaderValue::from_static("GET")),
-                            http::Method::POST => Some(HeaderValue::from_static("POST")),
-                            http::Method::PUT => Some(HeaderValue::from_static("PUT")),
-                            http::Method::DELETE => Some(HeaderValue::from_static("DELETE")),
-                            http::Method::HEAD => Some(HeaderValue::from_static("HEAD")),
-                            http::Method::OPTIONS => Some(HeaderValue::from_static("OPTIONS")),
-                            http::Method::PATCH => Some(HeaderValue::from_static("PATCH")),
-                            ref m => HeaderValue::from_str(m.as_str()).ok(),
-                        };
-                        if let Some(v) = val {
-                            req.headers.insert(name.clone(), v);
-                        }
-                    }
-                    DynamicVar::Path => {
-                        if let Ok(val) = HeaderValue::from_str(req.uri.path()) {
-                            req.headers.insert(name.clone(), val);
-                        }
-                    }
-                }
+        // Step 2: Set / overwrite static header values
+        if (mask & OP_SET) != 0 {
+            for (key, val) in &self.sets {
+                req.headers.insert_prehashed(key, val.clone());
             }
+        }
 
-            for (name, var) in &self.dynamic_appends {
-                match *var {
-                    DynamicVar::ClientIp => {
-                        let ip = req
-                            .headers
-                            .get_ip_u128("x-real-ip")
-                            .or_else(|| req.headers.get_ip_u128("x-forwarded-for"))
-                            .or_else(|| (req.state.client_ip != 0).then_some(req.state.client_ip))
-                            .unwrap_or_else(|| velda_core::lut::ip::encode_ipv4_u128(0x7F00_0001));
-                        req.headers.append_ip_u128(name.clone(), ip);
-                    }
-                    DynamicVar::RequestId => {
-                        if let Some(val) = req
-                            .headers
-                            .get(&velda_core::buffer::header::X_REQUEST_ID)
-                            .cloned()
-                        {
-                            req.headers.append(name.clone(), val);
-                        }
-                    }
-                    DynamicVar::Scheme => {
-                        let is_https = req.uri.scheme_str() == Some("https")
-                            || req
-                                .headers
-                                .get("x-forwarded-proto")
-                                .is_some_and(|v| v.as_bytes().eq_ignore_ascii_case(b"https"));
-                        let scheme = if is_https {
-                            b"https" as &[u8]
-                        } else {
-                            b"http" as &[u8]
-                        };
-                        req.headers.append_inline_ascii(name.clone(), scheme);
-                    }
-                    DynamicVar::Host => {
-                        if let Some(val) =
-                            req.headers.get(http::header::HOST).cloned().or_else(|| {
-                                req.uri.host().and_then(|h| HeaderValue::from_str(h).ok())
-                            })
-                        {
-                            req.headers.append(name.clone(), val);
-                        }
-                    }
-                    DynamicVar::Method => {
-                        let val = match req.method {
-                            http::Method::GET => Some(HeaderValue::from_static("GET")),
-                            http::Method::POST => Some(HeaderValue::from_static("POST")),
-                            http::Method::PUT => Some(HeaderValue::from_static("PUT")),
-                            http::Method::DELETE => Some(HeaderValue::from_static("DELETE")),
-                            http::Method::HEAD => Some(HeaderValue::from_static("HEAD")),
-                            http::Method::OPTIONS => Some(HeaderValue::from_static("OPTIONS")),
-                            http::Method::PATCH => Some(HeaderValue::from_static("PATCH")),
-                            ref m => HeaderValue::from_str(m.as_str()).ok(),
-                        };
-                        if let Some(v) = val {
-                            req.headers.append(name.clone(), v);
-                        }
-                    }
-                    DynamicVar::Path => {
-                        if let Ok(val) = HeaderValue::from_str(req.uri.path()) {
-                            req.headers.append(name.clone(), val);
-                        }
-                    }
-                }
+        // Step 3: Append static header values
+        if (mask & OP_APPEND) != 0 {
+            for (name, val) in &self.appends {
+                req.headers.append(name.clone(), val.clone());
             }
         }
 
@@ -535,28 +193,6 @@ impl PreUpstreamPlugin for HeaderMutationPlugin {
     }
 }
 
-#[cold]
-#[inline(never)]
-fn rename_multi_value_headers(
-    headers: &mut velda_core::HeaderWorkspace,
-    from_name: &http::HeaderName,
-    to_name: &http::HeaderName,
-) {
-    let mut stack_vals = [const { None }; 8];
-    let mut count = 0;
-    for v in headers.get_all(from_name) {
-        if count < stack_vals.len() {
-            stack_vals[count] = Some(v.clone());
-            count += 1;
-        }
-    }
-    headers.remove(from_name);
-    headers.remove(to_name);
-    for item in stack_vals.into_iter().flatten() {
-        headers.append(to_name.clone(), item);
-    }
-}
-
 // ── Tests ────────────────────────────────────────────────────────────
 
 #[cfg(test)]
@@ -566,218 +202,138 @@ mod tests {
     use velda_core::{Body, HeaderWorkspace};
 
     #[test]
-    fn test_strip_hop_by_hop_and_cve_protection() {
-        let mut headers = HeaderWorkspace::default();
+    fn test_does_not_touch_unconfigured_headers() {
+        let plugin = HeaderMutationPlugin::new(
+            "hm-explicit-only",
+            HeaderMutationConfig {
+                remove: vec![HeaderName::from_static("x-only-remove-this")],
+                set: Vec::new(),
+                append: Vec::new(),
+            },
+        );
+
+        let mut headers = HeaderWorkspace::new(8);
         headers.insert(
             http::header::CONNECTION,
-            HeaderValue::from_static("keep-alive, Host, Content-Length, X-Real-IP, X-Custom-Strip"),
+            HeaderValue::from_static("keep-alive, x-custom-hop"),
         );
+        headers.insert(http::header::TE, HeaderValue::from_static("trailers"));
         headers.insert(http::header::UPGRADE, HeaderValue::from_static("websocket"));
         headers.insert(
-            http::header::HOST,
-            HeaderValue::from_static("api.example.com"),
-        );
-        headers.insert(
-            http::header::CONTENT_LENGTH,
-            HeaderValue::from_static("123"),
-        );
-        headers.insert(
-            HeaderName::from_static("x-real-ip"),
-            HeaderValue::from_static("203.0.113.1"),
-        );
-        headers.insert(
-            HeaderName::from_static("x-custom-strip"),
-            HeaderValue::from_static("should-be-removed"),
+            HeaderName::from_static("x-only-remove-this"),
+            HeaderValue::from_static("bye"),
         );
 
-        strip_hop_by_hop_headers(&mut headers);
-
-        // Standard hop-by-hop headers are removed
-        assert!(!headers.contains_key(http::header::CONNECTION));
-        assert!(!headers.contains_key(http::header::UPGRADE));
-        assert!(!headers.contains_key("x-custom-strip"));
-
-        // Protected headers are preserved against CVE-2022-26143 connection strip attack
-        assert_eq!(headers.get(http::header::HOST).unwrap(), "api.example.com");
-        assert_eq!(headers.get(http::header::CONTENT_LENGTH).unwrap(), "123");
-        assert_eq!(headers.get("x-real-ip").unwrap(), "203.0.113.1");
-    }
-
-    #[test]
-    fn test_multiline_connection_hop_by_hop_stripping() {
-        let mut headers = HeaderWorkspace::new(16);
-        // Simulates RFC 9110 §5.3 multi-line Connection headers
-        headers.append(
-            http::header::CONNECTION,
-            HeaderValue::from_static("keep-alive"),
-        );
-        headers.append(
-            http::header::CONNECTION,
-            HeaderValue::from_static("x-secret-leak, x-secondary-hop"),
-        );
-        headers.insert(
-            HeaderName::from_static("x-secret-leak"),
-            HeaderValue::from_static("super-confidential"),
-        );
-        headers.insert(
-            HeaderName::from_static("x-secondary-hop"),
-            HeaderValue::from_static("must-be-stripped"),
-        );
-        headers.insert(
-            HeaderName::from_static("x-keep-this"),
-            HeaderValue::from_static("safe-data"),
-        );
-
-        strip_hop_by_hop_headers(&mut headers);
-
-        assert!(!headers.contains_key(http::header::CONNECTION));
-        assert!(!headers.contains_key("x-secret-leak"));
-        assert!(!headers.contains_key("x-secondary-hop"));
-        assert_eq!(headers.get("x-keep-this").unwrap(), "safe-data");
-    }
-
-    #[test]
-    fn test_rename_with_anti_shadowing() {
-        let config = HeaderMutationConfig {
-            strip_hop_by_hop: false,
-            remove: Vec::new(),
-            rename: vec![(
-                HeaderName::from_static("x-legacy-token"),
-                HeaderName::from_static("authorization"),
-            )],
-            set: Vec::new(),
-            append: Vec::new(),
-        };
-        let plugin = HeaderMutationPlugin::new("hm-rename", config);
-
-        let mut headers = HeaderWorkspace::new(4);
-        // Client attempted to pre-inject malicious target header
-        headers.insert(
-            HeaderName::from_static("authorization"),
-            HeaderValue::from_static("malicious-injected-token"),
-        );
-        headers.insert(
-            HeaderName::from_static("x-legacy-token"),
-            HeaderValue::from_static("Bearer abc123xyz"),
-        );
         let mut req = L7Request::new(
             Method::GET,
-            Uri::from_static("/test"),
+            Uri::from_static("/"),
             Version::HTTP_11,
             headers,
             Body::Empty,
         );
-
         let mut target = 1;
-        plugin.on_upstream_request(&mut req, &mut target);
+        let action = plugin.on_upstream_request(&mut req, &mut target);
 
-        assert!(!req.headers.contains_key("x-legacy-token"));
-        // Anti-shadowing: destination header was wiped clean before inserting valid renamed value
-        let auth_vals: Vec<_> = req.headers.get_all("authorization").iter().collect();
-        assert_eq!(auth_vals.len(), 1);
-        assert_eq!(auth_vals[0], "Bearer abc123xyz");
+        assert!(matches!(action, Action::Continue));
+        assert!(!req.headers.contains_key("x-only-remove-this"));
+        assert_eq!(
+            req.headers.get(http::header::CONNECTION).unwrap(),
+            "keep-alive, x-custom-hop"
+        );
+        assert_eq!(req.headers.get(http::header::TE).unwrap(), "trailers");
+        assert_eq!(req.headers.get(http::header::UPGRADE).unwrap(), "websocket");
     }
 
     #[test]
-    fn test_dynamic_variables_integration() {
-        let config = HeaderMutationConfig {
-            strip_hop_by_hop: false,
-            remove: Vec::new(),
-            rename: Vec::new(),
-            set: vec![
-                (
-                    HeaderName::from_static("x-client-ip"),
-                    HeaderValueSpec::parse("$client_ip").unwrap(),
-                ),
-                (
-                    HeaderName::from_static("x-req-id"),
-                    HeaderValueSpec::parse("$request_id").unwrap(),
-                ),
-                (
-                    HeaderName::from_static("x-method"),
-                    HeaderValueSpec::parse("$method").unwrap(),
-                ),
-                (
-                    HeaderName::from_static("x-path"),
-                    HeaderValueSpec::parse("$path").unwrap(),
-                ),
-                (
-                    HeaderName::from_static("x-req-scheme"),
-                    HeaderValueSpec::parse("$scheme").unwrap(),
-                ),
-            ],
-            append: vec![(
-                HeaderName::from_static("x-forwarded-for"),
-                HeaderValueSpec::parse("$client_ip").unwrap(),
-            )],
-        };
-        let plugin = HeaderMutationPlugin::new("hm-dynamic", config);
-
-        let mut headers = HeaderWorkspace::new(4);
-        headers.insert(
-            HeaderName::from_static("x-real-ip"),
-            HeaderValue::from_static("198.51.100.25"),
+    fn test_can_remove_and_overwrite_bypass_tagged_headers() {
+        let plugin = HeaderMutationPlugin::new(
+            "hm-bypass",
+            HeaderMutationConfig {
+                remove: vec![
+                    HeaderName::from_static("x-request-id"),
+                    HeaderName::from_static("x-forwarded-for"),
+                ],
+                set: vec![(
+                    HeaderName::from_static("host"),
+                    HeaderValue::from_static("overwritten.internal"),
+                )],
+                append: vec![(
+                    HeaderName::from_static("x-trace"),
+                    HeaderValue::from_static("hop-1"),
+                )],
+            },
         );
-        headers.insert(
+
+        let mut headers = HeaderWorkspace::new(8);
+        assert!(headers.contains_key("x-request-id"));
+        headers.insert_bypass(
             HeaderName::from_static("x-forwarded-for"),
-            HeaderValue::from_static("192.0.2.1"),
+            HeaderValue::from_static("10.0.0.1"),
+        );
+        headers.insert_bypass(
+            HeaderName::from_static("host"),
+            HeaderValue::from_static("original.example.com"),
+        );
+        headers.insert_bypass(
+            HeaderName::from_static("x-keep-bypass"),
+            HeaderValue::from_static("keep-me"),
         );
 
         let mut req = L7Request::new(
-            Method::PUT,
-            Uri::from_static("https://example.com/v1/resources/99"),
+            Method::GET,
+            Uri::from_static("/v1/items"),
             Version::HTTP_11,
             headers,
             Body::Empty,
         );
-
         let mut target = 1;
         plugin.on_upstream_request(&mut req, &mut target);
 
-        // Verify arithmetic workspace state before rendering
+        assert!(!req.headers.contains_key("x-request-id"));
+        assert!(!req.headers.contains_key("x-forwarded-for"));
         assert_eq!(
-            req.headers.get_ip_u128("x-client-ip"),
-            velda_core::lut::ip::parse_ip_u128(b"198.51.100.25")
+            req.headers.get(http::header::HOST).unwrap(),
+            "overwritten.internal"
         );
-        assert_eq!(
-            req.headers.get_hex128("x-req-id"),
-            req.headers.get_hex128("x-request-id")
-        );
-
-        // Edge x-real-ip takes precedence over untrusted xff prefix
-        assert_eq!(req.headers.get("x-client-ip").unwrap(), "198.51.100.25");
-        assert_eq!(req.headers.get("x-method").unwrap(), "PUT");
-        assert_eq!(req.headers.get("x-path").unwrap(), "/v1/resources/99");
-        assert_eq!(req.headers.get("x-req-scheme").unwrap(), "https");
-        assert!(req.headers.contains_key("x-req-id"));
-
-        let xff: Vec<_> = req.headers.get_all("x-forwarded-for").iter().collect();
-        assert_eq!(xff.len(), 2);
-        assert_eq!(xff[0], "192.0.2.1");
-        assert_eq!(xff[1], "198.51.100.25");
+        assert_eq!(req.headers.get("x-trace").unwrap(), "hop-1");
+        assert_eq!(req.headers.get("x-keep-bypass").unwrap(), "keep-me");
     }
 
     #[test]
-    fn test_set_append_and_remove() {
-        let set = vec![(
-            HeaderName::from_static("x-custom-gateway"),
-            HeaderValueSpec::Static(HeaderValue::from_static("velda")),
-        )];
-        let remove = vec![HeaderName::from_static("x-sensitive")];
-        let config = HeaderMutationConfig {
-            strip_hop_by_hop: true,
-            remove,
-            rename: Vec::new(),
-            set,
-            append: Vec::new(),
-        };
-        let plugin = HeaderMutationPlugin::new("hm-1", config);
+    fn test_set_overwrites_multi_value_and_append_adds_slot() {
+        let plugin = HeaderMutationPlugin::new(
+            "hm-ops",
+            HeaderMutationConfig {
+                remove: vec![HeaderName::from_static("x-sensitive")],
+                set: vec![(
+                    HeaderName::from_static("x-custom-gateway"),
+                    HeaderValue::from_static("velda-v2"),
+                )],
+                append: vec![(
+                    HeaderName::from_static("x-hop"),
+                    HeaderValue::from_static("edge-2"),
+                )],
+            },
+        );
 
-        let mut headers = HeaderWorkspace::new(4);
+        let mut headers = HeaderWorkspace::new(8);
         headers.insert(
             HeaderName::from_static("x-sensitive"),
             HeaderValue::from_static("secret"),
         );
+        headers.append(
+            HeaderName::from_static("x-custom-gateway"),
+            HeaderValue::from_static("old-1"),
+        );
+        headers.append(
+            HeaderName::from_static("x-custom-gateway"),
+            HeaderValue::from_static("old-2"),
+        );
+        headers.append(
+            HeaderName::from_static("x-hop"),
+            HeaderValue::from_static("edge-1"),
+        );
+
         let mut req = L7Request::new(
             Method::GET,
             Uri::from_static("/test"),
@@ -790,22 +346,26 @@ mod tests {
         let action = plugin.on_upstream_request(&mut req, &mut target);
         assert!(matches!(action, Action::Continue));
         assert!(!req.headers.contains_key("x-sensitive"));
-        assert_eq!(req.headers.get("x-custom-gateway").unwrap(), "velda");
+
+        let gw: Vec<_> = req.headers.get_all("x-custom-gateway").iter().collect();
+        assert_eq!(gw.len(), 1);
+        assert_eq!(gw[0], "velda-v2");
+
+        let hops: Vec<_> = req.headers.get_all("x-hop").iter().collect();
+        assert_eq!(hops.len(), 2);
+        assert_eq!(hops[0], "edge-1");
+        assert_eq!(hops[1], "edge-2");
     }
 
     #[test]
     fn test_from_config_complete() {
         let json_cfg = serde_json::json!({
-            "strip_hop_by_hop": true,
             "remove_headers": ["x-internal-secret"],
-            "rename_headers": {
-                "x-old-id": "x-new-id"
-            },
             "set_headers": {
                 "x-forwarded-proto": "https"
             },
             "append_headers": {
-                "x-forwarded-for": "$client_ip"
+                "x-proxy-tag": "velda-edge"
             }
         });
         let config = PluginConfig {
@@ -814,9 +374,7 @@ mod tests {
         };
         let plugin = HeaderMutationPlugin::from_config(&config).expect("valid config");
         assert_eq!(plugin.id, "header_mutation");
-        assert!(plugin.config.strip_hop_by_hop);
         assert_eq!(plugin.config.remove.len(), 1);
-        assert_eq!(plugin.config.rename.len(), 1);
         assert_eq!(plugin.config.set.len(), 1);
         assert_eq!(plugin.config.append.len(), 1);
 

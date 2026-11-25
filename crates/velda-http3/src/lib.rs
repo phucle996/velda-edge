@@ -40,8 +40,7 @@ pub use proto::qpack::{
 pub use quinn_proto;
 pub use server::{
     Http3Engine, Http3RequestEvent, OutgoingDatagram, build_edge_response_frames, extract_host,
-    is_clean_path, normalize_path, precompiled_early_response, precompiled_reject_response,
-    send_response,
+    is_clean_path, normalize_path, precompiled_early_response, reject_response, send_response,
 };
 pub use slot::Http3HeaderSlot;
 pub use strategy::Http3PipeStrategy;

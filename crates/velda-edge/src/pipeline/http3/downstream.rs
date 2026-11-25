@@ -438,6 +438,8 @@ async fn process_http3_request(
 
     let route_idx = route.id as usize;
     let mut target_upstream: u16 = rt.route_to_upstream.get(route_idx).copied().unwrap_or(0);
+    req.state.set_route(route.id);
+    req.state.set_upstream(target_upstream);
 
     // ========================================================================
     // [Route Plugin Pipeline Evaluation: pre_route & pre_upstream hooks]
@@ -458,21 +460,11 @@ async fn process_http3_request(
                 Action::Respond(resp) => {
                     short_circuit_resp = Some(resp);
                 }
-                Action::ServeCached(cached) => {
-                    short_circuit_resp = Some(cached.into_l7_response());
-                }
                 Action::Reject(reason) => {
                     // FAST-FAIL INVARIANT: Rejections terminate immediately at the Edge boundary.
                     // Strictly bypasses post_response_hooks (anti-CPDoS & Zero-DDoS CPU burn),
-                    // transforming HeaderWorkspace in-place to preserve only Bit-1 bypass headers.
-                    let reject_meta = velda_core::lut::get_reject_meta(reason);
-                    req.headers.prepare_for_rejection(reject_meta, true);
-                    let resp = velda_core::L7Response {
-                        status: reject_meta.status,
-                        version: http::Version::HTTP_3,
-                        headers: req.headers,
-                        body: velda_core::Body::Bytes(bytes::Bytes::from_static(reject_meta.body)),
-                    };
+                    // retaining only MSB bypass headers while velda-http3 stamps HTTP/3 rejection fields.
+                    let resp = velda_http3::reject_response(reason, req.headers);
                     let status = resp.status.as_u16();
                     let bytes_tx = resp.body.len() as u64;
                     let _ = responder.send_response(resp).await;
@@ -526,6 +518,7 @@ async fn process_http3_request(
         {
             let mut action =
                 velda_plugin::run_pre_upstream_plugins(hooks, &mut req, &mut target_upstream);
+            req.state.set_upstream(target_upstream);
             while let Action::Delay { duration, and_then } = action {
                 tokio::time::sleep(duration).await;
                 action = *and_then;
@@ -536,21 +529,11 @@ async fn process_http3_request(
                 Action::Respond(resp) => {
                     short_circuit_resp = Some(resp);
                 }
-                Action::ServeCached(cached) => {
-                    short_circuit_resp = Some(cached.into_l7_response());
-                }
                 Action::Reject(reason) => {
                     // FAST-FAIL INVARIANT: Rejections terminate immediately at the Edge boundary.
                     // Strictly bypasses post_response_hooks (anti-CPDoS & Zero-DDoS CPU burn),
-                    // transforming HeaderWorkspace in-place to preserve only Bit-1 bypass headers.
-                    let reject_meta = velda_core::lut::get_reject_meta(reason);
-                    req.headers.prepare_for_rejection(reject_meta, true);
-                    let resp = velda_core::L7Response {
-                        status: reject_meta.status,
-                        version: http::Version::HTTP_3,
-                        headers: req.headers,
-                        body: velda_core::Body::Bytes(bytes::Bytes::from_static(reject_meta.body)),
-                    };
+                    // retaining only MSB bypass headers while velda-http3 stamps HTTP/3 rejection fields.
+                    let resp = velda_http3::reject_response(reason, req.headers);
                     let status = resp.status.as_u16();
                     let bytes_tx = resp.body.len() as u64;
                     let _ = responder.send_response(resp).await;
@@ -611,7 +594,12 @@ async fn process_http3_request(
                 );
             }
             if let Some(post_hooks) = &plan.post_response_hooks {
-                velda_plugin::run_post_response_plugins(post_hooks, &req.headers, &mut resp);
+                velda_plugin::run_post_response_plugins(
+                    post_hooks,
+                    &req.state,
+                    &req.headers,
+                    &mut resp,
+                );
             }
             let status = resp.status.as_u16();
             let bytes_tx = resp.body.len() as u64;
@@ -809,7 +797,12 @@ async fn process_http3_request(
                 let (mut resp, upstream_addr, completion) =
                     pipe::buffered_h3_h3::serve(&req, upstream).await;
                 if let Some(post_hooks) = &plan.post_response_hooks {
-                    velda_plugin::run_post_response_plugins(post_hooks, &req.headers, &mut resp);
+                    velda_plugin::run_post_response_plugins(
+                        post_hooks,
+                        &req.state,
+                        &req.headers,
+                        &mut resp,
+                    );
                 }
                 let status = resp.status.as_u16();
                 let bytes_tx = resp.body.len() as u64;
@@ -839,7 +832,12 @@ async fn process_http3_request(
                 let (mut resp, upstream_addr, completion) =
                     pipe::client_stream_h3_h3::serve(&req, upstream).await;
                 if let Some(post_hooks) = &plan.post_response_hooks {
-                    velda_plugin::run_post_response_plugins(post_hooks, &req.headers, &mut resp);
+                    velda_plugin::run_post_response_plugins(
+                        post_hooks,
+                        &req.state,
+                        &req.headers,
+                        &mut resp,
+                    );
                 }
                 let status = resp.status.as_u16();
                 let bytes_tx = resp.body.len() as u64;
@@ -872,7 +870,12 @@ async fn process_http3_request(
                 let (mut resp, upstream_addr, completion) =
                     pipe::buffered_h3_h2::serve(&req, upstream).await;
                 if let Some(post_hooks) = &plan.post_response_hooks {
-                    velda_plugin::run_post_response_plugins(post_hooks, &req.headers, &mut resp);
+                    velda_plugin::run_post_response_plugins(
+                        post_hooks,
+                        &req.state,
+                        &req.headers,
+                        &mut resp,
+                    );
                 }
                 let status = resp.status.as_u16();
                 let bytes_tx = resp.body.len() as u64;
@@ -902,7 +905,12 @@ async fn process_http3_request(
                 let (mut resp, upstream_addr, completion) =
                     pipe::client_stream_h3_h2::serve(&req, upstream).await;
                 if let Some(post_hooks) = &plan.post_response_hooks {
-                    velda_plugin::run_post_response_plugins(post_hooks, &req.headers, &mut resp);
+                    velda_plugin::run_post_response_plugins(
+                        post_hooks,
+                        &req.state,
+                        &req.headers,
+                        &mut resp,
+                    );
                 }
                 let status = resp.status.as_u16();
                 let bytes_tx = resp.body.len() as u64;
@@ -935,7 +943,12 @@ async fn process_http3_request(
                 let (mut resp, upstream_addr, completion) =
                     pipe::buffered_h3_h1::serve(&req, upstream).await;
                 if let Some(post_hooks) = &plan.post_response_hooks {
-                    velda_plugin::run_post_response_plugins(post_hooks, &req.headers, &mut resp);
+                    velda_plugin::run_post_response_plugins(
+                        post_hooks,
+                        &req.state,
+                        &req.headers,
+                        &mut resp,
+                    );
                 }
                 let status = resp.status.as_u16();
                 let bytes_tx = resp.body.len() as u64;
@@ -965,7 +978,12 @@ async fn process_http3_request(
                 let (mut resp, upstream_addr, completion) =
                     pipe::client_stream_h3_h1::serve(&req, upstream).await;
                 if let Some(post_hooks) = &plan.post_response_hooks {
-                    velda_plugin::run_post_response_plugins(post_hooks, &req.headers, &mut resp);
+                    velda_plugin::run_post_response_plugins(
+                        post_hooks,
+                        &req.state,
+                        &req.headers,
+                        &mut resp,
+                    );
                 }
                 let status = resp.status.as_u16();
                 let bytes_tx = resp.body.len() as u64;

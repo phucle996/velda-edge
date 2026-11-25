@@ -1,82 +1,79 @@
 # HMAC Authentication Plugin (`hmac_auth`)
 
-High-performance, zero-IO Hash-based Message Authentication Code verification plugin conforming to RFC 2104. Evaluated during the `pre_upstream` phase after route matching. Guarantees message integrity, caller identity, and absolute anti-replay protection via timestamp drift windows and sharded in-memory nonce tracking.
+Constant-time HMAC-SHA256 / HMAC-SHA512 request authentication plugin executed during the `pre_upstream` phase on HTTP traffic (`SupportedProtocols::ALL_HTTP`). Validates caller identity, request integrity (`METHOD`, `PATH`, sorted query, signed headers, and SHA-256 payload digest), timestamp drift, and optional single-use nonce anti-replay protection.
+
+```text
++---------------------------------------------------------------------------------+
+|                         HMAC AUTHENTICATION HOT PATH                            |
++---------------------------------------------------------------------------------+
+|  L7Request (req.headers: HeaderWorkspace)                                       |
+|    |                                                                            |
+|    +---> [1] access_key_header (prehashed) ─► CredentialTable::lookup           |
+|    |                                          (zero-hash AGU bit-shift / pext)  |
+|    +---> [2] timestamp_header (prehashed)  ─► |ingress_sec - ts| <= clock_skew  |
+|    +---> [3] nonce_header (if enforce_nonce) ─► compute 128-bit fingerprint     |
+|    +---> [4] signature_header ─► decode hex/base64 onto stack (32B / 64B)       |
+|    +---> [5] payload SHA-256  ─► body digest vs content_sha256_header / empty   |
+|    +---> [6] streaming HMAC   ─► hmac::Context::with_key ─► constant_time_eq    |
+|    +---> [7] NonceCache       ─► single-lock check_and_record_fp (post-verify)  |
+|    +---> [8] x-consumer-id    ─► set precompiled value OR remove spoofed header |
+|                                                                                 |
+|  Any failure ─► insert_bypass(WWW-Authenticate) ─► Action::Reject(Unauthorized) |
++---------------------------------------------------------------------------------+
+```
 
 ---
 
-## 1. Overview & Pipeline Specification
+## 1. What This Plugin Does
+
+- **Zero-Hash Static Credential Lookup**: Compiles configured `credentials` into `CredentialTable`, resolving `access_key_id` via distinguishing bit-shifts / BMI2 `pext` directly into AGU-indexed `Option<Box<CredentialEntry>>` pointer slots instead of runtime HashMap hashing.
+- **Canonical Request Integrity Verification**: Streams `METHOD`, `PATH`, sorted query string, pre-hashed signed headers (with `:authority` fallback for HTTP/2 and HTTP/3), signed header list, and payload SHA-256 digest directly into `ring::hmac::Context`.
+- **Anti-Replay Window & Nonce Tracking**: Rejects expired/future timestamps outside `clock_skew_seconds` and enforces single-use nonces inside a sharded `NonceCache` when `enforce_nonce` is enabled.
+- **Authoritative Consumer Identity Injection**: Stamps pre-compiled `x-consumer-id` for downstream services when `consumer_id` is configured, or explicitly deletes any client-supplied `x-consumer-id` when `consumer_id` is `None`.
+
+---
+
+## 2. Where It Sits in Velda Edge
 
 | Property | Value |
 | :--- | :--- |
 | **Plugin ID** | `hmac_auth` |
-| **Canonical Phase** | `pre_upstream` |
-| **Execution Order** | Pre-upstream FIFO pipeline (evaluated before upstream dispatch) |
-| **Access Level** | `PluginCapability::new(AccessLevel::ReadWrite, SupportedProtocols::ALL_L7, false)` |
-| **Supported Protocols** | `ALL_L7` (HTTP/1.1, HTTP/2, HTTP/3, gRPC) |
-| **Hot-Path Overhead** | Nanosecond-level; zero-IO, in-memory credential lookup, constant-time verification |
-| **Memory Invariant** | Lock-striped sharded nonce set with automatic time-to-live eviction |
-
----
-
-## 2. 100% Explicit Configuration Invariant
-
-> [!IMPORTANT]
-> **Strict Configuration Contract**: Every configuration parameter must be explicitly declared in `plugins.json`. No silent fallbacks or implicit defaults exist. All field values must be intentionally supplied according to your infrastructure requirements.
-
-| Field | Type | Required | Constraints / Allowed Values | Recommended Value | Description |
-| :--- | :---: | :---: | :--- | :--- | :--- |
-| `access_key_header` | String | **Yes** | Valid RFC 9110 header name | `"x-access-key-id"` | Header containing caller's public access key ID. |
-| `signature_header` | String | **Yes** | Valid RFC 9110 header name | `"x-signature"` | Header carrying the client's computed HMAC signature. |
-| `signature_algorithm` | String | **Yes** | `"hmac-sha256"` or `"hmac-sha512"` | `"hmac-sha256"` | Cryptographic HMAC hashing algorithm. |
-| `signature_encoding` | String | **Yes** | `"hex"` or `"base64"` | `"hex"` | Wire format encoding of the incoming signature. |
-| `timestamp_header` | String | **Yes** | Valid RFC 9110 header name | `"x-timestamp"` | Header carrying request timestamp (Unix epoch seconds). |
-| `clock_skew_seconds` | u64 | **Yes** | Integer between `1` and `86400` | `60` | Maximum allowable time drift ($\pm \Delta t$) before request is rejected. |
-| `signed_headers` | Array of strings | **Yes** | Array of lowercase header names | `["host", "x-timestamp", "x-nonce"]` | List of headers participating in the canonical signature. Must include `timestamp_header` (and `nonce_header` if `enforce_nonce: true`). |
-| `validate_request_body` | Boolean | **Yes** | `true` or `false` | `true` | When `true`, computes SHA-256 payload digest to guarantee request body integrity. |
-| `content_sha256_header` | String | **Yes** | Valid RFC 9110 header name | `"x-content-sha256"` | Header containing pre-computed SHA-256 payload digest for streaming requests. |
-| `nonce_header` | String | **Yes** | Valid RFC 9110 header name | `"x-nonce"` | Header carrying unique single-use request nonce string. |
-| `enforce_nonce` | Boolean | **Yes** | `true` or `false` | `true` | Enables in-memory single-use nonce tracking to eliminate replays within clock skew. |
-| `credentials` | Array of objects | **Yes** | Non-empty array of credential objects | See schema below | Authorized caller keys pre-compiled directly into RAM. |
-
-### Credential Object Schema
-
-| Field | Type | Required | Description |
-| :--- | :---: | :---: | :--- |
-| `access_key_id` | String | **Yes** | Unique public client/caller identifier (e.g. `"partner_fintech_01"`). |
-| `secret_key` | String | **Yes** | Shared secret key (minimum 16 characters). |
-| `consumer_id` | String | No (null) | Logical consumer identity injected into upstream request via `x-consumer-id`. |
+| **Phase** | `pre_upstream` |
+| **Worker Affinity** | Frontline Traffic Workers (`velda-worker-{i}`) |
+| **PBWW (`pbww()`)** | `0` (pure inline hot path, no background tasks) |
+| **Capability** | `(AccessLevel::Write, AccessLevel::Read)` if `validate_request_body == true`; otherwise `header_only(AccessLevel::Write)` |
+| **Supported Protocols** | `SupportedProtocols::ALL_HTTP` (HTTP/1.1, HTTP/2, HTTP/3) |
+| **Failure Wire Action** | `Action::Reject(RejectReason::Unauthorized)` with bypass header `www-authenticate: HMAC realm="velda-edge"` |
 
 ---
 
 ## 3. Canonical Signature Specification
 
-Clients must construct the exact canonical string before computing HMAC:
+Clients sign the following canonical UTF-8/ASCII sequence using the shared `secret_key` (`HMAC-SHA256` or `HMAC-SHA512`):
 
 ```text
 HTTP_METHOD\n
-CANONICAL_URI\n
+CANONICAL_PATH\n
 CANONICAL_QUERY_STRING\n
-CANONICAL_HEADERS\n
+CANONICAL_SIGNED_HEADERS\n
 SIGNED_HEADERS_LIST\n
 PAYLOAD_HASH
 ```
 
-1. **`HTTP_METHOD`**: Uppercase string (e.g. `POST`, `GET`).
-2. **`CANONICAL_URI`**: Absolute URI path (e.g. `/v1/transfers`).
-3. **`CANONICAL_QUERY_STRING`**: Alphabetically sorted key-value query pairs (`key=val` joined with `&`).
-4. **`CANONICAL_HEADERS`**: For each header declared in `signed_headers` (in declared order), formatted as `name:value\n` with trimmed values.
-5. **`SIGNED_HEADERS_LIST`**: Semicolon-separated list of signed header names (e.g. `host;x-nonce;x-timestamp`).
-6. **`PAYLOAD_HASH`**:
-   - If `validate_request_body: true`: Hex-encoded SHA-256 digest of request body (`e3b0c442...` for empty body).
-   - If `validate_request_body: false`: Literal string `"UNSIGNED-PAYLOAD"`.
+- `HTTP_METHOD`: Uppercase HTTP method (`GET`, `POST`, ...).
+- `CANONICAL_PATH`: Request URI path (`/` when empty).
+- `CANONICAL_QUERY_STRING`: Query `key=val` pairs sorted lexicographically by key then value and joined by `&` (empty line if no query).
+- `CANONICAL_SIGNED_HEADERS`: Each header in `signed_headers` in declared order as `lowercase_name:trimmed_value\n` (comma-joined if multi-value; uses URI `:authority` for `host` on HTTP/2 & HTTP/3 when `Host` header is absent).
+- `SIGNED_HEADERS_LIST`: Semicolon-separated lowercase `signed_headers` (e.g. `host;x-timestamp;x-nonce`).
+- `PAYLOAD_HASH`: Lowercase SHA-256 hex digest of the body (`e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855` for empty body), or literal `UNSIGNED-PAYLOAD` when `validate_request_body` is `false`.
 
 ---
 
-## 4. Production Manifest Example (`plugins.json`)
+## 4. Quick Start Configuration
 
 ```json
 {
-  "id": "hmac_auth_prod",
+  "id": "hmac_auth",
   "config": {
     "access_key_header": "x-access-key-id",
     "signature_header": "x-signature",
@@ -84,19 +81,15 @@ PAYLOAD_HASH
     "signature_encoding": "hex",
     "timestamp_header": "x-timestamp",
     "clock_skew_seconds": 60,
-    "signed_headers": [
-      "host",
-      "x-timestamp",
-      "x-nonce"
-    ],
+    "signed_headers": ["host", "x-timestamp", "x-nonce"],
     "validate_request_body": true,
     "content_sha256_header": "x-content-sha256",
     "nonce_header": "x-nonce",
     "enforce_nonce": true,
     "credentials": [
       {
-        "access_key_id": "client_fintech_partner_01",
-        "secret_key": "sec_k89f2a019482bca881726c0981273412",
+        "access_key_id": "partner_fintech_01",
+        "secret_key": "replace_with_32_byte_random_secret_key",
         "consumer_id": "fintech-partner-prod"
       }
     ]
@@ -106,10 +99,9 @@ PAYLOAD_HASH
 
 ---
 
-## 5. Associated Engineering Documentation
+## 5. Documentation Directory
 
-> [!TIP]
-> `hmac_auth` follows the standard 4-document specification layout for production edge plugins:
-> - **[ARCHITECTURE.md](./ARCHITECTURE.md)**: Deep hot-path design, Mermaid sequence diagrams, zero-branching dual layouts (`sign_canonical_h1` vs `sign_canonical_h2_h3`), single-pass `CanonicalBuffer`, 64-byte aligned `NonceCache`, and 128-bit SIMD constant-time verification.
-> - **[TEST.md](./TEST.md)**: Testing methodology, adversarial attack scenarios (A3 body tampering, spoofing, replay attacks, unpoisoned nonces), test matrix, and the official Python Client Signing Reference Implementation.
-> - **[BENCHMARK.md](./BENCHMARK.md)**: High-concurrency performance metrics (29,009.60 RPS @ 2.90ms), LuaJIT C-FFI OpenSSL load generator scripts, and CPU headroom normalization.
+- **[Operational Runbook](RUNBOOK.md)**: Complete parameter reference, deployment recipes, observability signals, and incident triage playbook.
+- **[Architectural Specification](ARCHITECTURE.md)**: `CredentialTable` bit-extraction / AGU dispatch, streaming `hmac::Context`, `NonceCache`, and security invariants.
+- **[Performance Benchmark Report](BENCHMARK.md)**: 5-tier diagnostic matrix and verified `x86-64-v3` release assembly audit.
+- **[Test Verification Report](TEST.md)**: `cargo test` commands and verified unit test catalog across all `hmac_auth` submodules.

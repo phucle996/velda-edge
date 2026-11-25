@@ -408,8 +408,46 @@ pub fn validate_plugin_config(plugin: &mut PluginConfig) -> Result<(), PluginErr
     Ok(())
 }
 
+fn record_zone_policy(
+    zone_raw: &str,
+    max_memory_mb: usize,
+    key_headers: &[String],
+    owner: &'static str,
+    zone_budgets: &mut std::collections::HashMap<String, usize>,
+    zone_key_headers: &mut std::collections::HashMap<String, (&'static str, Vec<String>)>,
+) -> Result<(), PluginError> {
+    let zone = zone_raw.trim().to_string();
+    let entry = zone_budgets.entry(zone.clone()).or_insert(0);
+    *entry = (*entry).max(max_memory_mb);
+
+    let mut norm_keys: Vec<String> = key_headers
+        .iter()
+        .map(|h| h.trim().to_ascii_lowercase())
+        .collect();
+    norm_keys.sort_unstable();
+    norm_keys.dedup();
+
+    match zone_key_headers.get(&zone) {
+        Some((prev_owner, prev_keys)) if *prev_keys != norm_keys => {
+            return Err(PluginError::Config(format!(
+                "HTTP cache zone '{zone}' has mismatched key_headers between {prev_owner} ({prev_keys:?}) and {owner} ({norm_keys:?})"
+            )));
+        }
+        None => {
+            zone_key_headers.insert(zone, (owner, norm_keys));
+        }
+        _ => {}
+    }
+    Ok(())
+}
+
 /// Enforces cross-plugin invariants and dependencies across all active plugins.
 pub fn validate_plugin_dependencies(plugins: &[PluginConfig]) -> Result<(), PluginError> {
+    let mut zone_budgets: std::collections::HashMap<String, usize> =
+        std::collections::HashMap::new();
+    let mut zone_key_headers: std::collections::HashMap<String, (&'static str, Vec<String>)> =
+        std::collections::HashMap::new();
+
     for plugin in plugins.iter() {
         if plugin.id == "jwks_rotator" {
             let cfg: crate::background::jwks_rotator::validation::JwksRotatorConfig =
@@ -430,7 +468,110 @@ pub fn validate_plugin_dependencies(plugins: &[PluginConfig]) -> Result<(), Plug
                     "Plugin 'jwks_rotator' requires target jwt_auth plugin '{target_id}' in pre_upstream stage, but it was not found in active plugins"
                 )));
             }
+        } else if plugin.id == "http_cache_lookup" {
+            if let Ok(cfg) = serde_json::from_value::<
+                crate::pre_upstream::http_cache_lookup::validation::HttpCacheLookupConfig,
+            >(plugin.config.clone())
+            {
+                record_zone_policy(
+                    &cfg.zone,
+                    cfg.max_memory_mb,
+                    &cfg.key_headers,
+                    "http_cache_lookup",
+                    &mut zone_budgets,
+                    &mut zone_key_headers,
+                )?;
+            }
+        } else if plugin.id == "http_cache_store"
+            && let Ok(cfg) = serde_json::from_value::<
+                crate::post_response::http_cache_store::validation::HttpCacheStoreConfig,
+            >(plugin.config.clone())
+        {
+            record_zone_policy(
+                &cfg.zone,
+                cfg.max_memory_mb,
+                &cfg.key_headers,
+                "http_cache_store",
+                &mut zone_budgets,
+                &mut zone_key_headers,
+            )?;
         }
     }
+
+    let total_cache_mb: usize = zone_budgets
+        .values()
+        .copied()
+        .fold(0usize, usize::saturating_add);
+    let max_cache_mb = crate::http_cache::max_cache_memory_mb();
+    if total_cache_mb > max_cache_mb {
+        return Err(PluginError::Config(format!(
+            "Aggregate HTTP cache memory budget across zones ({total_cache_mb} MB) exceeds ceiling {max_cache_mb} MB ({}% of system memory)",
+            crate::http_cache::CACHE_MEMORY_CEILING_PERCENT
+        )));
+    }
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use serde_json::json;
+
+    fn cache_pair(
+        zone_a: &str,
+        keys_a: Vec<&str>,
+        zone_b: &str,
+        keys_b: Vec<&str>,
+    ) -> Vec<PluginConfig> {
+        vec![
+            PluginConfig {
+                id: "http_cache_lookup".into(),
+                config: json!({
+                    "zone": zone_a,
+                    "cacheable_methods": ["GET"],
+                    "bypass_authenticated_requests": true,
+                    "key_headers": keys_a,
+                    "preferred_encodings": ["zstd"],
+                    "max_memory_mb": 32,
+                    "default_ttl_secs": 300
+                }),
+            },
+            PluginConfig {
+                id: "http_cache_store".into(),
+                config: json!({
+                    "zone": zone_b,
+                    "cacheable_methods": ["GET"],
+                    "cacheable_status": [200],
+                    "max_payload_bytes": 1024,
+                    "default_ttl_secs": 300,
+                    "respect_cache_control": true,
+                    "bypass_authenticated_requests": true,
+                    "key_headers": keys_b,
+                    "async_precompression": false,
+                    "max_memory_mb": 32
+                }),
+            },
+        ]
+    }
+
+    #[test]
+    fn test_same_zone_key_headers_parity_enforced() {
+        // Order/case differences normalize cleanly and pass.
+        let matching = cache_pair(
+            "api",
+            vec!["X-User-ID", "X-Tenant-ID"],
+            "api",
+            vec!["x-tenant-id", "x-user-id"],
+        );
+        assert!(validate_plugin_dependencies(&matching).is_ok());
+
+        // Mismatched key_headers on same zone must fail dependency check.
+        let mismatched = cache_pair("api", vec!["x-tenant-id"], "api", vec![]);
+        let err = validate_plugin_dependencies(&mismatched).unwrap_err();
+        assert!(err.to_string().contains("mismatched key_headers"));
+
+        // Different zones remain independent.
+        let distinct_zones = cache_pair("api_a", vec!["x-tenant-id"], "api_b", vec![]);
+        assert!(validate_plugin_dependencies(&distinct_zones).is_ok());
+    }
 }

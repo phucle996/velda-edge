@@ -1,15 +1,16 @@
 //! HTTP Caching Infrastructure Module (`velda-plugin::http_cache`).
 //!
-//! Shared contiguous 2 MiB slab cache engine, zero-allocation request hashing, RFC 9111
-//! `Cache-Control` tokenizer, variant negotiation, and hardware DRAM streaming store.
+//! Shared contiguous 2 MiB slab cache engine, zero-allocation `(route_id, method, key_headers)`
+//! request hashing, RFC 9111 `Cache-Control` tokenizer, priority-ordered variant negotiation,
+//! and hardware DRAM streaming store.
 //!
 //! ```text
-//!   http_cache_lookup ──► hash_request_key_zero_alloc() ─► HttpCacheStorage::lookup_variant()
-//!                                                               ├─ Hit  ─► SlabArena::pin_span()
-//!                                                               └─ Miss ─► X_VELDA_CACHE_HASH
-//!                                                                              │
-//!   http_cache_store  ◄──────────── upstream response ─────────────────────────┘
-//!     └─► HttpCacheStorage::store_bytes() ─► SlabPool (2MB bump-down) + Non-Temporal DRAM write
+//!   http_cache_lookup ──► storage.route_key_hash(route_id, method, headers, key_headers)
+//!     (pre_upstream)       └─► storage.lookup_variant(..., preferred_encodings)
+//!                                └─ Hit ─► Action::Respond(L7Response + X-Cache: HIT)
+//!
+//!   http_cache_store  ──► storage.route_key_hash(route_id, method, headers, key_headers)
+//!     (post_response)      └─► storage.store_bytes() ─► SlabPool (2MB slab, DRAM non-temporal)
 //! ```
 
 pub mod cache_control;
@@ -26,7 +27,8 @@ pub use cache_control::{
     CC_FLAG_S_MAXAGE, CacheControlFast, parse_cache_control_fast, parse_cache_control_ttl,
 };
 pub use constants::{
-    MAX_CACHE_MEMORY_MB, X_CACHE, X_VELDA_CACHE_HASH, X_VELDA_CACHE_KEY, is_valid_header_name,
+    CACHE_MEMORY_CEILING_PERCENT, X_CACHE, is_valid_header_name, max_cache_memory_bytes,
+    max_cache_memory_bytes_for, max_cache_memory_mb, max_cache_memory_mb_for,
 };
 pub use dram::{create_dram_confined_bytes, stream_payload_to_dram};
 pub use entity::{
@@ -34,8 +36,7 @@ pub use entity::{
     negotiate_variant_kind,
 };
 pub use key::{
-    compute_cache_key, compute_cache_key_with_headers, filter_cacheable_headers, hash_key,
-    hash_request_key_zero_alloc, normalize_query,
+    CompiledKeyHeader, compile_key_headers, filter_cacheable_headers, hash_route_request,
 };
 pub use shard::{CacheShard, LookupOutcome, NUM_SHARDS};
 pub use slab::{SLAB_OFFSET_MASK, SLAB_SHIFT, SLAB_SIZE, SlabPoolStats};

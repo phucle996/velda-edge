@@ -23,6 +23,7 @@ pub async fn serve(
     mut responder: Http2Responder,
     meta: Arc<DownstreamMeta>,
     upstream: &Arc<Http3Upstream>,
+    req_state: &velda_core::RequestState,
     plan: &velda_plugin::RoutePluginPlan,
 ) -> PipeOutcome {
     // 1. Sanitize connection-specific headers forbidden by RFC 9114 §4.2
@@ -157,6 +158,7 @@ pub async fn serve(
                 );
                 velda_plugin::run_post_response_plugins(
                     post_hooks,
+                    req_state,
                     &req_head.headers,
                     &mut l7_resp,
                 );

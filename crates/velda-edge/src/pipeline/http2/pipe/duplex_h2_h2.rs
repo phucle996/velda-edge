@@ -22,6 +22,7 @@ use crate::pipeline::{DownstreamMeta, PipeOutcome};
 use crate::upstream::Http2Upstream;
 
 /// Serves a full-duplex bidirectional HTTP/2 downstream stream forwarded to an HTTP/2 upstream backend.
+#[allow(clippy::too_many_arguments)]
 pub async fn serve(
     req_head: Http2ServerRequestHead,
     mut receiver: Http2StreamReceiver,
@@ -29,6 +30,7 @@ pub async fn serve(
     meta: Arc<DownstreamMeta>,
     config: Http2Config,
     upstream: &Arc<Http2Upstream>,
+    req_state: &velda_core::RequestState,
     plan: &velda_plugin::RoutePluginPlan,
 ) -> PipeOutcome {
     // 1. Fail-fast: Acquire upstream multiplexed connection before duplex loop
@@ -120,6 +122,7 @@ pub async fn serve(
                     L7Response::new(response.status, Version::HTTP_2, resp_ws, Body::Empty);
                 velda_plugin::run_post_response_plugins(
                     post_hooks,
+                    req_state,
                     &req_head.headers,
                     &mut l7_resp,
                 );

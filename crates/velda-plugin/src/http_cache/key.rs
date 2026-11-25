@@ -1,264 +1,85 @@
-//! HTTP Cache Key Computation, Zero-Alloc Hashing & Query Normalization.
+//! HTTP Cache Key Computation & Zero-Alloc Pre-Hashed Header Extraction.
+//!
+//! Both `http_cache_lookup` (`pre_upstream`) and `http_cache_store` (`post_response`) derive the
+//! exact same 64-bit key from `(req_state.route_id, req_state.method, key_headers)`:
 //!
 //! ```text
-//!   Hot path: hash_request_key_zero_alloc(method, host, path, query, order, headers)
-//!     ├─► write METHOD ":" host ":" path directly into FxHasher
-//!     ├─► query present -> sort <= 32 params on stack ([&str; 32]) ─► feed "?k=v&..."
-//!     ├─► extra headers -> sort <= 16 pairs  on stack ([(&str,&str); 16]) ─► feed "|k=v"
-//!     └─► output u64 FxHash (0 heap allocations for standard requests)
+//!   hash_route_request(route_id, method, headers, compiled_key_headers)  [0 heap alloc]
+//!     ├─ write route_id (u16) + method (u8) + 0xFF delimiter directly into FxHasher
+//!     ├─ iterate pre-sorted CompiledKeyHeader slice (no runtime sort!)
+//!     │    └─ headers.get_prehashed(&hdr.key) ─► tag7 SIMD scan ─► tag value (1+bytes / 0)
+//!     └─ output u64 FxHash (0 reserved by normalize_tag in shard)
 //! ```
 
 use std::hash::Hasher;
 
-use http::Method;
+use http::header::HeaderName;
 use rustc_hash::FxHasher;
-
-use crate::http_cache::constants::{X_CACHE, X_VELDA_CACHE_HASH, X_VELDA_CACHE_KEY};
 use velda_core::HeaderWorkspace;
-use velda_core::buffer::header::X_REQUEST_ID;
+use velda_core::buffer::header::{HeaderKey, X_REQUEST_ID};
+use velda_core::lut::HttpMethod;
 
-const STACK_KEY_BYTES_CAP: usize = 512;
-const STACK_QUERY_CAP: usize = 32;
-const STACK_HEADER_CAP: usize = 16;
+use crate::http_cache::constants::X_CACHE;
 
-struct StackKeyBuf {
-    stack: [u8; STACK_KEY_BYTES_CAP],
-    len: usize,
-    heap: Option<Vec<u8>>,
+/// Pre-compiled, canonically lowercased cache key header descriptor.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct CompiledKeyHeader {
+    pub canonical_name: Box<str>,
+    pub key: HeaderKey,
 }
 
-impl StackKeyBuf {
-    #[inline(always)]
-    fn new() -> Self {
-        Self {
-            stack: [0u8; STACK_KEY_BYTES_CAP],
-            len: 0,
-            heap: None,
-        }
-    }
-
-    #[inline(always)]
-    fn push_bytes(&mut self, bytes: &[u8]) {
-        if self.heap.is_none() && bytes.len() <= STACK_KEY_BYTES_CAP.saturating_sub(self.len) {
-            // Safety: `self.len + bytes.len() <= STACK_KEY_BYTES_CAP`, non-overlapping stack slice.
-            unsafe {
-                std::ptr::copy_nonoverlapping(
-                    bytes.as_ptr(),
-                    self.stack.as_mut_ptr().add(self.len),
-                    bytes.len(),
-                );
-            }
-            self.len += bytes.len();
-            return;
-        }
-        self.push_heap(bytes);
-    }
-
-    #[cold]
-    #[inline(never)]
-    fn push_heap(&mut self, bytes: &[u8]) {
-        let vec = self.heap.get_or_insert_with(|| {
-            let mut v = Vec::with_capacity(self.len + bytes.len() + 256);
-            if let Some(existing) = self.stack.get(..self.len) {
-                v.extend_from_slice(existing);
-            }
-            v
-        });
-        vec.extend_from_slice(bytes);
-    }
-
-    #[inline(always)]
-    fn finish_hash(&self) -> u64 {
-        let mut hasher = FxHasher::default();
-        let slice = match &self.heap {
-            Some(vec) => vec.as_slice(),
-            None => self.stack.get(..self.len).unwrap_or(&[]),
-        };
-        hasher.write(slice);
-        hasher.finish()
-    }
-}
-
-/// Normalizes and sorts query string parameters alphabetically (e.g. `b=2&a=1` -> `a=1&b=2`).
-pub fn normalize_query(query: &str) -> String {
-    let mut params: Vec<&str> = query.split('&').filter(|s| !s.is_empty()).collect();
-    params.sort_unstable();
-    params.join("&")
-}
-
-/// Computes the 64-bit FxHash of a canonical cache key string.
-#[inline(always)]
-pub fn hash_key(key: &str) -> u64 {
-    let mut hasher = FxHasher::default();
-    hasher.write(key.as_bytes());
-    hasher.finish()
-}
-
-#[inline]
-fn feed_sorted_query(buf: &mut StackKeyBuf, query: &str) {
-    let mut stack_buf = [""; STACK_QUERY_CAP];
-    let mut count = 0usize;
-    let mut overflow: Option<Vec<&str>> = None;
-
-    for param in query.split('&').filter(|s| !s.is_empty()) {
-        if let Some(ref mut vec) = overflow {
-            vec.push(param);
-        } else if let Some(slot) = stack_buf.get_mut(count) {
-            *slot = param;
-            count += 1;
-        } else {
-            let mut vec = Vec::with_capacity(STACK_QUERY_CAP * 2);
-            vec.extend_from_slice(&stack_buf);
-            vec.push(param);
-            overflow = Some(vec);
-        }
-    }
-
-    let slice = match overflow {
-        Some(ref mut vec) => {
-            vec.sort_unstable();
-            vec.as_slice()
-        }
-        None => {
-            let used = stack_buf.get_mut(..count).unwrap_or(&mut []);
-            used.sort_unstable();
-            used
-        }
-    };
-
-    for (idx, param) in slice.iter().enumerate() {
-        if idx > 0 {
-            buf.push_bytes(b"&");
-        }
-        buf.push_bytes(param.as_bytes());
-    }
-}
-
-#[inline]
-fn feed_sorted_headers(buf: &mut StackKeyBuf, headers: &[(&str, &str)]) {
-    let mut stack_buf = [("", ""); STACK_HEADER_CAP];
-    let overflow: Option<Vec<(&str, &str)>>;
-
-    let slice = if headers.len() <= STACK_HEADER_CAP {
-        if let Some(dst) = stack_buf.get_mut(..headers.len()) {
-            dst.copy_from_slice(headers);
-            dst.sort_unstable_by(|a, b| a.0.cmp(b.0));
-            &*dst
-        } else {
-            &[]
-        }
-    } else {
-        let mut vec = headers.to_vec();
-        vec.sort_unstable_by(|a, b| a.0.cmp(b.0));
-        overflow = Some(vec);
-        overflow.as_deref().unwrap_or(&[])
-    };
-
-    for &(h_name, h_val) in slice {
-        buf.push_bytes(b"|");
-        buf.push_bytes(h_name.as_bytes());
-        buf.push_bytes(b"=");
-        buf.push_bytes(h_val.as_bytes());
-    }
-}
-
-/// Computes the canonical 64-bit FxHash directly from request parts with zero heap allocation
-/// for canonical keys up to 512 bytes (32 query params, 16 segmentation headers).
+/// Compiles, lowercases, deduplicates, and sorts custom segmentation header names once at config load.
 ///
-/// Produces the exact same hash value as [`compute_cache_key_with_headers`].
+/// Sorting during compilation eliminates per-request header sorting on the frontline hot path while
+/// guaranteeing identical hashes regardless of the declaration order in `plugins.json`.
+pub fn compile_key_headers(header_names: &[String]) -> Result<Box<[CompiledKeyHeader]>, String> {
+    let mut compiled = Vec::with_capacity(header_names.len());
+    for raw in header_names {
+        let trimmed = raw.trim();
+        let lower = trimmed.to_ascii_lowercase();
+        let hdr_name = HeaderName::from_bytes(lower.as_bytes())
+            .map_err(|e| format!("invalid header name '{raw}': {e}"))?;
+        let key = HeaderKey::from_name(hdr_name);
+        compiled.push(CompiledKeyHeader {
+            canonical_name: lower.into_boxed_str(),
+            key,
+        });
+    }
+    compiled.sort_unstable_by(|a, b| a.canonical_name.cmp(&b.canonical_name));
+    compiled.dedup_by(|a, b| a.canonical_name == b.canonical_name);
+    Ok(compiled.into_boxed_slice())
+}
+
+/// Computes the deterministic 64-bit cache slot key from `(route_id, method, key_headers)`
+/// with zero heap allocations and O(1) pre-hashed SIMD header tag scans.
 #[inline]
-pub fn hash_request_key_zero_alloc(
-    method: &Method,
-    host: Option<&str>,
-    path: &str,
-    query: Option<&str>,
-    ignore_query_order: bool,
-    extra_headers: Option<&[(&str, &str)]>,
+pub fn hash_route_request(
+    route_id: u16,
+    method: HttpMethod,
+    headers: &HeaderWorkspace,
+    key_headers: &[CompiledKeyHeader],
 ) -> u64 {
-    let mut buf = StackKeyBuf::new();
-    buf.push_bytes(method.as_str().as_bytes());
-    buf.push_bytes(b":");
-    if let Some(h) = host {
-        buf.push_bytes(h.as_bytes());
-    }
-    buf.push_bytes(b":");
-    buf.push_bytes(path.as_bytes());
+    let mut hasher = FxHasher::default();
+    hasher.write_u16(route_id);
+    hasher.write_u8(method as u8);
+    hasher.write_u8(0xff);
 
-    if let Some(q) = query
-        && !q.is_empty()
-    {
-        buf.push_bytes(b"?");
-        if ignore_query_order {
-            feed_sorted_query(&mut buf, q);
+    for hdr in key_headers {
+        hasher.write(hdr.canonical_name.as_bytes());
+        hasher.write_u8(b'=');
+        if let Some(val) = headers
+            .get_prehashed(&hdr.key)
+            .and_then(|v| v.to_str().ok())
+        {
+            hasher.write_u8(1);
+            hasher.write(val.as_bytes());
         } else {
-            buf.push_bytes(q.as_bytes());
+            hasher.write_u8(0);
         }
+        hasher.write_u8(b'|');
     }
 
-    if let Some(headers) = extra_headers
-        && !headers.is_empty()
-    {
-        feed_sorted_headers(&mut buf, headers);
-    }
-
-    buf.finish_hash()
-}
-
-/// Computes the canonical cache key and its 64-bit FxHash.
-pub fn compute_cache_key(
-    method: &Method,
-    host: Option<&str>,
-    path: &str,
-    query: Option<&str>,
-    ignore_query_order: bool,
-) -> (String, u64) {
-    compute_cache_key_with_headers(method, host, path, query, ignore_query_order, None)
-}
-
-/// Computes the canonical cache key string and its 64-bit FxHash.
-pub fn compute_cache_key_with_headers(
-    method: &Method,
-    host: Option<&str>,
-    path: &str,
-    query: Option<&str>,
-    ignore_query_order: bool,
-    extra_headers: Option<&[(&str, &str)]>,
-) -> (String, u64) {
-    let mut key = String::with_capacity(128);
-    key.push_str(method.as_str());
-    key.push(':');
-    if let Some(h) = host {
-        key.push_str(h);
-    }
-    key.push(':');
-    key.push_str(path);
-
-    if let Some(q) = query
-        && !q.is_empty()
-    {
-        key.push('?');
-        if ignore_query_order {
-            key.push_str(&normalize_query(q));
-        } else {
-            key.push_str(q);
-        }
-    }
-
-    if let Some(headers) = extra_headers
-        && !headers.is_empty()
-    {
-        let mut sorted_headers: Vec<(&str, &str)> = headers.to_vec();
-        sorted_headers.sort_unstable_by(|a, b| a.0.cmp(b.0));
-        for (h_name, h_val) in sorted_headers {
-            key.push('|');
-            key.push_str(h_name);
-            key.push('=');
-            key.push_str(h_val);
-        }
-    }
-
-    let hash = hash_key(&key);
-    (key, hash)
+    hasher.finish()
 }
 
 /// Strips dynamic, session-specific, and hop-by-hop headers from an upstream response.
@@ -279,8 +100,58 @@ pub fn filter_cacheable_headers(headers: &HeaderWorkspace) -> HeaderWorkspace {
     filtered.remove(PROXY_AUTHORIZATION);
     filtered.remove(&X_REQUEST_ID);
     filtered.remove(&X_CACHE);
-    filtered.remove(&X_VELDA_CACHE_KEY);
-    filtered.remove(&X_VELDA_CACHE_HASH);
 
     filtered
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use http::HeaderValue;
+
+    #[test]
+    fn test_route_id_method_and_key_headers_partitioning() {
+        let h_ab = compile_key_headers(&["X-Tenant-ID".into(), "X-User-ID".into()]).unwrap();
+        let h_ba = compile_key_headers(&["x-user-id".into(), "x-tenant-id".into()]).unwrap();
+
+        let mut ws1 = HeaderWorkspace::new(4);
+        ws1.insert("x-tenant-id", HeaderValue::from_static("acme"));
+        ws1.insert("x-user-id", HeaderValue::from_static("u42"));
+
+        // Different declaration order must produce identical hash.
+        assert_eq!(
+            hash_route_request(7, HttpMethod::Get, &ws1, &h_ab),
+            hash_route_request(7, HttpMethod::Get, &ws1, &h_ba)
+        );
+
+        // Different route_id isolates cache slots.
+        assert_ne!(
+            hash_route_request(7, HttpMethod::Get, &ws1, &h_ab),
+            hash_route_request(8, HttpMethod::Get, &ws1, &h_ab)
+        );
+
+        // Different HTTP method isolates cache slots.
+        assert_ne!(
+            hash_route_request(7, HttpMethod::Get, &ws1, &h_ab),
+            hash_route_request(7, HttpMethod::Head, &ws1, &h_ab)
+        );
+
+        // Different header value (tenant/user segmentation) isolates cache slots.
+        let mut ws2 = HeaderWorkspace::new(4);
+        ws2.insert("x-tenant-id", HeaderValue::from_static("acme"));
+        ws2.insert("x-user-id", HeaderValue::from_static("u99"));
+        assert_ne!(
+            hash_route_request(7, HttpMethod::Get, &ws1, &h_ab),
+            hash_route_request(7, HttpMethod::Get, &ws2, &h_ab)
+        );
+
+        // Missing header vs empty header value must not collide.
+        let ws_missing = HeaderWorkspace::new(2);
+        let mut ws_empty = HeaderWorkspace::new(2);
+        ws_empty.insert("x-tenant-id", HeaderValue::from_static(""));
+        assert_ne!(
+            hash_route_request(7, HttpMethod::Get, &ws_missing, &h_ab),
+            hash_route_request(7, HttpMethod::Get, &ws_empty, &h_ab)
+        );
+    }
 }

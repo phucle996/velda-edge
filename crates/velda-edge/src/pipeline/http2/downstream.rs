@@ -567,6 +567,13 @@ async fn serve_http2_stream(
     let mut target_upstream = default_upstream_id;
     let peer_ip = meta.peer_ip;
     let log_method = velda_core::HttpMethod::from_bytes(req_head.method.as_str().as_bytes());
+    let mut req_state = velda_core::RequestState::new(request_id)
+        .with_ingress_time(ingress_time_nanos)
+        .with_method(log_method);
+    req_state.client_ip = peer_ip;
+    req_state.ja4 = meta.ja4;
+    req_state.set_route(route_id);
+    req_state.set_upstream(target_upstream);
     let (ua_family, ua_os, ua_major_version) = req_head
         .headers
         .get(http::header::USER_AGENT)
@@ -600,9 +607,7 @@ async fn serve_http2_stream(
                 headers,
                 velda_core::Body::Empty,
             );
-            l7_req.state.request_id = request_id;
-            l7_req.state.client_ip = meta.peer_ip;
-            l7_req.state.ja4 = meta.ja4;
+            l7_req.state = req_state.clone();
 
             if let Some(hooks) = &plan.pre_route_hooks {
                 let mut action = velda_plugin::run_pre_route_plugins(hooks, &mut l7_req);
@@ -616,23 +621,16 @@ async fn serve_http2_stream(
                     Action::Respond(resp) => {
                         short_circuit_resp = Some(resp);
                     }
-                    Action::ServeCached(cached) => {
-                        short_circuit_resp = Some(cached.into_l7_response());
-                    }
                     Action::Reject(reason) => {
                         // FAST-FAIL INVARIANT: Rejections terminate immediately at the Edge boundary.
                         // Strictly bypasses post_response_hooks (anti-CPDoS & Zero-DDoS CPU burn),
-                        // transforming HeaderWorkspace in-place to preserve only Bit-1 bypass headers.
+                        // retaining only MSB bypass headers while velda-http2 stamps HTTP/2 rejection fields.
                         // RFC 9113 ZERO-BODY INVARIANT: Only HEADERS frame with END_STREAM = true.
-                        let reject_meta = velda_core::lut::get_reject_meta(reason);
-                        l7_req.headers.prepare_for_rejection(reject_meta, false);
-                        meta.inject_response_headers(&mut l7_req.headers);
-                        let resp = velda_core::L7Response {
-                            status: reject_meta.status,
-                            version: http::Version::HTTP_2,
-                            headers: l7_req.headers,
-                            body: velda_core::Body::Empty,
-                        };
+                        let mut resp = velda_http2::server::early_response::reject_response(
+                            reason,
+                            l7_req.headers,
+                        );
+                        meta.inject_response_headers(&mut resp.headers);
                         let status = resp.status.as_u16();
                         let mut responder = responder;
                         if !receiver.is_end_stream() {
@@ -693,6 +691,7 @@ async fn serve_http2_stream(
                     &mut l7_req,
                     &mut target_upstream,
                 );
+                l7_req.state.set_upstream(target_upstream);
                 while let Action::Delay { duration, and_then } = action {
                     tokio::time::sleep(duration).await;
                     action = *and_then;
@@ -703,23 +702,16 @@ async fn serve_http2_stream(
                     Action::Respond(resp) => {
                         short_circuit_resp = Some(resp);
                     }
-                    Action::ServeCached(cached) => {
-                        short_circuit_resp = Some(cached.into_l7_response());
-                    }
                     Action::Reject(reason) => {
                         // FAST-FAIL INVARIANT: Rejections terminate immediately at the Edge boundary.
                         // Strictly bypasses post_response_hooks (anti-CPDoS & Zero-DDoS CPU burn),
-                        // transforming HeaderWorkspace in-place to preserve only Bit-1 bypass headers.
+                        // retaining only MSB bypass headers while velda-http2 stamps HTTP/2 rejection fields.
                         // RFC 9113 ZERO-BODY INVARIANT: Only HEADERS frame with END_STREAM = true.
-                        let reject_meta = velda_core::lut::get_reject_meta(reason);
-                        l7_req.headers.prepare_for_rejection(reject_meta, false);
-                        meta.inject_response_headers(&mut l7_req.headers);
-                        let resp = velda_core::L7Response {
-                            status: reject_meta.status,
-                            version: http::Version::HTTP_2,
-                            headers: l7_req.headers,
-                            body: velda_core::Body::Empty,
-                        };
+                        let mut resp = velda_http2::server::early_response::reject_response(
+                            reason,
+                            l7_req.headers,
+                        );
+                        meta.inject_response_headers(&mut resp.headers);
                         let status = resp.status.as_u16();
                         let mut responder = responder;
                         if !receiver.is_end_stream() {
@@ -784,7 +776,12 @@ async fn serve_http2_stream(
                     );
                 }
                 if let Some(post_hooks) = &plan.post_response_hooks {
-                    velda_plugin::run_post_response_plugins(post_hooks, &l7_req.headers, &mut resp);
+                    velda_plugin::run_post_response_plugins(
+                        post_hooks,
+                        &l7_req.state,
+                        &l7_req.headers,
+                        &mut resp,
+                    );
                 }
                 meta.inject_response_headers(&mut resp.headers);
                 let status = resp.status.as_u16();
@@ -830,6 +827,7 @@ async fn serve_http2_stream(
                 return;
             }
 
+            req_state = l7_req.state;
             req_head.headers = l7_req.headers;
             req_head.uri = l7_req.uri;
             req_head.method = l7_req.method;
@@ -917,7 +915,7 @@ async fn serve_http2_stream(
                 global_metrics().record_stream_start(PIPE);
                 (
                     pipe::buffered_h2_h2::serve(
-                        req_head, receiver, responder, meta, config, upstream, &plan,
+                        req_head, receiver, responder, meta, config, upstream, &req_state, &plan,
                     )
                     .await,
                     PIPE,
@@ -928,7 +926,7 @@ async fn serve_http2_stream(
                 global_metrics().record_stream_start(PIPE);
                 (
                     pipe::server_stream_h2_h2::serve(
-                        req_head, receiver, responder, meta, config, upstream, &plan,
+                        req_head, receiver, responder, meta, config, upstream, &req_state, &plan,
                     )
                     .await,
                     PIPE,
@@ -939,7 +937,7 @@ async fn serve_http2_stream(
                 global_metrics().record_stream_start(PIPE);
                 (
                     pipe::client_stream_h2_h2::serve(
-                        req_head, receiver, responder, meta, config, upstream, &plan,
+                        req_head, receiver, responder, meta, config, upstream, &req_state, &plan,
                     )
                     .await,
                     PIPE,
@@ -950,7 +948,7 @@ async fn serve_http2_stream(
                 global_metrics().record_stream_start(PIPE);
                 (
                     pipe::duplex_h2_h2::serve(
-                        req_head, receiver, responder, meta, config, upstream, &plan,
+                        req_head, receiver, responder, meta, config, upstream, &req_state, &plan,
                     )
                     .await,
                     PIPE,
@@ -964,7 +962,7 @@ async fn serve_http2_stream(
                 global_metrics().record_stream_start(PIPE);
                 (
                     pipe::buffered_h2_h1::serve(
-                        req_head, receiver, responder, meta, upstream, &plan,
+                        req_head, receiver, responder, meta, upstream, &req_state, &plan,
                     )
                     .await,
                     PIPE,
@@ -975,7 +973,7 @@ async fn serve_http2_stream(
                 global_metrics().record_stream_start(PIPE);
                 (
                     pipe::server_stream_h2_h1::serve(
-                        req_head, receiver, responder, meta, upstream, &plan,
+                        req_head, receiver, responder, meta, upstream, &req_state, &plan,
                     )
                     .await,
                     PIPE,
@@ -986,7 +984,7 @@ async fn serve_http2_stream(
                 global_metrics().record_stream_start(PIPE);
                 (
                     pipe::client_stream_h2_h1::serve(
-                        req_head, receiver, responder, meta, upstream, &plan,
+                        req_head, receiver, responder, meta, upstream, &req_state, &plan,
                     )
                     .await,
                     PIPE,
@@ -996,8 +994,10 @@ async fn serve_http2_stream(
                 const PIPE: PipeKind = PipeKind::DuplexH2H1;
                 global_metrics().record_stream_start(PIPE);
                 (
-                    pipe::duplex_h2_h1::serve(req_head, receiver, responder, meta, upstream, &plan)
-                        .await,
+                    pipe::duplex_h2_h1::serve(
+                        req_head, receiver, responder, meta, upstream, &req_state, &plan,
+                    )
+                    .await,
                     PIPE,
                 )
             }
@@ -1009,7 +1009,7 @@ async fn serve_http2_stream(
                 global_metrics().record_stream_start(PIPE);
                 (
                     pipe::buffered_h2_h3::serve(
-                        req_head, receiver, responder, meta, upstream, &plan,
+                        req_head, receiver, responder, meta, upstream, &req_state, &plan,
                     )
                     .await,
                     PIPE,
@@ -1020,7 +1020,7 @@ async fn serve_http2_stream(
                 global_metrics().record_stream_start(PIPE);
                 (
                     pipe::server_stream_h2_h3::serve(
-                        req_head, receiver, responder, meta, upstream, &plan,
+                        req_head, receiver, responder, meta, upstream, &req_state, &plan,
                     )
                     .await,
                     PIPE,
@@ -1031,7 +1031,7 @@ async fn serve_http2_stream(
                 global_metrics().record_stream_start(PIPE);
                 (
                     pipe::client_stream_h2_h3::serve(
-                        req_head, receiver, responder, meta, upstream, &plan,
+                        req_head, receiver, responder, meta, upstream, &req_state, &plan,
                     )
                     .await,
                     PIPE,
@@ -1041,8 +1041,10 @@ async fn serve_http2_stream(
                 const PIPE: PipeKind = PipeKind::DuplexH2H3;
                 global_metrics().record_stream_start(PIPE);
                 (
-                    pipe::duplex_h2_h3::serve(req_head, receiver, responder, meta, upstream, &plan)
-                        .await,
+                    pipe::duplex_h2_h3::serve(
+                        req_head, receiver, responder, meta, upstream, &req_state, &plan,
+                    )
+                    .await,
                     PIPE,
                 )
             }

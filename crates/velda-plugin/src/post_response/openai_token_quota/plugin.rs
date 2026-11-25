@@ -215,7 +215,12 @@ impl PostResponsePlugin for OpenAiTokenQuotaPlugin {
     }
 
     #[inline]
-    fn on_response(&self, req_headers: &HeaderWorkspace, resp: &mut L7Response) {
+    fn on_response(
+        &self,
+        _req_state: &velda_core::RequestState,
+        req_headers: &HeaderWorkspace,
+        resp: &mut L7Response,
+    ) {
         let Some(usage) = scan_token_usage(resp.body.as_slice()) else {
             resp.headers.insert(
                 HDR_STATUS.clone(),
@@ -339,7 +344,8 @@ mod tests {
 
         let body = br#"{"id":"1","model":"deepseek-chat","usage":{"prompt_tokens":1540,"completion_tokens":320,"total_tokens":1860}}"#;
         let mut resp = L7Response::from_bytes(StatusCode::OK, body.as_slice());
-        plugin.on_response(&req_ws, &mut resp);
+        let req_state = velda_core::RequestState::default();
+        plugin.on_response(&req_state, &req_ws, &mut resp);
 
         assert_eq!(resp.headers.get("x-ai-prompt-tokens").unwrap(), "1540");
         assert_eq!(resp.headers.get("x-ai-completion-tokens").unwrap(), "320");
@@ -373,8 +379,9 @@ mod tests {
 
         let mut resp1 = L7Response::from_bytes(StatusCode::OK, body1.as_slice());
         let mut resp2 = L7Response::from_bytes(StatusCode::OK, body2.as_slice());
-        plugin.on_response(&req_ws, &mut resp1);
-        plugin.on_response(&req_ws, &mut resp2);
+        let req_state = velda_core::RequestState::default();
+        plugin.on_response(&req_state, &req_ws, &mut resp1);
+        plugin.on_response(&req_state, &req_ws, &mut resp2);
 
         let (p, c, t, ca, rem) = plugin
             .ledger

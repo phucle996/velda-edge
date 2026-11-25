@@ -19,8 +19,10 @@ use rustc_hash::FxHashMap;
 use crate::http_cache::entity::{
     CacheEntry, CompressedVariants, StoreBytesParams, StoreVariantParams,
 };
+use crate::http_cache::key::{CompiledKeyHeader, hash_route_request};
 use crate::http_cache::shard::{CacheShard, LookupOutcome, NUM_SHARDS, SHARD_MASK};
-use crate::http_cache::slab::{SLAB_SHIFT, SlabArena, SlabPool, SlabPoolStats};
+use crate::http_cache::slab::{SLAB_SHIFT, SLAB_SIZE, SlabArena, SlabPool, SlabPoolStats};
+use crate::post_response::response_compression::CompressionAlgorithm;
 
 /// Production In-Memory HTTP Cache Storage Engine backed by a contiguous 2 MiB slab pool.
 pub struct HttpCacheStorage {
@@ -48,9 +50,13 @@ impl std::fmt::Debug for HttpCacheStorage {
 }
 
 impl HttpCacheStorage {
-    /// Creates a new named cache storage backed by at least 2 contiguous 2 MiB slabs.
+    /// Creates a new named cache storage backed by at least 2 contiguous 2 MiB slabs,
+    /// clamped strictly to the hardware RAM percentage ceiling from `velda-core`.
     pub fn new(name: impl Into<String>, max_memory_bytes: usize, default_ttl: Duration) -> Self {
-        let num_slabs = (max_memory_bytes >> SLAB_SHIFT).max(2);
+        let clamped_bytes = max_memory_bytes
+            .min(crate::http_cache::max_cache_memory_bytes())
+            .max(SLAB_SIZE * 2);
+        let num_slabs = (clamped_bytes >> SLAB_SHIFT).max(2);
         let arena = Arc::new(SlabArena::new(num_slabs));
         let pool = Mutex::new(SlabPool::new(Arc::clone(&arena)));
         let shards = (0..NUM_SHARDS)
@@ -60,7 +66,7 @@ impl HttpCacheStorage {
 
         Self {
             name: name.into(),
-            max_memory_bytes,
+            max_memory_bytes: clamped_bytes,
             default_ttl,
             arena,
             pool,
@@ -75,19 +81,39 @@ impl HttpCacheStorage {
         self.shards.get((hash as usize) & SHARD_MASK)
     }
 
-    /// Hot-path variant lookup returning only the single negotiated zero-copy payload slice.
+    /// Computes the canonical 64-bit cache key hash shared by both `pre_upstream` lookup and
+    /// `post_response` store phases (`req_state.route_id + req_state.method + key_headers`).
+    #[inline]
+    pub fn route_key_hash(
+        &self,
+        req_state: &velda_core::RequestState,
+        headers: &velda_core::HeaderWorkspace,
+        key_headers: &[CompiledKeyHeader],
+    ) -> u64 {
+        hash_route_request(req_state.route_id, req_state.method, headers, key_headers)
+    }
+
+    /// Hot-path variant lookup returning only the single negotiated zero-copy payload slice
+    /// within the configured priority-ordered `preferred_encodings` allowlist.
     #[inline]
     pub fn lookup_variant(
         &self,
         hash: u64,
         accept_encoding: Option<&http::HeaderValue>,
+        preferred_encodings: &[CompressionAlgorithm],
         bypass_auth: bool,
     ) -> LookupOutcome {
         let Some(shard) = self.shard(hash) else {
             self.miss_count.fetch_add(1, Ordering::Relaxed);
             return LookupOutcome::Miss;
         };
-        let outcome = shard.lookup_variant(hash, &self.arena, accept_encoding, bypass_auth);
+        let outcome = shard.lookup_variant(
+            hash,
+            &self.arena,
+            accept_encoding,
+            preferred_encodings,
+            bypass_auth,
+        );
         match outcome {
             LookupOutcome::Hit { .. } => {
                 self.hit_count.fetch_add(1, Ordering::Relaxed);

@@ -15,6 +15,7 @@
 
 use crate::l4::request::L4Request;
 use crate::l7::request::L7Request;
+use crate::lut::HttpMethod;
 
 /// Sentinel value indicating no route has been matched (`u16::MAX`).
 pub const UNMATCHED_ROUTE_ID: u16 = u16::MAX;
@@ -111,6 +112,9 @@ pub struct RequestState {
     /// Upstream selected for the request (`UNASSIGNED_UPSTREAM_ID` if unassigned).
     pub upstream_id: u16,
 
+    /// Canonical HTTP method for the request.
+    pub method: HttpMethod,
+
     /// Whether routing has completed.
     pub routed: bool,
 
@@ -142,6 +146,7 @@ impl RequestState {
             client_ip: 0,
             route_id: UNMATCHED_ROUTE_ID,
             upstream_id: UNASSIGNED_UPSTREAM_ID,
+            method: HttpMethod::Unknown,
             routed: false,
             upstream_started: false,
             upstream_completed: false,
@@ -159,6 +164,19 @@ impl RequestState {
     #[inline(always)]
     pub fn ingress_time_sec(&self) -> u64 {
         self.ingress_time_nanos / 1_000_000_000
+    }
+
+    /// Stores the HTTP method in request state.
+    #[inline(always)]
+    pub const fn with_method(mut self, method: HttpMethod) -> Self {
+        self.method = method;
+        self
+    }
+
+    /// Stores the HTTP method in request state.
+    #[inline(always)]
+    pub fn set_method(&mut self, method: HttpMethod) {
+        self.method = method;
     }
 
     /// Stores the route selected by the router.

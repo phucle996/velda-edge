@@ -135,7 +135,12 @@ impl PostResponsePlugin for ResponseCompressionPlugin {
         0
     }
 
-    fn on_response(&self, req_headers: &velda_core::HeaderWorkspace, resp: &mut L7Response) {
+    fn on_response(
+        &self,
+        _req_state: &velda_core::RequestState,
+        req_headers: &velda_core::HeaderWorkspace,
+        resp: &mut L7Response,
+    ) {
         // Guard 0: Explicit Declaration Invariant
         if self.config.algorithms.is_empty() || self.config.content_types.is_empty() {
             return;

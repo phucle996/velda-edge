@@ -104,7 +104,7 @@ To allow protocol-independent short-circuiting without leaking internal headers:
 | [`canary`](src/pre_upstream/canary/) | HTTP / gRPC | `0` | Deterministic hash/header/weight-based canary upstream rerouting. |
 | [`csrf`](src/pre_upstream/csrf/) | HTTP | `0` | Double-submit cookie / origin-verified CSRF token enforcement. |
 | [`grpc_fault_injection`](src/pre_upstream/grpc_fault_injection/) | gRPC | `0` | Deterministic gRPC status abort & latency fault injection. |
-| [`header_mutation`](src/pre_upstream/header_mutation/) | All L7 | `0` | Request header insertion, dynamic variable substitution, and stripping. |
+| [`header_mutation`](src/pre_upstream/header_mutation/) | All L7 | `0` | Explicit static header remove, overwrite, and append directly on `HeaderWorkspace`. |
 | [`hmac_auth`](src/pre_upstream/hmac_auth/) | HTTP | `0` | HMAC-SHA256 request signature and replay-window verification. |
 | [`http_cache_lookup`](src/pre_upstream/http_cache_lookup/) | HTTP | `0` | Lock-free shared-memory HTTP response cache lookup (short-circuits on HIT). |
 | [`http_fault_injection`](src/pre_upstream/http_fault_injection/) | HTTP | `0` | Scoped HTTP status abort & non-blocking delay fault injection. |

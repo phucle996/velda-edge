@@ -37,9 +37,7 @@ pub use api_metering::{
 pub use canary::{CanaryConfig, CanaryPlugin, HeaderRule, RuleOperator};
 pub use csrf::{CsrfConfig, CsrfPlugin};
 pub use grpc_fault_injection::{GrpcAbortConfig, GrpcDelayConfig, GrpcFaultInjectionPlugin};
-pub use header_mutation::{
-    DynamicVar, HeaderMutationConfig, HeaderMutationPlugin, HeaderValueSpec,
-};
+pub use header_mutation::{HeaderMutationConfig, HeaderMutationPlugin};
 pub use hmac_auth::{HmacAuthConfig, HmacAuthPlugin, HmacCredentialConfig};
 pub use http_cache_lookup::{HttpCacheLookupConfig, HttpCacheLookupPlugin};
 pub use http_fault_injection::{
@@ -226,13 +224,8 @@ mod tests {
         let remove_hdrs = vec![HeaderName::from_static("x-internal-secret")];
 
         let config = HeaderMutationConfig {
-            strip_hop_by_hop: true,
             remove: remove_hdrs,
-            rename: Vec::new(),
-            set: set_hdrs
-                .into_iter()
-                .map(|(k, v)| (k, HeaderValueSpec::Static(v)))
-                .collect(),
+            set: set_hdrs,
             append: Vec::new(),
         };
         let plugin = Arc::new(HeaderMutationPlugin::new("mutation-1", config));

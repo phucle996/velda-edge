@@ -49,6 +49,7 @@ pub async fn serve<IO>(
     framing: Http1BodyFraming,
     upstream: &Arc<Http2Upstream>,
     meta: &DownstreamMeta,
+    req_state: &velda_core::RequestState,
     plan: &velda_plugin::RoutePluginPlan,
 ) -> Result<(), Http1Error>
 where
@@ -261,7 +262,12 @@ where
     if let Some(post_hooks) = &plan.post_response_hooks {
         let mut l7_resp =
             velda_core::L7Response::new(status, http::Version::HTTP_11, h1_headers, initial_body);
-        velda_plugin::run_post_response_plugins(post_hooks, &req_head.headers, &mut l7_resp);
+        velda_plugin::run_post_response_plugins(
+            post_hooks,
+            req_state,
+            &req_head.headers,
+            &mut l7_resp,
+        );
         status = l7_resp.status;
         h1_headers = l7_resp.headers;
         if !matches!(l7_resp.body, velda_core::Body::Empty) {

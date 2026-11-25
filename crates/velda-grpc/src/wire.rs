@@ -121,6 +121,31 @@ impl GrpcWire {
             format!("{secs}S")
         }
     }
+
+    /// Transforms a request [`velda_core::HeaderWorkspace`] in-place into gRPC Trailers-Only
+    /// rejection headers, retaining only bypass headers (e.g. `x-request-id`, `x-ratelimit-*`)
+    /// before stamping `content-type: application/grpc`, `grpc-status`, and optional `grpc-message`.
+    #[cold]
+    pub fn prepare_rejection_headers(
+        headers: &mut velda_core::HeaderWorkspace,
+        status: velda_core::GrpcStatus,
+        message: Option<&str>,
+    ) {
+        use velda_core::HeaderKey;
+
+        const KEY_CONTENT_TYPE: HeaderKey = HeaderKey::from_static("content-type");
+        const KEY_GRPC_STATUS: HeaderKey = HeaderKey::from_static(GrpcWire::STATUS_HEADER);
+        const KEY_GRPC_MESSAGE: HeaderKey = HeaderKey::from_static(GrpcWire::MESSAGE_HEADER);
+
+        headers.retain_bypass_only();
+        headers.insert_prehashed(&KEY_CONTENT_TYPE, Self::CONTENT_TYPE_VALUE);
+        headers.insert_prehashed(&KEY_GRPC_STATUS, status.code_header_value());
+        if let Some(msg) = message
+            && let Ok(val) = HeaderValue::from_str(msg)
+        {
+            headers.insert_prehashed(&KEY_GRPC_MESSAGE, val);
+        }
+    }
 }
 
 /// Standard correlation ID header propagated across gRPC HTTP/2 streams.
@@ -172,5 +197,38 @@ mod tests {
             GrpcWire::format_grpc_timeout(Duration::from_secs(10)),
             "10S"
         );
+    }
+
+    #[test]
+    fn test_prepare_rejection_headers_retains_bypass_and_stamps_grpc_trailers() {
+        let mut ws = velda_core::HeaderWorkspace::new(32);
+        let req_id_str = ws.request_id().to_str().unwrap().to_string();
+        ws.insert(
+            http::header::HOST,
+            HeaderValue::from_static("grpc.example.com"),
+        );
+        ws.insert(
+            http::header::USER_AGENT,
+            HeaderValue::from_static("grpc-go/1.64"),
+        );
+
+        GrpcWire::prepare_rejection_headers(
+            &mut ws,
+            velda_core::GrpcStatus::ResourceExhausted,
+            Some("quota exceeded"),
+        );
+
+        assert!(!ws.contains_key(http::header::HOST));
+        assert!(!ws.contains_key(http::header::USER_AGENT));
+        assert_eq!(
+            ws.get(&velda_core::HeaderWorkspace::X_REQUEST_ID).unwrap(),
+            req_id_str.as_str()
+        );
+        assert_eq!(
+            ws.get(http::header::CONTENT_TYPE).unwrap(),
+            "application/grpc"
+        );
+        assert_eq!(ws.get("grpc-status").unwrap(), "8");
+        assert_eq!(ws.get("grpc-message").unwrap(), "quota exceeded");
     }
 }

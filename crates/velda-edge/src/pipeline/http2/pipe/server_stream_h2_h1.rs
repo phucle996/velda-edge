@@ -24,6 +24,7 @@ pub async fn serve(
     mut responder: Http2Responder,
     meta: Arc<DownstreamMeta>,
     upstream: &Arc<Http1Upstream>,
+    req_state: &velda_core::RequestState,
     plan: &velda_plugin::RoutePluginPlan,
 ) -> PipeOutcome {
     // 1. Consume downstream request body
@@ -169,7 +170,12 @@ pub async fn serve(
             clean_headers,
             velda_core::Body::Empty,
         );
-        velda_plugin::run_post_response_plugins(post_hooks, h1_req_headers, &mut l7_resp);
+        velda_plugin::run_post_response_plugins(
+            post_hooks,
+            req_state,
+            h1_req_headers,
+            &mut l7_resp,
+        );
         resp_head.status = l7_resp.status;
         clean_headers = l7_resp.headers;
     }

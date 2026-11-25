@@ -1,165 +1,86 @@
 # HMAC Authentication Plugin (`hmac_auth`) — Architectural Specification
 
-This document specifies the internal engine design, hot-path execution pipeline, memory invariants, and hardware-level concurrency model of the **`hmac_auth`** pre-upstream plugin (RFC 2104).
+Internal specification of `CredentialTable` zero-hash AGU indexing, streaming RFC 2104 verification via `ring::hmac::Context`, `HeaderWorkspace` pre-hashed lookups, and post-verification `NonceCache` concurrency.
 
 ---
 
-## 1. System Mindset & Architectural Invariants
+## 1. End-to-End Request Pipeline
 
-The `hmac_auth` plugin acts as an ultra-high-throughput, zero-IO Layer 7 cryptographic security gate for edge APIs, enforcing three fundamental non-negotiable invariants:
-
-1. **Zero-IO Hot-Path Invariant**:
-   Serving paths **never** parse JSON, allocate dynamic memory, read from disk, or make RPC/database network calls. All credentials, header layouts, and error responses are pre-compiled into RAM at configuration time.
-2. **Hardware-Accelerated Single-Pass Cryptography**:
-   Canonical requests are assembled contiguously into pre-allocated stack buffers, invoking `ring::hmac::sign` **exactly once** per transaction to saturate hardware SHA-NI instruction pipelines.
-3. **Autonomous Two-Phase Anti-Replay Defense**:
-   Nonce deduplication utilizes a hardware-sharded, lock-striped in-memory cache aligned to 64-byte CPU cache lines, completely eliminating cross-core false sharing and lock contention.
-
----
-
-## 2. End-to-End Request Hot-Path Pipeline
-
-```mermaid
-flowchart TD
-    subgraph Ingress["Phase 1: Ingress & Validation"]
-        A["Incoming L7Request"] --> B["1. Extract Access Key ID\n(Zero-Alloc &[u8] Trim)"]
-        B --> C["2. Lookup Pre-Compiled Key in RAM\n(FxHashMap<Box<[u8]>, ...>)"]
-        C --> D["3. Validate Timestamp Skew\n(parse_u64_bytes, abs_diff <= 60s)"]
-        D --> E["4. Phase 1 Nonce Peek Check\n(is_replayed_fp: Drop Replay in ~10ns)"]
-        E --> F["5. Pre-Crypto Signature Length Guard\n(Strict 44 / 64 / 88 / 128 bytes)"]
-    end
-
-    subgraph PayloadVerification["Phase 2: Payload Hash Verification (Scenario A3)"]
-        F --> G{"req.body variant"}
-        G -- "Body::Bytes(bytes)" --> H["Compute Authentic Body SHA-256\n(Stack Buffer [u8; 64])"]
-        H --> I["Verify Client x-content-sha256 Header\n(128-bit SIMD constant_time_eq)"]
-        G -- "Body::Empty" --> J["Check Content-Length / Chunked Flag\nFallback to EMPTY_SHA256_HEX"]
-    end
-
-    subgraph CanonicalSigning["Phase 3: Zero-Branching Canonical Signing"]
-        I --> K{"Protocol Dispatch\n(req.version)"}
-        J --> K
-        K -- "<= HTTP/1.1" --> L["sign_canonical_h1\n(Zero Per-Header Branching)"]
-        K -- "HTTP/2, HTTP/3" --> M["sign_canonical_h2_h3\n(:authority Fallback, Zero Branching)"]
-        L --> N["Assemble Contiguous CanonicalBuffer\n(Stack-first [u8; 512])"]
-        M --> N
-        N --> O["Single-Pass HMAC-SHA256\n(ring::hmac::sign)"]
-        O --> P["Format Stack Signature & Compare\n(128-bit SIMD constant_time_eq)"]
-    end
-
-    subgraph StateCommit["Phase 4: Nonce Commit & Upstream Dispatch"]
-        P -- "Valid Signature" --> Q["Phase 2 Commit: check_and_record_fp\n(Atomic Nonce Dedup)"]
-        Q --> R["Inject Pre-Materialized x-consumer-id Header"]
-        R --> S["Forward Request (Action::Continue)"]
-        P -- "Invalid Signature" --> T["Reject (401 Unauthorized)\nNonce Cache Left Unpoisoned"]
-    end
+```text
+  L7Request (mut req.headers: HeaderWorkspace)
+    │
+    ├─► 1. access_key_header (HeaderKey::get_prehashed)
+    │        └─► CredentialTable::lookup ─► AGU bit-shift / _pext_u64 ─► exact slice eq
+    ├─► 2. timestamp_header (HeaderKey::get_prehashed)
+    │        └─► |req.ingress_time_sec() - ts| <= clock_skew_seconds
+    ├─► 3. nonce_header (if enforce_nonce == true)
+    │        └─► nonce_fingerprint_128(trimmed_bytes)   [lock-free; no Mutex yet]
+    ├─► 4. signature_header ─► decode_client_signature on [u8; 64] stack
+    │        └─► hex (case-insensitive) or base64 length + decode guard
+    ├─► 5. payload SHA-256 ─► Body::Bytes digest + optional x-content-sha256 verify
+    ├─► 6. sign_canonical_request (hmac::Context::with_key(&cred.key))
+    │        ├─► stream METHOD \n PATH \n SORTED_QUERY \n
+    │        ├─► stream pre-hashed signed_headers (+ :authority fallback for H2/H3)
+    │        └─► stream joined_line \n payload_hash ─► constant_time_eq(tag, decoded)
+    ├─► 7. NonceCache::check_and_record_fp (single Mutex lock, post-HMAC verify)
+    └─► 8. x-consumer-id: insert_prehashed (Some) or remove spoofed header (None)
 ```
 
 ---
 
-## 3. Core Architectural Subsystems
+## 2. Zero-Hash Static Credential Lookup ([credential.rs](credential.rs))
 
-### 3.1 Zero-Branching Dual-Layout Architecture (`sign_canonical_h1` vs `sign_canonical_h2_h3`)
+`HmacAuthPlugin` credentials are static for the lifetime of a plugin snapshot and swapped wholesale on reload. Instead of hashing `access_key_id` per request in a `HashMap`, `CredentialTable::build` analyzes the static key set at initialization and emits the narrowest collision-free bit-index plan over `Slot = Option<Box<CredentialEntry>>` (`8` bytes per slot via Rust null-pointer niche optimization):
 
-In modern multi-protocol edge gateways, HTTP/1.1 uses the standard `Host` header, whereas HTTP/2 and HTTP/3 (RFC 9113 / RFC 9114) replace `Host` with the `:authority` pseudo-header in the request URI. Dynamically evaluating `if hname == HOST` inside inner header iteration loops introduces repeated branch misprediction penalties on every request.
-
-`hmac_auth` solves this by pre-compiling signed headers into dual layouts at bootstrap:
-
-```
-SignedHeadersSpec
-├── h1_headers: Box<[(HeaderName, Box<[u8]>)]>
-│   └── Pre-formatted with trailing colon: b"host:", b"x-timestamp:", b"x-nonce:"
-│       (Enables branchless sequential iteration for HTTP/1.1)
-├── h2_before_host: Box<[(HeaderName, Box<[u8]>)]>
-│   └── Headers declared before "host"
-├── h2_has_host: bool
-│   └── Directs fallback to req.uri.authority() if "host" is signed
-├── h2_after_host: Box<[(HeaderName, Box<[u8]>)]>
-│   └── Headers declared after "host"
-└── joined_line: Box<[u8]>
-    └── Pre-joined signed header names line: b"host;x-timestamp;x-nonce\n"
-```
-
-* **HTTP/1.1 Fast Path (`sign_canonical_h1`)**: Iterates over `h1_headers` in a single unrolled loop with zero conditional branches.
-* **HTTP/2 & HTTP/3 Fast Path (`sign_canonical_h2_h3`)**: Iterates `h2_before_host`, writes the `:authority` byte slice, and unrolls `h2_after_host`.
-* **Zero Runtime String Allocations**: Header name prefixes (`b"name:"`) are allocated once at plugin startup.
-
----
-
-### 3.2 Single-Pass Contiguous Stack Buffer (`CanonicalBuffer`)
-
-Traditional HMAC streaming implementations call `ring::hmac::Context::update` repeatedly for each component (method, path, query, each header, payload hash). Each `.update()` call incurs internal block buffer boundary checks, alignment verification, and function call overhead.
-
-`CanonicalBuffer` introduces a stack-first contiguous buffer:
-* **Default Capacity**: `[u8; 512]` allocated on the stack frame.
-* **Contiguous Assembly**: Method, Path, Query, Headers, Signed List, and Payload Hash are written contiguously into the slice.
-* **Transparent Heap Fallback**: If an oversized canonical request exceeds 512 bytes (e.g. extremely long query strings), `CanonicalBuffer` falls back to a heap-allocated `Vec<u8>` dynamically without failing.
-* **Single Crypto Call**: `ring::hmac::sign(key, buffer.as_bytes())` is executed once over the contiguous memory slice, allowing the CPU to pipeline SHA-NI hardware instructions at full bandwidth.
-
----
-
-### 3.3 Two-Phase Hardware-Sharded `NonceCache`
-
-To eliminate replay attacks while sustaining tens of thousands of requests per second, the `NonceCache` implements a hardware-aware, lock-striped concurrent set:
-
-```
-NonceCache (Lock-Striped, Hardware-Sharded)
-│
-├── Shard 0  [Mutex<FxHashMap<u128, u32>>] ── 64-Byte Cache-Line Aligned
-├── Shard 1  [Mutex<FxHashMap<u128, u32>>] ── 64-Byte Cache-Line Aligned
-├── ...
-└── Shard 63 [Mutex<FxHashMap<u128, u32>>] ── 64-Byte Cache-Line Aligned
+```text
++-----------------------------------------------------------------------------+
+|                    CredentialTable Dispatch Hierarchy                       |
++-----------------------------------------------------------------------------+
+| K == 0  ─► DispatchPlan::Empty                                              |
+| K == 1  ─► DispatchPlan::Single(Box<CredentialEntry>)  [0 index arithmetic] |
+| K >= 2  ─► Search order:                                                    |
+|   1. ByteWindow / TailByteWindow                                            |
+|      Single byte at pos (from start or end), contiguous bit slice:          |
+|      idx = ((key[pos] >> shift) as usize) & mask  ─► slots[idx] (idx << 3)  |
+|   2. BitGather (<= 8 differing byte offsets packed into u64, <= 10 bits)    |
+|      Greedy information-gain splitting builds minimal bitmask:              |
+|      - x86_64 + bmi2: _pext_u64(word, bitmask)                              |
+|      - other targets: portable mask-and-shift bit gather                    |
+|   3. RadixBuckets (fallback when > 10 bits would exceed 1024 pointer slots) |
+|      (key[pos] ^ (last << 3) ^ (len << 1)) & mask ─► short bucket scan      |
++-----------------------------------------------------------------------------+
 ```
 
-#### Key Engineering Invariants:
-1. **False-Sharing Elimination (`#[repr(align(64))]`)**:
-   Each `NonceShard` is explicitly aligned to 64 bytes (the x86_64 L1 cache-line size). This ensures that concurrent writes from different CPU cores to adjacent shards never invalidate CPU L1/L2 caches.
-2. **Two-Phase Lifecycle (Peek vs Commit)**:
-   * **Phase 1 (Peek - Read)**: Nonce fingerprint is checked in ~10 ns via `is_replayed_fp`. Replayed requests are rejected before wasting CPU cycles on SHA-256 or HMAC computation.
-   * **Phase 2 (Commit - Write)**: The nonce is recorded via `check_and_record_fp` strictly **after** the cryptographic signature passes. This prevents unauthenticated attackers from poisoning or filling the nonce cache with forged signatures.
-3. **128-Bit Chunk-Based Avalanche Mixer (`nonce_fingerprint_128`)**:
-   Processes nonces in 8-byte chunks using 64-bit avalanche multipliers (`0x9E3779B97F4A7C15` and `0xBF58476D1CE4E5B9`). Guarantees zero collisions across parallel threads.
-4. **Hardware Shard Scaling**:
-   Shard count scales dynamically to `clamp(cores * 16, 16, 512)`, yielding 64 shards on a 4-core instance to minimize lock contention.
-5. **Rate-Limited Sweep Eviction**:
-   Expired entries are swept at most once per second per shard and only triggered when shard size exceeds 2,048 entries.
+- **Non-Contiguous Entry Storage**: Pointer slots (`Box<[Option<Box<CredentialEntry>>]>`) form a compact `8`-byte AGU-scaled table (`[base + idx * 8]`), while each `CredentialEntry` (`access_key_id`, `hmac::Key`, `consumer_header`) is individually heap-allocated at reload time without forcing unused table slots to reserve `hmac::Key` bytes inline.
+- **Exact Identity Check**: Every slot hit always compares `entry.access_key_id.as_ref() == access_key_id` to prevent a forged caller key sharing the same extracted bits from matching.
 
 ---
 
-### 3.4 128-Bit SIMD Constant-Time Equality (`constant_time_eq`)
+## 3. Pre-Computed HMAC Key Schedule & Streaming Canonical Message ([canonical.rs](canonical.rs))
 
-To prevent timing side-channel attacks (where an adversary infers valid signature bytes by measuring gateway response latency differences):
-* Comparisons process 16-byte chunks (`as_chunks::<16>()`) using native 128-bit unsigned integers (`u128::from_ne_bytes`).
-* Operates in $O(1)$ constant time regardless of where mismatches occur:
-  ```rust
-  let mut diff = 0u128;
-  for (ca, cb) in chunks_a.iter().zip(chunks_b.iter()) {
-      diff |= u128::from_ne_bytes(*ca) ^ u128::from_ne_bytes(*cb);
-  }
-  for (&ra, &rb) in remainder_a.iter().zip(remainder_b.iter()) {
-      diff |= (ra ^ rb) as u128;
-  }
-  diff == 0
-  ```
-* Modern LLVM/Rust compiles this loop directly into vector SSE/AVX registers (`vpxor`, `vpor`).
+By RFC 2104:
+
+$$\text{HMAC}(K, m) = H\Big((K' \oplus \text{opad}) \,\|\, H\big((K' \oplus \text{ipad}) \,\|\, m\big)\Big)$$
+
+1. **Key Schedule Pre-Computation**: `ring::hmac::Key::new` pre-compresses both $(K' \oplus \text{ipad})$ and $(K' \oplus \text{opad})$ into internal SHA states at plugin initialization. Calling `hmac::Context::with_key(&cred.key)` copies the pre-compressed SHA state directly.
+2. **Dynamic Canonical Prefix Invariant**: Because canonical input starts with `METHOD \n PATH \n QUERY \n ...` and `PATH`/`QUERY` vary per request, Merkle–Damgård state cannot be pre-compressed ahead of time across request boundaries without restricting path dynamism.
+3. **Zero Intermediate Buffer**: `sign_canonical_request` streams slices directly into `hmac::Context::update` — eliminating intermediate `512`-byte buffer copies and dynamic buffer growth.
+4. **Canonical Query Stack Allocation**: Queries with `0` or `1` parameter stream directly; queries with `2..=16` parameters are sorted on a stack `[(&str, &str); 16]` array, falling back to `Vec` only when `> 16` query parameters exist.
+5. **Multi-Value Header Determinism**: `feed_prehashed_header` iterates `HeaderWorkspace::get_all_prehashed(key)`, joining multiple header lines with `,` per RFC 9110 §5.3 so multi-value smuggling cannot slip unsigned slots past verification.
+6. **Raw Digest Stack Verification**: `decode_client_signature` validates length (`64`/`128` hex, `44`/`88` base64) and decodes directly into `[u8; 64]` on the stack prior to SHA-256 / HMAC execution, accepting both uppercase and lowercase hex and verifying raw bytes with constant-time XOR accumulation (`constant_time_eq`).
 
 ---
 
-## 4. Entity & Memory Architecture
+## 4. Sharded Nonce Replay Cache ([nonce.rs](nonce.rs))
 
-| Component | In-Memory Representation | Allocation Lifecycle | Concurrency / Thread-Safety | Hot-Path Guarantee |
-| :--- | :--- | :--- | :--- | :--- |
-| **Credentials** | `FxHashMap<Box<[u8]>, (hmac::Key, Option<HeaderValue>)>` | Pre-compiled at bootstrap into RAM | Read-Only (Lock-Free) | $O(1)$ lookup via pre-trimmed `&[u8]` |
-| **Signed Spec** | `SignedHeadersSpec` (Boxed slices of `HeaderName` + prefix) | Pre-compiled at bootstrap into RAM | Read-Only (Lock-Free) | Zero string formatting, zero branches |
-| **Stack Buffer** | `CanonicalBuffer` wrapping `[u8; 512]` | Stack frame per request | Thread-local (No locks) | 100% Zero heap allocation |
-| **Nonce Cache** | `NonceCache` (`Box<[NonceShard]>`, 64-byte aligned) | Persists across plugin lifetime | Lock-striped `Mutex<FxHashMap>` | Sub-20ns peek, zero false sharing |
-| **Error Responses**| Pre-computed static `L7Response` handles | Pre-built in `HmacAuthPlugin::new` | Read-Only (Cloned `Bytes`) | Zero JSON serialization on reject |
+- **Conditional Allocation**: Allocated as `Option<NonceCache>` (`None` when `enforce_nonce == false`, reserving zero shards or bucket memory when nonces are disabled).
+- **Post-Verify Single-Lock Flow**: `nonce_fingerprint_128` computes a 128-bit fingerprint (`u128`) without locks before HMAC; `NonceCache::check_and_record_fp` acquires the shard `Mutex` **once** strictly **after** `constant_time_eq` passes. Unauthenticated traffic with forged signatures never touches shard mutexes or poisons nonces.
+- **Bounded Shards**: `(cores.max(1) * 16).next_power_of_two().clamp(16, 512)` shards aligned to `#[repr(align(64))]`, storing `u64` expiration epochs with `MAX_ENTRIES_PER_SHARD = 8192` hard ceiling after expired-entry sweep.
 
 ---
 
-## 5. Security Architecture: Scenario A3 Body Binding
+## 5. Security & Memory Layout Invariants
 
-To prevent **Body Tampering Bypass Attacks** (where an attacker modifies request payload but keeps original valid headers and signature):
-1. **Actual Payload Hashing**: For buffered payloads (`Body::Bytes`), the authentic SHA-256 digest is always computed from raw bytes into a stack buffer `[u8; 64]`.
-2. **Cross-Verification Guard**: If the client also sends `x-content-sha256`, it is compared against the authentic digest using SIMD `constant_time_eq`. Any discrepancy immediately drops the request.
-3. **Empty Body Binding**: Empty payloads use the pre-computed constant `EMPTY_SHA256_HEX` (`e3b0c442...`), bypassing SHA-256 calculation entirely.
+- **Cache-Line Packed Hot Fields**: `HmacAuthPlugin` uses `#[repr(C, align(64))]`, packing hot booleans (`is_base64_encoding`, `is_sha512`, `enforce_nonce`, `validate_request_body`), `clock_skew_seconds`, `CredentialTable`, `NonceCache`, and pre-hashed `HeaderKey`s ahead of cold `id` and `config`.
+- **`x-consumer-id` Scrubbing**: If a credential specifies `consumer_id: None`, `on_upstream_request` explicitly removes any pre-existing `x-consumer-id` header supplied by the downstream client.
+- **Side-Channel Hygiene**: Length/syntax checks reject malformed signatures early; digest comparison executes in constant time (`constant_time_eq`); rejections short-circuit via `#[cold] #[inline(never)] reject_unauthorized` without leaking internal failure step.

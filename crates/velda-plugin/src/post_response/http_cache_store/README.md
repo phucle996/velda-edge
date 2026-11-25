@@ -1,13 +1,28 @@
 # HTTP Cache Store Plugin (`http_cache_store`)
 
-Evaluated on outgoing responses returned from upstream backends during the `post_response` lifecycle phase. Inspects response cacheability per RFC 9111, stores valid payloads into the designated in-memory [`HttpCacheStorage`], and injects diagnostic `X-Cache` and `Age` response headers.
+Evaluated on outgoing responses returned from upstream backends during the `post_response` lifecycle phase. Inspects method, status, and upstream `Cache-Control` eligibility per RFC 9111, derives the canonical `(route_id, method, key_headers)` key directly from `RequestState` and request headers, streams valid payloads into the shared [`HttpCacheStorage`], and emits diagnostic `X-Cache` and `Age` response headers.
+
+```text
++-------------------------------------------------------------------------------+
+|                        HTTP CACHE STORE PIPELINE                              |
++-------------------------------------------------------------------------------+
+|  on_response(req_state: &RequestState, req_headers: &HeaderWorkspace, resp)   |
+|    |                                                                          |
+|    +---> [1] X-Cache == "HIT" or non-cacheable method ──────► return          |
+|    +---> [2] status / Cache-Control (no-cache|no-store|private) ─► X-Cache: BYPASS |
+|    +---> [3] RFC 9111 Auth Shield / payload > max_payload_bytes ─► BYPASS     |
+|    +---> [4] hash = storage.route_key_hash(route_id, method, req_headers)     |
+|    +---> [5] storage.store_bytes()  [stream_payload_to_dram -> 2 MiB slab]    |
+|            ├─► X-Cache: MISS, Age: 0                                          |
+|            └─► optional variant pre-compression (raw & len >= 256)            |
++-------------------------------------------------------------------------------+
+```
 
 > [!IMPORTANT]
-> **100% Explicit Configuration Invariant**: Every configuration parameter must be declared explicitly in `plugins.json`. No silent fallbacks, implicit defaults, or hidden behaviors are permitted.
->
-> **Strict Protocol Invariant**: Restricted exclusively to HTTP routes (`http/1.1`, `http/2`, `http/3`).
->
-> **Zone Pairing Invariant**: The `zone` parameter must match the corresponding `zone` declared in `http_cache_lookup` for the cache entry to be retrieved.
+> **Protocol & Hardware Invariants**:
+> - Restricted exclusively to HTTP routes (`HTTP/1.1`, `HTTP/2`, `HTTP/3`).
+> - `zone` and `key_headers` must match the corresponding `http_cache_lookup` configuration (`validate_plugin_dependencies` enforces `key_headers` parity across each shared `zone`).
+> - Unknown config fields are rejected (`#[serde(deny_unknown_fields)]`), and aggregate cache budgets across all zones cannot exceed `50%` of system/cgroup memory reported by `velda-core`.
 
 ---
 
@@ -17,123 +32,84 @@ Evaluated on outgoing responses returned from upstream backends during the `post
 | :--- | :--- |
 | **Plugin ID** | `http_cache_store` |
 | **Lifecycle Phase** | `post_response` |
-| **Supported Protocols** | HTTP only (`http/1.1`, `http/2`, `http/3`) |
+| **Worker Affinity** | Frontline Traffic Workers (`velda-worker-{i}`) |
+| **PBWW (`pbww()`)** | `0` (optional async variant pre-compression offloaded to `tokio::task::spawn_blocking`) |
+| **Supported Protocols** | `SupportedProtocols::ALL_HTTP` (`HTTP/1.1`, `HTTP/2`, `HTTP/3`) |
 | **Reverse Capability** | `PluginCapability::new(AccessLevel::Write, AccessLevel::Read)` |
-| **Hot Path Latency** | ~18ns store (AVX2 Non-Temporal DRAM streaming, zero disk I/O, zero network calls) |
 
 ---
 
-## 2. Configuration Parameters
+## 2. Configuration Parameters (`plugins.json`)
 
-| Field | Type | Required | Constraints / Allowed Values | Recommended Value | Description |
-| :--- | :--- | :---: | :--- | :--- | :--- |
-| `zone` | `string` | **Yes** | Non-empty string identifier | `"default"` | Identifier of the shared in-memory cache zone (must match `http_cache_lookup`). |
-| `cacheable_status` | `array[integer]` | **Yes** | Non-empty array of HTTP status codes (`200..=599`) | `[200, 203, 204, 206, 300, 301, 404]` | HTTP status codes eligible for caching. |
-| `max_payload_bytes` | `integer` | **Yes** | `1..=67108864` (up to 64MB) | `2097152` (2MB) | Maximum response body size in bytes eligible for caching. |
-| `default_ttl_secs` | `integer` | **Yes** | `1..=31536000` (1 second to 1 year) | `300` | Default TTL in seconds when upstream response omits `Cache-Control: max-age` / `s-maxage`. |
-| `respect_cache_control` | `boolean` | **Yes** | `true` or `false` | `true` | Honors upstream `Cache-Control: no-store` / `private` and extracts upstream max-age. |
-| `bypass_authenticated_requests` | `boolean` | **Yes** | `true` or `false` | `true` | Enforces RFC 9111 §3.5 safety shield: bypasses caching requests carrying `Authorization` unless marked `public`. |
-| `key_headers` | `array[string]` | **Yes** | Array of valid RFC 9110 header tokens, or `[]` | `[]` | Custom request header names incorporated into cache key for segmented/multi-tenant caching. |
-| `async_precompression` | `boolean` | **Yes** | `true` or `false` | `true` | Activates asynchronous background pre-compression (Gzip, Brotli, Zstd) for 0ms client wait time on Cache Miss. |
-| `max_memory_mb` | `integer` | **Yes** | `1..=65536` (up to 64GB) | `256` | Maximum memory allocated to this zone in megabytes if instantiated by this plugin. |
+| Field | Type | Required | Constraints / Allowed Values | Default / Notes | Description |
+| :--- | :---: | :---: | :--- | :--- | :--- |
+| `zone` | `string` | **Yes** | Non-empty string identifier | Must match `http_cache_lookup` | Shared in-memory cache storage zone name. |
+| `cacheable_methods` | `string[]` | No | Non-empty list of valid HTTP methods | `["GET", "HEAD"]` | HTTP methods eligible for cache storage (checked against `req_state.method`). |
+| `cacheable_status` | `u16[]` | **Yes** | Non-empty array in `200..=599` | Explicit (e.g. `[200, 203, 204, 206, 300, 301, 404]`) | HTTP status codes eligible for caching. |
+| `max_payload_bytes` | `usize` | **Yes** | `1 ..= 2_097_152` (`SLAB_SIZE`, 2 MiB) | Explicit (e.g. `2097152`) | Maximum response payload size stored in a single 2 MiB slab. |
+| `default_ttl_secs` | `u64` | **Yes** | `1 ..= 31_536_000` | Explicit (e.g. `300`) | Fallback TTL in seconds when upstream omits `Cache-Control: max-age` / `s-maxage`. |
+| `respect_cache_control` | `bool` | **Yes** | `true` or `false` | Explicit (`true` recommended) | Honors upstream `Cache-Control: no-cache`, `no-store`, `private`, `max-age`, `s-maxage`, and `public`. |
+| `bypass_authenticated_requests` | `bool` | **Yes** | `true` or `false` | Explicit (`true` recommended) | Enforces RFC 9111 §3.5: bypasses requests carrying `Authorization` unless `public` or partitioned via `key_headers`. |
+| `key_headers` | `string[]` | **Yes** | Valid RFC 9110 header names (`[]` if none); must match `http_cache_lookup` in same `zone` | Explicit | Request header names hashed together with `(route_id, method)`. |
+| `async_precompression` | `bool` | **Yes** | `true` or `false` | Explicit | Offloads background variant compression (`gzip`, `brotli`, `zstd`) via `spawn_blocking` when uncompressed body `>= 256` bytes and MIME is compressible. |
+| `max_memory_mb` | `usize` | **Yes** | `1 ..= max_cache_memory_mb()` (`50%` of RAM/cgroup limit from `velda-core`) | Explicit | Memory ceiling for this zone if created here (runtime clamps to `SLAB_SIZE * 2 ..= max_cache_memory_bytes()`). |
 
 ---
 
-## 3. Configuration Manifest (`plugins.json`)
+## 3. Configuration Example (`plugins.json`) & Route Attachment (`routes.json`)
 
 ```json
 {
+  "id": "http_cache_store",
+  "config": {
+    "zone": "api_cache",
+    "cacheable_methods": ["GET", "HEAD"],
+    "cacheable_status": [200, 203, 204, 206, 300, 301, 404],
+    "max_payload_bytes": 2097152,
+    "default_ttl_secs": 300,
+    "respect_cache_control": true,
+    "bypass_authenticated_requests": true,
+    "key_headers": ["x-tenant-id"],
+    "async_precompression": true,
+    "max_memory_mb": 256
+  }
+}
+```
+
+For optimal caching + compression ordering, place `http_cache_store` before `response_compression` on routes:
+
+```json
+{
+  "id": "route_api",
+  "match": {
+    "path": { "prefix": "/api/v1/" }
+  },
   "plugins": [
-    {
-      "id": "edge_cache_store",
-      "plugin": "http_cache_store",
-      "config": {
-        "zone": "default",
-        "cacheable_status": [200, 203, 204, 206, 300, 301, 404],
-        "max_payload_bytes": 2097152,
-        "default_ttl_secs": 300,
-        "respect_cache_control": true,
-        "bypass_authenticated_requests": true,
-        "key_headers": [],
-        "async_precompression": true,
-        "max_memory_mb": 256
-      }
-    }
-  ]
+    "http_cache_lookup",
+    "http_cache_store",
+    "response_compression"
+  ],
+  "upstream": "cluster_main"
 }
 ```
 
 ---
 
-## 4. Route Attachment (`routes.json`)
+## 4. Dual-Mode Caching & Micro-Architectural Foundations
 
-Attach the plugin to an HTTP route via its unique identifier in the `plugins` array. For optimal caching and compression, place `http_cache_store` before `response_compression`:
-
-```json
-{
-  "routes": [
-    {
-      "id": "route_api",
-      "match": {
-        "path": {
-          "prefix": "/api/v1/"
-        }
-      },
-      "plugins": [
-        "edge_cache_lookup",
-        "edge_cache_store",
-        "edge_compressor"
-      ],
-      "upstream": "cluster_main"
-    }
-  ]
-}
-```
+1. **Eager Multi-Variant (`[http_cache_store, response_compression]`)**: `http_cache_store` captures pristine uncompressed bytes as `raw_body`, emits `X-Cache: MISS` and `Age: 0`, and optionally generates `gzip`/`brotli`/`zstd` variants asynchronously (if `async_precompression == true`) or synchronously (`false`).
+2. **Lazy Single-Variant (`[response_compression, http_cache_store]`)**: When upstream or an earlier plugin already encoded the body (`Content-Encoding`), `http_cache_store` stores only that compressed variant without double-compressing.
+3. **Compile-Time DRAM Confinement (`dram.rs`)**: `stream_payload_to_dram` dispatches at compile time:
+   - `x86_64 + avx2`: `_mm256_stream_si256` (`32B` non-temporal stores when `len >= 64`) or `_mm_stream_si128` (`32..64`).
+   - `x86_64` baseline (`sse2`): `_mm_stream_si128` (`16B` non-temporal stores when `len >= 32`).
+   - `not(x86_64)` (`aarch64` / portable): `std::ptr::copy_nonoverlapping`.
+4. **Shared `RequestState` Keying**: `http_cache_lookup` and `http_cache_store` both invoke `storage.route_key_hash(req_state, req_headers, compiled_key_headers)` — requiring zero transient request headers (`x-velda-cache-*` does not exist) and zero cross-phase header allocations.
+5. **Pure Payload Storage**: Stores only payload slabs (`raw_body`, `variants`), `status`, and `Content-Type` inside 64 lock-striped CLOCK-evicted shards (`#[repr(align(64))]`), preventing accidental leakage of response headers (`Set-Cookie`, etc.).
 
 ---
 
-## 5. Dual-Mode Caching Architecture (Eager vs Lazy)
+## 5. Documentation Directory
 
-`http_cache_store` seamlessly supports **two distinct operational strategies** purely through pipeline ordering declarative configuration:
-
-### Strategy A: Eager Multi-Variant with Asynchronous Background Pre-compression (Default)
-**Pipeline Order**: `[..., http_cache_store, response_compression]`
-* **Mechanism**:
-  1. `http_cache_store` executes first and receives raw, uncompressed payload bytes from upstream.
-  2. Stores pristine canonical `raw_body` into RAM cache immediately (0ms wait time for client).
-  3. When `async_precompression` is enabled (`true`), offloads Pareto-tuned multi-variant compression (`gzip: 1`, `brotli: 2`, `zstd: 1`) to a background task (`tokio::task::spawn_blocking`).
-  4. The background worker merges computed variants into `HttpCacheStorage` via `merge_variants`.
-  5. Subsequent downstream requests with any `Accept-Encoding` achieve instant **Zero-CPU Cache HITs**.
-* **Best For**: High-throughput Hot APIs, public websites, and traffic where maximum throughput and instantaneous multi-client readiness are paramount.
-
-### Strategy B: Lazy Demand-Driven (Memory-Optimized Mode)
-**Pipeline Order**: `[..., response_compression, http_cache_store]`
-* **Mechanism**:
-  1. `response_compression` executes first, compressing the raw body into the specific codec requested by the current client (e.g., Brotli) and injecting `Content-Encoding: br`.
-  2. `http_cache_store` executes second, observes `Content-Encoding`, and switches to **Single-Variant Ingestion**.
-  3. Merges only this requested variant into the zone (`variants.brotli = Some(...)`).
-  4. Subsequent requests from other client types seamlessly merge additional variants into the existing `CacheEntry` via `store_variant` without recompressing or clearing prior variants.
-* **Best For**: Long-tail catalog APIs, memory-constrained edge hardware, or traffic where 95%+ of clients share the same modern codec.
-
----
-
-## 6. Micro-Architectural Foundations & Performance Invariants
-
-1. **AVX2 Non-Temporal DRAM Confinement (`_mm256_stream_si256` / `VMOVNTDQ`)**:
-   - Payloads $\ge 256$ bytes are streamed directly into physical DRAM via CPU Write-Combining Buffers, bypassing L1/L2 cache lines.
-   - Eliminates CPU Cache Pollution: routing tables, header workspaces, and session states remain permanently warm in L1 cachelines, while cache payloads reside entirely in DRAM until read.
-2. **Coarse Clock 1-ALU Cycle (`velda_core::coarse_now_sec()`)**:
-   - Cache entry expiration (`is_fresh`) evaluates in a single integer comparison instruction on register (`CMP EAX, [RSI+4]`), completely eliminating vDSO syscall overhead.
-3. **64 Lock-Striped Shards with 64-Byte Alignment (`#[repr(align(64))]`)**:
-   - Cache keys are distributed across 64 independent shards (`hash % 64`).
-   - Each shard inner lock is padded to 64 bytes to prevent cacheline bouncing (False Sharing) between multi-core Frontline Workers.
-4. **Lockless Read Parallelism & Second-Chance CLOCK Eviction ($O(1)$)**:
-   - Shard lookups execute under non-exclusive `RwLock::read()`. The access bit is updated via `AtomicBool::store(true, Ordering::Relaxed)` without bus locks (`LOCK MOV`).
-   - Eviction executes in $O(1)$ amortized steps without scanning $O(N)$ LRU queues.
-5. **Zero-Allocation Single-Pass Tokenizer (`parse_cache_control_fast`)**:
-   - Direct byte slice scanner computes `Cache-Control` bitmasks and integer TTL values in a single pass without heap allocations or regex.
-6. **Zero-Lock Serving Context Passing**:
-   - Transient cache keys and precomputed 64-bit FxHashes are passed from `http_cache_lookup` to `http_cache_store` via `HeaderWorkspace`, eliminating global pending keys mutexes.
-7. **Pure Payload Model**: Cache zones never persist request/response headers maps (`HeaderMap`). Only payload bytes (`raw_body`, `variants`), status code, and `Content-Type` are stored.
-8. **Zero Double-Compression**: If a response carries `Content-Encoding`, `http_cache_store` never attempts to recompress the payload.
-9. **Atomic Single-Key Invalidation**: All variants for a URL live in a unified `CacheEntry` keyed by URI hash. Purging a route purges all variants atomically in $O(1)$ time.
+- **[Operational Runbook](RUNBOOK.md)**: Parameter table, metrics reference, and production incident playbooks.
+- **[Performance Benchmark Report](BENCHMARK.md)**: Benchmark evaluation matrix and target tiers.
+- **[Test Verification Report](TEST.md)**: Observed `cargo test` results covering storage, key partitioning, validation, and variant negotiation.

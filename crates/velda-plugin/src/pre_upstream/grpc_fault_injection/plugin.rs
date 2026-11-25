@@ -21,7 +21,6 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::Duration;
 
 use crate::config::PluginConfig;
-use http::header::CONTENT_TYPE;
 use http::{HeaderValue, StatusCode, Version};
 use velda_core::{Action, Body, GrpcStatus, HeaderWorkspace, L7Request, L7Response};
 use velda_grpc::wire::GrpcWire;
@@ -181,17 +180,21 @@ impl GrpcFaultInjectionPlugin {
 
         let (abort_threshold, pre_compiled_response) = match &abort {
             Some(a) if a.percentage > 0 => {
+                use velda_core::HeaderKey;
+
+                const KEY_CONTENT_TYPE: HeaderKey = HeaderKey::from_static("content-type");
+                const KEY_GRPC_STATUS: HeaderKey = HeaderKey::from_static(GrpcWire::STATUS_HEADER);
+                const KEY_GRPC_MESSAGE: HeaderKey =
+                    HeaderKey::from_static(GrpcWire::MESSAGE_HEADER);
+
                 let threshold = calculate_threshold_32(a.percentage);
 
-                // Build pre-compiled Trailers-Only response pre-sized to exactly 3 slots
-                let mut ws = HeaderWorkspace::new(3);
-                ws.insert(CONTENT_TYPE, GrpcWire::CONTENT_TYPE_VALUE);
-                ws.insert(
-                    GrpcWire::STATUS_NAME,
-                    HeaderValue::from_static(a.status.code_str()),
-                );
+                // Build pre-compiled Trailers-Only response pre-sized to 4 slots
+                let mut ws = HeaderWorkspace::new(4);
+                ws.insert_prehashed(&KEY_CONTENT_TYPE, GrpcWire::CONTENT_TYPE_VALUE);
+                ws.insert_prehashed(&KEY_GRPC_STATUS, a.status.code_header_value());
                 if let Ok(val) = HeaderValue::from_str(&a.message) {
-                    ws.insert(GrpcWire::MESSAGE_NAME, val);
+                    ws.insert_prehashed(&KEY_GRPC_MESSAGE, val);
                 }
 
                 let resp = L7Response::new(StatusCode::OK, Version::HTTP_2, ws, Body::Empty);
@@ -269,9 +272,9 @@ impl PreUpstreamPlugin for GrpcFaultInjectionPlugin {
     ///
     /// # Ultimate Flat Hardware-Accelerated Workflow
     /// 1. Fast-Path Guard: Single instruction `self.combined_mask == 0` bypasses in ~0.3ns.
-    /// 2. Single PRNG Roll: 64-bit entropy evaluated into independent 32-bit delay & abort outcomes.
-    /// 3. Zero-Division Delay: Pre-computed `self.delay_dur` used directly.
-    /// 4. Compact Abort: Pre-compiled 3-slot Trailers-Only response cloned with minimal footprint.
+    /// 2. Deterministic Skip: Avoids PRNG/TLS completely for `0%` or `100%` rules.
+    /// 3. Single PRNG Roll: 64-bit entropy evaluated into independent 32-bit delay & abort outcomes.
+    /// 4. Pre-compiled Abort: Clones pre-baked Trailers-Only HTTP/2 response cleanly.
     #[inline]
     fn on_upstream_request(&self, _req: &mut L7Request, _target_upstream: &mut u16) -> Action {
         // Step 1: Single-cycle fast-path bypass when fault injection is inactive
@@ -279,32 +282,29 @@ impl PreUpstreamPlugin for GrpcFaultInjectionPlugin {
             return Action::Continue;
         }
 
-        // Step 2: Single 64-bit PRNG entropy roll for both delay (high 32 bits) and abort (low 32 bits)
-        let r = fast_random_u64();
-        let delay_roll = (r >> 32) as u32;
-        let abort_roll = r as u32;
+        // Step 2: Roll 64-bit PRNG once only when at least one threshold is fractional (`1..99%`).
+        let need_delay_roll = self.delay_threshold > 0 && self.delay_threshold < u32::MAX;
+        let need_abort_roll = self.abort_threshold > 0 && self.abort_threshold < u32::MAX;
+        let r = if need_delay_roll || need_abort_roll {
+            fast_random_u64()
+        } else {
+            0
+        };
 
-        let should_delay = self.delay_threshold == u32::MAX || delay_roll < self.delay_threshold;
-        let should_abort = self.abort_threshold == u32::MAX || abort_roll < self.abort_threshold;
+        let should_delay = self.delay_threshold == u32::MAX
+            || (self.delay_threshold > 0 && ((r >> 32) as u32) < self.delay_threshold);
+        let should_abort = self.abort_threshold == u32::MAX
+            || (self.abort_threshold > 0 && (r as u32) < self.abort_threshold);
 
-        // Step 3: Action composition (100% unwrap/expect free on hot path)
-        match (should_delay, should_abort) {
-            (true, true) => {
-                if let Some(resp) = &self.pre_compiled_response {
-                    Action::delay(self.delay_dur, Action::Respond(resp.clone()))
-                } else {
-                    Action::delay(self.delay_dur, Action::Continue)
-                }
-            }
-            (true, false) => Action::delay(self.delay_dur, Action::Continue),
-            (false, true) => {
-                if let Some(resp) = &self.pre_compiled_response {
-                    Action::Respond(resp.clone())
-                } else {
-                    Action::Continue
-                }
-            }
-            (false, false) => Action::Continue,
+        // Step 3: Action composition
+        match (
+            should_delay,
+            self.pre_compiled_response.as_ref().filter(|_| should_abort),
+        ) {
+            (true, Some(resp)) => Action::delay(self.delay_dur, Action::Respond(resp.clone())),
+            (true, None) => Action::delay(self.delay_dur, Action::Continue),
+            (false, Some(resp)) => Action::Respond(resp.clone()),
+            (false, None) => Action::Continue,
         }
     }
 

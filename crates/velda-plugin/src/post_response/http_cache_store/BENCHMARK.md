@@ -69,7 +69,7 @@ All benchmark scenarios are evaluated across five standardized, non-abbreviated 
    - **L1 Data Cache Miss Rate (%)**: Level 1 data cache miss ratio.
    - **Last Level Cache Miss Rate (%)**: Level 3 (LLC) cache miss ratio.
 5. **Tier 5: Plugin-Specific Mechanics & Wire Efficiency**:
-   - **Cache Key Cryptographic / Hash Calculation Duration (nanoseconds)**: CPU cost to compute 64-bit or 128-bit cache key hash from method, URI, and headers.
+   - **Cache Key Hash Calculation Duration (nanoseconds)**: CPU cost to compute 64-bit FxHash from `(route_id, method, compiled_key_headers)` with pre-hashed `HeaderWorkspace` probes.
    - **In-Memory Lock-Free Cache Store Read Latency (nanoseconds)**: Duration to look up and lease cached response entry from sharded lock-free memory store.
    - **RFC 9111 Cache-Control Directives Evaluation Overhead (nanoseconds)**: Overhead to parse and evaluate `max-age`, `no-cache`, `s-maxage`, and `stale-while-revalidate`.
    - **Conditional ETag / If-None-Match Comparison Latency (nanoseconds)**: CPU cost to validate client conditional headers and synthesize 304 Not Modified.
@@ -423,7 +423,7 @@ To focus directly on essential operational requirements, the evaluation framewor
 | **Primary Execution Mechanism** | **Sharded Lock-Free Memory Arena + Zero-Copy Byte Lease** | Kong proxy-cache plugin via shared memory | APISIX proxy-cache plugin via shared dict / disk | Envoy http_cache filter in HTTP filter chain |
 | **Heap Allocations** | **Zero allocations on cache hit (Direct byte slice)** | Lua shared memory table & string allocations | Lua shared memory table & string allocations | C++ cache buffer heap allocations |
 | **Garbage Collection (GC) Impact** | None (Zero GC Pauses by design) | Periodic Lua GC collection cycles | Periodic Lua GC collection cycles | None (TCMalloc heap churn) |
-| **Hot-Path Request Serving Impact** | **Lock-free hash lookup & slice lease (< 12 ns)** | Lua shared dict lock & string retrieval | Lua shared dict lock & string retrieval | C++ cache manager lookup & stream copy |
+| **Hot-Path Request Serving Impact** | **Lock-free sharded hash lookup & `Bytes` slice clone** | Lua shared dict lock & string retrieval | Lua shared dict lock & string retrieval | C++ cache manager lookup & stream copy |
 | **Backpressure / Failure Mechanism** | **Instant local reply, zero upstream queuing** | Worker execution overhead in Lua | Worker execution overhead in Lua | Worker execution overhead in C++ |
 | **Worker Execution Allocation** | **Frontline Worker 0/1 (`velda-worker-{id}`)** | Main Nginx worker thread | Main Nginx worker thread | Main Envoy worker threads |
 | **HTTP/3 Support (QUIC Ingress)** | **Native RFC 9114 / RFC 9000 (H3 Production)** | Not Supported | Experimental | Native HTTP/3 Production |

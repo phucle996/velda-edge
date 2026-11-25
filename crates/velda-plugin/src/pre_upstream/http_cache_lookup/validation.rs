@@ -1,30 +1,34 @@
 //! HTTP Cache Lookup Configuration Schema & Semantic Validation.
 //!
 //! ```text
-//!   PluginConfig (JSON) ─► serde_json::from_value ─► zone / methods / key_headers / bounds
-//!                                                        └─► Ok(HttpCacheLookupConfig) | Err
+//!   PluginConfig (JSON) ─► serde_json::from_value
+//!     ├─ validate zone, cacheable_methods, key_headers, max_memory_mb, default_ttl_secs
+//!     ├─ validate preferred_encodings (ordered zstd | br | gzip allowlist, no duplicates)
+//!     └─► Ok(HttpCacheLookupConfig) | Err
 //! ```
 
 use serde::{Deserialize, Serialize};
 
 use crate::error::PluginError;
-use crate::http_cache::{MAX_CACHE_MEMORY_MB, is_valid_header_name};
+use crate::http_cache::{CACHE_MEMORY_CEILING_PERCENT, is_valid_header_name, max_cache_memory_mb};
+use crate::post_response::response_compression::CompressionAlgorithm;
 
 /// Declarative configuration for the HTTP Cache Lookup plugin.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct HttpCacheLookupConfig {
     /// Shared cache zone identifier.
     pub zone: String,
     /// HTTP methods eligible for cache lookup (e.g. `["GET", "HEAD"]`).
     pub cacheable_methods: Vec<String>,
-    /// Whether to sort query string keys alphabetically before hashing.
-    pub ignore_query_order: bool,
-    /// Honor client `Cache-Control: no-cache` / `Pragma: no-cache` directives.
-    pub honor_client_no_cache: bool,
     /// Whether to bypass cache lookup on requests carrying an `Authorization` header.
     pub bypass_authenticated_requests: bool,
-    /// Custom request header names to incorporate into the cache key for per-user caching.
+    /// Custom request header names to incorporate into the cache key (e.g. `x-user-id`, `x-tenant-id`).
     pub key_headers: Vec<String>,
+    /// Mandatory priority-ordered compressed content encodings eligible during `Accept-Encoding` negotiation.
+    ///
+    /// Must be non-empty. Supported tokens: `"zstd"`, `"br"`, `"gzip"`.
+    pub preferred_encodings: Vec<String>,
     /// Allocated memory limit for this zone if created here (in megabytes).
     pub max_memory_mb: usize,
     /// Default TTL fallback in seconds if response does not specify Cache-Control.
@@ -32,13 +36,18 @@ pub struct HttpCacheLookupConfig {
 }
 
 fn is_valid_http_method(m: &str) -> bool {
-    let trimmed = m.trim();
-    if trimmed.is_empty() {
-        return false;
+    velda_core::lut::HttpMethod::from_bytes(m.trim().as_bytes())
+        != velda_core::lut::HttpMethod::Unknown
+}
+
+/// Parses and validates a single `preferred_encodings` token for cached variants (`zstd`, `br`, `gzip`).
+pub(crate) fn parse_cache_encoding_token(token: &str) -> Option<CompressionAlgorithm> {
+    match CompressionAlgorithm::from_token(token)? {
+        algo @ (CompressionAlgorithm::Zstd
+        | CompressionAlgorithm::Brotli
+        | CompressionAlgorithm::Gzip) => Some(algo),
+        CompressionAlgorithm::Deflate => None,
     }
-    trimmed
-        .chars()
-        .all(|c| c.is_ascii_alphanumeric() || c == '-')
 }
 
 /// Validates HTTP Cache Lookup configuration strictly according to production standards.
@@ -79,9 +88,31 @@ pub fn validate_http_cache_lookup_config(
         }
     }
 
-    if !(1..=MAX_CACHE_MEMORY_MB).contains(&cfg.max_memory_mb) {
+    if cfg.preferred_encodings.is_empty() {
         return Err(PluginError::Config(format!(
-            "Plugin '{plugin_id}': max_memory_mb ({}) must be between 1 and {MAX_CACHE_MEMORY_MB} MB",
+            "Plugin '{plugin_id}': preferred_encodings cannot be empty"
+        )));
+    }
+
+    let mut seen_encodings = Vec::with_capacity(cfg.preferred_encodings.len());
+    for enc in &cfg.preferred_encodings {
+        let parsed = parse_cache_encoding_token(enc).ok_or_else(|| {
+            PluginError::Config(format!(
+                "Plugin '{plugin_id}': unsupported encoding '{enc}' in preferred_encodings (supported: zstd, br, gzip)"
+            ))
+        })?;
+        if seen_encodings.contains(&parsed) {
+            return Err(PluginError::Config(format!(
+                "Plugin '{plugin_id}': duplicate encoding '{enc}' in preferred_encodings"
+            )));
+        }
+        seen_encodings.push(parsed);
+    }
+
+    let max_cache_mb = max_cache_memory_mb();
+    if !(1..=max_cache_mb).contains(&cfg.max_memory_mb) {
+        return Err(PluginError::Config(format!(
+            "Plugin '{plugin_id}': max_memory_mb ({}) must be between 1 and {max_cache_mb} MB ({CACHE_MEMORY_CEILING_PERCENT}% of system memory ceiling)",
             cfg.max_memory_mb
         )));
     }

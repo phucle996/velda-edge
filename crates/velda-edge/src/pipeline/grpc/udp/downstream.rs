@@ -242,6 +242,8 @@ pub async fn process_grpc_udp_request(
 
     let route_idx = route.id as usize;
     let mut target_upstream: u16 = rt.route_to_upstream.get(route_idx).copied().unwrap_or(0);
+    req.state.set_route(route.id);
+    req.state.set_upstream(target_upstream);
 
     // ========================================================================
     // [Route Plugin Pipeline Evaluation: pre_route & pre_upstream hooks]
@@ -262,17 +264,17 @@ pub async fn process_grpc_udp_request(
                 Action::Respond(resp) => {
                     short_circuit_resp = Some(resp);
                 }
-                Action::ServeCached(cached) => {
-                    short_circuit_resp = Some(cached.into_l7_response());
-                }
                 Action::Reject(reason) => {
                     // FAST-FAIL INVARIANT: Rejections terminate immediately at the Edge boundary.
                     // Strictly bypasses post_response_hooks (anti-CPDoS & Zero-DDoS CPU burn),
-                    // transforming HeaderWorkspace in-place to preserve only Bit-1 bypass headers.
+                    // retaining only MSB bypass headers while velda-grpc stamps Trailers-Only rejection fields.
                     let grpc_status = GrpcStatus::from_reject_reason(reason);
                     let log_grpc_status = grpc_status;
-                    req.headers
-                        .prepare_for_grpc_rejection(grpc_status, Some(reason.canonical_phrase()));
+                    velda_grpc::GrpcWire::prepare_rejection_headers(
+                        &mut req.headers,
+                        grpc_status,
+                        Some(reason.canonical_phrase()),
+                    );
                     let resp = velda_core::L7Response {
                         status: http::StatusCode::OK,
                         version: http::Version::HTTP_3,
@@ -331,17 +333,17 @@ pub async fn process_grpc_udp_request(
                 Action::Respond(resp) => {
                     short_circuit_resp = Some(resp);
                 }
-                Action::ServeCached(cached) => {
-                    short_circuit_resp = Some(cached.into_l7_response());
-                }
                 Action::Reject(reason) => {
                     // FAST-FAIL INVARIANT: Rejections terminate immediately at the Edge boundary.
                     // Strictly bypasses post_response_hooks (anti-CPDoS & Zero-DDoS CPU burn),
-                    // transforming HeaderWorkspace in-place to preserve only Bit-1 bypass headers.
+                    // retaining only MSB bypass headers while velda-grpc stamps Trailers-Only rejection fields.
                     let grpc_status = GrpcStatus::from_reject_reason(reason);
                     let log_grpc_status = grpc_status;
-                    req.headers
-                        .prepare_for_grpc_rejection(grpc_status, Some(reason.canonical_phrase()));
+                    velda_grpc::GrpcWire::prepare_rejection_headers(
+                        &mut req.headers,
+                        grpc_status,
+                        Some(reason.canonical_phrase()),
+                    );
                     let resp = velda_core::L7Response {
                         status: http::StatusCode::OK,
                         version: http::Version::HTTP_3,
@@ -389,7 +391,12 @@ pub async fn process_grpc_udp_request(
             resp.headers
                 .set_request_id(req.headers.request_id().clone());
             if let Some(post_hooks) = &plan.post_response_hooks {
-                velda_plugin::run_post_response_plugins(post_hooks, &req.headers, &mut resp);
+                velda_plugin::run_post_response_plugins(
+                    post_hooks,
+                    &req.state,
+                    &req.headers,
+                    &mut resp,
+                );
             }
             let duration_ns = velda_core::clock::now_unix_nanos().saturating_sub(ingress_nanos);
             let bytes_rx = req.body.len() as u64;
@@ -633,7 +640,7 @@ pub async fn process_grpc_udp_request(
     };
 
     if let Some(post_hooks) = &plan.post_response_hooks {
-        velda_plugin::run_post_response_plugins(post_hooks, &req.headers, &mut resp);
+        velda_plugin::run_post_response_plugins(post_hooks, &req.state, &req.headers, &mut resp);
     }
 
     let duration_ns = velda_core::clock::now_unix_nanos().saturating_sub(ingress_nanos);

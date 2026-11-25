@@ -32,7 +32,9 @@ pub mod worker;
 // Core Request Buffer Workspace
 // -----------------------------------------------------------------------------
 
-pub use buffer::header::{HeaderWorkspace, TAG_BYPASS_BIT, header_key};
+pub use buffer::header::{
+    HeaderKey, HeaderWorkspace, TAG_BYPASS_BIT, TAG_BYTE_BYPASS_BIT, fold_tag_hash7, header_key,
+};
 
 // -----------------------------------------------------------------------------
 // Canonical L1D Vocabulary
@@ -76,7 +78,7 @@ pub use error::{Error, ErrorKind, RejectReason, Result};
 // Lifecycle
 // -----------------------------------------------------------------------------
 
-pub use lifecycle::{Action, CachedResponseDirective, HookPhase, Phase};
+pub use lifecycle::{Action, HookPhase, Phase};
 
 // -----------------------------------------------------------------------------
 // Shared Identifiers & Endpoints

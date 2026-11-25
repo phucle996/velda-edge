@@ -22,9 +22,9 @@
 use std::sync::LazyLock;
 
 use bytes::BytesMut;
-use http::header::{CACHE_CONTROL, CONTENT_TYPE, HeaderValue};
+use http::header::HeaderValue;
 use http::{StatusCode, Version};
-use velda_core::{Body, HeaderWorkspace, L7Response};
+use velda_core::{Body, HeaderKey, HeaderWorkspace, L7Response};
 
 use crate::proto::hpack::{encode_stateless_literal, encode_stateless_status};
 
@@ -111,28 +111,29 @@ pub fn precompiled_early_hpack(status: StatusCode) -> Option<&'static [u8]> {
     }
 }
 
-/// Pre-compiles an HTTP/2 canonical early error [`L7Response`] with Zero-Body.
+/// Builds an HTTP/2 Zero-Body rejection [`L7Response`] in-place from a request [`HeaderWorkspace`],
+/// preserving bypass headers (`x-request-id`, `x-ratelimit-*`, `retry-after`) while stamping
+/// canonical HTTP/2 error headers.
 #[cold]
-pub fn precompiled_early_response(
-    status: StatusCode,
-    request_id: Option<&HeaderValue>,
+pub fn reject_response(
+    reason: velda_core::RejectReason,
+    mut headers: HeaderWorkspace,
 ) -> L7Response {
-    let mut ws = match request_id {
-        Some(req_id) => HeaderWorkspace::with_request_id(req_id.clone(), 4),
-        None => HeaderWorkspace::empty(4),
-    };
-    ws.insert(
-        CONTENT_TYPE,
-        HeaderValue::from_static("text/plain; charset=utf-8"),
-    );
-    ws.insert(CACHE_CONTROL, HeaderValue::from_static("no-store"));
-    if status == StatusCode::TOO_MANY_REQUESTS {
-        ws.insert_bypass(http::header::RETRY_AFTER, HeaderValue::from_static("1"));
+    const KEY_CACHE_CTRL: HeaderKey = HeaderKey::from_static("cache-control");
+    const KEY_RETRY_AFTER: HeaderKey = HeaderKey::from_static("retry-after");
+
+    let meta = velda_core::lut::get_reject_meta(reason);
+    headers.retain_bypass_only();
+    headers.insert_prehashed(&KEY_CACHE_CTRL, HeaderValue::from_static("no-store"));
+    if meta.status == StatusCode::TOO_MANY_REQUESTS && !headers.contains_prehashed(&KEY_RETRY_AFTER)
+    {
+        headers.insert_prehashed(&KEY_RETRY_AFTER, HeaderValue::from_static("1"));
     }
+
     L7Response {
-        status,
+        status: meta.status,
         version: Version::HTTP_2,
-        headers: ws,
+        headers,
         body: Body::Empty,
     }
 }
@@ -141,24 +142,7 @@ pub fn precompiled_early_response(
 mod tests {
     use super::*;
     use crate::proto::hpack::HpackDecoder;
-
-    #[test]
-    fn test_precompiled_early_response_zero_body() {
-        let req_id = HeaderValue::from_static("0123456789abcdef0123456789abcdef");
-        let resp = precompiled_early_response(StatusCode::FORBIDDEN, Some(&req_id));
-
-        assert_eq!(resp.status, StatusCode::FORBIDDEN);
-        assert_eq!(resp.version, Version::HTTP_2);
-        assert!(resp.body.is_empty());
-        assert_eq!(
-            resp.headers.get("content-type").unwrap(),
-            "text/plain; charset=utf-8"
-        );
-        assert_eq!(
-            resp.headers.get("x-request-id").unwrap(),
-            "0123456789abcdef0123456789abcdef"
-        );
-    }
+    use http::header::CACHE_CONTROL;
 
     #[test]
     fn test_precompiled_early_hpack_table_decodes_statelessly() {
@@ -183,5 +167,20 @@ mod tests {
         }
         // Unknown status falls back cleanly to None (handled dynamically by H2Connection).
         assert!(precompiled_early_hpack(StatusCode::IM_A_TEAPOT).is_none());
+    }
+
+    #[test]
+    fn test_reject_response_zero_body_and_preserves_plugin_retry_after() {
+        let mut ws = HeaderWorkspace::new(32);
+        ws.insert(http::header::HOST, HeaderValue::from_static("example.com"));
+        ws.insert_bypass_u64(http::header::RETRY_AFTER, 42);
+
+        let resp = reject_response(velda_core::RejectReason::TooManyRequests, ws);
+        assert_eq!(resp.status, StatusCode::TOO_MANY_REQUESTS);
+        assert_eq!(resp.version, Version::HTTP_2);
+        assert!(resp.body.is_empty());
+        assert!(!resp.headers.contains_key(http::header::HOST));
+        assert_eq!(resp.headers.get(CACHE_CONTROL).unwrap(), "no-store");
+        assert_eq!(resp.headers.get(http::header::RETRY_AFTER).unwrap(), "42");
     }
 }

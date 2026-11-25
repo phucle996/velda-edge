@@ -1,35 +1,49 @@
 //! Pre-Upstream HMAC Authentication Plugin (`hmac_auth`).
 //!
-//! Enforces zero-IO, zero-heap-allocation, hardware-accelerated constant-time
-//! Hash-based Message Authentication Code verification (RFC 2104).
-//! Protects upstream services against request tampering, identity spoofing, and replay attacks
-//! via strict timestamp drift windows, 128-bit SIMD constant-time comparison, and hardware-sharded
-//! lock-striped nonce tracking.
+//! Validates RFC 2104 HMAC-SHA256 / HMAC-SHA512 request signatures on `SupportedProtocols::ALL_HTTP`:
+//! - Credential lookup via static zero-hash AGU bit-shift index ([`CredentialTable`]).
+//! - Pre-hashed [`HeaderKey`] lookups on [`velda_core::HeaderWorkspace`].
+//! - Stack signature decoding (`hex` case-insensitive or `base64`) before cryptographic work.
+//! - Streaming HMAC verification via [`ring::hmac::Context`] (pre-computed `ipad`/`opad`).
+//! - Post-verification single-lock [`NonceCache`] replay commit (allocated only when `enforce_nonce == true`).
+//! - Authoritative `x-consumer-id` injection or removal to block client header spoofing.
+//!
+//! ```text
+//!   on_upstream_request(req)
+//!     ├─► 1. Extract access_key (prehashed) ─► CredentialTable::lookup (bit-shift/AGU, 0 hash)
+//!     ├─► 2. Parse timestamp (prehashed)    ─► |now - ts| <= clock_skew_seconds
+//!     ├─► 3. Extract & decode signature on stack (hex/b64 length & syntax guard)
+//!     ├─► 4. Compute/verify payload SHA-256 (empty LUT / Body::Bytes / streaming header)
+//!     ├─► 5. Streaming HMAC verify (ring::hmac::Context + ring::constant_time)
+//!     ├─► 6. Single-lock NonceCache::check_and_record_fp (only if enforce_nonce)
+//!     └─► 7. Set or scrub `x-consumer-id` ─► Action::Continue (or Reject 401 + WWW-Authenticate)
+//! ```
 
 use std::str::FromStr;
-use std::sync::Arc;
 
-use super::validation::HmacAuthConfig;
-use crate::config::PluginConfig;
 use http::header::{HeaderName, HeaderValue};
 use ring::hmac;
-use rustc_hash::FxHashMap;
-use velda_core::{Action, L7Request, RejectReason};
+use velda_core::{Action, HeaderKey, L7Request, RejectReason};
 
 use super::canonical::{
-    CanonicalRequest, SignedHeadersSpec, compute_sha256, constant_time_eq, format_base64_to_buf,
-    format_hex_to_buf, sign_canonical_h1, sign_canonical_h2_h3,
+    CanonicalRequest, SignedHeadersSpec, compute_sha256, constant_time_eq, decode_client_signature,
+    format_hex_to_buf, sign_canonical_request,
 };
-use super::nonce::NonceCache;
+use super::credential::{CredentialEntry, CredentialTable};
+use super::nonce::{NonceCache, nonce_fingerprint_128};
+use super::validation::HmacAuthConfig;
 use crate::capability::{AccessLevel, PluginCapability, SupportedProtocols};
+use crate::config::PluginConfig;
 use crate::error::PluginError;
 use crate::pre_upstream::PreUpstreamPlugin;
 
-/// Standard SHA-256 hex digest of an empty byte array `b""`.
 const EMPTY_SHA256_HEX: &[u8; 64] =
     b"e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855";
 
-/// Zero-allocation, branchless ASCII decimal digit parser for timestamps and lengths.
+const KEY_CONTENT_LENGTH: HeaderKey = HeaderKey::from_static("content-length");
+const KEY_TRANSFER_ENCODING: HeaderKey = HeaderKey::from_static("transfer-encoding");
+const KEY_X_CONSUMER_ID: HeaderKey = HeaderKey::from_static("x-consumer-id");
+
 #[inline(always)]
 fn parse_u64_bytes(bytes: &[u8]) -> Option<u64> {
     let trimmed = bytes.trim_ascii();
@@ -46,83 +60,84 @@ fn parse_u64_bytes(bytes: &[u8]) -> Option<u64> {
     Some(val)
 }
 
-/// Constant-time verification of the client-supplied `content_sha256_header` against expected hex.
 #[inline(always)]
 fn verify_content_sha256(header_val: Option<&HeaderValue>, expected_hex: &[u8; 64]) -> bool {
-    match header_val {
-        Some(val) => {
-            let client_hash = val.as_bytes().trim_ascii();
-            if client_hash.is_empty() {
-                return true;
-            }
-            if client_hash.len() != 64 {
-                return false;
-            }
-            let mut client_buf = [0u8; 64];
-            for (i, &b) in client_hash.iter().enumerate() {
-                client_buf[i] = b.to_ascii_lowercase();
-            }
-            constant_time_eq(&client_buf, expected_hex)
-        }
-        None => true,
+    let Some(val) = header_val else {
+        return true;
+    };
+    let client_hash = val.as_bytes().trim_ascii();
+    if client_hash.is_empty() {
+        return true;
     }
+    if client_hash.len() != 64 {
+        return false;
+    }
+    let mut client_buf = [0u8; 64];
+    for (i, &b) in client_hash.iter().enumerate() {
+        client_buf[i] = b.to_ascii_lowercase();
+    }
+    constant_time_eq(&client_buf, expected_hex)
 }
 
 /// Pre-Upstream HMAC Authentication Plugin.
+#[repr(C, align(64))]
 pub struct HmacAuthPlugin {
-    pub id: String,
-    pub config: HmacAuthConfig,
-    /// Pre-compiled HMAC key map: access_key_id -> (precompiled_key, pre_materialized_consumer_header)
-    credentials: FxHashMap<Box<[u8]>, (hmac::Key, Option<HeaderValue>)>,
-    /// Thread-safe hardware-sharded nonce cache for anti-replay tracking
-    nonce_cache: Arc<NonceCache>,
-    /// Pre-parsed HeaderNames for zero-allocation header retrieval
-    access_key_header: HeaderName,
-    signature_header: HeaderName,
-    timestamp_header: HeaderName,
-    content_sha256_header: HeaderName,
-    nonce_header: HeaderName,
-    /// Pre-compiled signed headers specification
-    signed_headers: SignedHeadersSpec,
-    /// Pre-parsed flags to avoid string comparison on hot path
     is_base64_encoding: bool,
     is_sha512: bool,
+    enforce_nonce: bool,
+    validate_request_body: bool,
+    clock_skew_seconds: u64,
+    credentials: CredentialTable,
+    nonce_cache: Option<NonceCache>,
+    access_key_header: HeaderKey,
+    signature_header: HeaderKey,
+    timestamp_header: HeaderKey,
+    content_sha256_header: HeaderKey,
+    nonce_header: HeaderKey,
+    signed_headers: SignedHeadersSpec,
+    pub id: String,
+    pub config: HmacAuthConfig,
 }
 
 impl HmacAuthPlugin {
-    /// Constructs a new `HmacAuthPlugin` instance with full validation and pre-materialization.
+    /// Constructs a validated, pre-compiled [`HmacAuthPlugin`] instance.
     pub fn new(id: impl Into<String>, config: HmacAuthConfig) -> Result<Self, PluginError> {
         let id_str = id.into();
 
-        let parse_header = |name: &str, field: &str| -> Result<HeaderName, PluginError> {
-            HeaderName::from_str(name).map_err(|e| {
+        let parse_key = |name: &str, field: &str| -> Result<HeaderKey, PluginError> {
+            let hname = HeaderName::from_str(name.trim()).map_err(|e| {
                 PluginError::Config(format!(
                     "Invalid {field} '{name}' for plugin '{id_str}': {e}"
                 ))
-            })
+            })?;
+            Ok(HeaderKey::from_name(hname))
         };
-        let access_key_header = parse_header(&config.access_key_header, "access_key_header")?;
-        let signature_header = parse_header(&config.signature_header, "signature_header")?;
-        let timestamp_header = parse_header(&config.timestamp_header, "timestamp_header")?;
+
+        let access_key_header = parse_key(&config.access_key_header, "access_key_header")?;
+        let signature_header = parse_key(&config.signature_header, "signature_header")?;
+        let timestamp_header = parse_key(&config.timestamp_header, "timestamp_header")?;
         let content_sha256_header =
-            parse_header(&config.content_sha256_header, "content_sha256_header")?;
-        let nonce_header = parse_header(&config.nonce_header, "nonce_header")?;
+            parse_key(&config.content_sha256_header, "content_sha256_header")?;
+        let nonce_header = parse_key(&config.nonce_header, "nonce_header")?;
 
-        let is_sha512 = config.signature_algorithm == "hmac-sha512";
-        let is_base64_encoding = config.signature_encoding == "base64";
-
+        let is_sha512 = config
+            .signature_algorithm
+            .trim()
+            .eq_ignore_ascii_case("hmac-sha512");
+        let is_base64_encoding = config
+            .signature_encoding
+            .trim()
+            .eq_ignore_ascii_case("base64");
         let hmac_algo = if is_sha512 {
             hmac::HMAC_SHA512
         } else {
             hmac::HMAC_SHA256
         };
 
-        // Pre-compile HMAC keys and pre-materialize consumer HeaderValues into RAM
-        let mut credentials =
-            FxHashMap::with_capacity_and_hasher(config.credentials.len(), Default::default());
+        let mut entries = Vec::with_capacity(config.credentials.len());
         for cred in &config.credentials {
             let key = hmac::Key::new(hmac_algo, cred.secret_key.as_bytes());
-            let consumer_hval = match &cred.consumer_id {
+            let consumer_header = match &cred.consumer_id {
                 Some(cid) => Some(HeaderValue::from_str(cid).map_err(|e| {
                     PluginError::Config(format!(
                         "Invalid consumer_id '{cid}' for plugin '{id_str}': {e}"
@@ -130,27 +145,32 @@ impl HmacAuthPlugin {
                 })?),
                 None => None,
             };
-            credentials.insert(
-                cred.access_key_id.as_bytes().to_vec().into_boxed_slice(),
-                (key, consumer_hval),
-            );
+            entries.push(CredentialEntry {
+                access_key_id: cred.access_key_id.as_bytes().to_vec().into_boxed_slice(),
+                key,
+                consumer_header,
+            });
         }
-
+        let credentials = CredentialTable::build(entries);
         let signed_headers = SignedHeadersSpec::compile(&config.signed_headers, &id_str)?;
+        let nonce_cache = config.enforce_nonce.then(NonceCache::new);
 
         Ok(Self {
-            id: id_str,
-            config,
+            is_base64_encoding,
+            is_sha512,
+            enforce_nonce: config.enforce_nonce,
+            validate_request_body: config.validate_request_body,
+            clock_skew_seconds: config.clock_skew_seconds,
             credentials,
-            nonce_cache: Arc::new(NonceCache::new()),
+            nonce_cache,
             access_key_header,
             signature_header,
             timestamp_header,
             content_sha256_header,
             nonce_header,
             signed_headers,
-            is_base64_encoding,
-            is_sha512,
+            id: id_str,
+            config,
         })
     }
 
@@ -170,50 +190,32 @@ impl HmacAuthPlugin {
         Self::new(&config.id, cfg)
     }
 
-    /// Computes and verifies the payload hash bytes without heap allocations.
-    ///
-    /// SECURITY PATCH (Scenario A3 - Body Tampering Bypass):
-    /// When request payload is present in memory (`Body::Bytes`), we MUST NEVER blindly trust
-    /// the client-supplied `content_sha256_header`. We always compute the SHA-256 digest of
-    /// the actual request body and verify in constant time that the client header matches
-    /// the calculated digest. Any mismatch or tampered body is rejected immediately.
-    ///
-    /// For unbuffered/streaming requests where `Body::Empty` but `content-length` or
-    /// `transfer-encoding` indicates an in-flight payload, the client-supplied `content_sha256_header`
-    /// is used for canonical HMAC signing (as specified by AWS SigV4 / RFC 2104).
     #[inline(always)]
     fn compute_payload_hash_bytes<'buf>(
         &self,
         req: &L7Request,
         stack_buf: &'buf mut [u8; 64],
     ) -> Option<&'buf [u8]> {
-        if !self.config.validate_request_body {
+        if !self.validate_request_body {
             return Some(b"UNSIGNED-PAYLOAD");
         }
 
-        let header_val = req.headers.get(&self.content_sha256_header);
+        let header_val = req.headers.get_prehashed(&self.content_sha256_header);
 
         if !req.body.is_empty() {
-            // Actual body bytes are available: ALWAYS compute true SHA-256 digest!
             let digest = compute_sha256(req.body.as_slice());
             format_hex_to_buf(&digest, stack_buf);
-
-            // Security check: If client also provided x-content-sha256 header,
-            // strictly verify in constant time that it matches the actual body digest!
             if !verify_content_sha256(header_val, stack_buf) {
                 return None;
             }
-
             Some(stack_buf.as_slice())
         } else {
-            // If request header declares an unbuffered body in streaming mode,
-            // use client-supplied content_sha256_header if provided.
             let has_unbuffered_payload = req
                 .headers
-                .get(http::header::CONTENT_LENGTH)
+                .get_prehashed(&KEY_CONTENT_LENGTH)
                 .and_then(|v| parse_u64_bytes(v.as_bytes()))
                 .is_some_and(|len| len > 0)
-                || req.headers.contains_key(http::header::TRANSFER_ENCODING);
+                || req.headers.contains_prehashed(&KEY_TRANSFER_ENCODING);
 
             if has_unbuffered_payload && let Some(val) = header_val {
                 let client_hash = val.as_bytes().trim_ascii();
@@ -225,11 +227,9 @@ impl HmacAuthPlugin {
                 }
             }
 
-            // Truly empty body: verify client header matches empty SHA-256 in constant time
             if !verify_content_sha256(header_val, EMPTY_SHA256_HEX) {
                 return None;
             }
-
             Some(EMPTY_SHA256_HEX.as_slice())
         }
     }
@@ -247,136 +247,97 @@ impl PreUpstreamPlugin for HmacAuthPlugin {
     }
 
     fn on_upstream_request(&self, req: &mut L7Request, _target_upstream: &mut u16) -> Action {
-        // Use authoritative pre-sampled ingress timestamp (0ns, zero redundant clock reads)
         let now = req.ingress_time_sec();
 
-        // 1. Extract Access Key ID (Pure byte trimming, zero UTF-8 validation overhead!)
-        let access_key_id = match req.headers.get(&self.access_key_header) {
-            Some(v) => v.as_bytes().trim_ascii(),
-            None => return Self::reject_unauthorized(req),
+        // 1. Access key lookup via zero-hash AGU index
+        let Some(access_key_val) = req.headers.get_prehashed(&self.access_key_header) else {
+            return Self::reject_unauthorized(req);
+        };
+        let access_key_id = access_key_val.as_bytes().trim_ascii();
+        let Some(cred) = self.credentials.lookup(access_key_id) else {
+            return Self::reject_unauthorized(req);
         };
 
-        // 2. Lookup Pre-Compiled Secret Key in RAM (Zero key-derivation overhead!)
-        let (key, consumer_hval_opt) = match self.credentials.get(access_key_id) {
-            Some((k, cid)) => (k, cid),
-            None => return Self::reject_unauthorized(req),
+        // 2. Timestamp drift window
+        let Some(ts_val) = req.headers.get_prehashed(&self.timestamp_header) else {
+            return Self::reject_unauthorized(req);
         };
-
-        // 3. Extract and Validate Timestamp (Zero-allocation byte parsing)
-        let ts_bytes = match req.headers.get(&self.timestamp_header) {
-            Some(v) => v.as_bytes(),
-            None => return Self::reject_unauthorized(req),
+        let Some(req_timestamp) = parse_u64_bytes(ts_val.as_bytes()) else {
+            return Self::reject_unauthorized(req);
         };
-
-        let req_timestamp = match parse_u64_bytes(ts_bytes) {
-            Some(t) => t,
-            None => return Self::reject_unauthorized(req),
-        };
-
-        let diff = now.abs_diff(req_timestamp);
-        if diff > self.config.clock_skew_seconds {
+        if now.abs_diff(req_timestamp) > self.clock_skew_seconds {
             return Self::reject_unauthorized(req);
         }
 
-        // 4. Nonce Phase 1 (Peek): Extract Nonce Header & Check Replay in ~10ns BEFORE doing any crypto
-        let nonce_fp_opt = if self.config.enforce_nonce {
-            match req.headers.get(&self.nonce_header) {
-                Some(v) => {
-                    let trimmed = v.as_bytes().trim_ascii();
-                    if trimmed.is_empty() {
-                        return Self::reject_unauthorized(req);
-                    }
-                    let fp = super::nonce::nonce_fingerprint_128(trimmed);
-                    if self.nonce_cache.is_replayed_fp(fp, now) {
-                        return Self::reject_unauthorized(req);
-                    }
-                    Some(fp)
-                }
-                None => return Self::reject_unauthorized(req),
+        // 3. Extract nonce fingerprint (lock-free; recorded only after signature passes)
+        let nonce_fp = if self.enforce_nonce {
+            let Some(nonce_val) = req.headers.get_prehashed(&self.nonce_header) else {
+                return Self::reject_unauthorized(req);
+            };
+            let trimmed = nonce_val.as_bytes().trim_ascii();
+            if trimmed.is_empty() {
+                return Self::reject_unauthorized(req);
             }
+            Some(nonce_fingerprint_128(trimmed))
         } else {
             None
         };
 
-        // 5. Extract Client Signature & Pre-Crypto Length Guard
-        let client_sig = match req.headers.get(&self.signature_header) {
-            Some(v) => {
-                let trimmed = v.as_bytes().trim_ascii();
-                if trimmed.is_empty() {
-                    return Self::reject_unauthorized(req);
-                }
-                trimmed
-            }
-            None => return Self::reject_unauthorized(req),
-        };
-
-        let expected_sig_len = match (self.is_sha512, self.is_base64_encoding) {
-            (false, false) => 64, // SHA-256 Hex
-            (false, true) => 44,  // SHA-256 Base64
-            (true, false) => 128, // SHA-512 Hex
-            (true, true) => 88,   // SHA-512 Base64
-        };
-        if client_sig.len() != expected_sig_len {
+        // 4. Decode client signature directly onto stack before computing SHA-256 / HMAC
+        let Some(sig_val) = req.headers.get_prehashed(&self.signature_header) else {
             return Self::reject_unauthorized(req);
-        }
-
-        // 6. Compute and verify Payload Hash (using stack buffer if calculated from raw body)
-        let mut payload_buf = [0u8; 64];
-        let payload_hash_bytes = match self.compute_payload_hash_bytes(req, &mut payload_buf) {
-            Some(h) => h,
-            None => return Self::reject_unauthorized(req),
+        };
+        let client_sig = sig_val.as_bytes().trim_ascii();
+        let mut decoded_sig = [0u8; 64];
+        let Some(sig_len) = decode_client_signature(
+            client_sig,
+            self.is_sha512,
+            self.is_base64_encoding,
+            &mut decoded_sig,
+        ) else {
+            return Self::reject_unauthorized(req);
         };
 
-        // 7. Extract Authority for HTTP/2 & HTTP/3 (:authority)
-        let authority = req.uri.authority().map(|a| a.as_str().as_bytes());
+        // 5. Payload SHA-256 hash
+        let mut payload_buf = [0u8; 64];
+        let Some(payload_hash) = self.compute_payload_hash_bytes(req, &mut payload_buf) else {
+            return Self::reject_unauthorized(req);
+        };
 
+        // 6. Streaming canonical HMAC sign & constant-time raw digest comparison
+        let authority = req.uri.authority().map(|a| a.as_str().as_bytes());
         let canonical_req = CanonicalRequest {
             method: req.method.as_str(),
             path: req.uri.path(),
             query: req.uri.query(),
             headers: &req.headers,
             authority,
-            payload_hash: payload_hash_bytes,
+            payload_hash,
         };
-
-        // Zero-branching protocol-specialized signing
-        let tag = if req.version <= http::Version::HTTP_11 {
-            sign_canonical_h1(key, &canonical_req, &self.signed_headers)
-        } else {
-            sign_canonical_h2_h3(key, &canonical_req, &self.signed_headers)
-        };
-
-        // 8. Format Computed Signature on Stack and Verify via 128-bit SIMD constant_time_eq
-        let is_valid = if self.is_base64_encoding {
-            let mut b64_buf = [0u8; 88];
-            let expected_sig = format_base64_to_buf(tag.as_ref(), &mut b64_buf);
-            constant_time_eq(client_sig, expected_sig)
-        } else if self.is_sha512 {
-            let mut hex_buf = [0u8; 128];
-            format_hex_to_buf(tag.as_ref(), &mut hex_buf);
-            constant_time_eq(client_sig, &hex_buf)
-        } else {
-            let mut hex_buf = [0u8; 64];
-            format_hex_to_buf(tag.as_ref(), &mut hex_buf);
-            constant_time_eq(client_sig, &hex_buf)
-        };
-
-        if !is_valid {
+        let tag = sign_canonical_request(&cred.key, &canonical_req, &self.signed_headers);
+        if !constant_time_eq(tag.as_ref(), &decoded_sig[..sig_len]) {
             return Self::reject_unauthorized(req);
         }
 
-        // 9. Nonce Phase 2 (Commit): Record Authentic Nonce to Sharded NonceCache
-        if let Some(fp) = nonce_fp_opt {
-            let expiry = req_timestamp + self.config.clock_skew_seconds;
-            if !self.nonce_cache.check_and_record_fp(fp, expiry, now) {
+        // 7. Single-lock nonce replay check & commit (authenticated requests only)
+        if let (Some(fp), Some(cache)) = (nonce_fp, self.nonce_cache.as_ref()) {
+            let expiry = req_timestamp.saturating_add(self.clock_skew_seconds);
+            if !cache.check_and_record_fp(fp, expiry, now) {
                 return Self::reject_unauthorized(req);
             }
         }
 
-        // 10. Inject Pre-materialized Consumer ID Header (Zero string parsing on hot path)
-        if let Some(hval) = consumer_hval_opt {
-            const X_CONSUMER_ID: HeaderName = HeaderName::from_static("x-consumer-id");
-            req.headers.insert(X_CONSUMER_ID, hval.clone());
+        // 8. Authoritative consumer identity (scrub client spoofed x-consumer-id when None)
+        match &cred.consumer_header {
+            Some(hval) => {
+                req.headers
+                    .insert_prehashed(&KEY_X_CONSUMER_ID, hval.clone());
+            }
+            None => {
+                if req.headers.contains_prehashed(&KEY_X_CONSUMER_ID) {
+                    req.headers.remove(&KEY_X_CONSUMER_ID.name);
+                }
+            }
         }
 
         Action::Continue
@@ -384,7 +345,7 @@ impl PreUpstreamPlugin for HmacAuthPlugin {
 
     #[inline(always)]
     fn capability(&self) -> PluginCapability {
-        if self.config.validate_request_body {
+        if self.validate_request_body {
             PluginCapability::new(AccessLevel::Write, AccessLevel::Read)
         } else {
             PluginCapability::header_only(AccessLevel::Write)
@@ -431,24 +392,33 @@ mod tests {
             content_sha256_header: "x-content-sha256".to_string(),
             nonce_header: "x-nonce".to_string(),
             enforce_nonce,
-            credentials: vec![HmacCredentialConfig {
-                access_key_id: "test_key_01".to_string(),
-                secret_key: "sec_secret_key_123456789".to_string(),
-                consumer_id: Some("test-consumer".to_string()),
-            }],
+            credentials: vec![
+                HmacCredentialConfig {
+                    access_key_id: "test_key_01".to_string(),
+                    secret_key: "sec_secret_key_123456789".to_string(),
+                    consumer_id: Some("test-consumer".to_string()),
+                },
+                HmacCredentialConfig {
+                    access_key_id: "anon_key_02".to_string(),
+                    secret_key: "sec_anon_secret_987654321".to_string(),
+                    consumer_id: None,
+                },
+            ],
         };
 
         HmacAuthPlugin::new("hmac-1", config).unwrap()
     }
 
-    fn make_signed_req(
+    fn make_signed_req_with_key(
         method: Method,
         uri_str: &str,
         version: Version,
         body_bytes: &'static [u8],
         nonce: &str,
         signed_header_names: &[&str],
+        cred: (&'static str, &[u8]),
     ) -> L7Request {
+        let (access_key_id, secret) = cred;
         let now = velda_core::clock::coarse_sec();
         let payload_hash = to_hex(&compute_sha256(body_bytes));
         let mut headers = velda_core::HeaderWorkspace::default();
@@ -462,9 +432,9 @@ mod tests {
             HeaderValue::from_str(&now.to_string()).unwrap(),
         );
         headers.insert("x-nonce", HeaderValue::from_str(nonce).unwrap());
-        headers.insert("x-access-key-id", HeaderValue::from_static("test_key_01"));
+        headers.insert("x-access-key-id", HeaderValue::from_static(access_key_id));
 
-        let key = hmac::Key::new(hmac::HMAC_SHA256, b"sec_secret_key_123456789");
+        let key = hmac::Key::new(hmac::HMAC_SHA256, secret);
         let signed_strings: Vec<String> =
             signed_header_names.iter().map(|s| s.to_string()).collect();
         let spec = SignedHeadersSpec::compile(&signed_strings, "test").unwrap();
@@ -479,11 +449,7 @@ mod tests {
             payload_hash: payload_hash.as_bytes(),
         };
 
-        let tag = if version <= Version::HTTP_11 {
-            sign_canonical_h1(&key, &canonical_req, &spec)
-        } else {
-            sign_canonical_h2_h3(&key, &canonical_req, &spec)
-        };
+        let tag = sign_canonical_request(&key, &canonical_req, &spec);
         headers.insert(
             "x-signature",
             HeaderValue::from_str(&to_hex(tag.as_ref())).unwrap(),
@@ -495,6 +461,25 @@ mod tests {
             version,
             headers,
             Body::Bytes(bytes::Bytes::from_static(body_bytes)),
+        )
+    }
+
+    fn make_signed_req(
+        method: Method,
+        uri_str: &str,
+        version: Version,
+        body_bytes: &'static [u8],
+        nonce: &str,
+        signed_header_names: &[&str],
+    ) -> L7Request {
+        make_signed_req_with_key(
+            method,
+            uri_str,
+            version,
+            body_bytes,
+            nonce,
+            signed_header_names,
+            ("test_key_01", b"sec_secret_key_123456789"),
         )
     }
 
@@ -512,14 +497,12 @@ mod tests {
         );
         let mut target = 1;
 
-        // First attempt: MUST SUCCEED
         assert!(matches!(
             plugin.on_upstream_request(&mut req, &mut target),
             Action::Continue
         ));
         assert_eq!(req.headers.get("x-consumer-id").unwrap(), "test-consumer");
 
-        // Second attempt with exact same nonce: MUST FAIL (Replay detected!)
         let replay = plugin.on_upstream_request(&mut req, &mut target);
         assert!(matches!(replay, Action::Reject(RejectReason::Unauthorized)));
     }
@@ -541,13 +524,11 @@ mod tests {
             .insert("x-signature", HeaderValue::from_static("forged_bad_sig"));
         let mut target = 1;
 
-        // Attacker sends forged signature -> Rejected
         assert!(matches!(
             plugin.on_upstream_request(&mut forged_req, &mut target),
             Action::Reject(RejectReason::Unauthorized)
         ));
 
-        // Legitimate client sends valid signature with SAME nonce -> MUST SUCCEED (nonce not poisoned)
         let mut valid_req = make_signed_req(
             Method::POST,
             "/v1/payments",
@@ -580,7 +561,6 @@ mod tests {
         assert!(matches!(action, Action::Reject(RejectReason::Unauthorized)));
     }
 
-    /// Verifies the security patch for Scenario A3 (Body Tampering Bypass via client-supplied x-content-sha256).
     #[test]
     fn test_hmac_auth_body_tampering_bypass_with_content_sha256_header_prevented() {
         let plugin = make_test_plugin(true, false);
@@ -604,9 +584,8 @@ mod tests {
         assert!(matches!(action, Action::Reject(RejectReason::Unauthorized)));
     }
 
-    /// Verifies that a legitimate request containing x-content-sha256 header (even uppercase) succeeds.
     #[test]
-    fn test_hmac_auth_valid_with_content_sha256_header() {
+    fn test_hmac_auth_valid_with_content_sha256_header_and_uppercase_sig() {
         let plugin = make_test_plugin(true, false);
         let signed_headers = ["host", "x-timestamp", "x-nonce"];
         let mut req = make_signed_req(
@@ -622,6 +601,16 @@ mod tests {
             "x-content-sha256",
             HeaderValue::from_str(&upper_hash).unwrap(),
         );
+        let upper_sig = req
+            .headers
+            .get("x-signature")
+            .unwrap()
+            .to_str()
+            .unwrap()
+            .to_ascii_uppercase();
+        req.headers
+            .insert("x-signature", HeaderValue::from_str(&upper_sig).unwrap());
+
         let mut target = 1;
         assert!(matches!(
             plugin.on_upstream_request(&mut req, &mut target),
@@ -629,8 +618,6 @@ mod tests {
         ));
     }
 
-    /// Verifies HTTP/2 and HTTP/3 support where Host is transmitted via :authority in URI
-    /// without a physical Host header in HeaderMap (RFC 9113 compliance).
     #[test]
     fn test_hmac_auth_http2_authority_support() {
         let plugin = make_test_plugin(true, false);
@@ -643,11 +630,37 @@ mod tests {
             "nonce-h2-001",
             &signed_headers,
         );
-        req.headers.remove("host"); // RFC 9113: :authority in URI instead of Host header
+        req.headers.remove("host");
         let mut target = 1;
         assert!(matches!(
             plugin.on_upstream_request(&mut req, &mut target),
             Action::Continue
         ));
+    }
+
+    #[test]
+    fn test_hmac_auth_scrubs_spoofed_consumer_id_when_none() {
+        let plugin = make_test_plugin(true, false);
+        let signed_headers = ["host", "x-timestamp", "x-nonce"];
+        let mut req = make_signed_req_with_key(
+            Method::GET,
+            "/v1/ping",
+            Version::HTTP_11,
+            b"",
+            "nonce-scrub-01",
+            &signed_headers,
+            ("anon_key_02", b"sec_anon_secret_987654321"),
+        );
+        req.headers.insert(
+            "x-consumer-id",
+            HeaderValue::from_static("spoofed-super-admin"),
+        );
+
+        let mut target = 1;
+        assert!(matches!(
+            plugin.on_upstream_request(&mut req, &mut target),
+            Action::Continue
+        ));
+        assert!(!req.headers.contains_key("x-consumer-id"));
     }
 }

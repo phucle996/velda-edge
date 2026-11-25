@@ -54,6 +54,7 @@ pub async fn serve<IO>(
     framing: Http1BodyFraming,
     upstream: &Arc<Http1Upstream>,
     meta: &DownstreamMeta,
+    req_state: &velda_core::RequestState,
     plan: &velda_plugin::RoutePluginPlan,
 ) -> Result<(), Http1Error>
 where
@@ -231,7 +232,7 @@ where
             std::mem::take(&mut resp_head.headers),
             velda_core::Body::Empty,
         );
-        velda_plugin::run_post_response_plugins(post_hooks, &req.headers, &mut l7_resp);
+        velda_plugin::run_post_response_plugins(post_hooks, req_state, &req.headers, &mut l7_resp);
         resp_head.status = l7_resp.status;
         resp_head.headers = l7_resp.headers;
     }

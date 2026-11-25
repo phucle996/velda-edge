@@ -309,6 +309,7 @@ mod tests {
 
         fn on_response(
             &self,
+            _req_state: &velda_core::RequestState,
             _req: &velda_core::HeaderWorkspace,
             _resp: &mut velda_core::L7Response,
         ) {
