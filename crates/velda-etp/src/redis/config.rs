@@ -1,32 +1,41 @@
-//! Redis ETP configuration parser (`RedisEtpConfig`).
+//! Redis ETP configuration parser (`RedisEtpConfig`) supporting explicit `standalone` and
+//! `cluster` topologies.
 //!
 //! ```text
 //!   EtpEntryConfig (kind == EtpKind::Redis)
 //!         │
-//!         ├─► entry.validate() + resolve_endpoint() ──► (host, port) [default 6379/6380]
-//!         ├─► extract username, password, db (default 0), key_prefix
+//!         ├─► entry.validate() + resolve_endpoint() ──► primary (host, port)
+//!         ├─► parse mode: "standalone" (default) | "cluster"
+//!         │     ├─ Standalone ──► accepts db >= 0, uses host:port
+//!         │     └─ Cluster    ──► rejects db > 0, collects seed_nodes (defaults to host:port)
 //!         └─► Ok(RedisEtpConfig)
-//!
-//!   Parsed Configuration Layout:
-//!   ┌────────────────────────────────────────────────────────────────────────────┐
-//!   │ id | host | port | username | password | db: u16 | key_prefix              │
-//!   │ pool: EtpPoolSettings (pool_size, connect_timeout_ms, idle_timeout_ms)     │
-//!   │ tls: Option<EtpTlsConfig>                                                  │
-//!   └────────────────────────────────────────────────────────────────────────────┘
 //! ```
 
 use serde::{Deserialize, Serialize};
 
-use crate::config::{EtpEntryConfig, EtpKind, EtpPoolSettings};
-use crate::connect::EtpTlsConfig;
+use crate::config::{
+    EtpEntryConfig, EtpKind, EtpPoolSettings, format_host_port, parse_host_port_target,
+};
+use crate::connect::{EtpTlsConfig, EtpTransportSecurity};
 use crate::error::EtpError;
 
-/// Tailored configuration for a Redis external third-party pool.
+/// Explicit Redis topology branch selected by `settings.mode` in `etp.json`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum RedisMode {
+    #[default]
+    Standalone,
+    Cluster,
+}
+
+/// Tailored configuration for a Redis external third-party pool (`standalone` or `cluster`).
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct RedisEtpConfig {
     pub id: String,
+    pub mode: RedisMode,
     pub host: String,
     pub port: u16,
+    pub seed_nodes: Vec<String>,
     pub username: Option<String>,
     pub password: Option<String>,
     pub db: u16,
@@ -46,13 +55,46 @@ impl RedisEtpConfig {
             });
         }
         entry.validate()?;
+        entry.require_security(&[
+            EtpTransportSecurity::Plain,
+            EtpTransportSecurity::Tls,
+            EtpTransportSecurity::Mtls,
+        ])?;
         let (host, port) = entry.resolve_endpoint()?;
+        let is_tls = entry.is_tls_transport();
         let obj = entry.settings.as_object().ok_or_else(|| {
             EtpError::Config(format!(
                 "Redis ETP '{}' settings must be an object",
                 entry.id
             ))
         })?;
+
+        let mode = match obj.get("mode").and_then(|v| v.as_str()) {
+            None => RedisMode::Standalone,
+            Some(raw) => match raw.trim().to_ascii_lowercase().as_str() {
+                "standalone" | "" => RedisMode::Standalone,
+                "cluster" => RedisMode::Cluster,
+                other => {
+                    return Err(EtpError::Config(format!(
+                        "Redis ETP '{}' invalid mode '{other}' (expected 'standalone' or 'cluster')",
+                        entry.id
+                    )));
+                }
+            },
+        };
+
+        let mut seed_nodes = Vec::new();
+        if let Some(arr) = obj.get("seed_nodes").and_then(|v| v.as_array()) {
+            for item in arr {
+                if let Some(s) = item.as_str().map(str::trim).filter(|s| !s.is_empty()) {
+                    let (sh, sp) = parse_host_port_target(s, EtpKind::Redis, is_tls, &entry.id)?;
+                    seed_nodes.push(format_host_port(&sh, sp));
+                }
+            }
+        }
+        if seed_nodes.is_empty() {
+            seed_nodes.push(format_host_port(&host, port));
+        }
 
         let username = obj
             .get("username")
@@ -85,6 +127,13 @@ impl RedisEtpConfig {
             None => 0,
         };
 
+        if mode == RedisMode::Cluster && db > 0 {
+            return Err(EtpError::Config(format!(
+                "Redis ETP '{}' cannot configure db={db} when mode='cluster' (Redis Cluster supports db 0 only)",
+                entry.id
+            )));
+        }
+
         let key_prefix = obj
             .get("key_prefix")
             .and_then(|v| v.as_str())
@@ -94,14 +143,16 @@ impl RedisEtpConfig {
 
         Ok(Self {
             id: entry.id.clone(),
+            mode,
             host,
             port,
+            seed_nodes,
             username,
             password,
             db,
             key_prefix,
             pool: entry.pool.clone(),
-            tls: entry.tls.clone(),
+            tls: entry.effective_tls(),
         })
     }
 }

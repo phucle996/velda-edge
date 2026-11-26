@@ -1,4 +1,4 @@
-//! Lock-free Redis ETP pool (`RedisEtp`) backed by [`EtpPageArena<EtpStream>`],
+//! Single-node Redis pool (`RedisStandalonePool`) backed by [`EtpPageArena<EtpStream>`],
 //! 64B-aligned [`ColdConnectBlueprint`], and pre-baked pipelined RESP2 `AUTH` / `SELECT` handshake.
 //!
 //! ```text
@@ -8,19 +8,10 @@
 //!         │     TZCNT(ready_bitmap) -> clear ready[idx], set busy[idx] -> RedisLease(idx)
 //!         │
 //!         └─► Connect Path (connect_authenticated):
-//!               1. claim_empty_slot(allow_spare = true) [spills to +4096B page if full]
-//!               2. blueprint.connect_stream().await [integer ColdTargetAddr + TLS]
-//!               3. if prebaked_handshake: write_all(frame) + flush() [1 pipelined RTT!]
-//!               4. read `handshake_replies` RESP lines, verify each starts with "+OK"
-//!               5. write_leased_slot(idx, stream) -> RedisLease(idx)
-//!
-//!   Pipelined Pre-Baked RESP2 Handshake & Page Arena Layout:
-//!   ┌────────────────────────────────────────────────────────────────────────────┐
-//!   │ prebaked_handshake: [*2/3 AUTH ...\r\n][*2 SELECT <db>\r\n] (0 heap allocs)│
-//!   │ ColdConnectBlueprint (64B aligned, isolated): id | ColdTargetAddr | TLS    │
-//!   ├────────────────────────────────────────────────────────────────────────────┤
-//!   │ Hot Arena: Cache Line 0 (64B) | Slot[idx] at (idx << 6) + 64 | +4096B Spare│
-//!   └────────────────────────────────────────────────────────────────────────────┘
+//!               1. blueprint.connect_stream().await [integer ColdTargetAddr + TLS]
+//!               2. if prebaked_handshake: write_all(frame) + flush() [1 pipelined RTT!]
+//!               3. read `handshake_replies` RESP lines, verify "+OK"
+//!               4. commit_leased(stream) -> RedisLease(idx)
 //! ```
 
 use std::fmt;
@@ -30,16 +21,19 @@ use std::time::Duration;
 use tokio::sync::Semaphore;
 
 use crate::arena::{EtpPageArena, ReadyAcquire};
-use crate::config::EtpEntryConfig;
-use crate::connect::{ColdConnectBlueprint, EtpStream, build_tls_target};
+use crate::config::EtpPoolSettings;
+use crate::connect::{ColdConnectBlueprint, EtpStream, EtpTlsConfig, build_tls_target};
 use crate::error::EtpError;
 use crate::redis::config::RedisEtpConfig;
 use crate::redis::lease::RedisLease;
 
-/// Lock-free bounded pool of authenticated Redis RESP2 connections stored in-place
+/// Single-endpoint bounded pool of authenticated Redis RESP2 connections stored in-place
 /// inside a page-aligned [`EtpPageArena`].
-pub struct RedisEtp {
-    pub config: RedisEtpConfig,
+pub struct RedisStandalonePool {
+    pub id: String,
+    pub host: String,
+    pub port: u16,
+    pub db: u16,
     pub blueprint: ColdConnectBlueprint,
     pub(crate) prebaked_handshake: Option<Box<[u8]>>,
     pub(crate) handshake_replies: u8,
@@ -49,13 +43,13 @@ pub struct RedisEtp {
     pub idle_timeout_secs: u64,
 }
 
-impl fmt::Debug for RedisEtp {
+impl fmt::Debug for RedisStandalonePool {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        f.debug_struct("RedisEtp")
-            .field("id", &self.config.id)
-            .field("host", &self.config.host)
-            .field("port", &self.config.port)
-            .field("db", &self.config.db)
+        f.debug_struct("RedisStandalonePool")
+            .field("id", &self.id)
+            .field("host", &self.host)
+            .field("port", &self.port)
+            .field("db", &self.db)
             .field("baseline_slots", &self.arena.baseline_slots)
             .field("total_slots", &self.arena.total_slots)
             .field("page_count", &self.arena.page_count)
@@ -64,35 +58,48 @@ impl fmt::Debug for RedisEtp {
     }
 }
 
-impl RedisEtp {
-    /// Creates a new `RedisEtp` pool from a generic [`EtpEntryConfig`].
-    pub fn from_entry(entry: &EtpEntryConfig) -> Result<Self, EtpError> {
-        let config = RedisEtpConfig::from_entry(entry)?;
-        Self::new(config)
-    }
-
-    /// Creates a new `RedisEtp` pool from a parsed [`RedisEtpConfig`].
-    pub fn new(config: RedisEtpConfig) -> Result<Self, EtpError> {
-        let tls_target = build_tls_target(&config.id, &config.host, config.tls.as_ref())?;
-        let connect_timeout = Duration::from_millis(config.pool.connect_timeout_ms.max(1));
-        let idle_timeout_secs = config.pool.idle_timeout_ms.div_ceil(1000);
-
-        let blueprint = ColdConnectBlueprint::new(
+impl RedisStandalonePool {
+    /// Creates a [`RedisStandalonePool`] directly from a [`RedisEtpConfig`].
+    pub fn from_config(config: &RedisEtpConfig) -> Result<Self, EtpError> {
+        Self::from_endpoint(
             &config.id,
             &config.host,
             config.port,
-            tls_target,
-            connect_timeout,
-        );
+            config.username.as_deref(),
+            config.password.as_deref(),
+            config.db,
+            &config.pool,
+            config.tls.as_ref(),
+        )
+    }
+
+    /// Creates a [`RedisStandalonePool`] targeting one physical `(host, port)` endpoint
+    /// (also used per Master node by the Cluster branch with `db = 0`).
+    #[allow(clippy::too_many_arguments)]
+    pub fn from_endpoint(
+        id: &str,
+        host: &str,
+        port: u16,
+        username: Option<&str>,
+        password: Option<&str>,
+        db: u16,
+        pool_settings: &EtpPoolSettings,
+        tls: Option<&EtpTlsConfig>,
+    ) -> Result<Self, EtpError> {
+        let tls_target = build_tls_target(id, host, tls)?;
+        let connect_timeout = Duration::from_millis(pool_settings.connect_timeout_ms.max(1));
+        let idle_timeout_secs = pool_settings.idle_timeout_ms.div_ceil(1000);
+
+        let blueprint = ColdConnectBlueprint::new(id, host, port, tls_target, connect_timeout);
 
         let mut handshake = Vec::new();
         let mut handshake_replies: u8 = 0;
-        if let Some(password) = &config.password {
-            handshake.extend_from_slice(&build_auth_command(config.username.as_deref(), password));
+        if let Some(pw) = password {
+            handshake.extend_from_slice(&build_auth_command(username, pw));
             handshake_replies += 1;
         }
-        if config.db > 0 {
-            handshake.extend_from_slice(&build_select_command(config.db));
+        if db > 0 {
+            handshake.extend_from_slice(&build_select_command(db));
             handshake_replies += 1;
         }
         let prebaked_handshake = if handshake.is_empty() {
@@ -101,11 +108,14 @@ impl RedisEtp {
             Some(handshake.into_boxed_slice())
         };
 
-        let arena = EtpPageArena::new(config.pool.pool_size);
+        let arena = EtpPageArena::new(pool_settings.pool_size);
         let semaphore = Semaphore::new(arena.total_slots);
 
         Ok(Self {
-            config,
+            id: id.to_string(),
+            host: host.to_string(),
+            port,
+            db,
             blueprint,
             prebaked_handshake,
             handshake_replies,
@@ -116,9 +126,8 @@ impl RedisEtp {
         })
     }
 
-    /// Establishes a fresh TCP/TLS stream from [`ColdConnectBlueprint`] and executes the
-    /// pre-baked pipelined RESP2 `AUTH` / `SELECT` handshake in a single RTT.
-    pub(crate) async fn connect_authenticated(&self) -> Result<EtpStream, EtpError> {
+    /// Establishes a fresh TCP/TLS stream and executes pre-baked pipelined RESP2 `AUTH` / `SELECT`.
+    pub async fn connect_authenticated(&self) -> Result<EtpStream, EtpError> {
         let mut stream = self.blueprint.connect_stream().await?;
 
         let Some(ref frame) = self.prebaked_handshake else {
@@ -133,7 +142,7 @@ impl RedisEtp {
                 if !reply.starts_with("+OK") {
                     return Err(EtpError::Config(format!(
                         "Redis '{}' handshake step {step} failed: {reply}",
-                        self.config.id
+                        self.id
                     )));
                 }
             }
@@ -144,7 +153,7 @@ impl RedisEtp {
         match tokio::time::timeout(self.connect_timeout, handshake).await {
             Ok(res) => res,
             Err(_) => Err(EtpError::Timeout {
-                id: self.config.id.clone(),
+                id: self.id.clone(),
                 timeout_ms,
             }),
         }
@@ -214,15 +223,14 @@ impl RedisEtp {
         }
     }
 
-    /// Acquires an authenticated Redis session lease, borrowing in-place or spilling into the
-    /// `+4096B` spare page during traffic bursts.
+    /// Acquires an authenticated Redis session lease.
     pub async fn acquire(self: &Arc<Self>) -> Result<RedisLease, EtpError> {
         let permit =
             match tokio::time::timeout(self.connect_timeout, self.semaphore.acquire()).await {
                 Ok(Ok(permit)) => permit,
                 _ => {
                     return Err(EtpError::PoolExhausted {
-                        id: self.config.id.clone(),
+                        id: self.id.clone(),
                     });
                 }
             };
@@ -236,7 +244,7 @@ impl RedisEtp {
 
         let Some(guard) = self.arena.claim_empty_slot(true) else {
             return Err(EtpError::PoolExhausted {
-                id: self.config.id.clone(),
+                id: self.id.clone(),
             });
         };
 
@@ -287,7 +295,7 @@ impl RedisEtp {
                             drop(guard);
                             drop(permit);
                             tracing::warn!(
-                                id = %pool.config.id,
+                                id = %pool.id,
                                 error = %err,
                                 "Redis ETP background replenishment failed"
                             );

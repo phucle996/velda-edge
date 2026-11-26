@@ -19,8 +19,8 @@
 
 use serde::{Deserialize, Serialize};
 
-use crate::config::{EtpEntryConfig, EtpKind, EtpPoolSettings, parse_endpoint_target};
-use crate::connect::EtpTlsConfig;
+use crate::config::{EtpEntryConfig, EtpKind, EtpPoolSettings, parse_host_port_target};
+use crate::connect::{EtpTlsConfig, EtpTransportSecurity};
 use crate::error::EtpError;
 
 /// SASL authentication mechanism negotiated when opening a Kafka broker socket.
@@ -85,6 +85,11 @@ impl KafkaEtpConfig {
             });
         }
         entry.validate()?;
+        entry.require_security(&[
+            EtpTransportSecurity::Plain,
+            EtpTransportSecurity::Tls,
+            EtpTransportSecurity::Mtls,
+        ])?;
         let obj = entry.settings.as_object().ok_or_else(|| {
             EtpError::Config(format!(
                 "Kafka ETP '{}' settings must be an object",
@@ -92,14 +97,14 @@ impl KafkaEtpConfig {
             ))
         })?;
 
-        let tls_hint = entry.tls.is_some();
+        let is_tls = entry.is_tls_transport();
         let mut brokers = Vec::new();
         let mut resolved_brokers = Vec::new();
 
         if let Some(arr) = obj.get("brokers").and_then(|v| v.as_array()) {
             for item in arr {
                 if let Some(raw) = item.as_str().map(str::trim).filter(|s| !s.is_empty()) {
-                    let target = parse_endpoint_target(raw, EtpKind::Kafka, tls_hint, &entry.id)?;
+                    let target = parse_host_port_target(raw, EtpKind::Kafka, is_tls, &entry.id)?;
                     brokers.push(raw.to_string());
                     resolved_brokers.push(target);
                 }
@@ -169,7 +174,7 @@ impl KafkaEtpConfig {
             sasl_username,
             sasl_password,
             pool: entry.pool.clone(),
-            tls: entry.tls.clone(),
+            tls: entry.effective_tls(),
         })
     }
 }
@@ -183,6 +188,7 @@ mod tests {
         EtpEntryConfig {
             id: "kafka-test".into(),
             kind: EtpKind::Kafka,
+            security: EtpTransportSecurity::Plain,
             pool: EtpPoolSettings::default(),
             tls: None,
             settings,

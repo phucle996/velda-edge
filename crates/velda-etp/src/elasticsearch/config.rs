@@ -18,9 +18,10 @@
 use serde::{Deserialize, Serialize};
 
 use crate::config::{
-    EtpEntryConfig, EtpKind, EtpPoolSettings, extract_endpoint_path, format_host_header,
+    EtpEntryConfig, EtpKind, EtpPoolSettings, format_host_header, read_base_path,
+    synthesize_endpoint_uri,
 };
-use crate::connect::EtpTlsConfig;
+use crate::connect::{EtpTlsConfig, EtpTransportSecurity};
 use crate::error::EtpError;
 
 /// Tailored configuration for an Elasticsearch / OpenSearch HTTP/HTTPS ETP pool.
@@ -51,6 +52,11 @@ impl ElasticsearchEtpConfig {
             });
         }
         entry.validate()?;
+        entry.require_security(&[
+            EtpTransportSecurity::Plain,
+            EtpTransportSecurity::Tls,
+            EtpTransportSecurity::Mtls,
+        ])?;
         let (host, port) = entry.resolve_endpoint()?;
         let obj = entry.settings.as_object().ok_or_else(|| {
             EtpError::Config(format!(
@@ -59,21 +65,11 @@ impl ElasticsearchEtpConfig {
             ))
         })?;
 
-        let endpoint = obj
-            .get("endpoint")
-            .or_else(|| obj.get("url"))
-            .and_then(|v| v.as_str())
-            .map(str::trim)
-            .filter(|s| !s.is_empty())
-            .map(ToString::to_string)
-            .unwrap_or_else(|| {
-                let scheme = if entry.tls.is_some() { "https" } else { "http" };
-                format!("{scheme}://{host}:{port}")
-            });
-
-        let is_tls = entry.tls.is_some() || endpoint.to_ascii_lowercase().starts_with("https://");
+        let is_tls = entry.is_tls_transport();
+        let base_path = read_base_path(obj, &entry.id)?;
+        let scheme = if is_tls { "https" } else { "http" };
+        let endpoint = synthesize_endpoint_uri(scheme, &host, port, &base_path);
         let host_header = format_host_header(&host, port, is_tls);
-        let base_path = extract_endpoint_path(&endpoint);
 
         let index = obj
             .get("index")
@@ -126,7 +122,7 @@ impl ElasticsearchEtpConfig {
             basic_auth,
             bearer_token,
             pool: entry.pool.clone(),
-            tls: entry.tls.clone(),
+            tls: entry.effective_tls(),
         })
     }
 }
@@ -140,6 +136,7 @@ mod tests {
         EtpEntryConfig {
             id: "es-unit".into(),
             kind: EtpKind::Elasticsearch,
+            security: EtpTransportSecurity::Plain,
             pool: EtpPoolSettings::default(),
             tls: None,
             settings,
@@ -149,7 +146,9 @@ mod tests {
     #[test]
     fn test_es_etp_parses_bearer_token_and_basic_auth_variants() {
         let cfg1 = ElasticsearchEtpConfig::from_entry(&entry_with_settings(serde_json::json!({
-            "endpoint": "http://127.0.0.1:9200/proxy",
+            "host": "127.0.0.1",
+            "port": 9200,
+            "base_path": "/proxy",
             "bearer_token": "tok-primary",
             "username": "elastic",
             "password": "changeme"

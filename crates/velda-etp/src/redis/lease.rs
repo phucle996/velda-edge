@@ -1,6 +1,5 @@
-//! Redis session lease (`RedisLease`) borrowing `Slot[idx]` in-place inside [`EtpPageArena`]
-//! with direct `Deref`/`DerefMut` to [`EtpStream`], in-place `reconnect()`, and
-//! `recreate_in_background()`.
+//! Redis session lease (`RedisLease`) borrowing `Slot[idx]` in-place inside
+//! [`RedisStandalonePool`]'s [`EtpPageArena`] for both Standalone and per-shard Cluster nodes.
 //!
 //! ```text
 //!   Plugin uses RedisLease (Deref / DerefMut -> &mut EtpStream at Slot[idx] inside Arena)
@@ -9,14 +8,13 @@
 //!         ├─► Error -> recreate_in_background() ──► sets broken = true
 //!         └─► Drop:
 //!               ├─ !broken && idx < baseline  ──► L2 prefetch + ready_bitmap[idx] = 1
-//!               ├─ !broken && idx >= baseline ──► auto-decay burst slot (init=0, busy=0)
+//!               ├─ !broken && idx >= baseline ──► auto-decay burst slot
 //!               └─  broken                    ──► discard + trigger_replenish()
 //!               └─  semaphore.add_permits(1)  ──► return semaphore permit
 //!
 //!   In-Place Lease Memory Handle (24 Bytes):
 //!   ┌────────────────────────────────────────────────────────────────────────────┐
-//!   │ RedisLease { pool: Arc<RedisEtp>, slot_idx: usize, broken: bool }          │
-//!   │   ──► &(pool.arena + (slot_idx << 6) + 64) : EtpStream (zero pointer jump) │
+//!   │ RedisLease { pool: Arc<RedisStandalonePool>, slot_idx: usize, broken: bool }│
 //!   └────────────────────────────────────────────────────────────────────────────┘
 //! ```
 
@@ -26,11 +24,11 @@ use std::sync::Arc;
 
 use crate::connect::EtpStream;
 use crate::error::EtpError;
-use crate::redis::pool::RedisEtp;
+use crate::redis::standalone::pool::RedisStandalonePool;
 
 /// Exclusive RAII lease borrowing an authenticated Redis [`EtpStream`] in-place at `Slot[idx]`.
 pub struct RedisLease {
-    pub pool: Arc<RedisEtp>,
+    pub pool: Arc<RedisStandalonePool>,
     pub slot_idx: usize,
     pub broken: bool,
 }
@@ -40,7 +38,7 @@ const _: () = assert!(std::mem::size_of::<RedisLease>() == 24);
 impl fmt::Debug for RedisLease {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.debug_struct("RedisLease")
-            .field("id", &self.pool.config.id)
+            .field("id", &self.pool.id)
             .field("slot_idx", &self.slot_idx)
             .field("broken", &self.broken)
             .finish()
@@ -64,7 +62,7 @@ impl DerefMut for RedisLease {
 }
 
 impl RedisLease {
-    pub(crate) fn new(pool: Arc<RedisEtp>, slot_idx: usize) -> Self {
+    pub(crate) fn new(pool: Arc<RedisStandalonePool>, slot_idx: usize) -> Self {
         Self {
             pool,
             slot_idx,
@@ -83,7 +81,7 @@ impl RedisLease {
     }
 
     /// Flags this connection as broken so `Drop` discards it, releases the permit,
-    /// and triggers background replenishment in [`RedisEtp`].
+    /// and triggers background replenishment in [`RedisStandalonePool`].
     #[inline]
     pub fn recreate_in_background(&mut self) {
         self.broken = true;

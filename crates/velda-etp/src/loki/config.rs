@@ -1,11 +1,11 @@
 //! Loki ETP configuration parser (`LokiEtpConfig`, `LokiProtocol`).
 //!
 //! ```text
-//!   EtpEntryConfig (kind == EtpKind::Loki)
+//!   EtpEntryConfig (kind == EtpKind::Loki, security: Plain | Tls | Mtls)
 //!         │
-//!         ├─► protocol: Http | Grpc (explicit "protocol" or grpc:// / grpcs:// scheme)
+//!         ├─► protocol: Http | Grpc (explicit "protocol", default Http)
 //!         ├─► resolve_endpoint() ──► (host, port) [HTTP: 3100/443 | gRPC: 9096/443]
-//!         ├─► format_host_header() + extract_endpoint_path() ──► host_header, base_path
+//!         ├─► format_host_header() + read_base_path() ──► host_header, base_path
 //!         ├─► extract tenant_id (X-Scope-OrgID), bearer_token, basic_auth, custom_headers
 //!         └─► Ok(LokiEtpConfig)
 //!
@@ -19,9 +19,10 @@
 use serde::{Deserialize, Serialize};
 
 use crate::config::{
-    EtpEntryConfig, EtpKind, EtpPoolSettings, extract_endpoint_path, format_host_header,
+    EtpEntryConfig, EtpKind, EtpPoolSettings, format_host_header, read_base_path,
+    synthesize_endpoint_uri,
 };
-use crate::connect::EtpTlsConfig;
+use crate::connect::{EtpTlsConfig, EtpTransportSecurity};
 use crate::error::EtpError;
 
 /// Transport protocol for Grafana Loki log push ETP pools.
@@ -33,30 +34,13 @@ pub enum LokiProtocol {
     Grpc,
 }
 
-fn endpoint_has_explicit_port(raw: &str) -> bool {
-    let without_scheme = raw.split_once("://").map(|(_, r)| r).unwrap_or(raw);
-    let authority = without_scheme.split('/').next().unwrap_or(without_scheme);
-    let authority = authority
-        .rsplit_once('@')
-        .map(|(_, h)| h)
-        .unwrap_or(authority);
-    if let Some(after_open) = authority.strip_prefix('[') {
-        after_open
-            .split_once(']')
-            .is_some_and(|(_, rest)| rest.starts_with(':'))
-    } else if let Some((host, _)) = authority.rsplit_once(':') {
-        !host.contains(':')
-    } else {
-        false
-    }
-}
-
 /// Tailored configuration for a Grafana Loki log push endpoint.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct LokiEtpConfig {
     pub id: String,
     pub protocol: LokiProtocol,
     pub endpoint: String,
+    pub http_scheme: String,
     pub host: String,
     pub port: u16,
     pub host_header: String,
@@ -80,6 +64,11 @@ impl LokiEtpConfig {
             });
         }
         entry.validate()?;
+        entry.require_security(&[
+            EtpTransportSecurity::Plain,
+            EtpTransportSecurity::Tls,
+            EtpTransportSecurity::Mtls,
+        ])?;
         let (host, mut port) = entry.resolve_endpoint()?;
         let obj = entry.settings.as_object().ok_or_else(|| {
             EtpError::Config(format!(
@@ -88,17 +77,10 @@ impl LokiEtpConfig {
             ))
         })?;
 
-        let raw_endpoint = obj
-            .get("endpoint")
-            .or_else(|| obj.get("url"))
-            .and_then(|v| v.as_str())
-            .map(str::trim)
-            .filter(|s| !s.is_empty());
-
         let protocol = match obj.get("protocol").and_then(|v| v.as_str()) {
             Some(p) => match p.trim().to_ascii_lowercase().as_str() {
-                "http" | "https" => LokiProtocol::Http,
-                "grpc" | "grpcs" => LokiProtocol::Grpc,
+                "http" => LokiProtocol::Http,
+                "grpc" => LokiProtocol::Grpc,
                 other => {
                     return Err(EtpError::Config(format!(
                         "Loki ETP '{}' unsupported protocol '{other}'; expected 'http' or 'grpc'",
@@ -106,47 +88,25 @@ impl LokiEtpConfig {
                     )));
                 }
             },
-            None => match raw_endpoint {
-                Some(ep)
-                    if ep.to_ascii_lowercase().starts_with("grpc://")
-                        || ep.to_ascii_lowercase().starts_with("grpcs://") =>
-                {
-                    LokiProtocol::Grpc
-                }
-                _ => LokiProtocol::Http,
-            },
+            None => LokiProtocol::Http,
         };
 
-        let explicit_port = if obj.get("host").is_some() {
-            obj.get("port").is_some()
-        } else if let Some(ep) = raw_endpoint {
-            endpoint_has_explicit_port(ep)
-        } else {
-            false
-        };
-
-        let raw_lower = raw_endpoint.map(str::to_ascii_lowercase);
-        let is_tls = entry.tls.is_some()
-            || raw_lower
-                .as_deref()
-                .is_some_and(|s| s.starts_with("https://") || s.starts_with("grpcs://"));
-
+        let explicit_port = obj.get("port").is_some();
+        let is_tls = entry.is_tls_transport();
         if protocol == LokiProtocol::Grpc && !explicit_port {
             port = if is_tls { 443 } else { 9096 };
         }
 
-        let endpoint = raw_endpoint.map(ToString::to_string).unwrap_or_else(|| {
-            let scheme = match (protocol, is_tls) {
-                (LokiProtocol::Grpc, true) => "grpcs",
-                (LokiProtocol::Grpc, false) => "grpc",
-                (LokiProtocol::Http, true) => "https",
-                (LokiProtocol::Http, false) => "http",
-            };
-            format!("{scheme}://{host}:{port}")
-        });
-
+        let base_path = read_base_path(obj, &entry.id)?;
+        let http_scheme = if is_tls { "https" } else { "http" }.to_string();
+        let scheme = match (protocol, is_tls) {
+            (LokiProtocol::Grpc, true) => "grpcs",
+            (LokiProtocol::Grpc, false) => "grpc",
+            (LokiProtocol::Http, true) => "https",
+            (LokiProtocol::Http, false) => "http",
+        };
+        let endpoint = synthesize_endpoint_uri(scheme, &host, port, &base_path);
         let host_header = format_host_header(&host, port, is_tls);
-        let base_path = extract_endpoint_path(&endpoint);
 
         let tenant_id = obj
             .get("tenant_id")
@@ -200,6 +160,7 @@ impl LokiEtpConfig {
             id: entry.id.clone(),
             protocol,
             endpoint,
+            http_scheme,
             host,
             port,
             host_header,
@@ -209,7 +170,7 @@ impl LokiEtpConfig {
             basic_auth,
             custom_headers,
             pool: entry.pool.clone(),
-            tls: entry.tls.clone(),
+            tls: entry.effective_tls(),
         })
     }
 }
@@ -219,10 +180,15 @@ mod tests {
     use super::*;
     use crate::config::EtpPoolSettings;
 
-    fn loki_entry(settings: serde_json::Value, tls: Option<EtpTlsConfig>) -> EtpEntryConfig {
+    fn loki_entry(
+        security: EtpTransportSecurity,
+        settings: serde_json::Value,
+        tls: Option<EtpTlsConfig>,
+    ) -> EtpEntryConfig {
         EtpEntryConfig {
             id: "loki-cfg-test".into(),
             kind: EtpKind::Loki,
+            security,
             pool: EtpPoolSettings::default(),
             tls,
             settings,
@@ -232,6 +198,7 @@ mod tests {
     #[test]
     fn test_loki_protocol_and_default_ports_and_headers() {
         let http_cfg = LokiEtpConfig::from_entry(&loki_entry(
+            EtpTransportSecurity::Plain,
             serde_json::json!({
                 "host": "loki.local",
                 "headers": { "X-Custom": "abc" }
@@ -247,22 +214,28 @@ mod tests {
         );
 
         let grpc_plain = LokiEtpConfig::from_entry(&loki_entry(
-            serde_json::json!({ "endpoint": "grpc://loki.local" }),
+            EtpTransportSecurity::Plain,
+            serde_json::json!({ "host": "loki.local", "protocol": "grpc" }),
             None,
         ))
         .unwrap();
         assert_eq!(grpc_plain.protocol, LokiProtocol::Grpc);
         assert_eq!(grpc_plain.port, 9096);
+        assert_eq!(grpc_plain.endpoint, "grpc://loki.local:9096");
 
         let grpcs_tls = LokiEtpConfig::from_entry(&loki_entry(
-            serde_json::json!({ "endpoint": "grpcs://loki.local" }),
+            EtpTransportSecurity::Tls,
+            serde_json::json!({ "host": "loki.local", "protocol": "grpc" }),
             None,
         ))
         .unwrap();
         assert_eq!(grpcs_tls.protocol, LokiProtocol::Grpc);
         assert_eq!(grpcs_tls.port, 443);
+        assert!(grpcs_tls.tls.is_some());
+        assert_eq!(grpcs_tls.endpoint, "grpcs://loki.local:443");
 
         let host_grpc = LokiEtpConfig::from_entry(&loki_entry(
+            EtpTransportSecurity::Tls,
             serde_json::json!({ "host": "loki.local", "protocol": "grpc" }),
             Some(EtpTlsConfig {
                 insecure_skip_verify: true,
