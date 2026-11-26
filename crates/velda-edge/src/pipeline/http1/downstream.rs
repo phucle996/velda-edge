@@ -436,7 +436,9 @@ pub async fn run_http1_loop<IO>(
         };
 
         let route_idx = route.id as usize;
-        let mut target_upstream: u16 = rt.route_to_upstream.get(route_idx).copied().unwrap_or(0);
+        let default_upstream: u16 = rt.route_to_upstream.get(route_idx).copied().unwrap_or(0);
+        let mut target_mask: u32 = velda_plugin::target_init(default_upstream);
+        let mut target_upstream: u16 = default_upstream;
         let mut req_state = velda_core::RequestState::new(request_id)
             .with_ingress_time(ingress_nanos)
             .with_method(log_method);
@@ -545,9 +547,11 @@ pub async fn run_http1_loop<IO>(
                     let mut action = velda_plugin::run_pre_upstream_plugins_async(
                         hooks,
                         &mut l7_req,
-                        &mut target_upstream,
+                        &mut target_mask,
                     )
                     .await;
+                    target_upstream = velda_plugin::target_primary(target_mask)
+                        .unwrap_or(velda_core::UNASSIGNED_UPSTREAM_ID);
                     l7_req.state.set_upstream(target_upstream);
                     while let Action::Delay { duration, and_then } = action {
                         tokio::time::sleep(duration).await;
@@ -808,6 +812,12 @@ pub async fn run_http1_loop<IO>(
                 .windows(b"text/event-stream".len())
                 .any(|w| w.eq_ignore_ascii_case(b"text/event-stream"))
         });
+        if let Some(mirror_up) = velda_plugin::target_mirror(target_mask)
+            .filter(|&m| m != target_upstream)
+            .and_then(|m| rt.upstreams.http.get(m))
+        {
+            crate::pipeline::mirror::attach_h1_mirror(&mut conn, &req_head, framing, mirror_up);
+        }
 
         let (pipe_result, pipe_kind) = match upstream_target.as_ref() {
             HttpUpstream::Http1(upstream) => {

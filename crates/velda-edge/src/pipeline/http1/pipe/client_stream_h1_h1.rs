@@ -102,6 +102,7 @@ where
 
     // 4. If request has no body (e.g. GET, HEAD), forward directly without chunked stream
     if framing == Http1BodyFraming::Empty {
+        velda_http1::server::connection::tee_end(&mut conn.body_tee);
         let req = velda_http1::server::request::Http1ServerRequest::new(
             req_head.method,
             req_head.uri,
@@ -274,6 +275,7 @@ where
             if total_body_bytes > cfg.max_body_size {
                 return Err(Http1Error::PayloadTooLarge(total_body_bytes));
             }
+            velda_http1::server::connection::tee_chunk(&mut conn.body_tee, slice.clone());
             encode_chunk(&slice, &mut conn.upstream_write_buf);
             if conn.upstream_write_buf.len() >= 65536 {
                 break;
@@ -282,6 +284,7 @@ where
 
         if decoder.is_done() {
             velda_http1::wire::encode_chunked_end(&mut conn.upstream_write_buf);
+            velda_http1::server::connection::tee_end(&mut conn.body_tee);
             sent_terminal = true;
         }
         conn.last_bytes_rx += total_body_bytes as u64;
@@ -305,6 +308,7 @@ where
                         return Err(Http1Error::PayloadTooLarge(total_body_bytes));
                     }
                     conn.last_bytes_rx += slice.len() as u64;
+                    velda_http1::server::connection::tee_chunk(&mut conn.body_tee, slice.clone());
                     send_chunk(&mut *upstream_lease, &slice).await?;
                 }
 
@@ -340,6 +344,7 @@ where
             }
 
             if sent_terminal {
+                velda_http1::server::connection::tee_end(&mut conn.body_tee);
                 send_chunked_end(&mut *upstream_lease).await?;
             }
         }

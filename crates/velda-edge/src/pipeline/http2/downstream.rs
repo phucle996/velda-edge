@@ -548,7 +548,7 @@ struct Http2StreamContext {
 /// Serves an individual HTTP/2 downstream multiplexed stream top-to-bottom.
 async fn serve_http2_stream(
     mut req_head: Http2ServerRequestHead,
-    receiver: Http2StreamReceiver,
+    mut receiver: Http2StreamReceiver,
     responder: Http2Responder,
     ctx: Http2StreamContext,
 ) {
@@ -564,6 +564,7 @@ async fn serve_http2_stream(
         ingress_time_nanos,
         sampling,
     } = ctx;
+    let mut target_mask: u32 = velda_plugin::target_init(default_upstream_id);
     let mut target_upstream = default_upstream_id;
     let peer_ip = meta.peer_ip;
     let log_method = velda_core::HttpMethod::from_bytes(req_head.method.as_str().as_bytes());
@@ -690,9 +691,11 @@ async fn serve_http2_stream(
                 let mut action = velda_plugin::run_pre_upstream_plugins_async(
                     hooks,
                     &mut l7_req,
-                    &mut target_upstream,
+                    &mut target_mask,
                 )
                 .await;
+                target_upstream = velda_plugin::target_primary(target_mask)
+                    .unwrap_or(velda_core::UNASSIGNED_UPSTREAM_ID);
                 l7_req.state.set_upstream(target_upstream);
                 while let Action::Delay { duration, and_then } = action {
                     tokio::time::sleep(duration).await;
@@ -908,6 +911,12 @@ async fn serve_http2_stream(
             .windows(b"text/event-stream".len())
             .any(|w| w.eq_ignore_ascii_case(b"text/event-stream"))
     });
+    if let Some(mirror_up) = velda_plugin::target_mirror(target_mask)
+        .filter(|&m| m != target_upstream)
+        .and_then(|m| http_upstreams.get(m))
+    {
+        crate::pipeline::mirror::attach_h2_mirror(&mut receiver, &req_head, mirror_up);
+    }
 
     let (outcome, pipe_kind) = match upstream_target.as_ref() {
         HttpUpstream::Http2(upstream) => match upstream.strategy.effective(has_upload_body, is_sse)

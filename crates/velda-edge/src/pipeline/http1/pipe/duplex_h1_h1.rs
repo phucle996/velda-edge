@@ -134,6 +134,7 @@ where
     if is_fully_buffered_request {
         match framing {
             Http1BodyFraming::Empty => {
+                velda_http1::server::connection::tee_end(&mut conn.body_tee);
                 velda_http1::client::request::encode_request_head(
                     &req_head.method,
                     &req_head.uri,
@@ -143,6 +144,15 @@ where
                 );
             }
             Http1BodyFraming::ContentLength(total_len) => {
+                if conn.body_tee.is_some() {
+                    if total_len > 0 {
+                        velda_http1::server::connection::tee_chunk(
+                            &mut conn.body_tee,
+                            bytes::Bytes::copy_from_slice(&conn.read_buf[..total_len]),
+                        );
+                    }
+                    velda_http1::server::connection::tee_end(&mut conn.body_tee);
+                }
                 velda_http1::client::request::encode_request_head(
                     &req_head.method,
                     &req_head.uri,
@@ -158,6 +168,28 @@ where
                 }
             }
             Http1BodyFraming::Chunked => {
+                if conn.body_tee.is_some() {
+                    let mut pos = 0usize;
+                    while pos < chunked_coalesced_wire_len {
+                        if let Ok(Some((needed, payload, is_term))) =
+                            parse_single_chunk(&conn.read_buf[pos..chunked_coalesced_wire_len])
+                        {
+                            pos += needed;
+                            if !payload.is_empty() {
+                                velda_http1::server::connection::tee_chunk(
+                                    &mut conn.body_tee,
+                                    bytes::Bytes::copy_from_slice(payload),
+                                );
+                            }
+                            if is_term {
+                                break;
+                            }
+                        } else {
+                            break;
+                        }
+                    }
+                    velda_http1::server::connection::tee_end(&mut conn.body_tee);
+                }
                 velda_http1::client::request::encode_request_head_chunked(
                     &req_head,
                     &mut conn.upstream_write_buf,
@@ -397,6 +429,7 @@ where
         }
     }
 
+    let mut body_tee = conn.body_tee.take();
     let (mut down_read, mut down_write) = tokio::io::split(&mut conn.stream);
     let (mut up_read, mut up_write) = tokio::io::split(&mut *upstream_lease);
 
@@ -443,6 +476,12 @@ where
                         Some((needed, payload, is_terminal)) => {
                             coalesced_wire_len += needed;
                             coalesced_payload_bytes += payload.len();
+                            if !payload.is_empty() && body_tee.is_some() {
+                                velda_http1::server::connection::tee_chunk(
+                                    &mut body_tee,
+                                    bytes::Bytes::copy_from_slice(payload),
+                                );
+                            }
                             if is_terminal {
                                 sent_terminal = true;
                                 break;
@@ -472,6 +511,7 @@ where
                 upstream_write_buf.clear();
 
                 if sent_terminal {
+                    velda_http1::server::connection::tee_end(&mut body_tee);
                     upload_finished.store(true, std::sync::atomic::Ordering::Release);
                 } else {
                     loop {
@@ -489,6 +529,12 @@ where
                                 Some((needed, payload, is_terminal)) => {
                                     wire_len += needed;
                                     payload_bytes += payload.len();
+                                    if !payload.is_empty() && body_tee.is_some() {
+                                        velda_http1::server::connection::tee_chunk(
+                                            &mut body_tee,
+                                            bytes::Bytes::copy_from_slice(payload),
+                                        );
+                                    }
                                     if is_terminal {
                                         reached_terminal = true;
                                         break;
@@ -567,6 +613,7 @@ where
                     }
 
                     if sent_terminal {
+                        velda_http1::server::connection::tee_end(&mut body_tee);
                         upload_finished.store(true, std::sync::atomic::Ordering::Release);
                     }
                     if !early_response {
@@ -589,6 +636,12 @@ where
                 let mut remaining = total_len;
                 let initial_avail = read_buf.len().min(remaining);
                 if initial_avail > 0 {
+                    if body_tee.is_some() {
+                        velda_http1::server::connection::tee_chunk(
+                            &mut body_tee,
+                            bytes::Bytes::copy_from_slice(&read_buf[..initial_avail]),
+                        );
+                    }
                     upstream_write_buf.extend_from_slice(&read_buf[..initial_avail]);
                     read_buf.advance(initial_avail);
                     remaining -= initial_avail;
@@ -605,6 +658,12 @@ where
 
                     let available = read_buf.len().min(remaining);
                     if available > 0 {
+                        if body_tee.is_some() {
+                            velda_http1::server::connection::tee_chunk(
+                                &mut body_tee,
+                                bytes::Bytes::copy_from_slice(&read_buf[..available]),
+                            );
+                        }
                         if !early_response {
                             tokio::select! {
                                 biased;
@@ -653,6 +712,7 @@ where
                 }
 
                 if remaining == 0 {
+                    velda_http1::server::connection::tee_end(&mut body_tee);
                     upload_finished.store(true, std::sync::atomic::Ordering::Release);
                 }
                 if !early_response {
@@ -660,6 +720,7 @@ where
                 }
             }
             Http1BodyFraming::Empty => {
+                velda_http1::server::connection::tee_end(&mut body_tee);
                 velda_http1::client::request::encode_request_head(
                     &req_head.method,
                     &req_head.uri,

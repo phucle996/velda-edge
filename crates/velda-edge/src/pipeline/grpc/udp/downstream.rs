@@ -248,7 +248,9 @@ pub async fn process_grpc_udp_request(
     };
 
     let route_idx = route.id as usize;
-    let mut target_upstream: u16 = rt.route_to_upstream.get(route_idx).copied().unwrap_or(0);
+    let default_upstream: u16 = rt.route_to_upstream.get(route_idx).copied().unwrap_or(0);
+    let mut target_mask: u32 = velda_plugin::target_init(default_upstream);
+    let mut target_upstream: u16 = default_upstream;
     req.state.set_route(route.id);
     req.state.set_upstream(target_upstream);
 
@@ -329,8 +331,11 @@ pub async fn process_grpc_udp_request(
             && let Some(hooks) = &plan.pre_upstream_hooks
         {
             let mut action =
-                velda_plugin::run_pre_upstream_plugins_async(hooks, &mut req, &mut target_upstream)
+                velda_plugin::run_pre_upstream_plugins_async(hooks, &mut req, &mut target_mask)
                     .await;
+            target_upstream = velda_plugin::target_primary(target_mask)
+                .unwrap_or(velda_core::UNASSIGNED_UPSTREAM_ID);
+            req.state.set_upstream(target_upstream);
             while let Action::Delay { duration, and_then } = action {
                 tokio::time::sleep(duration).await;
                 action = *and_then;
@@ -524,6 +529,20 @@ pub async fn process_grpc_udp_request(
             });
         }
         return GrpcStatus::ResourceExhausted.to_l7_response(Some("resource exhausted"));
+    }
+
+    if let Some(mirror_id) = velda_plugin::target_mirror(target_mask)
+        && mirror_id != target_upstream
+        && let Some(mirror_up) = rt.upstreams.grpc.get(mirror_id)
+    {
+        crate::pipeline::mirror::dispatch_grpc_mirror(
+            Arc::clone(mirror_up),
+            req.method.clone(),
+            req.uri.clone(),
+            req.version,
+            req.headers.clone(),
+            req.body.clone(),
+        );
     }
 
     let (pipe_res, pipe_kind) = match upstream_target.as_ref() {

@@ -5,6 +5,7 @@ pub mod http1;
 pub mod http2;
 pub mod http3;
 pub mod l4;
+pub mod mirror;
 
 pub use l4::{tcp, udp};
 

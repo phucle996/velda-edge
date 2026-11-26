@@ -324,7 +324,9 @@ async fn dispatch_grpc_tcp_request_stream(
     };
 
     let route_idx = route.id as usize;
-    let mut target_upstream: u16 = rt.route_to_upstream.get(route_idx).copied().unwrap_or(0);
+    let default_upstream: u16 = rt.route_to_upstream.get(route_idx).copied().unwrap_or(0);
+    let mut target_mask: u32 = velda_plugin::target_init(default_upstream);
+    let mut target_upstream: u16 = default_upstream;
     let mut req_state = velda_core::RequestState::new(request_id)
         .with_ingress_time(ingress_nanos)
         .with_method(velda_core::lut::HttpMethod::from_http_method(
@@ -421,9 +423,11 @@ async fn dispatch_grpc_tcp_request_stream(
                 let mut action = velda_plugin::run_pre_upstream_plugins_async(
                     hooks,
                     &mut l7_req,
-                    &mut target_upstream,
+                    &mut target_mask,
                 )
                 .await;
+                target_upstream = velda_plugin::target_primary(target_mask)
+                    .unwrap_or(velda_core::UNASSIGNED_UPSTREAM_ID);
                 l7_req.state.set_upstream(target_upstream);
                 while let Action::Delay { duration, and_then } = action {
                     tokio::time::sleep(duration).await;
@@ -598,6 +602,17 @@ async fn dispatch_grpc_tcp_request_stream(
             });
         }
         return;
+    }
+
+    if let Some(mirror_up) = velda_plugin::target_mirror(target_mask)
+        .filter(|&m| m != target_upstream)
+        .and_then(|m| rt.upstreams.grpc.get(m))
+    {
+        crate::pipeline::mirror::attach_grpc_tcp_mirror(
+            &mut server_stream.receiver,
+            &server_stream.head,
+            mirror_up,
+        );
     }
 
     let (outcome, pipe_kind) = match upstream_target.as_ref() {

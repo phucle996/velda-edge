@@ -176,6 +176,14 @@ impl Http2ServerRequest {
     }
 }
 
+/// Non-blocking stream tee event emitted by [`Http2StreamReceiver`] on mirror-enabled routes.
+#[derive(Debug)]
+pub enum StreamTeeEvent {
+    Data(Bytes),
+    Trailers(HeaderWorkspace),
+    End,
+}
+
 /// Progressive stream receiver for an incoming HTTP/2 request body.
 #[derive(Debug)]
 pub struct Http2StreamReceiver {
@@ -186,9 +194,41 @@ pub struct Http2StreamReceiver {
     pub bytes_received: usize,
     pub(crate) eof: bool,
     pub(crate) trailers: Option<HeaderWorkspace>,
+    pub(crate) tee_tx: Option<mpsc::Sender<StreamTeeEvent>>,
 }
 
 impl Http2StreamReceiver {
+    /// Attaches a bounded non-blocking tee channel that receives zero-copy `Bytes` copies of
+    /// decoded incoming body frames without adding any pipe-level mirror coupling.
+    #[inline]
+    pub fn attach_tee(&mut self, tx: mpsc::Sender<StreamTeeEvent>) {
+        self.tee_tx = Some(tx);
+    }
+
+    #[inline(always)]
+    fn push_tee_data(&mut self, payload: &Bytes) {
+        if let Some(tx) = self.tee_tx.as_ref() {
+            // Keep 1 slot reserved for terminal `End` / `Trailers` so EOF signaling never drops.
+            if tx.capacity() <= 1 || tx.try_send(StreamTeeEvent::Data(payload.clone())).is_err() {
+                self.tee_tx = None;
+            }
+        }
+    }
+
+    #[inline(always)]
+    fn push_tee_end(&mut self) {
+        if let Some(tx) = self.tee_tx.take() {
+            let _ = tx.try_send(StreamTeeEvent::End);
+        }
+    }
+
+    #[inline(always)]
+    fn push_tee_trailers(&mut self, trailers: &HeaderWorkspace) {
+        if let Some(tx) = self.tee_tx.take() {
+            let _ = tx.try_send(StreamTeeEvent::Trailers(trailers.clone()));
+        }
+    }
+
     #[inline(always)]
     fn record_chunk(&mut self, len: usize) -> Result<(), Http2Error> {
         self.bytes_received = self.bytes_received.saturating_add(len);
@@ -205,6 +245,7 @@ impl Http2StreamReceiver {
     /// Asynchronously receives the next `DATA` chunk from the incoming stream.
     pub async fn recv_chunk(&mut self) -> Result<Option<Bytes>, Http2Error> {
         if self.eof {
+            self.push_tee_end();
             return Ok(None);
         }
         loop {
@@ -218,22 +259,30 @@ impl Http2StreamReceiver {
                     }
                     if !payload.is_empty() {
                         self.record_chunk(payload.len())?;
+                        self.push_tee_data(&payload);
+                        if end_stream {
+                            self.push_tee_end();
+                        }
                         return Ok(Some(payload));
                     }
                     if self.eof {
+                        self.push_tee_end();
                         return Ok(None);
                     }
                 }
                 Some(Ok(ServerBodyEvent::Trailers(tr))) => {
+                    self.push_tee_trailers(&tr);
                     self.trailers = Some(tr);
                     self.eof = true;
                     return Ok(None);
                 }
                 Some(Err(e)) => {
+                    self.tee_tx = None;
                     self.eof = true;
                     return Err(e);
                 }
                 None => {
+                    self.tee_tx = None;
                     self.eof = true;
                     return Ok(None);
                 }
@@ -265,6 +314,7 @@ impl Http2StreamReceiver {
                     }
                     if !payload.is_empty() {
                         self.record_chunk(payload.len())?;
+                        self.push_tee_data(&payload);
                         let b = buf.get_or_insert_with(|| {
                             let mut bm = BytesMut::with_capacity(
                                 (first.len() + payload.len() + 16_384).min(max_coalesce_bytes),
@@ -274,17 +324,23 @@ impl Http2StreamReceiver {
                         });
                         b.extend_from_slice(&payload);
                     }
+                    if end_stream {
+                        self.push_tee_end();
+                    }
                 }
                 Ok(Ok(ServerBodyEvent::Trailers(tr))) => {
+                    self.push_tee_trailers(&tr);
                     self.trailers = Some(tr);
                     self.eof = true;
                     break;
                 }
                 Ok(Err(e)) => {
+                    self.tee_tx = None;
                     self.eof = true;
                     return Err(e);
                 }
                 Err(mpsc::error::TryRecvError::Disconnected) => {
+                    self.tee_tx = None;
                     self.eof = true;
                     break;
                 }

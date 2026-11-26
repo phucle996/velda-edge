@@ -141,6 +141,7 @@ where
             loop {
                 while let Some(chunk) = decoder.decode_step(&mut conn.read_buf)? {
                     conn.last_bytes_rx += chunk.len() as u64;
+                    velda_http1::server::connection::tee_chunk(&mut conn.body_tee, chunk.clone());
                     send_stream
                         .send_chunk(chunk, false)
                         .await
@@ -176,6 +177,7 @@ where
                     let chunk = conn.read_buf.split_to(chunk_len).freeze();
                     remaining = remaining.saturating_sub(chunk_len);
                     conn.last_bytes_rx += chunk_len as u64;
+                    velda_http1::server::connection::tee_chunk(&mut conn.body_tee, chunk.clone());
                     send_stream
                         .send_chunk(chunk, false)
                         .await
@@ -195,6 +197,7 @@ where
                 let chunk = conn.read_buf.split_to(chunk_len).freeze();
                 remaining = remaining.saturating_sub(chunk_len);
                 conn.last_bytes_rx += chunk_len as u64;
+                velda_http1::server::connection::tee_chunk(&mut conn.body_tee, chunk.clone());
                 send_stream
                     .send_chunk(chunk, false)
                     .await
@@ -205,6 +208,7 @@ where
     }
 
     // Conclude upload stream
+    velda_http1::server::connection::tee_end(&mut conn.body_tee);
     let _ = send_stream.send_data(Bytes::new(), true);
 
     // 7. Await response and return to downstream

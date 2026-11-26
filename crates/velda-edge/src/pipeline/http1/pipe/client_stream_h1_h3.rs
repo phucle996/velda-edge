@@ -224,9 +224,16 @@ where
 
     // 7. Progressive Upload Pump: Stream downstream chunks progressively to upstream HTTP/3
     // without buffering whole payload in RAM, enabling true concurrent network pipelining.
+    if let Some(ref chunk) = initial_chunk {
+        velda_http1::server::connection::tee_chunk(&mut conn.body_tee, chunk.clone());
+    }
+    if initial_is_fin {
+        velda_http1::server::connection::tee_end(&mut conn.body_tee);
+    }
     if !initial_is_fin {
         match framing {
             Http1BodyFraming::Empty => {
+                velda_http1::server::connection::tee_end(&mut conn.body_tee);
                 let _ = sender.finish().await;
             }
             Http1BodyFraming::Chunked => {
@@ -236,6 +243,10 @@ where
                     // 1. Drain all available chunk payload slices currently in memory
                     while let Some(chunk) = decoder.decode_step(&mut conn.read_buf)? {
                         conn.last_bytes_rx += chunk.len() as u64;
+                        velda_http1::server::connection::tee_chunk(
+                            &mut conn.body_tee,
+                            chunk.clone(),
+                        );
                         sender
                             .send_chunk(chunk)
                             .await
@@ -262,6 +273,7 @@ where
                         }
                     }
                 }
+                velda_http1::server::connection::tee_end(&mut conn.body_tee);
                 let _ = sender.finish().await;
             }
             Http1BodyFraming::ContentLength(total_len) => {
@@ -276,6 +288,10 @@ where
                         remaining = remaining.saturating_sub(chunk_len);
                         conn.last_bytes_rx += chunk_len as u64;
                         let is_fin = remaining == 0;
+                        velda_http1::server::connection::tee_chunk(
+                            &mut conn.body_tee,
+                            chunk.clone(),
+                        );
                         sender
                             .send_chunk_fin(chunk, is_fin)
                             .await
@@ -291,6 +307,9 @@ where
                     if n == 0 {
                         break;
                     }
+                }
+                if remaining == 0 {
+                    velda_http1::server::connection::tee_end(&mut conn.body_tee);
                 }
                 if remaining > 0 {
                     let _ = sender.finish().await;
