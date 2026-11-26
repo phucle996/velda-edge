@@ -7,19 +7,17 @@
 //!            │
 //!            ▼
 //!     validate_oauth2_introspection_config()
-//!            ├──► 1. RFC 3986 Endpoint URI (`http://` | `https://`, IPv4 / [IPv6] / Hostname)
-//!            ├──► 2. Explicit Client Auth (`client_secret_basic` | `client_secret_post`)
+//!            ├──► 1. ETP Pool Reference (`etp_id`, optional relative `path` override)
+//!            ├──► 2. Client Auth (`client_secret_basic` | `client_secret_post` | `none`)
 //!            ├──► 3. Token Sources (`token_headers` / `token_cookies` / `token_query_params`)
 //!            ├──► 4. Token Type Hint (`access_token` | `refresh_token` | `none`)
-//!            ├──► 5. TTL Bounds (`cache_ttl_seconds: 0..=86400`, `negative_cache_ttl_seconds: 0..=86400`)
-//!            ├──► 6. Outbound Keep-Alive & TLS (`tls: OutboundTlsConfig`, pool, timeouts)
-//!            └──► 7. Scopes, Claims Projection & Fallback (`reject` | `allow`)
+//!            ├──► 5. TTL & Timeout Bounds (`cache_ttl_seconds: 0..=86400`, `request_timeout_ms: 1..=60000`)
+//!            └──► 6. Scopes, Claims Projection & Fallback (`reject` | `allow`)
 //! ```
 
 use std::collections::HashSet;
 use std::str::FromStr;
 
-use http::Uri;
 use http::header::HeaderName;
 use serde::{Deserialize, Serialize};
 
@@ -27,6 +25,10 @@ use crate::error::PluginError;
 
 /// Maximum allowable TTL in seconds (24 hours).
 pub const MAX_TTL_SECS: u64 = 86_400;
+
+fn default_auth_method() -> String {
+    "client_secret_basic".to_string()
+}
 
 /// Mapping from an IdP introspection JSON claim path to an upstream HTTP header name.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -39,19 +41,29 @@ pub struct ClaimToHeaderConfig {
 }
 
 /// Declarative configuration for the OAuth 2.0 Token Introspection plugin.
+///
+/// Transport connection pooling, TLS/mTLS, and keep-alive mechanics are delegated cleanly
+/// to the referenced External Third-Party (`velda-etp`) pool (`etp_id`).
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct Oauth2IntrospectionConfig {
-    /// Full HTTP or HTTPS URL of the Authorization Server RFC 7662 endpoint.
-    pub introspection_url: String,
+    /// Reference identifier of the ETP pool entry (`velda-etp`) providing IdP/Vault connectivity.
+    pub etp_id: String,
 
-    /// Client ID of Gateway for authenticating with Authorization Server.
-    pub client_id: String,
+    /// Optional URL path override on the attached ETP endpoint (defaults to provider's endpoint path).
+    #[serde(default)]
+    pub path: Option<String>,
 
-    /// Client Secret of Gateway for authenticating with Authorization Server.
-    pub client_secret: String,
+    /// Optional OAuth 2.0 Client ID (overrides ETP-level `client_id` when provided).
+    #[serde(default)]
+    pub client_id: Option<String>,
 
-    /// Authentication method: `"client_secret_basic"` or `"client_secret_post"`.
+    /// Optional OAuth 2.0 Client Secret (overrides ETP-level `client_secret` when provided).
+    #[serde(default)]
+    pub client_secret: Option<String>,
+
+    /// Authentication method: `"client_secret_basic"`, `"client_secret_post"`, or `"none"`.
+    #[serde(default = "default_auth_method")]
     pub auth_method: String,
 
     /// Ordered list of header names to inspect for incoming tokens.
@@ -72,13 +84,7 @@ pub struct Oauth2IntrospectionConfig {
     /// Negative in-memory cache TTL in seconds (`0..=86400`; `0` disables negative cache).
     pub negative_cache_ttl_seconds: u64,
 
-    /// Persistent HTTP Keep-Alive idle connection timeout in seconds (`1..=86400`).
-    pub keepalive_timeout_secs: u64,
-
-    /// Maximum idle connections maintained in the persistent IdP pool (`1..=1000`).
-    pub pool_max_idle_connections: usize,
-
-    /// Request timeout for contacting Authorization Server in milliseconds (`1..=60000`).
+    /// Request timeout for contacting the attached ETP provider in milliseconds (`1..=60000`).
     pub request_timeout_ms: u64,
 
     /// List of scopes required for this route (`[]` if none).
@@ -92,10 +98,6 @@ pub struct Oauth2IntrospectionConfig {
 
     /// Fallback behavior when IdP is unreachable or times out: `"reject"` or `"allow"`.
     pub fallback_behavior: String,
-
-    /// Outbound TLS / mTLS settings when `introspection_url` uses `https://`.
-    #[serde(default)]
-    pub tls: crate::config::OutboundTlsConfig,
 }
 
 #[inline]
@@ -122,50 +124,61 @@ pub fn validate_oauth2_introspection_config(
             ))
         })?;
 
-    // 1. Validate Introspection URL (RFC 3986 HTTP / HTTPS, IPv4 / [IPv6] / Hostname)
-    let url_str = cfg.introspection_url.trim().to_string();
-    let uri = url_str.parse::<Uri>().map_err(|e| {
-        PluginError::Config(format!(
-            "Plugin '{plugin_id}': invalid introspection_url '{url_str}': {e}"
-        ))
-    })?;
-    let scheme = uri.scheme_str().unwrap_or("");
-    if scheme != "http" && scheme != "https" {
+    // 1. Validate ETP Pool Reference & Optional Path Override
+    cfg.etp_id = cfg.etp_id.trim().to_string();
+    if cfg.etp_id.is_empty() {
         return Err(PluginError::Config(format!(
-            "Plugin '{plugin_id}': introspection_url must start with 'http://' or 'https://' (got '{url_str}')"
+            "Plugin '{plugin_id}': etp_id cannot be empty"
         )));
     }
-    if uri.authority().map(|a| a.host()).is_none() {
-        return Err(PluginError::Config(format!(
-            "Plugin '{plugin_id}': introspection_url '{url_str}' missing host"
-        )));
-    }
-    cfg.introspection_url = url_str;
-
-    // 2. Validate Credentials
-    cfg.client_id = cfg.client_id.trim().to_string();
-    if cfg.client_id.is_empty() {
-        return Err(PluginError::Config(format!(
-            "Plugin '{plugin_id}': client_id cannot be empty"
-        )));
-    }
-    if cfg.client_secret.trim().is_empty() {
-        return Err(PluginError::Config(format!(
-            "Plugin '{plugin_id}': client_secret cannot be empty"
-        )));
+    if let Some(ref mut path) = cfg.path {
+        let trimmed = path.trim();
+        if trimmed.is_empty() {
+            return Err(PluginError::Config(format!(
+                "Plugin '{plugin_id}': path cannot be empty when specified"
+            )));
+        }
+        if trimmed.starts_with("http://") || trimmed.starts_with("https://") {
+            return Err(PluginError::Config(format!(
+                "Plugin '{plugin_id}': path must be a relative endpoint path, not a full URL ('{trimmed}')"
+            )));
+        }
+        if trimmed.chars().any(|c| c.is_whitespace() || c.is_control()) {
+            return Err(PluginError::Config(format!(
+                "Plugin '{plugin_id}': path '{trimmed}' contains invalid whitespace or control characters"
+            )));
+        }
+        *path = trimmed.to_string();
     }
 
-    // 3. Validate & normalize Auth Method
+    // 2. Validate Optional Client Credentials Override & Auth Method
+    if let Some(ref mut cid) = cfg.client_id {
+        let trimmed = cid.trim();
+        if trimmed.is_empty() {
+            return Err(PluginError::Config(format!(
+                "Plugin '{plugin_id}': client_id cannot be empty when specified"
+            )));
+        }
+        *cid = trimmed.to_string();
+    }
+    if let Some(ref csec) = cfg.client_secret
+        && csec.trim().is_empty()
+    {
+        return Err(PluginError::Config(format!(
+            "Plugin '{plugin_id}': client_secret cannot be empty when specified"
+        )));
+    }
+
     let method = cfg.auth_method.trim().to_ascii_lowercase();
-    if method != "client_secret_basic" && method != "client_secret_post" {
+    if method != "client_secret_basic" && method != "client_secret_post" && method != "none" {
         return Err(PluginError::Config(format!(
-            "Plugin '{plugin_id}': auth_method '{}' is invalid; strictly 'client_secret_basic' or 'client_secret_post' are supported",
+            "Plugin '{plugin_id}': auth_method '{}' is invalid; strictly 'client_secret_basic', 'client_secret_post', or 'none' are supported",
             cfg.auth_method
         )));
     }
     cfg.auth_method = method;
 
-    // 4. Validate Token Sources
+    // 3. Validate Token Sources
     if cfg.token_headers.is_empty()
         && cfg.token_cookies.is_empty()
         && cfg.token_query_params.is_empty()
@@ -205,7 +218,7 @@ pub fn validate_oauth2_introspection_config(
         *qname = trimmed.to_string();
     }
 
-    // 5. Validate & normalize Token Type Hint
+    // 4. Validate & normalize Token Type Hint
     let hint = cfg.token_type_hint.trim().to_ascii_lowercase();
     if hint != "access_token" && hint != "refresh_token" && hint != "none" {
         return Err(PluginError::Config(format!(
@@ -215,7 +228,7 @@ pub fn validate_oauth2_introspection_config(
     }
     cfg.token_type_hint = hint;
 
-    // 6. Validate Cache TTLs
+    // 5. Validate Cache TTLs & Timeout
     if cfg.cache_ttl_seconds > MAX_TTL_SECS {
         return Err(PluginError::Config(format!(
             "Plugin '{plugin_id}': cache_ttl_seconds must be between 0 and {MAX_TTL_SECS} (got {})",
@@ -230,21 +243,6 @@ pub fn validate_oauth2_introspection_config(
         )));
     }
 
-    // 7. Validate Pool & Request Timeouts
-    if cfg.keepalive_timeout_secs == 0 || cfg.keepalive_timeout_secs > MAX_TTL_SECS {
-        return Err(PluginError::Config(format!(
-            "Plugin '{plugin_id}': keepalive_timeout_secs must be between 1 and {MAX_TTL_SECS} (got {})",
-            cfg.keepalive_timeout_secs
-        )));
-    }
-
-    if cfg.pool_max_idle_connections == 0 || cfg.pool_max_idle_connections > 1000 {
-        return Err(PluginError::Config(format!(
-            "Plugin '{plugin_id}': pool_max_idle_connections must be between 1 and 1000 (got {})",
-            cfg.pool_max_idle_connections
-        )));
-    }
-
     if cfg.request_timeout_ms == 0 || cfg.request_timeout_ms > 60_000 {
         return Err(PluginError::Config(format!(
             "Plugin '{plugin_id}': request_timeout_ms must be between 1 and 60000 (got {})",
@@ -252,7 +250,7 @@ pub fn validate_oauth2_introspection_config(
         )));
     }
 
-    // 8. Validate Required Scopes
+    // 6. Validate Required Scopes
     for (idx, scope) in cfg.required_scopes.iter_mut().enumerate() {
         let trimmed = scope.trim();
         if trimmed.is_empty() {
@@ -268,7 +266,7 @@ pub fn validate_oauth2_introspection_config(
         *scope = trimmed.to_string();
     }
 
-    // 9. Validate Claims to Headers Mapping
+    // 7. Validate Claims to Headers Mapping
     let mut target_headers = HashSet::with_capacity(cfg.claims_to_headers.len());
     for (idx, mapping) in cfg.claims_to_headers.iter_mut().enumerate() {
         let claim = mapping.claim.trim();
@@ -295,7 +293,7 @@ pub fn validate_oauth2_introspection_config(
         mapping.header = hdr_lower;
     }
 
-    // 10. Validate & normalize Fallback Behavior
+    // 8. Validate & normalize Fallback Behavior
     let fallback = cfg.fallback_behavior.trim().to_ascii_lowercase();
     if fallback != "reject" && fallback != "allow" {
         return Err(PluginError::Config(format!(
@@ -315,7 +313,8 @@ mod tests {
 
     fn valid_config_json() -> serde_json::Value {
         json!({
-            "introspection_url": "https://[::1]:8443/oauth/introspect",
+            "etp_id": "kc-prod",
+            "path": "/realms/app/protocol/openid-connect/token/introspect",
             "client_id": "velda-edge-gateway",
             "client_secret": "sec_gateway_secret_12345",
             "auth_method": "client_secret_basic",
@@ -325,8 +324,6 @@ mod tests {
             "token_type_hint": "access_token",
             "cache_ttl_seconds": 300,
             "negative_cache_ttl_seconds": 10,
-            "keepalive_timeout_secs": 60,
-            "pool_max_idle_connections": 10,
             "request_timeout_ms": 500,
             "required_scopes": ["read", "orders"],
             "claims_to_headers": [
@@ -343,34 +340,63 @@ mod tests {
     fn test_valid_oauth2_introspection_config_and_zero_ttl() {
         let mut val = valid_config_json();
         let cfg = validate_oauth2_introspection_config("oauth2-1", &val).unwrap();
-        assert_eq!(cfg.introspection_url, "https://[::1]:8443/oauth/introspect");
+        assert_eq!(cfg.etp_id, "kc-prod");
+        assert_eq!(
+            cfg.path.as_deref(),
+            Some("/realms/app/protocol/openid-connect/token/introspect")
+        );
         assert_eq!(cfg.token_headers[0], "x-access-token");
         assert_eq!(cfg.claims_to_headers[0].header, "x-user-id");
 
-        // Zero TTL allowed for instant revocation on sensitive routes
+        // Zero TTL allowed for instant revocation; optional fields omitted with auth_method=none
         val["cache_ttl_seconds"] = json!(0);
         val["negative_cache_ttl_seconds"] = json!(0);
+        val["auth_method"] = json!("none");
+        val.as_object_mut().unwrap().remove("path");
+        val.as_object_mut().unwrap().remove("client_id");
+        val.as_object_mut().unwrap().remove("client_secret");
         assert!(validate_oauth2_introspection_config("oauth2-1", &val).is_ok());
     }
 
     #[test]
-    fn test_unknown_fields_and_legacy_max_cache_entries_rejected() {
+    fn test_unknown_and_legacy_pool_fields_rejected() {
         let mut val = valid_config_json();
-        val["max_cache_entries"] = json!(10000);
+        val["introspection_url"] = json!("https://kc.local/introspect");
         let err = validate_oauth2_introspection_config("oauth2-1", &val).unwrap_err();
         assert!(err.to_string().contains("unknown field"));
+
+        let mut val2 = valid_config_json();
+        val2["keepalive_timeout_secs"] = json!(60);
+        assert!(validate_oauth2_introspection_config("oauth2-1", &val2).is_err());
+
+        let mut val3 = valid_config_json();
+        val3["pool_max_idle_connections"] = json!(10);
+        assert!(validate_oauth2_introspection_config("oauth2-1", &val3).is_err());
     }
 
     #[test]
-    fn test_invalid_url_and_auth_method_rejected() {
+    fn test_invalid_etp_id_path_and_auth_method_rejected() {
         let mut val = valid_config_json();
-        val["introspection_url"] = json!("ftp://auth.server/introspect");
-        let err = validate_oauth2_introspection_config("oauth2-1", &val).unwrap_err();
-        assert!(err.to_string().contains("must start with 'http://'"));
+        val["etp_id"] = json!("   ");
+        assert!(
+            validate_oauth2_introspection_config("oauth2-1", &val)
+                .unwrap_err()
+                .to_string()
+                .contains("etp_id cannot be empty")
+        );
 
-        let mut val2 = valid_config_json();
-        val2["auth_method"] = json!("bearer_token");
-        let err2 = validate_oauth2_introspection_config("oauth2-1", &val2).unwrap_err();
+        let mut val_path = valid_config_json();
+        val_path["path"] = json!("https://kc.local/introspect");
+        assert!(
+            validate_oauth2_introspection_config("oauth2-1", &val_path)
+                .unwrap_err()
+                .to_string()
+                .contains("relative endpoint path")
+        );
+
+        let mut val_auth = valid_config_json();
+        val_auth["auth_method"] = json!("bearer_token");
+        let err2 = validate_oauth2_introspection_config("oauth2-1", &val_auth).unwrap_err();
         assert!(
             err2.to_string()
                 .contains("auth_method 'bearer_token' is invalid")
