@@ -1,31 +1,17 @@
 //! Request Mirror Configuration Schema & Semantic Validation.
 //!
-//! Enforces a strict declarative contract for shadow traffic mirroring.
+//! ```text
+//!   serde_json::Value
+//!     └──► validate_request_mirror_config()
+//!            ├─ mirror_upstream.trim() non-empty
+//!            ├─ sample_percent in 0.0..=100.0 (non-NaN)
+//!            └─ ignore_methods[] valid RFC 9110 HTTP method tokens
+//! ```
 //!
-//! # Strict Declarative Contract (Zero Silent Fallbacks)
-//! - **Mandatory Upstream**: `mirror_upstream` must be non-empty.
-//! - **Sample Percentage**: `sample_percent` must be between 0 and 100.
-//! - **Queue Capacity**: `queue_capacity` must be within production-safe boundaries (16..=1,000,000).
-//! - **Valid Methods**: Every entry in `ignore_methods` must be a valid RFC 9110 HTTP method token.
+//! Enforces a strict declarative contract for traffic mirroring decisions.
 
-use serde::{Deserialize, Serialize};
-
+pub use super::config::RequestMirrorConfig;
 use crate::error::PluginError;
-
-/// Declarative configuration for the Request Mirror plugin.
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
-pub struct RequestMirrorConfig {
-    /// Target mirror upstream cluster name to receive shadowed traffic.
-    pub mirror_upstream: String,
-    /// Percentage of traffic sampled and mirrored (0.0 to 100.0).
-    pub sample_percent: f64,
-    /// Optional replacement Host header to send to shadow upstream.
-    pub replace_host: Option<String>,
-    /// HTTP methods excluded from traffic mirroring (e.g. mutating methods like ["POST", "DELETE"]).
-    pub ignore_methods: Vec<String>,
-    /// Bounded non-blocking queue capacity for mirrored request dispatch.
-    pub queue_capacity: usize,
-}
 
 fn is_valid_http_method(m: &str) -> bool {
     let trimmed = m.trim();
@@ -37,7 +23,7 @@ fn is_valid_http_method(m: &str) -> bool {
         .all(|c| c.is_ascii_alphanumeric() || c == '-')
 }
 
-/// Validates Request Mirror configuration strictly according to production standards.
+/// Validates Request Mirror configuration strictly according to declarative traffic-control rules.
 pub fn validate_request_mirror_config(
     plugin_id: &str,
     config_val: &serde_json::Value,
@@ -48,15 +34,12 @@ pub fn validate_request_mirror_config(
         ))
     })?;
 
-    // 1. Validate mirror_upstream
-    let upstream_trimmed = cfg.mirror_upstream.trim();
-    if upstream_trimmed.is_empty() {
+    if cfg.mirror_upstream.trim().is_empty() {
         return Err(PluginError::Config(format!(
             "Plugin '{plugin_id}': mirror_upstream cannot be empty"
         )));
     }
 
-    // 2. Validate sample_percent (0.0 ..= 100.0)
     if !(0.0..=100.0).contains(&cfg.sample_percent) || cfg.sample_percent.is_nan() {
         return Err(PluginError::Config(format!(
             "Plugin '{plugin_id}': sample_percent ({}) must be between 0.0 and 100.0",
@@ -64,15 +47,6 @@ pub fn validate_request_mirror_config(
         )));
     }
 
-    // 3. Validate queue_capacity (16 ..= 1,000,000)
-    if !(16..=1_000_000).contains(&cfg.queue_capacity) {
-        return Err(PluginError::Config(format!(
-            "Plugin '{plugin_id}': queue_capacity ({}) must be between 16 and 1,000,000",
-            cfg.queue_capacity
-        )));
-    }
-
-    // 4. Validate ignore_methods
     for method in &cfg.ignore_methods {
         if !is_valid_http_method(method) {
             return Err(PluginError::Config(format!(
@@ -94,9 +68,7 @@ mod tests {
         let val = json!({
             "mirror_upstream": "shadow-cluster-1",
             "sample_percent": 10.5,
-            "replace_host": "shadow.internal",
-            "ignore_methods": ["POST", "DELETE"],
-            "queue_capacity": 4096
+            "ignore_methods": ["POST", "DELETE"]
         });
         let res = validate_request_mirror_config("mirror_1", &val);
         assert!(res.is_ok());
@@ -107,9 +79,7 @@ mod tests {
         let val = json!({
             "mirror_upstream": "",
             "sample_percent": 10.0,
-            "replace_host": null,
-            "ignore_methods": [],
-            "queue_capacity": 1024
+            "ignore_methods": []
         });
         let res = validate_request_mirror_config("mirror_bad_up", &val);
         assert!(res.is_err());
@@ -125,9 +95,7 @@ mod tests {
         let val = json!({
             "mirror_upstream": "shadow-up",
             "sample_percent": 105.0,
-            "replace_host": null,
-            "ignore_methods": [],
-            "queue_capacity": 1024
+            "ignore_methods": []
         });
         let res = validate_request_mirror_config("mirror_bad_sample", &val);
         assert!(res.is_err());
@@ -142,7 +110,6 @@ mod tests {
     fn test_missing_required_fields_rejected() {
         let val = json!({
             "mirror_upstream": "shadow-up"
-            // Missing sample_percent, ignore_methods, queue_capacity
         });
         let res = validate_request_mirror_config("mirror_missing", &val);
         assert!(res.is_err());
