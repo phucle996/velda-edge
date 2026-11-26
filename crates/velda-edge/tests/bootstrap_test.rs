@@ -256,11 +256,13 @@ async fn test_http1_unified_log_trace_sampling_and_exact_metrics() {
         velda_edge::pipeline::http1::downstream::handle_http1_stream(
             conn_drop,
             "test-drop".into(),
-            Http1Config::default(),
-            false,
-            StreamingMode::DISABLED,
-            None,
-            drop_sampling,
+            velda_edge::pipeline::http1::downstream::Http1IngressConfig {
+                config: Http1Config::default(),
+                tls_enabled: false,
+                streaming: StreamingMode::DISABLED,
+                alt_svc: None,
+                sampling: drop_sampling,
+            },
             rt_shared.clone(),
         ),
     );
@@ -300,11 +302,13 @@ async fn test_http1_unified_log_trace_sampling_and_exact_metrics() {
         velda_edge::pipeline::http1::downstream::handle_http1_stream(
             conn_keep,
             "test-keep".into(),
-            Http1Config::default(),
-            false,
-            StreamingMode::DISABLED,
-            None,
-            HttpSampling::keep_all(),
+            velda_edge::pipeline::http1::downstream::Http1IngressConfig {
+                config: Http1Config::default(),
+                tls_enabled: false,
+                streaming: StreamingMode::DISABLED,
+                alt_svc: None,
+                sampling: HttpSampling::keep_all(),
+            },
             rt_shared,
         ),
     );

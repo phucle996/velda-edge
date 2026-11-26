@@ -218,11 +218,13 @@ pub fn build_tcp_pipeline_runner(listener_id: &str, runtime: SharedRuntime) -> D
                     http1::downstream::handle_http1_stream(
                         connection,
                         lid,
-                        config,
-                        tls_enabled,
-                        streaming,
-                        alt_svc,
-                        sampling,
+                        http1::downstream::Http1IngressConfig {
+                            config,
+                            tls_enabled,
+                            streaming,
+                            alt_svc,
+                            sampling,
+                        },
                         rt,
                     )
                     .await;
@@ -430,11 +432,13 @@ async fn handle_http_auto_stream(
         http1::downstream::handle_http1_stream(
             connection,
             listener_id,
-            config.http1_config,
-            false,
-            config.streaming,
-            config.alt_svc,
-            config.sampling,
+            http1::downstream::Http1IngressConfig {
+                config: config.http1_config,
+                tls_enabled: false,
+                streaming: config.streaming,
+                alt_svc: config.alt_svc,
+                sampling: config.sampling,
+            },
             runtime,
         )
         .await;

@@ -30,22 +30,34 @@ use velda_http3::strategy::Http3PipeStrategy;
 use velda_observability::sampling::http::HttpSampling;
 use velda_observability::{StreamCompletion, global_metrics};
 
+/// Listener configuration bundle passed into [`handle_http1_stream`].
+#[derive(Clone)]
+pub struct Http1IngressConfig {
+    pub config: Http1Config,
+    pub tls_enabled: bool,
+    pub streaming: velda_core::StreamingMode,
+    pub alt_svc: Option<http::HeaderValue>,
+    pub sampling: HttpSampling,
+}
+
 /// Asynchronous stream worker dispatching incoming HTTP/1.1 connections.
 ///
 /// Inspects the pre-compiled listener metadata to determine whether downstream
 /// TLS termination is active. If TLS is required, negotiates the handshake, validates
 /// ALPN against "http/1.1", and passes the encrypted stream to the HTTP/1.1 loop.
-#[allow(clippy::too_many_arguments)]
 pub async fn handle_http1_stream(
     connection: Connection,
     listener_id: Arc<str>,
-    config: Http1Config,
-    tls_enabled: bool,
-    streaming: velda_core::StreamingMode,
-    alt_svc: Option<http::HeaderValue>,
-    sampling: HttpSampling,
+    ingress: Http1IngressConfig,
     runtime: SharedRuntime,
 ) {
+    let Http1IngressConfig {
+        config,
+        tls_enabled,
+        streaming,
+        alt_svc,
+        sampling,
+    } = ingress;
     let rt = runtime.load();
     let peer = velda_sock::raw_to_socket_addr(connection.peer_ip, connection.peer_port_be);
     let local_addr = velda_sock::raw_to_socket_addr(connection.local_ip, connection.local_port_be);
