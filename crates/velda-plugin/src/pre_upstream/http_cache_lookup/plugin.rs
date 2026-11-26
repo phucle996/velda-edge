@@ -205,7 +205,7 @@ impl PreUpstreamPlugin for HttpCacheLookupPlugin {
         0
     }
 
-    fn on_upstream_request(&self, req: &mut L7Request, _target_upstream: &mut u16) -> Action {
+    fn on_upstream_request(&self, req: &mut L7Request, _targets: &mut u32) -> Action {
         if (self.method_mask & (1u16 << (req.state.method as u8))) == 0 {
             return Action::Continue;
         }
@@ -468,7 +468,7 @@ mod tests {
             Arc::clone(&storage),
         );
 
-        let mut target_upstream = 0u16;
+        let mut target_upstream = 0u32;
 
         // 1. Initial lookup misses -> forwards to upstream.
         let mut req_a = make_req(10, Method::GET, vec![("x-tenant-id", "acme")]);
@@ -593,7 +593,7 @@ mod tests {
 
         // Client without Accept-Encoding -> cannot use compressed variant and !has_raw -> MISS!
         let mut req_miss = make_req(5, Method::GET, vec![]);
-        let mut upstream = 0u16;
+        let mut upstream = 0u32;
         assert!(
             lookup
                 .on_upstream_request(&mut req_miss, &mut upstream)

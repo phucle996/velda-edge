@@ -246,7 +246,7 @@ impl PreUpstreamPlugin for HmacAuthPlugin {
         0
     }
 
-    fn on_upstream_request(&self, req: &mut L7Request, _target_upstream: &mut u16) -> Action {
+    fn on_upstream_request(&self, req: &mut L7Request, _targets: &mut u32) -> Action {
         let now = req.ingress_time_sec();
 
         // 1. Access key lookup via zero-hash AGU index

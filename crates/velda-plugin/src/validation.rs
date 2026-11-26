@@ -21,7 +21,7 @@
 //!         |   - Pre-Route: ip_filter, cors_preflight, resource_limit... |
 //!         |   - Pre-Upstream: api_key, jwt_auth, rate_limit, csrf...    |
 //!         |   - Post-Response: cors, security_headers, compression...   |
-//!         |   - Background: prometheus, health_probe, jwks_rotator...   |
+//!         |   - Background: prometheus, health_probe, acme_cert_rotator |
 //!         +-------------------------------------------------------------+
 //!                                        |
 //!                                        v
@@ -163,7 +163,6 @@ pub fn validate_plugin_config(plugin: &mut PluginConfig) -> Result<(), PluginErr
         "rate_limit" => {
             let normalized =
                 crate::pre_upstream::rate_limit::validation::validate_rate_limit_config(
-                    &plugin.id,
                     &plugin.config,
                 )?;
             plugin.config =
@@ -321,15 +320,6 @@ pub fn validate_plugin_config(plugin: &mut PluginConfig) -> Result<(), PluginErr
             plugin.config =
                 serde_json::to_value(normalized).map_err(|e| PluginError::Config(e.to_string()))?;
         }
-        "jwks_rotator" => {
-            let normalized =
-                crate::background::jwks_rotator::validation::validate_jwks_rotator_config(
-                    &plugin.id,
-                    &plugin.config,
-                )?;
-            plugin.config =
-                serde_json::to_value(normalized).map_err(|e| PluginError::Config(e.to_string()))?;
-        }
         "loki_log_shipper" => {
             let normalized =
                 crate::background::loki_log_shipper::validation::validate_loki_log_shipper_config(
@@ -447,48 +437,9 @@ pub fn validate_plugin_dependencies(plugins: &[PluginConfig]) -> Result<(), Plug
         std::collections::HashMap::new();
     let mut zone_key_headers: std::collections::HashMap<String, (&'static str, Vec<String>)> =
         std::collections::HashMap::new();
-    let mut rotator_targets: std::collections::HashSet<String> = std::collections::HashSet::new();
-    let mut keyless_asymmetric_jwt_ids: Vec<String> = Vec::new();
 
     for plugin in plugins.iter() {
-        if plugin.id == "jwks_rotator" {
-            let cfg: crate::background::jwks_rotator::validation::JwksRotatorConfig =
-                serde_json::from_value(plugin.config.clone()).map_err(|e| {
-                    PluginError::Config(format!(
-                        "Plugin '{}' failed to parse jwks_rotator config: {e}",
-                        plugin.id
-                    ))
-                })?;
-            let target_id = cfg.target_jwt_auth_id.trim();
-
-            let target_exists = plugins
-                .iter()
-                .any(|p| p.id == target_id && crate::pre_upstream::owns_id(&p.id));
-
-            if !target_exists {
-                return Err(PluginError::Config(format!(
-                    "Plugin 'jwks_rotator' requires target jwt_auth plugin '{target_id}' in pre_upstream stage, but it was not found in active plugins"
-                )));
-            }
-            rotator_targets.insert(target_id.to_string());
-        } else if plugin.id == "jwt_auth" {
-            if let Ok(cfg) = serde_json::from_value::<
-                crate::pre_upstream::jwt_auth::validation::JwtAuthConfig,
-            >(plugin.config.clone())
-                && let Ok(alg) = cfg
-                    .algorithm
-                    .parse::<crate::pre_upstream::jwt_auth::JwtAlgorithm>()
-                && !alg.is_symmetric()
-                && cfg
-                    .public_key_pem
-                    .as_deref()
-                    .map(str::trim)
-                    .unwrap_or("")
-                    .is_empty()
-            {
-                keyless_asymmetric_jwt_ids.push(plugin.id.clone());
-            }
-        } else if plugin.id == "http_cache_lookup" {
+        if plugin.id == "http_cache_lookup" {
             if let Ok(cfg) = serde_json::from_value::<
                 crate::pre_upstream::http_cache_lookup::validation::HttpCacheLookupConfig,
             >(plugin.config.clone())
@@ -515,14 +466,6 @@ pub fn validate_plugin_dependencies(plugins: &[PluginConfig]) -> Result<(), Plug
                 &mut zone_budgets,
                 &mut zone_key_headers,
             )?;
-        }
-    }
-
-    for jwt_id in keyless_asymmetric_jwt_ids {
-        if !rotator_targets.contains(&jwt_id) {
-            return Err(PluginError::Config(format!(
-                "Asymmetric jwt_auth plugin '{jwt_id}' has 'public_key_pem' set to null, which requires an active companion 'jwks_rotator' targeting '{jwt_id}'"
-            )));
         }
     }
 
@@ -601,37 +544,5 @@ mod tests {
         // Different zones remain independent.
         let distinct_zones = cache_pair("api_a", vec!["x-tenant-id"], "api_b", vec![]);
         assert!(validate_plugin_dependencies(&distinct_zones).is_ok());
-    }
-
-    #[test]
-    fn test_asymmetric_jwt_null_pem_requires_jwks_rotator_dependency() {
-        let jwt_only = vec![PluginConfig {
-            id: "jwt_auth".into(),
-            config: json!({
-                "algorithm": "RS256",
-                "public_key_pem": null,
-                "token_sources": [{ "type": "header", "name": "authorization", "prefix": "Bearer " }],
-                "validate_exp": true,
-                "clock_skew_secs": 60,
-                "claims_to_headers": {},
-                "assert_claims": {},
-                "cache_ttl_secs": 300
-            }),
-        }];
-        let err = validate_plugin_dependencies(&jwt_only).unwrap_err();
-        assert!(
-            err.to_string()
-                .contains("requires an active companion 'jwks_rotator'")
-        );
-
-        let mut paired = jwt_only;
-        paired.push(PluginConfig {
-            id: "jwks_rotator".into(),
-            config: json!({
-                "target_jwt_auth_id": "jwt_auth",
-                "jwks_uri": "https://auth.example.com/.well-known/jwks.json"
-            }),
-        });
-        assert!(validate_plugin_dependencies(&paired).is_ok());
     }
 }

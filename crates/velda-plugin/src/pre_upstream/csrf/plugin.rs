@@ -292,7 +292,7 @@ impl PreUpstreamPlugin for CsrfPlugin {
         0
     }
 
-    fn on_upstream_request(&self, req: &mut L7Request, _target_upstream: &mut u16) -> Action {
+    fn on_upstream_request(&self, req: &mut L7Request, _targets: &mut u32) -> Action {
         // Gate 1: Safe idempotent methods bypass in 1 bitmask instruction
         if (self.safe_methods_mask & MethodMask::from_method(&req.method)) != 0 {
             return Action::Continue;

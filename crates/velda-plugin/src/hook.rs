@@ -12,15 +12,39 @@
 //! `oauth2_introspection`). Long-running background daemons are scheduled statically across
 //! cores via PBWW (`pbww() > 0` + `run_background()`), not via this hook.
 
+use std::cell::Cell;
 use std::future::Future;
 use std::pin::Pin;
+use std::sync::atomic::{AtomicUsize, Ordering};
 use tokio::sync::mpsc;
 
 /// Boxed thread-safe future representation of a sporadic task offloaded to the local Shadow Worker.
 pub type ShadowTask = Pin<Box<dyn Future<Output = ()> + Send + 'static>>;
 
+static NEXT_WORKER_LANE: AtomicUsize = AtomicUsize::new(0);
+
 thread_local! {
     static LOCAL_SHADOW_SENDER: std::cell::RefCell<Option<mpsc::Sender<ShadowTask>>> = const { std::cell::RefCell::new(None) };
+    static LOCAL_WORKER_LANE: Cell<Option<usize>> = const { Cell::new(None) };
+}
+
+/// Sets the explicit zero-based traffic worker lane ID for the calling OS worker thread.
+#[inline]
+pub fn set_current_worker_lane(lane: usize) {
+    LOCAL_WORKER_LANE.with(|cell| cell.set(Some(lane)));
+}
+
+/// Returns the calling thread's traffic worker lane ID (falling back to monotonic assignment for tests).
+#[inline(always)]
+pub fn current_worker_lane() -> usize {
+    LOCAL_WORKER_LANE.with(|cell| match cell.get() {
+        Some(lane) => lane,
+        None => {
+            let lane = NEXT_WORKER_LANE.fetch_add(1, Ordering::Relaxed);
+            cell.set(Some(lane));
+            lane
+        }
+    })
 }
 
 /// Sets the core-local Shadow Worker task hook sender for the calling Traffic Worker thread.

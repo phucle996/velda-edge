@@ -88,7 +88,7 @@ impl PreUpstreamPlugin for Ja4FilterPlugin {
     }
 
     #[inline]
-    fn on_upstream_request(&self, req: &mut L7Request, _target_upstream: &mut u16) -> Action {
+    fn on_upstream_request(&self, req: &mut L7Request, _targets: &mut u32) -> Action {
         let ja4 = req.state.ja4;
         if ja4 != 0 && self.is_denied(ja4) {
             return Action::Reject(RejectReason::Forbidden);
@@ -140,7 +140,7 @@ mod tests {
         };
 
         let plugin = Ja4FilterPlugin::from_config(&cfg).unwrap();
-        let mut target = 0u16;
+        let mut target = 0u32;
 
         // Matching canonical JA4 string -> Reject
         let mut req1 = make_req(fp_id);
@@ -178,7 +178,7 @@ mod tests {
             ids.push(i * 1000 + 7);
         }
         let plugin = Ja4FilterPlugin::new("ja4-large", ids);
-        let mut target = 0u16;
+        let mut target = 0u32;
 
         let mut req_hit = make_req(32_007);
         assert!(matches!(

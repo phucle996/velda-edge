@@ -431,7 +431,7 @@ impl PreUpstreamPlugin for HttpFaultInjectionPlugin {
 
     /// Evaluates the request against fault injection rules.
     #[inline]
-    fn on_upstream_request(&self, req: &mut L7Request, _target_upstream: &mut u16) -> Action {
+    fn on_upstream_request(&self, req: &mut L7Request, _targets: &mut u32) -> Action {
         // Step 1: Extract dynamic overrides (when allowed) and sanitize chaos headers once via pre-hashed SIMD checks.
         let (override_delay, override_abort) = if self.condition.allow_header_override {
             self.condition.extract_overrides(req)

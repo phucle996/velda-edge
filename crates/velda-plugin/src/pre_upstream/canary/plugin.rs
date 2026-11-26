@@ -22,6 +22,9 @@ use crate::capability::{AccessLevel, PluginCapability, SupportedProtocols};
 use crate::config::PluginConfig;
 use crate::error::PluginError;
 use crate::pre_upstream::PreUpstreamPlugin;
+use crate::pre_upstream::targets::target_set_primary;
+#[cfg(test)]
+use crate::pre_upstream::targets::{target_init, target_mirror, target_primary};
 
 /// Lean, header-only, read-only Canary Traffic Splitting plugin.
 #[derive(Debug)]
@@ -161,9 +164,9 @@ impl PreUpstreamPlugin for CanaryPlugin {
     }
 
     #[inline]
-    fn on_upstream_request(&self, req: &mut L7Request, target_upstream: &mut u16) -> Action {
+    fn on_upstream_request(&self, req: &mut L7Request, targets: &mut u32) -> Action {
         if self.should_route_to_canary(req) {
-            *target_upstream = self.canary_upstream_id;
+            target_set_primary(targets, self.canary_upstream_id);
         }
         Action::Continue
     }
@@ -252,34 +255,35 @@ mod tests {
             ("x-debug", "1"),
         ] {
             let mut req = make_req(&[(hdr, val)]);
-            let mut target = 0;
+            let mut target = target_init(0);
             plugin.on_upstream_request(&mut req, &mut target);
-            assert_eq!(target, 2, "failed rule {hdr}={val}");
+            assert_eq!(target_primary(target), Some(2), "failed rule {hdr}={val}");
+            assert_eq!(target_mirror(target), None);
         }
 
         // Missing or partial hash_headers -> always stays safely on baseline (0), zero PRNG fallback
         for _ in 0..32 {
             let mut no_hdrs = make_req(&[]);
-            let mut t1 = 0;
+            let mut t1 = target_init(0);
             plugin.on_upstream_request(&mut no_hdrs, &mut t1);
-            assert_eq!(t1, 0);
+            assert_eq!(target_primary(t1), Some(0));
 
             let mut partial = make_req(&[("x-tenant-id", "acme")]);
-            let mut t2 = 0;
+            let mut t2 = target_init(0);
             plugin.on_upstream_request(&mut partial, &mut t2);
-            assert_eq!(t2, 0);
+            assert_eq!(target_primary(t2), Some(0));
 
             let mut blank_user = make_req(&[("x-tenant-id", "acme"), ("x-user-id", "   ")]);
-            let mut t3 = 0;
+            let mut t3 = target_init(0);
             plugin.on_upstream_request(&mut blank_user, &mut t3);
-            assert_eq!(t3, 0);
+            assert_eq!(target_primary(t3), Some(0));
         }
 
         // Unmatched rule & missing headers preserves original headers verbatim
         let mut base = make_req(&[("x-canary", "never")]);
-        let mut target_base = 0;
+        let mut target_base = target_init(0);
         plugin.on_upstream_request(&mut base, &mut target_base);
-        assert_eq!(target_base, 0);
+        assert_eq!(target_primary(target_base), Some(0));
         assert_eq!(base.headers.get("x-canary").unwrap(), "never");
     }
 
@@ -318,15 +322,16 @@ mod tests {
                 h,
                 Body::Empty,
             );
-            let mut t_low = 0;
+            let mut t_low = target_init(0);
             plugin_low.on_upstream_request(&mut req, &mut t_low);
-            let mut t_high = 0;
+            let mut t_high = target_init(0);
             plugin_high.on_upstream_request(&mut req, &mut t_high);
 
-            if t_low == 1 {
+            if target_primary(t_low) == Some(1) {
                 canary_hits += 1;
                 assert_eq!(
-                    t_high, 1,
+                    target_primary(t_high),
+                    Some(1),
                     "increasing ratio dropped previously canary user {uid}"
                 );
             }
@@ -427,8 +432,9 @@ mod tests {
             },
             Body::Empty,
         );
-        let mut target = 0;
+        let mut target = target_init(0);
         plugin.on_upstream_request(&mut req, &mut target);
-        assert_eq!(target, 2);
+        assert_eq!(target_primary(target), Some(2));
+        assert_eq!(target_mirror(target), None);
     }
 }

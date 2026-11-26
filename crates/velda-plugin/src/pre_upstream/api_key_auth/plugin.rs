@@ -130,7 +130,7 @@ impl PreUpstreamPlugin for ApiKeyAuthPlugin {
     }
 
     #[inline]
-    fn on_upstream_request(&self, req: &mut L7Request, _target_upstream: &mut u16) -> Action {
+    fn on_upstream_request(&self, req: &mut L7Request, _targets: &mut u32) -> Action {
         let Some(raw_val) = req.headers.get(&self.header_name) else {
             return self.reject_unauthorized(req);
         };
@@ -241,7 +241,7 @@ mod tests {
         let plugin = ApiKeyAuthPlugin::from_config(&cfg).unwrap();
         assert_eq!(plugin.cache.byte_size() % 4096, 0);
 
-        let mut target = 0u16;
+        let mut target = 0u32;
         // First request -> cache miss -> store hit -> cache populate
         let mut req1 = make_req(Some("sk-live-secret-key-001"));
         assert!(matches!(
@@ -276,7 +276,7 @@ mod tests {
             }),
         };
         let plugin = ApiKeyAuthPlugin::from_config(&cfg).unwrap();
-        let mut target = 0u16;
+        let mut target = 0u32;
 
         // Missing header
         let mut req_missing = make_req(None);

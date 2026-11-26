@@ -276,7 +276,7 @@ impl PreUpstreamPlugin for GrpcFaultInjectionPlugin {
     /// 3. Single PRNG Roll: 64-bit entropy evaluated into independent 32-bit delay & abort outcomes.
     /// 4. Pre-compiled Abort: Clones pre-baked Trailers-Only HTTP/2 response cleanly.
     #[inline]
-    fn on_upstream_request(&self, _req: &mut L7Request, _target_upstream: &mut u16) -> Action {
+    fn on_upstream_request(&self, _req: &mut L7Request, _targets: &mut u32) -> Action {
         // Step 1: Single-cycle fast-path bypass when fault injection is inactive
         if self.combined_mask == 0 {
             return Action::Continue;

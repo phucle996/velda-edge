@@ -150,7 +150,7 @@ impl PreUpstreamPlugin for HeaderMutationPlugin {
         0
     }
 
-    fn on_upstream_request(&self, req: &mut L7Request, _target_upstream: &mut u16) -> Action {
+    fn on_upstream_request(&self, req: &mut L7Request, _targets: &mut u32) -> Action {
         let mask = self.op_mask;
         if mask == 0 {
             return Action::Continue;
