@@ -122,7 +122,7 @@ Under the Velda Edge Workload Distribution Model, background logistics plugins d
 ### Complementary Static Sharding Recommendation
 * **Core Placement**: Core 2 or 3.
 * **Strict Anti-Colocation Rule**: NEVER co-locate on Core 0 with latency-critical `health_probe` (Weight: 1) or master traffic intake. NEVER co-locate on the same core as `loki_log_shipper` (Weight: 80) — both are heavy log shippers that will exhaust core L1/L2 cache capacity and TLS cryptographic hardware units.
-* **Ideal Pairing**: Pair with sleep-bound rotators (`jwks_rotator`, `acme_cert_rotator`) or lightweight UDP exporters (`statsd_exporter`) on secondary cores.
+* **Ideal Pairing**: Pair with sleep-bound rotators (`jwt_auth` in `external` mode, `acme_cert_rotator`) or lightweight UDP exporters (`statsd_exporter`) on secondary cores.
 
 ---
 
