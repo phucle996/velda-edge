@@ -1,10 +1,10 @@
 //! Request Termination Pre-Upstream Plugin (`request_termination`).
 //!
-//! Immediately terminates incoming HTTP requests at the edge and returns a synthetic response
-//! without contacting upstream backends.
+//! Short-circuits matched HTTP routes with a pre-compiled synthetic [`velda_core::L7Response`].
 
+pub mod config;
 pub mod plugin;
-
-pub use plugin::{RequestTerminationConfig, RequestTerminationPlugin};
-
 pub mod validation;
+
+pub use config::RequestTerminationConfig;
+pub use plugin::RequestTerminationPlugin;

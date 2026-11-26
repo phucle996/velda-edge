@@ -391,28 +391,20 @@ mod tests {
                 "termination-1",
                 RequestTerminationConfig {
                     status_code: 503,
-                    headers: vec![(
-                        HeaderName::from_static("retry-after"),
-                        HeaderValue::from_static("60"),
-                    )],
-                    body: None,
+                    headers: std::collections::HashMap::from([("retry-after".into(), "60".into())]),
+                    body: "Service Unavailable".into(),
+                    content_type: "text/plain; charset=utf-8".into(),
                 },
             )
             .unwrap(),
         );
         let chain: Vec<Arc<dyn PreUpstreamPlugin>> = vec![plugin];
 
-        let mut headers = HeaderWorkspace::empty(4);
-        headers.insert(
-            HeaderName::from_static("x-request-id"),
-            HeaderValue::from_static("req-term-999"),
-        );
-
         let mut req = L7Request::new(
             Method::POST,
             Uri::from_static("/api/v1/checkout"),
             Version::HTTP_11,
-            headers,
+            HeaderWorkspace::empty(0),
             Body::Empty,
         );
 
@@ -423,11 +415,11 @@ mod tests {
             Action::Respond(resp) => {
                 assert_eq!(resp.status, StatusCode::SERVICE_UNAVAILABLE);
                 assert_eq!(resp.headers.get("retry-after").unwrap(), "60");
-                assert_eq!(resp.headers.get("x-request-id").unwrap(), "req-term-999");
                 assert_eq!(
                     resp.headers.get("content-type").unwrap(),
                     "text/plain; charset=utf-8"
                 );
+                assert_eq!(resp.body.as_slice(), b"Service Unavailable");
             }
             _ => panic!("Expected Action::Respond(503)"),
         }

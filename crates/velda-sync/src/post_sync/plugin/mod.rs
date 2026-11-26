@@ -470,6 +470,41 @@ mod tests {
             }),
         }];
         assert!(validate_plugins(&mut invalid_status_high).is_err());
+
+        // 3. Unknown fields, 204 body, and forbidden framing headers must fail
+        let mut unknown_field_plugins = vec![PluginConfig {
+            id: "request_termination".into(),
+            config: serde_json::json!({
+                "status_code": 503,
+                "body": "down",
+                "content_type": "text/plain",
+                "headers": {},
+                "bypass_headers": []
+            }),
+        }];
+        assert!(validate_plugins(&mut unknown_field_plugins).is_err());
+
+        let mut body_on_204_plugins = vec![PluginConfig {
+            id: "request_termination".into(),
+            config: serde_json::json!({
+                "status_code": 204,
+                "body": "not allowed",
+                "content_type": "text/plain",
+                "headers": {}
+            }),
+        }];
+        assert!(validate_plugins(&mut body_on_204_plugins).is_err());
+
+        let mut framing_hdr_plugins = vec![PluginConfig {
+            id: "request_termination".into(),
+            config: serde_json::json!({
+                "status_code": 503,
+                "body": "",
+                "content_type": "",
+                "headers": { "transfer-encoding": "chunked" }
+            }),
+        }];
+        assert!(validate_plugins(&mut framing_hdr_plugins).is_err());
     }
 
     #[test]
