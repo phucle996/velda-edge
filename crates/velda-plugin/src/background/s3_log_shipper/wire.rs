@@ -65,8 +65,8 @@ impl S3WireState {
     /// Constructs wire state from an attached [`S3Etp`] pool and validated [`S3LogShipperConfig`].
     pub fn new(etp: Arc<S3Etp>, cfg: &S3LogShipperConfig) -> Self {
         let signer = SigV4Signer::new(
-            &etp.config.access_key,
-            &etp.config.secret_key,
+            &etp.config.access_key_id,
+            &etp.config.secret_access_key,
             &etp.config.region,
             &etp.config.host_header,
         );
