@@ -1,14 +1,10 @@
-//! URL Rewrite Plugin Module (`url_rewrite`).
+//! URL Rewrite Pre-Upstream Plugin (`url_rewrite`).
+//!
+//! Single-pass Aho-Corasick + SIMD URI (`path` + `query`) transformation plugin.
 
+pub mod config;
 pub mod plugin;
-pub mod sanitizer;
-pub mod strategy;
-
-pub use plugin::{UrlRewriteConfig, UrlRewritePlugin};
-pub use sanitizer::{PathTraversalError, is_already_normalized, normalize_and_sanitize_path};
-pub use strategy::{
-    CompiledPathStrategy, PathRewriteStrategy, QueryStrategy, ReplacementToken,
-    extract_static_prefix, parse_replacement_template,
-};
-
 pub mod validation;
+
+pub use config::{PathRewriteRule, QueryRewriteMode, UrlRewriteConfig};
+pub use plugin::UrlRewritePlugin;

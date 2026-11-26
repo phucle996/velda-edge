@@ -61,10 +61,7 @@ pub use targets::{
     TARGET_UNASSIGNED, TARGETS_CANCELLED, target_cancel_all, target_init, target_mirror,
     target_pair, target_primary, target_set_mirror, target_set_primary,
 };
-pub use url_rewrite::{
-    CompiledPathStrategy, PathRewriteStrategy, QueryStrategy, ReplacementToken, UrlRewriteConfig,
-    UrlRewritePlugin,
-};
+pub use url_rewrite::{PathRewriteRule, QueryRewriteMode, UrlRewriteConfig, UrlRewritePlugin};
 
 /// Contract for plugins evaluated prior to forwarding to upstream backend.
 pub trait PreUpstreamPlugin: Send + Sync {
@@ -356,13 +353,14 @@ mod tests {
             UrlRewritePlugin::new(
                 "rewrite-chain",
                 UrlRewriteConfig {
-                    path: Some(PathRewriteStrategy::StripPrefix {
-                        prefix: "/api/v1".into(),
-                    }),
-                    query: QueryStrategy::Append {
-                        query: "cluster=primary".into(),
-                    },
-                    sanitize_path: true,
+                    path_rules: vec![PathRewriteRule {
+                        find: "/api/v1/".into(),
+                        replace: "/".into(),
+                    }],
+                    query_mode: QueryRewriteMode::Keep,
+                    query_replace: None,
+                    remove_params: Vec::new(),
+                    query_append: Some("cluster=primary".into()),
                 },
             )
             .unwrap(),

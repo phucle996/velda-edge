@@ -560,13 +560,16 @@ export const EXTENSION_DEFAULT_CONFIGS: Record<string, Record<string, any>> = {
     remove_fields: ['deprecated_param', 'internal_secret']
   },
   'uri-rewrite': {
-    enabled: true,
-    rules: [
+    path_rules: [
       {
-        pattern: '^/api/v1/(.*)',
-        replacement: '/v2/$1'
+        find: '/api/v1/',
+        replace: '/v2/'
       }
-    ]
+    ],
+    query_mode: 'keep',
+    query_replace: null,
+    remove_params: ['utm_source'],
+    query_append: 'edge=velda'
   },
   'host-rewrite': {
     enabled: true,

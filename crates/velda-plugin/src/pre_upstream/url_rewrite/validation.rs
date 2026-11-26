@@ -1,62 +1,170 @@
-//! URL Rewrite Configuration Schema & Semantic Validation.
+//! URL Rewrite Configuration Validation (`url_rewrite::validation`).
 //!
-//! Enforces a strict declarative contract for path and query string transformation.
-//!
-//! # Strict Declarative Contract (Zero Silent Fallbacks)
-//! - **Valid Path Mode**: `path_rewrite_mode` must be one of `"prefix"`, `"regex"`, `"exact"`, or `"none"`.
-//! - **Valid Query Mode**: `query_rewrite_mode` must be one of `"keep"`, `"strip"`, `"replace"`, or `"append"`.
-//! - **Leading Slash Invariant**: `path_replacement` must start with `/` when path rewrite is active.
+//! ```text
+//!   serde_json::Value
+//!     └──► serde(deny_unknown_fields) -> UrlRewriteConfig
+//!            ├── non-empty effective policy (path_rules | drop | replace | remove_params | query_append)
+//!            ├── path_rules[]: non-empty unique `find`, valid URI path bytes (no '?'/'#'/ctrl)
+//!            └── query policy parity:
+//!                  ├─ drop    -> forbids query_replace, remove_params, query_append
+//!                  ├─ replace -> requires non-empty query_replace; forbids remove_params, query_append
+//!                  └─ keep    -> forbids query_replace; validates remove_params keys & query_append
+//! ```
 
-use serde::{Deserialize, Serialize};
+use std::collections::HashSet;
 
+use http::uri::PathAndQuery;
+
+pub use super::config::{PathRewriteRule, QueryRewriteMode, UrlRewriteConfig};
 use crate::error::PluginError;
 
-/// Declarative configuration for the URL Rewrite plugin.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct UrlRewriteConfig {
-    /// Path rewrite strategy: "prefix", "regex", "exact", or "none".
-    pub path_rewrite_mode: String,
-    /// Path match prefix or regex pattern (empty string if path_rewrite_mode is "none").
-    pub path_match: String,
-    /// Path replacement string (empty string if path_rewrite_mode is "none").
-    pub path_replacement: String,
-    /// Query string strategy: "keep", "strip", "replace", or "append".
-    pub query_rewrite_mode: String,
-    /// Query replacement parameter string when query_rewrite_mode is "replace" or "append".
-    pub query_replacement: Option<String>,
-    /// Whether to canonicalize and sanitize path (remove redundant slashes, resolve dot segments).
-    pub sanitize_path: bool,
-}
-
-fn validate_regex_brackets(pattern: &str) -> Result<(), String> {
-    let mut paren_count: i32 = 0;
-    let mut in_escape = false;
-
-    for c in pattern.chars() {
-        if in_escape {
-            in_escape = false;
-            continue;
-        }
-        match c {
-            '\\' => in_escape = true,
-            '(' => paren_count += 1,
-            ')' => {
-                paren_count -= 1;
-                if paren_count < 0 {
-                    return Err("unmatched closing parenthesis".to_string());
-                }
-            }
-            _ => {}
+#[inline]
+fn validate_path_fragment(plugin_id: &str, field: &str, s: &str) -> Result<(), PluginError> {
+    for b in s.bytes() {
+        if b <= 0x20 || b == 0x7F || b == b'?' || b == b'#' || b == b'\\' {
+            return Err(PluginError::Config(format!(
+                "Plugin '{plugin_id}': '{field}' contains invalid URI path byte 0x{b:02X}"
+            )));
         }
     }
-
-    if paren_count != 0 {
-        return Err("unclosed parenthesis".to_string());
+    if !s.is_empty() {
+        let probe = if s.starts_with('/') {
+            s.to_string()
+        } else {
+            format!("/{s}")
+        };
+        if probe.parse::<PathAndQuery>().is_err() {
+            return Err(PluginError::Config(format!(
+                "Plugin '{plugin_id}': '{field}' ('{s}') is not valid in an HTTP URI path"
+            )));
+        }
     }
     Ok(())
 }
 
-/// Validates URL Rewrite configuration strictly according to production standards.
+#[inline]
+fn validate_query_payload(plugin_id: &str, field: &str, q: &str) -> Result<(), PluginError> {
+    if q.is_empty() {
+        return Err(PluginError::Config(format!(
+            "Plugin '{plugin_id}': '{field}' cannot be empty when specified"
+        )));
+    }
+    if q.starts_with('?') || q.contains('#') {
+        return Err(PluginError::Config(format!(
+            "Plugin '{plugin_id}': '{field}' must not start with '?' or contain '#'"
+        )));
+    }
+    if q.bytes().any(|b| b <= 0x20 || b == 0x7F) {
+        return Err(PluginError::Config(format!(
+            "Plugin '{plugin_id}': '{field}' contains whitespace or ASCII control characters"
+        )));
+    }
+    if format!("/?{q}").parse::<PathAndQuery>().is_err() {
+        return Err(PluginError::Config(format!(
+            "Plugin '{plugin_id}': '{field}' ('{q}') is not a valid URI query string"
+        )));
+    }
+    Ok(())
+}
+
+/// Validates a typed [`UrlRewriteConfig`] shared by sync validation and plugin compilation.
+pub(crate) fn validate_config_fields(
+    plugin_id: &str,
+    cfg: &UrlRewriteConfig,
+) -> Result<(), PluginError> {
+    if cfg.path_rules.is_empty()
+        && cfg.query_mode == QueryRewriteMode::Keep
+        && cfg.remove_params.is_empty()
+        && cfg.query_append.is_none()
+    {
+        return Err(PluginError::Config(format!(
+            "Plugin '{plugin_id}': url_rewrite must declare at least one path rule or query transformation"
+        )));
+    }
+
+    let mut seen_finds = HashSet::with_capacity(cfg.path_rules.len());
+    for (idx, rule) in cfg.path_rules.iter().enumerate() {
+        if rule.find.is_empty() {
+            return Err(PluginError::Config(format!(
+                "Plugin '{plugin_id}': path_rules[{idx}].find cannot be empty"
+            )));
+        }
+        if !seen_finds.insert(rule.find.as_str()) {
+            return Err(PluginError::Config(format!(
+                "Plugin '{plugin_id}': duplicate path_rules.find '{}'",
+                rule.find
+            )));
+        }
+        validate_path_fragment(plugin_id, "path_rules.find", &rule.find)?;
+        validate_path_fragment(plugin_id, "path_rules.replace", &rule.replace)?;
+    }
+
+    match cfg.query_mode {
+        QueryRewriteMode::Drop => {
+            if cfg.query_replace.is_some()
+                || !cfg.remove_params.is_empty()
+                || cfg.query_append.is_some()
+            {
+                return Err(PluginError::Config(format!(
+                    "Plugin '{plugin_id}': query_mode 'drop' forbids query_replace, remove_params, and query_append"
+                )));
+            }
+        }
+        QueryRewriteMode::Replace => {
+            if !cfg.remove_params.is_empty() || cfg.query_append.is_some() {
+                return Err(PluginError::Config(format!(
+                    "Plugin '{plugin_id}': query_mode 'replace' forbids remove_params and query_append"
+                )));
+            }
+            let rep = cfg.query_replace.as_deref().ok_or_else(|| {
+                PluginError::Config(format!(
+                    "Plugin '{plugin_id}': query_mode 'replace' requires query_replace"
+                ))
+            })?;
+            validate_query_payload(plugin_id, "query_replace", rep)?;
+        }
+        QueryRewriteMode::Keep => {
+            if cfg.query_replace.is_some() {
+                return Err(PluginError::Config(format!(
+                    "Plugin '{plugin_id}': query_mode 'keep' forbids query_replace"
+                )));
+            }
+            let mut seen_params = HashSet::with_capacity(cfg.remove_params.len());
+            for key in &cfg.remove_params {
+                if key.is_empty() {
+                    return Err(PluginError::Config(format!(
+                        "Plugin '{plugin_id}': remove_params cannot contain an empty key"
+                    )));
+                }
+                if key
+                    .bytes()
+                    .any(|b| b <= 0x20 || b == 0x7F || matches!(b, b'&' | b'=' | b'?' | b'#'))
+                {
+                    return Err(PluginError::Config(format!(
+                        "Plugin '{plugin_id}': invalid query parameter name '{key}' in remove_params"
+                    )));
+                }
+                if !seen_params.insert(key.as_str()) {
+                    return Err(PluginError::Config(format!(
+                        "Plugin '{plugin_id}': duplicate query parameter '{key}' in remove_params"
+                    )));
+                }
+            }
+            if let Some(append) = &cfg.query_append {
+                if append.starts_with('&') || append.ends_with('&') {
+                    return Err(PluginError::Config(format!(
+                        "Plugin '{plugin_id}': query_append must not start or end with '&'"
+                    )));
+                }
+                validate_query_payload(plugin_id, "query_append", append)?;
+            }
+        }
+    }
+
+    Ok(())
+}
+
+/// Validates and parses JSON config for `url_rewrite`.
 pub fn validate_url_rewrite_config(
     plugin_id: &str,
     config_val: &serde_json::Value,
@@ -67,58 +175,7 @@ pub fn validate_url_rewrite_config(
         ))
     })?;
 
-    // 1. Validate path_rewrite_mode
-    let path_mode_lower = cfg.path_rewrite_mode.trim().to_ascii_lowercase();
-    match path_mode_lower.as_str() {
-        "prefix" | "regex" | "exact" | "none" => {}
-        other => {
-            return Err(PluginError::Config(format!(
-                "Plugin '{plugin_id}': invalid path_rewrite_mode '{other}' (expected 'prefix', 'regex', 'exact', or 'none')"
-            )));
-        }
-    }
-
-    if path_mode_lower != "none" {
-        let rep_trimmed = cfg.path_replacement.trim();
-        if !rep_trimmed.starts_with('/') {
-            return Err(PluginError::Config(format!(
-                "Plugin '{plugin_id}': path_replacement '{rep_trimmed}' must start with '/'"
-            )));
-        }
-
-        if path_mode_lower == "regex"
-            && let Err(e) = validate_regex_brackets(&cfg.path_match)
-        {
-            return Err(PluginError::Config(format!(
-                "Plugin '{plugin_id}': invalid regex pattern in path_match: {e}"
-            )));
-        }
-    }
-
-    // 2. Validate query_rewrite_mode
-    let query_mode_lower = cfg.query_rewrite_mode.trim().to_ascii_lowercase();
-    match query_mode_lower.as_str() {
-        "keep" | "strip" | "replace" | "append" => {}
-        other => {
-            return Err(PluginError::Config(format!(
-                "Plugin '{plugin_id}': invalid query_rewrite_mode '{other}' (expected 'keep', 'strip', 'replace', or 'append')"
-            )));
-        }
-    }
-
-    if (query_mode_lower == "replace" || query_mode_lower == "append")
-        && cfg
-            .query_replacement
-            .as_deref()
-            .unwrap_or("")
-            .trim()
-            .is_empty()
-    {
-        return Err(PluginError::Config(format!(
-            "Plugin '{plugin_id}': query_rewrite_mode '{query_mode_lower}' requires non-empty query_replacement"
-        )));
-    }
-
+    validate_config_fields(plugin_id, &cfg)?;
     Ok(cfg)
 }
 
@@ -128,61 +185,78 @@ mod tests {
     use serde_json::json;
 
     #[test]
-    fn test_valid_prefix_rewrite() {
+    fn test_valid_url_rewrite_configs() {
         let val = json!({
-            "path_rewrite_mode": "prefix",
-            "path_match": "/v1/api",
-            "path_replacement": "/internal/api",
-            "query_rewrite_mode": "keep",
-            "query_replacement": null,
+            "path_rules": [
+                { "find": "/api/v1/", "replace": "/" },
+                { "find": "/legacy", "replace": "/v2" }
+            ],
+            "query_mode": "keep",
+            "query_replace": null,
+            "remove_params": ["utm_source", "debug"],
+            "query_append": "edge=velda"
+        });
+        assert!(validate_url_rewrite_config("rw_1", &val).is_ok());
+
+        let replace_q = json!({
+            "path_rules": [],
+            "query_mode": "replace",
+            "query_replace": "v=2",
+            "remove_params": [],
+            "query_append": null
+        });
+        assert!(validate_url_rewrite_config("rw_2", &replace_q).is_ok());
+    }
+
+    #[test]
+    fn test_rejects_unknown_fields_and_noop_and_invalid_rules() {
+        let unknown = json!({
+            "path_rules": [],
+            "query_mode": "drop",
+            "query_replace": null,
+            "remove_params": [],
+            "query_append": null,
             "sanitize_path": true
         });
-        let res = validate_url_rewrite_config("rewrite_1", &val);
-        assert!(res.is_ok());
-    }
+        assert!(validate_url_rewrite_config("rw_unknown", &unknown).is_err());
 
-    #[test]
-    fn test_invalid_path_replacement_no_slash_rejected() {
-        let val = json!({
-            "path_rewrite_mode": "exact",
-            "path_match": "/old",
-            "path_replacement": "new_without_slash",
-            "query_rewrite_mode": "strip",
-            "query_replacement": null,
-            "sanitize_path": true
+        let noop = json!({
+            "path_rules": [],
+            "query_mode": "keep",
+            "query_replace": null,
+            "remove_params": [],
+            "query_append": null
         });
-        let res = validate_url_rewrite_config("rewrite_bad_slash", &val);
-        assert!(res.is_err());
-        assert!(res.unwrap_err().to_string().contains("must start with '/'"));
-    }
+        assert!(validate_url_rewrite_config("rw_noop", &noop).is_err());
 
-    #[test]
-    fn test_missing_query_replacement_rejected() {
-        let val = json!({
-            "path_rewrite_mode": "none",
-            "path_match": "",
-            "path_replacement": "",
-            "query_rewrite_mode": "replace",
-            "query_replacement": "",
-            "sanitize_path": false
+        let dup_find = json!({
+            "path_rules": [
+                { "find": "/a", "replace": "/b" },
+                { "find": "/a", "replace": "/c" }
+            ],
+            "query_mode": "keep",
+            "query_replace": null,
+            "remove_params": [],
+            "query_append": null
         });
-        let res = validate_url_rewrite_config("rewrite_bad_query", &val);
-        assert!(res.is_err());
-        assert!(
-            res.unwrap_err()
-                .to_string()
-                .contains("requires non-empty query_replacement")
-        );
-    }
+        assert!(validate_url_rewrite_config("rw_dup", &dup_find).is_err());
 
-    #[test]
-    fn test_missing_required_fields_rejected() {
-        let val = json!({
-            "path_rewrite_mode": "prefix"
-            // Missing path_match, path_replacement, query_rewrite_mode, sanitize_path
+        let bad_drop = json!({
+            "path_rules": [],
+            "query_mode": "drop",
+            "query_replace": null,
+            "remove_params": ["a"],
+            "query_append": null
         });
-        let res = validate_url_rewrite_config("rewrite_missing", &val);
-        assert!(res.is_err());
-        assert!(res.unwrap_err().to_string().contains("missing field"));
+        assert!(validate_url_rewrite_config("rw_bad_drop", &bad_drop).is_err());
+
+        let bad_query = json!({
+            "path_rules": [],
+            "query_mode": "replace",
+            "query_replace": "?foo=bar",
+            "remove_params": [],
+            "query_append": null
+        });
+        assert!(validate_url_rewrite_config("rw_bad_q", &bad_query).is_err());
     }
 }

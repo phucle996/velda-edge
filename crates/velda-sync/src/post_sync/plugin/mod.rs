@@ -508,6 +508,34 @@ mod tests {
     }
 
     #[test]
+    fn test_url_rewrite_validation() {
+        let mut valid = vec![PluginConfig {
+            id: "url_rewrite".into(),
+            config: serde_json::json!({
+                "path_rules": [{ "find": "/api/v1/", "replace": "/" }],
+                "query_mode": "keep",
+                "query_replace": null,
+                "remove_params": ["utm_source"],
+                "query_append": "edge=velda"
+            }),
+        }];
+        assert!(validate_plugins(&mut valid).is_ok());
+
+        let mut legacy_unknown = vec![PluginConfig {
+            id: "url_rewrite".into(),
+            config: serde_json::json!({
+                "path_rules": [],
+                "query_mode": "drop",
+                "query_replace": null,
+                "remove_params": [],
+                "query_append": null,
+                "sanitize_path": true
+            }),
+        }];
+        assert!(validate_plugins(&mut legacy_unknown).is_err());
+    }
+
+    #[test]
     fn test_validate_plugins_with_etps_rejects_mismatched_etp_kind() {
         let etps = vec![
             crate::post_sync::etp::EtpSyncConfig {
