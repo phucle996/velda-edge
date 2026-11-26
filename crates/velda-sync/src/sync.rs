@@ -225,25 +225,39 @@ impl SyncComposition {
                         post_sync::upstream::persist_upstreams(&self.storage_dir, &content, &bin)?;
                     }
                     "plugins" => {
-                        let mut plugins = post_sync::plugin::parse_plugins(&content)?;
-                        post_sync::plugin::validate_plugins(&mut plugins)?;
+                        // Step 1: Resolve & validate ETPs FIRST so plugin ETP references
+                        // verify against validated EtpKind definitions before compilation.
+                        let etps = if let Some(etp_entry) = manifest
+                            .configuration
+                            .files
+                            .iter()
+                            .find(|f| f.name == "etp")
+                        {
+                            let etp_bytes = self.stage.read_domain_file(&etp_entry.path).await?;
+                            let etp_file = post_sync::etp::parse_etps(&etp_bytes)?;
+                            post_sync::etp::validate_etps(&etp_file)?;
+                            etp_file.etps
+                        } else {
+                            let lkg_etp = self.storage_dir.join("runtime/etp.bin");
+                            if lkg_etp.exists() {
+                                let bytes = std::fs::read(&lkg_etp)?;
+                                post_sync::etp::unpack_etps(&bytes)?.etps
+                            } else {
+                                Vec::new()
+                            }
+                        };
 
-                        // Validate cross-domain upstream targets (e.g. canary -> canary_upstream)
-                        // against already-reconciled manifest upstreams or LKG upstreams.bin.
+                        // Step 2: Resolve candidate manifest upstreams or LKG upstreams.bin.
                         let upstreams = if let Some(up_entry) = manifest
                             .configuration
                             .files
                             .iter()
                             .find(|f| f.name == "upstreams")
                         {
-                            if let Ok(up_bytes) = self.stage.read_domain_file(&up_entry.path).await
-                            {
-                                let mut parsed = post_sync::upstream::parse_upstreams(&up_bytes)?;
-                                post_sync::upstream::validate_upstreams(&mut parsed)?;
-                                parsed
-                            } else {
-                                Vec::new()
-                            }
+                            let up_bytes = self.stage.read_domain_file(&up_entry.path).await?;
+                            let mut parsed = post_sync::upstream::parse_upstreams(&up_bytes)?;
+                            post_sync::upstream::validate_upstreams(&mut parsed)?;
+                            parsed
                         } else {
                             let lkg_up = self.storage_dir.join("runtime/upstreams.bin");
                             if lkg_up.exists()
@@ -256,36 +270,11 @@ impl SyncComposition {
                                 Vec::new()
                             }
                         };
-                        validate_canary_upstream_references(&plugins, &upstreams)?;
 
-                        // Validate cross-domain etp_id references against manifest's etp or LKG etp.bin
-                        let etps = if let Some(etp_entry) = manifest
-                            .configuration
-                            .files
-                            .iter()
-                            .find(|f| f.name == "etp")
-                        {
-                            if let Ok(etp_bytes) =
-                                self.stage.read_domain_file(&etp_entry.path).await
-                            {
-                                let etp_file = post_sync::etp::parse_etps(&etp_bytes)?;
-                                post_sync::etp::validate_etps(&etp_file)?;
-                                etp_file.etps
-                            } else {
-                                Vec::new()
-                            }
-                        } else {
-                            let lkg_etp = self.storage_dir.join("runtime/etp.bin");
-                            if lkg_etp.exists()
-                                && let Ok(bytes) = std::fs::read(&lkg_etp)
-                                && let Ok(etp_file) = post_sync::etp::unpack_etps(&bytes)
-                            {
-                                etp_file.etps
-                            } else {
-                                Vec::new()
-                            }
-                        };
-                        post_sync::etp::validate_plugin_etp_references(&plugins, &etps)?;
+                        // Step 3: Parse & validate plugins together with ETP kinds and upstreams.
+                        let mut plugins = post_sync::plugin::parse_plugins(&content)?;
+                        post_sync::plugin::validate_plugins_with_etps(&mut plugins, &etps)?;
+                        validate_canary_upstream_references(&plugins, &upstreams)?;
 
                         let bin = post_sync::plugin::compile_plugins_to_binary(
                             &plugins, domain_rev, checksum,

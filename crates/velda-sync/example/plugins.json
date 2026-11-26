@@ -73,16 +73,17 @@
       "id": "rate_limit",
       "config": {
         "algorithm": "token_bucket",
-        "backend": "memory",
         "rate_per_second": 1000,
         "burst_capacity": 2000,
-        "key_strategy": "priority",
+        "overdraft_percent": 5,
+        "key_strategy": "hierarchical",
         "key_headers": [
+          "x-tenant-id",
           "x-api-key",
-          "x-user-id",
           "client_ip"
         ],
-        "fallback_behavior": "memory"
+        "fallback_behavior": "memory",
+        "sync_interval_ms": 200
       }
     },
     {
@@ -203,7 +204,8 @@
     {
       "id": "oauth2_introspection",
       "config": {
-        "introspection_url": "http://127.0.0.1:8080/oauth/introspect",
+        "etp_id": "keycloak-prod",
+        "path": "/realms/master/protocol/openid-connect/token/introspect",
         "client_id": "velda-edge-gateway",
         "client_secret": "sec_gateway_secret_key_12345",
         "auth_method": "client_secret_basic",
@@ -220,8 +222,6 @@
         "token_type_hint": "access_token",
         "cache_ttl_seconds": 300,
         "negative_cache_ttl_seconds": 10,
-        "keepalive_timeout_secs": 60,
-        "pool_max_idle_connections": 10,
         "request_timeout_ms": 500,
         "required_scopes": [
           "read",

@@ -30,7 +30,6 @@ pub use velda_plugin::background::acme_cert_rotator::validation::*;
 pub use velda_plugin::background::clickhouse_log_shipper::validation::*;
 pub use velda_plugin::background::elasticsearch_log_shipper::validation::*;
 pub use velda_plugin::background::health_probe::validation::*;
-pub use velda_plugin::background::jwks_rotator::validation::*;
 pub use velda_plugin::background::kafka_log_shipper::validation::*;
 pub use velda_plugin::background::loki_log_shipper::validation::*;
 pub use velda_plugin::background::otlp_log_shipper::validation::*;
@@ -181,6 +180,17 @@ pub fn validate_plugins(plugins: &mut [PluginConfig]) -> Result<(), SyncError> {
         reason: e.to_string(),
     })?;
 
+    Ok(())
+}
+
+/// Validates plugin schema/dependencies and enforces ETP existence + allowed kind mapping
+/// against already-validated ETP entries.
+pub fn validate_plugins_with_etps(
+    plugins: &mut [PluginConfig],
+    etps: &[crate::post_sync::etp::EtpSyncConfig],
+) -> Result<(), SyncError> {
+    validate_plugins(plugins)?;
+    crate::post_sync::etp::validate_plugin_etp_references(plugins, etps)?;
     Ok(())
 }
 
@@ -460,5 +470,55 @@ mod tests {
             }),
         }];
         assert!(validate_plugins(&mut invalid_status_high).is_err());
+    }
+
+    #[test]
+    fn test_validate_plugins_with_etps_rejects_mismatched_etp_kind() {
+        let etps = vec![
+            crate::post_sync::etp::EtpSyncConfig {
+                id: "redis-main".into(),
+                kind: "redis".into(),
+                security: velda_etp::EtpTransportSecurity::Plain,
+                pool: velda_etp::EtpPoolSettings::default(),
+                tls: None,
+                settings: serde_json::json!({ "host": "127.0.0.1", "port": 6379 }),
+            },
+            crate::post_sync::etp::EtpSyncConfig {
+                id: "kc-main".into(),
+                kind: "keycloak".into(),
+                security: velda_etp::EtpTransportSecurity::Tls,
+                pool: velda_etp::EtpPoolSettings::default(),
+                tls: None,
+                settings: serde_json::json!({ "host": "kc.local", "port": 8443 }),
+            },
+        ];
+
+        let oauth2_cfg = |etp_id: &str| PluginConfig {
+            id: "oauth2_introspection".into(),
+            config: serde_json::json!({
+                "etp_id": etp_id,
+                "client_id": "gw",
+                "client_secret": "sec",
+                "auth_method": "client_secret_basic",
+                "token_headers": ["authorization"],
+                "token_cookies": [],
+                "token_query_params": [],
+                "token_type_hint": "access_token",
+                "cache_ttl_seconds": 60,
+                "negative_cache_ttl_seconds": 10,
+                "request_timeout_ms": 500,
+                "required_scopes": [],
+                "claims_to_headers": [],
+                "hide_credentials": true,
+                "fallback_behavior": "reject"
+            }),
+        };
+
+        let mut ok_plugins = vec![oauth2_cfg("kc-main")];
+        assert!(validate_plugins_with_etps(&mut ok_plugins, &etps).is_ok());
+
+        let mut bad_plugins = vec![oauth2_cfg("redis-main")];
+        let err = validate_plugins_with_etps(&mut bad_plugins, &etps).unwrap_err();
+        assert!(err.to_string().contains("has kind 'redis'"));
     }
 }
