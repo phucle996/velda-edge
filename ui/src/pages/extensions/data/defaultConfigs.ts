@@ -523,17 +523,12 @@ export const EXTENSION_DEFAULT_CONFIGS: Record<string, Record<string, any>> = {
     sample_rate: 0.1
   },
   'request-termination': {
-    enabled: true,
     status_code: 503,
     content_type: 'application/json; charset=utf-8',
     body: '{"error": "Service undergoing planned maintenance. Please retry later."}',
-    headers: [
-      { name: 'Retry-After', value: '300' },
-      { name: 'X-Aurora-Terminated', value: 'true' }
-    ],
-    bypass_headers: [
-      { name: 'X-Maintenance-Bypass', value: 'secret123' }
-    ]
+    headers: {
+      'retry-after': '300'
+    }
   },
 
   // 5. Request Transformation (10)
@@ -565,13 +560,16 @@ export const EXTENSION_DEFAULT_CONFIGS: Record<string, Record<string, any>> = {
     remove_fields: ['deprecated_param', 'internal_secret']
   },
   'uri-rewrite': {
-    enabled: true,
-    rules: [
+    path_rules: [
       {
-        pattern: '^/api/v1/(.*)',
-        replacement: '/v2/$1'
+        find: '/api/v1/',
+        replace: '/v2/'
       }
-    ]
+    ],
+    query_mode: 'keep',
+    query_replace: null,
+    remove_params: ['utm_source'],
+    query_append: 'edge=velda'
   },
   'host-rewrite': {
     enabled: true,

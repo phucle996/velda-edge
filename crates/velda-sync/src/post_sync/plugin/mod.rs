@@ -470,6 +470,69 @@ mod tests {
             }),
         }];
         assert!(validate_plugins(&mut invalid_status_high).is_err());
+
+        // 3. Unknown fields, 204 body, and forbidden framing headers must fail
+        let mut unknown_field_plugins = vec![PluginConfig {
+            id: "request_termination".into(),
+            config: serde_json::json!({
+                "status_code": 503,
+                "body": "down",
+                "content_type": "text/plain",
+                "headers": {},
+                "bypass_headers": []
+            }),
+        }];
+        assert!(validate_plugins(&mut unknown_field_plugins).is_err());
+
+        let mut body_on_204_plugins = vec![PluginConfig {
+            id: "request_termination".into(),
+            config: serde_json::json!({
+                "status_code": 204,
+                "body": "not allowed",
+                "content_type": "text/plain",
+                "headers": {}
+            }),
+        }];
+        assert!(validate_plugins(&mut body_on_204_plugins).is_err());
+
+        let mut framing_hdr_plugins = vec![PluginConfig {
+            id: "request_termination".into(),
+            config: serde_json::json!({
+                "status_code": 503,
+                "body": "",
+                "content_type": "",
+                "headers": { "transfer-encoding": "chunked" }
+            }),
+        }];
+        assert!(validate_plugins(&mut framing_hdr_plugins).is_err());
+    }
+
+    #[test]
+    fn test_url_rewrite_validation() {
+        let mut valid = vec![PluginConfig {
+            id: "url_rewrite".into(),
+            config: serde_json::json!({
+                "path_rules": [{ "find": "/api/v1/", "replace": "/" }],
+                "query_mode": "keep",
+                "query_replace": null,
+                "remove_params": ["utm_source"],
+                "query_append": "edge=velda"
+            }),
+        }];
+        assert!(validate_plugins(&mut valid).is_ok());
+
+        let mut legacy_unknown = vec![PluginConfig {
+            id: "url_rewrite".into(),
+            config: serde_json::json!({
+                "path_rules": [],
+                "query_mode": "drop",
+                "query_replace": null,
+                "remove_params": [],
+                "query_append": null,
+                "sanitize_path": true
+            }),
+        }];
+        assert!(validate_plugins(&mut legacy_unknown).is_err());
     }
 
     #[test]

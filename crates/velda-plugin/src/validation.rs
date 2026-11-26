@@ -61,6 +61,7 @@ pub fn canonical_protocol_family_for_id(id: &str) -> Option<&'static str> {
         "response_header_mutation" => Some("http"),
         "response_compression" => Some("http"),
         "request_termination" => Some("http"),
+        "url_rewrite" => Some("http"),
         "openai_token_quota" => Some("http"),
         _ => None,
     }

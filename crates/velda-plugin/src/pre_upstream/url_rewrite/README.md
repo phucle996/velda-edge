@@ -1,106 +1,64 @@
 # URL Rewrite Plugin (`url_rewrite`)
 
-Production-grade, zero-allocation URI path and query string transformation plugin evaluated during the `pre_upstream` execution phase. Adapts public edge routing contracts into internal microservice endpoint structures with multi-level optimization and RFC 3986 path traversal protection.
+Literal HTTP URI (`path` + `query`) transformation plugin evaluated during the `pre_upstream` phase using a single Aho-Corasick + SIMD execution path.
+
+```text
+  Sync / Compile Time
+    UrlRewriteConfig (#[serde(deny_unknown_fields)])
+      ├─► path_rules[]  ──► 1 Aho-Corasick (LeftmostLongest) literal matcher
+      └─► remove_params ──► 1 Aho-Corasick (DFA + Anchored::Yes) exact key filter
+
+  Frontline Hot Path (PreUpstreamPlugin)
+    on_upstream_request(req, _targets)
+      ├─► 1. Path  : AhoCorasick::find_iter(path) [literal find -> replace, zero magic]
+      ├─► 2. Query : keep (AC key filter + SIMD '&'/'=' scan + query_append) | drop | replace
+      ├─► 3. Bypass: unchanged -> Action::Continue (zero heap allocation)
+      └─► 4. Build : 1 BytesMut + simd_copy_nonoverlapping -> PathAndQuery -> Uri
+                     (invalid URI output -> Action::Reject(RejectReason::BadRequest))
+```
 
 ---
 
-## 1. Overview & Pipeline Specification
+## 1. Specifications
 
 | Property | Value |
 | :--- | :--- |
 | **Plugin ID** | `url_rewrite` |
-| **Canonical Phase** | `pre_upstream` |
-| **Execution Order** | Strictly FIFO based on route `plugins` declaration order (First declared, first executed) |
-| **Reverse Capability** | `PluginCapability::new(AccessLevel::Write, AccessLevel::None)` |
-| **Payload Passthrough** | **100% Zero-Copy streaming**. Request and response bodies are never buffered |
-| **Supported Protocols** | `ALL_HTTP` (HTTP/1.1, HTTP/2, HTTP/3) |
-| **Single Responsibility** | Operates strictly on URI (`path` and `query`). `Host` / `:authority` header mutation belongs to [`header_mutation`](../header_mutation/) |
+| **Lifecycle Phase** | `PreUpstreamPlugin` (`pbww() == 0`) |
+| **Supported Protocols** | HTTP only (`SupportedProtocols::ALL_HTTP`: `http/1.1`, `http/2`, `http/3`) |
+| **Capability** | `PluginCapability::new(AccessLevel::Write, AccessLevel::None)` |
+| **Scope Boundary** | Mutates `req.uri` (`path` + `query`) only. `Host` / `:authority` belongs to `header_mutation`; path traversal normalization belongs to Ingress (`normalize_path`) and `waf_lite`. |
 
 ---
 
-## 2. 100% Explicit Configuration Invariant
+## 2. Configuration Schema (`#[serde(deny_unknown_fields)]`)
 
-> [!IMPORTANT]
-> **Strict Configuration Contract**: Every configuration parameter must be explicitly declared in `plugins.json`. No silent fallbacks or implicit defaults exist. All field values must be intentionally supplied according to your infrastructure requirements.
+| Field | Type | Required | Constraints |
+| :--- | :--- | :--- | :--- |
+| `path_rules` | `array<{find, replace}>` | **Yes** | Literal substrings replaced verbatim (`LeftmostLongest`). `find` must be non-empty and unique; no `?`, `#`, `\`, or control chars. |
+| `query_mode` | `string` | **Yes** | `"keep"`, `"drop"`, or `"replace"`. |
+| `query_replace` | `string \| null` | **Yes** | Required non-empty query string (without `?` or `#`) when `query_mode == "replace"`; `null` otherwise. |
+| `remove_params` | `array<string>` | **Yes** | Exact query parameter keys stripped when `query_mode == "keep"`; must be `[]` otherwise. |
+| `query_append` | `string \| null` | **Yes** | Static suffix appended when `query_mode == "keep"` (no leading/trailing `&`, no `?` or `#`); `null` otherwise. |
 
-| Field | Type | Required | Constraints / Allowed Values | Recommended Value | Description |
-| :--- | :---: | :---: | :--- | :--- | :--- |
-| `path_rewrite_mode` | String | **Yes** | `"prefix"`, `"regex"`, `"exact"`, or `"none"` | `"prefix"` (prefix rewriting) / `"none"` (query only) | Path rewriting strategy to evaluate. |
-| `path_match` | String | **Yes** | Prefix or regex pattern (empty string `""` if mode is `"none"`) | `"/api/v1"` | Pattern matched against incoming URI path. |
-| `path_replacement` | String | **Yes** | Replacement path string (must start with `/` if mode is active, or `""` if `"none"`) | `""` (for strip) / `"/internal/v2"` (replace) | Replacement target path. Supports regex capture tokens `$1`, `$2` in `"regex"` mode. |
-| `query_rewrite_mode` | String | **Yes** | `"keep"`, `"strip"`, `"replace"`, or `"append"` | `"keep"` | Query string transformation policy. |
-| `query_replacement` | String / null | **Yes** | Non-empty string when mode is `"replace"` or `"append"`, otherwise `null` | `null` | Static query string parameter payload to substitute or append. |
-| `sanitize_path` | Boolean | **Yes** | `true` or `false` | `true` | Enables RFC 3986 normalization (collapses redundant `//`, strips `/./`, blocks `/../` traversal). |
+- No hidden slash trimming or fallback `/` insertion is applied: `find` matches literally and `replace` substitutes literally. If rewriting leaves a path without a leading `/`, the request fails cleanly with `400 Bad Request`.
 
 ---
 
-## 3. Query String Handling Policies
-
-- `"keep"`: Preserves downstream client query string intact. `query_replacement` must be `null`.
-- `"strip"`: Completely removes query string before upstream forwarding. `query_replacement` must be `null`.
-- `"replace"`: Replaces entire query string with `query_replacement`.
-- `"append"`: Appends `query_replacement` to existing query parameters (e.g. `gateway=velda&cluster=prod`).
-
----
-
-## 4. Configuration Examples
-
-### Prefix Rewrite Example (`plugins.json`)
-
-Strip `/api/v1` prefix so upstream microservice receives `/orders/42`:
+## 3. Example
 
 ```json
 {
-  "schema_version": 1,
-  "plugins": [
-    {
-      "id": "url_rewrite",
-      "config": {
-        "path_rewrite_mode": "prefix",
-        "path_match": "/api/v1",
-        "path_replacement": "",
-        "query_rewrite_mode": "keep",
-        "query_replacement": null,
-        "sanitize_path": true
-      }
-    }
-  ]
-}
-```
-
-### Regex Rewrite with Query Append (`plugins.json`)
-
-```json
-{
-  "schema_version": 1,
-  "plugins": [
-    {
-      "id": "url_rewrite",
-      "config": {
-        "path_rewrite_mode": "regex",
-        "path_match": "^/users/([0-9]+)/orders/([0-9]+)$",
-        "path_replacement": "/orders/$2/user/$1",
-        "query_rewrite_mode": "append",
-        "query_replacement": "source=edge_gateway",
-        "sanitize_path": true
-      }
-    }
-  ]
-}
-```
-
-### Route Attachment (`routes.json`)
-
-```json
-{
-  "id": "api-orders-route",
-  "match": {
-    "path": "/api/v1/orders"
-  },
-  "upstream_id": "orders-backend",
-  "plugins": [
-    "url_rewrite",
-    "jwt_auth"
-  ]
+  "id": "url_rewrite",
+  "config": {
+    "path_rules": [
+      { "find": "/api/v1/", "replace": "/" },
+      { "find": "/legacy/", "replace": "/v2/" }
+    ],
+    "query_mode": "keep",
+    "query_replace": null,
+    "remove_params": ["utm_source", "internal_token"],
+    "query_append": "edge=velda"
+  }
 }
 ```

@@ -61,10 +61,7 @@ pub use targets::{
     TARGET_UNASSIGNED, TARGETS_CANCELLED, target_cancel_all, target_init, target_mirror,
     target_pair, target_primary, target_set_mirror, target_set_primary,
 };
-pub use url_rewrite::{
-    CompiledPathStrategy, PathRewriteStrategy, QueryStrategy, ReplacementToken, UrlRewriteConfig,
-    UrlRewritePlugin,
-};
+pub use url_rewrite::{PathRewriteRule, QueryRewriteMode, UrlRewriteConfig, UrlRewritePlugin};
 
 /// Contract for plugins evaluated prior to forwarding to upstream backend.
 pub trait PreUpstreamPlugin: Send + Sync {
@@ -356,13 +353,14 @@ mod tests {
             UrlRewritePlugin::new(
                 "rewrite-chain",
                 UrlRewriteConfig {
-                    path: Some(PathRewriteStrategy::StripPrefix {
-                        prefix: "/api/v1".into(),
-                    }),
-                    query: QueryStrategy::Append {
-                        query: "cluster=primary".into(),
-                    },
-                    sanitize_path: true,
+                    path_rules: vec![PathRewriteRule {
+                        find: "/api/v1/".into(),
+                        replace: "/".into(),
+                    }],
+                    query_mode: QueryRewriteMode::Keep,
+                    query_replace: None,
+                    remove_params: Vec::new(),
+                    query_append: Some("cluster=primary".into()),
                 },
             )
             .unwrap(),
@@ -391,28 +389,20 @@ mod tests {
                 "termination-1",
                 RequestTerminationConfig {
                     status_code: 503,
-                    headers: vec![(
-                        HeaderName::from_static("retry-after"),
-                        HeaderValue::from_static("60"),
-                    )],
-                    body: None,
+                    headers: std::collections::HashMap::from([("retry-after".into(), "60".into())]),
+                    body: "Service Unavailable".into(),
+                    content_type: "text/plain; charset=utf-8".into(),
                 },
             )
             .unwrap(),
         );
         let chain: Vec<Arc<dyn PreUpstreamPlugin>> = vec![plugin];
 
-        let mut headers = HeaderWorkspace::empty(4);
-        headers.insert(
-            HeaderName::from_static("x-request-id"),
-            HeaderValue::from_static("req-term-999"),
-        );
-
         let mut req = L7Request::new(
             Method::POST,
             Uri::from_static("/api/v1/checkout"),
             Version::HTTP_11,
-            headers,
+            HeaderWorkspace::empty(0),
             Body::Empty,
         );
 
@@ -423,11 +413,11 @@ mod tests {
             Action::Respond(resp) => {
                 assert_eq!(resp.status, StatusCode::SERVICE_UNAVAILABLE);
                 assert_eq!(resp.headers.get("retry-after").unwrap(), "60");
-                assert_eq!(resp.headers.get("x-request-id").unwrap(), "req-term-999");
                 assert_eq!(
                     resp.headers.get("content-type").unwrap(),
                     "text/plain; charset=utf-8"
                 );
+                assert_eq!(resp.body.as_slice(), b"Service Unavailable");
             }
             _ => panic!("Expected Action::Respond(503)"),
         }
