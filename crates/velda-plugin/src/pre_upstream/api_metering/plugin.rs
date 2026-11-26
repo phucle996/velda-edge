@@ -18,15 +18,14 @@ use bytes::Bytes;
 use http::header::{CONTENT_LENGTH, CONTENT_TYPE, RETRY_AFTER};
 use http::{HeaderName, HeaderValue, StatusCode};
 use velda_core::{Action, L7Request, L7Response, RejectReason};
-use velda_etp::redis::RedisEtp;
-use velda_etp::{EtpBackend, EtpInstance};
+use velda_etp::EtpInstance;
 
 use super::algorithm::{CompiledDecision, ShardedMeteringState};
 use super::config::{
     ApiMeteringConfig, CompiledTier, ExhaustedAction, compile_tiers, parse_metering_config,
 };
 use super::key::{resolve_account_keys, resolve_tier};
-use super::redis::run_shadow_metering_sync;
+use super::providers::{ApiMeteringProvider, from_etp_instance, run_sync_loop};
 use crate::capability::{AccessLevel, PluginCapability, SupportedProtocols};
 use crate::config::PluginConfig;
 use crate::error::PluginError;
@@ -46,7 +45,7 @@ pub struct ApiMeteringPlugin {
     pub id: String,
     pub config: ApiMeteringConfig,
     pub state: Arc<ShardedMeteringState>,
-    pub etp: OnceLock<Arc<RedisEtp>>,
+    pub provider: OnceLock<ApiMeteringProvider>,
     compiled_tiers: Box<[CompiledTier]>,
     default_tier_idx: usize,
 }
@@ -78,7 +77,7 @@ impl ApiMeteringPlugin {
             id: id.into(),
             config,
             state,
-            etp: OnceLock::new(),
+            provider: OnceLock::new(),
             compiled_tiers,
             default_tier_idx,
         }
@@ -111,18 +110,9 @@ impl PreUpstreamPlugin for ApiMeteringPlugin {
     }
 
     fn attach_etp(&self, instance: &EtpInstance) -> Result<(), PluginError> {
-        match &instance.backend {
-            EtpBackend::Redis(pool) => {
-                let _ = self.etp.set(Arc::clone(pool));
-                Ok(())
-            }
-            _ => Err(PluginError::Config(format!(
-                "Plugin '{}' (api_metering) requires a 'redis' ETP for etp_id '{}', got '{}'",
-                self.id,
-                self.config.etp_id.as_deref().unwrap_or(""),
-                instance.kind
-            ))),
-        }
+        let provider = from_etp_instance(&self.id, self.config.etp_id.as_deref(), instance)?;
+        let _ = self.provider.set(provider);
+        Ok(())
     }
 
     fn run_background(
@@ -130,11 +120,11 @@ impl PreUpstreamPlugin for ApiMeteringPlugin {
         shutdown: tokio::sync::watch::Receiver<bool>,
     ) -> Option<crate::BackgroundTaskFuture> {
         let etp_id = self.config.etp_id.as_deref()?;
-        let etp = match self.etp.get() {
-            Some(pool) => Arc::clone(pool),
+        let provider = match self.provider.get() {
+            Some(p) => p.clone(),
             None => {
                 let msg = format!(
-                    "Plugin '{}' (api_metering) has no attached RedisEtp for etp_id '{}'",
+                    "Plugin '{}' (api_metering) has no attached KV ETP for etp_id '{}'",
                     self.id, etp_id
                 );
                 return Some(Box::pin(async move { Err(PluginError::Config(msg)) }));
@@ -144,9 +134,9 @@ impl PreUpstreamPlugin for ApiMeteringPlugin {
         let initial_balance = self.config.initial_balance_micro_credits;
         let sync_interval_ms = self.config.sync_interval_ms;
         let key_prefix = self.config.key_prefix.clone();
-        Some(Box::pin(run_shadow_metering_sync(
+        Some(Box::pin(run_sync_loop(
+            provider,
             state,
-            etp,
             sync_interval_ms,
             key_prefix,
             initial_balance,
@@ -163,7 +153,7 @@ impl PreUpstreamPlugin for ApiMeteringPlugin {
         SupportedProtocols::ALL_L7
     }
 
-    fn on_upstream_request(&self, req: &mut L7Request, _upstream_target: &mut u16) -> Action {
+    fn on_upstream_request(&self, req: &mut L7Request, _targets: &mut u32) -> Action {
         let Some(chain) = resolve_account_keys(req, &self.config.account_headers) else {
             return handle_missing_account();
         };
