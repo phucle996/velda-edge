@@ -607,6 +607,7 @@ async fn serve_http2_stream(
                 headers,
                 velda_core::Body::Empty,
             );
+            l7_req.ingress_time_nanos = ingress_time_nanos;
             l7_req.state = req_state.clone();
 
             if let Some(hooks) = &plan.pre_route_hooks {
@@ -686,11 +687,12 @@ async fn serve_http2_stream(
             if short_circuit_resp.is_none()
                 && let Some(hooks) = &plan.pre_upstream_hooks
             {
-                let mut action = velda_plugin::run_pre_upstream_plugins(
+                let mut action = velda_plugin::run_pre_upstream_plugins_async(
                     hooks,
                     &mut l7_req,
                     &mut target_upstream,
-                );
+                )
+                .await;
                 l7_req.state.set_upstream(target_upstream);
                 while let Action::Delay { duration, and_then } = action {
                     tokio::time::sleep(duration).await;

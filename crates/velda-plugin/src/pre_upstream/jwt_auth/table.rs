@@ -1,7 +1,7 @@
-//! In-memory Contiguous 8-Slot JWKS Key Table and Shared Store (`JwksKeyTable`).
+//! In-memory Contiguous 8-Slot JWKS Key Table and Epoch-Tracked Shared Store (`jwt_auth::table`).
 //!
 //! ```text
-//!                         JWKS KEY TABLE MEMORY LAYOUT (1.1 KB)
+//!                         JWKS KEY TABLE MEMORY LAYOUT (align(64))
 //!
 //! +-----------------------------------------------------------------------------------------+
 //! | JwksKeyTable (repr(C, align(64)))                                                       |
@@ -9,62 +9,43 @@
 //! | [L1D Cache Line 0: 64-Byte Integer Index Header]                                        |
 //! | +-------------------------------------------------------------------------------------+ |
 //! | | kid_index: [u64; 8]                                                                 | |
-//! | | [ slot 0 ]  [ slot 1 ]  [ slot 2 ]  [ slot 3 ]  [ slot 4 ]  [ slot 5 ]  [ slot 6 ]  [ slot 7] |
-//! | |  (8B int)    (8B int)    (8B int)    (8B int)    (8B int)    (8B int)    (8B int)    (8B int) |
-//! | +-------------------------------------------------------------------------------------+ |
-//! | | default_slot: u8 (Slot 0 for static key)    | active_mask: u8 (1 bit per active slot)| |
+//! | | [ slot 0 ]  [ slot 1 ]  [ slot 2 ]  [ slot 3 ]  [ slot 4 ]  [ slot 5 ]  [ slot 6 ]  [ slot 7 ] |
+//! | |  (8B int)    (8B int)    (8B int)    (8B int)    (8B int)    (8B int)    (8B int)    (8B int)  |
 //! | +-------------------------------------------------------------------------------------+ |
 //! |                                                                                         |
 //! | [Contiguous Slots Array: 8 x JwksKeySlot (repr(C, align(64)))]                         |
 //! | +-------------------------------------------------------------------------------------+ |
-//! | | Slot 0: [internal_kid | raw_kid_hash | raw_kid: [u8; 32] | alg | key (VerifierKey)]  | |
-//! | | Slot 1: [internal_kid | raw_kid_hash | raw_kid: [u8; 32] | alg | key (VerifierKey)]  | |
-//! | | ...                                                                                 | |
-//! | | Slot 7: [internal_kid | raw_kid_hash | raw_kid: [u8; 32] | alg | key (VerifierKey)]  | |
+//! | | Slot 0..7: [internal_kid | raw_kid_hash | raw_kid: [u8; 128] | alg | VerifierKey]   | |
 //! | +-------------------------------------------------------------------------------------+ |
 //! +-----------------------------------------------------------------------------------------+
 //!
-//!                          MULTI-CORE HARDWARE & COHERENCE
+//!                          EPOCH-COORDINATED ROTATION & CACHE COHERENCE
 //!
 //!         [Background Rotator Thread]                     [Frontline Serving Hot Path]
 //!                      |                                                |
-//!             Prepares new table                                 Token with kid
-//!                      |                                                |
-//!          Atomic ArcSwap::store()                               fn hash_kid() -> u64
-//!                      |                                                |
-//!                      v                                                v
-//!          +------------------------+                     +---------------------------+
-//!          | RAM: Arc<JwksKeyTable> |                     | 1x 64B L1D Cache Line:    |
-//!          +------------------------+                     | Integer Match kid_index   |
-//!                      |                                  +---------------------------+
-//!        Pushed to L1D across cores                                     |
-//!                      v                                                | (Local L1D Hit)
-//!     +----------------------------------+                              v
-//!     | Core 0 L1D (S) | Core 1 L1D (S)  |                  Direct Index into Slot
-//!     | (Shared state) | (Shared state)  |                              |
-//!     | Low LFB load   | 0 False Sharing |                              v
-//!     +----------------------------------+                     Run Signature Check
+//!             Prepares new table                                 SharedJwksStore::epoch()
+//!                      |                                                | (Acquire)
+//!          ArcSwap::store(Arc<Table>)                                   v
+//!          epoch.fetch_add(1, Release)                    JwtCache tags entries w/ epoch
+//!                      |                                  (Stale-epoch tokens auto-miss!)
+//!                      v                                                |
+//!          1x 64B L1D Cache Line 0: <-----------------------------------+
+//!          Integer Match `kid_index`
 //! ```
-//!
-//! # Architecture & Hardware-Mechanical Sympathy
-//! - **Single Source of Truth (SSOT)**: Both static pre-configured keys and dynamic rotated keys
-//!   reside within the same contiguous 8-slot array.
-//! - **1 Cache Line Index (64 Bytes)**: `kid_index: [u64; 8]` packs all 8 key identifiers into
-//!   a single 64-byte L1D cache line for flat branchless integer comparison without pointer chasing.
-//! - **Core-Local Cache Residency**: A single compact table in RAM is cached across worker cores
-//!   in the MESI `Shared` state (read-only on serving path), eliminating cross-core bus traffic
-//!   and avoiding false sharing.
-//! - **Lock-Free Double-Buffering**: Writer updates use `arc_swap::ArcSwap` atomic pointer swaps
-//!   with `Release`/`Acquire` semantics, never blocking frontline traffic serving threads.
 
 use std::sync::Arc;
+use std::sync::atomic::{AtomicU64, Ordering};
 
 use arc_swap::ArcSwap;
 
-use super::crypto::{JwtAlgorithm, VerifierKey};
+use super::crypto::{JwtAlgorithm, JwtVerifyError, VerifierKey};
+use crate::error::PluginError;
 
-/// Maximum capacity of the contiguous JWKS key table (8 slots).
+/// Maximum capacity of the contiguous JWKS key table (8 slots = 1 64-byte cache line of `u64` hashes).
 pub const MAX_JWKS_SLOTS: usize = 8;
+
+/// Maximum inline UTF-8 byte length of an external `kid` identifier (covers UUIDv4 36B, SHA-256 43B, SHA-512 86B, ARNs).
+pub const MAX_KID_BYTES: usize = 128;
 
 /// Computes a 64-bit FNV-1a integer representation of an external `kid` string.
 #[inline(always)]
@@ -85,19 +66,22 @@ pub const fn hash_kid(raw_kid: &[u8]) -> u64 {
 pub struct JwksKeySlot {
     /// Internal unique integer identifier assigned to this key.
     pub internal_kid: u64,
-    /// 64-bit integer representation of the external `kid` string.
+    /// 64-bit FNV-1a hash of the external `kid` string.
     pub raw_kid_hash: u64,
-    /// Raw ASCII `kid` bytes (inline, up to 32 bytes, zero heap allocation).
-    pub raw_kid: [u8; 32],
-    /// Length of `raw_kid` in bytes (`0..=32`).
+    /// Inline `kid` bytes (`0..=128` bytes, zero heap allocation, zero silent truncation).
+    pub raw_kid: [u8; MAX_KID_BYTES],
+    /// Length of `raw_kid` in bytes (`0..=128`).
     pub raw_kid_len: u8,
-    /// Cryptographic signing algorithm.
+    /// Cryptographic signing algorithm bound to this slot.
     pub alg: JwtAlgorithm,
-    /// Whether this slot contains an active, valid key (1 = active, 0 = inactive).
+    /// Whether this slot contains an active verification key (`1` = active, `0` = inactive).
     pub is_active: u8,
-    /// Explicit padding to maintain strict 64-byte alignment boundaries.
-    pub _reserved: [u8; 5],
-    /// Concrete cryptographic key (RSA / ECDSA / HMAC).
+    /// `1` when created from a static un-keyed config (`secret_key` / `public_key_pem`), allowing
+    /// single-key mode to verify tokens carrying arbitrary IdP `kid` headers.
+    pub is_wildcard_kid: u8,
+    /// Explicit padding to align subsequent fields.
+    pub _reserved: [u8; 4],
+    /// Concrete cryptographic verification key (HMAC / RSA / ECDSA / Ed25519).
     pub key: Option<VerifierKey>,
 }
 
@@ -107,32 +91,57 @@ impl JwksKeySlot {
         Self {
             internal_kid: 0,
             raw_kid_hash: 0,
-            raw_kid: [0u8; 32],
+            raw_kid: [0u8; MAX_KID_BYTES],
             raw_kid_len: 0,
             alg: JwtAlgorithm::HS256,
             is_active: 0,
-            _reserved: [0u8; 5],
+            is_wildcard_kid: 0,
+            _reserved: [0u8; 4],
             key: None,
         }
     }
 
-    /// Populates this slot with an active key.
-    pub fn new(internal_kid: u64, raw_kid_str: &str, alg: JwtAlgorithm, key: VerifierKey) -> Self {
-        let mut raw_kid = [0u8; 32];
+    /// Populates this slot with an active key, rejecting `kid` values exceeding [`MAX_KID_BYTES`].
+    pub fn try_new(
+        internal_kid: u64,
+        raw_kid_str: &str,
+        alg: JwtAlgorithm,
+        key: VerifierKey,
+    ) -> Result<Self, PluginError> {
         let bytes = raw_kid_str.as_bytes();
-        let copy_len = bytes.len().min(32);
-        raw_kid[..copy_len].copy_from_slice(&bytes[..copy_len]);
+        if bytes.len() > MAX_KID_BYTES {
+            return Err(PluginError::Config(format!(
+                "JWK kid length ({} bytes) exceeds maximum supported {MAX_KID_BYTES} bytes",
+                bytes.len()
+            )));
+        }
+        let mut raw_kid = [0u8; MAX_KID_BYTES];
+        raw_kid[..bytes.len()].copy_from_slice(bytes);
 
-        Self {
+        Ok(Self {
             internal_kid,
             raw_kid_hash: hash_kid(bytes),
             raw_kid,
-            raw_kid_len: copy_len as u8,
+            raw_kid_len: bytes.len() as u8,
             alg,
             is_active: 1,
-            _reserved: [0u8; 5],
+            is_wildcard_kid: 0,
+            _reserved: [0u8; 4],
             key: Some(key),
-        }
+        })
+    }
+
+    /// Populates this slot with an active key (`raw_kid_str.len() <= 128`).
+    pub fn new(internal_kid: u64, raw_kid_str: &str, alg: JwtAlgorithm, key: VerifierKey) -> Self {
+        Self::try_new(internal_kid, raw_kid_str, alg, key)
+            .expect("raw_kid_str must not exceed MAX_KID_BYTES (128 bytes)")
+    }
+
+    /// Creates a static key slot (Slot 0) configured via `secret_key` or `public_key_pem`.
+    pub fn new_static(alg: JwtAlgorithm, key: VerifierKey) -> Self {
+        let mut slot = Self::new(1, "default", alg, key);
+        slot.is_wildcard_kid = 1;
+        slot
     }
 }
 
@@ -140,19 +149,21 @@ impl JwksKeySlot {
 #[repr(C, align(64))]
 #[derive(Clone)]
 pub struct JwksKeyTable {
-    /// 64-byte array containing the `raw_kid_hash` for each slot.
-    /// Resides in exactly 1 L1D cache line for single-pass branchless integer matching.
+    /// 64-byte array containing the `raw_kid_hash` for each slot (Cache Line 0).
     pub kid_index: [u64; MAX_JWKS_SLOTS],
-    /// Array of 8 concrete key slots.
+    /// Contiguous array of 8 concrete key slots.
     pub slots: [JwksKeySlot; MAX_JWKS_SLOTS],
-    /// Number of active keys currently held in the table.
+    /// Number of active keys currently held in the table (`0..=8`).
     pub active_count: u8,
-    /// Default slot index to use when a JWT token omits the `kid` header (defaults to 0).
+    /// Default slot index used when a JWT omits the `kid` header (defaults to `0`).
     pub default_slot: u8,
 }
 
+const _: () = assert!(std::mem::align_of::<JwksKeyTable>() == 64);
+const _: () = assert!(std::mem::offset_of!(JwksKeyTable, kid_index) == 0);
+
 impl JwksKeyTable {
-    /// Creates an empty table with 8 inactive slots.
+    /// Creates an empty table with 8 inactive slots (used when awaiting `jwks_rotator` boot fetch).
     pub const fn empty() -> Self {
         Self {
             kid_index: [0u64; MAX_JWKS_SLOTS],
@@ -165,7 +176,7 @@ impl JwksKeyTable {
     /// Creates a table initialized with a single static key at Slot 0.
     pub fn with_static_key(key: VerifierKey, alg: JwtAlgorithm) -> Self {
         let mut table = Self::empty();
-        let slot = JwksKeySlot::new(1, "default", alg, key);
+        let slot = JwksKeySlot::new_static(alg, key);
         let mut hashes = [0u64; MAX_JWKS_SLOTS];
         hashes[0] = slot.raw_kid_hash;
         table.slots[0] = slot;
@@ -206,13 +217,16 @@ impl JwksKeyTable {
         self.default_slot = default_slot;
     }
 
-    /// Finds a key slot matching the raw `kid` string from the token's JOSE header.
+    /// Finds a key slot matching the exact raw `kid` string from the token's JOSE header.
     #[inline(always)]
     pub fn find_by_raw_kid(&self, raw_kid: &str) -> Option<&JwksKeySlot> {
-        let target_hash = hash_kid(raw_kid.as_bytes());
         let target_bytes = raw_kid.as_bytes();
+        if target_bytes.len() > MAX_KID_BYTES {
+            return None;
+        }
+        let target_hash = hash_kid(target_bytes);
 
-        // 1. Fast match across 64-byte kid_index (1 Cache Line in L1D!)
+        // Scan 64-byte kid_index residing in Cache Line 0
         for i in 0..MAX_JWKS_SLOTS {
             if self.kid_index[i] == target_hash {
                 let slot = &self.slots[i];
@@ -225,6 +239,33 @@ impl JwksKeyTable {
             }
         }
         None
+    }
+
+    /// Resolves the target key slot for an inbound JOSE `kid` header.
+    ///
+    /// - Returns `Err(JwtVerifyError::NoActiveKeys)` if the table is completely empty.
+    /// - Matches exact `kid` across Cache Line 0 when `kid` is present.
+    /// - In pure single-static-key mode (`active_count == 1` and `is_wildcard_kid == 1`),
+    ///   uses the configured static key even if the IdP attaches a `kid` header.
+    #[inline(always)]
+    pub fn resolve_key(&self, header_kid: Option<&str>) -> Result<&JwksKeySlot, JwtVerifyError> {
+        if self.active_count == 0 {
+            return Err(JwtVerifyError::NoActiveKeys);
+        }
+        if let Some(kid_str) = header_kid {
+            if let Some(slot) = self.find_by_raw_kid(kid_str) {
+                return Ok(slot);
+            }
+            if self.active_count == 1
+                && self.slots[0].is_active != 0
+                && self.slots[0].is_wildcard_kid != 0
+            {
+                return Ok(&self.slots[0]);
+            }
+            Err(JwtVerifyError::UnknownKid)
+        } else {
+            self.default_key().ok_or(JwtVerifyError::UnknownKid)
+        }
     }
 
     /// Finds a key slot by internal integer ID.
@@ -243,7 +284,8 @@ impl JwksKeyTable {
     #[inline(always)]
     pub fn default_key(&self) -> Option<&JwksKeySlot> {
         if self.active_count > 0 {
-            let slot = &self.slots[self.default_slot as usize];
+            let idx = (self.default_slot as usize) & (MAX_JWKS_SLOTS - 1);
+            let slot = &self.slots[idx];
             if slot.is_active != 0 {
                 return Some(slot);
             }
@@ -252,17 +294,25 @@ impl JwksKeyTable {
     }
 }
 
-/// Thread-safe, lock-free container wrapping an atomic reference to [`JwksKeyTable`].
+/// Thread-safe, lock-free container wrapping an atomic reference to [`JwksKeyTable`] and its rotation epoch.
 pub struct SharedJwksStore {
     inner: ArcSwap<JwksKeyTable>,
+    epoch: AtomicU64,
 }
 
 impl SharedJwksStore {
-    /// Creates a new shared store with the initial key table.
+    /// Creates a new shared store with the initial key table (`epoch = 1`).
     pub fn new(initial_table: JwksKeyTable) -> Self {
         Self {
             inner: ArcSwap::from_pointee(initial_table),
+            epoch: AtomicU64::new(1),
         }
+    }
+
+    /// Returns the current key-table generation epoch (`Acquire` ordering) for cache invalidation.
+    #[inline(always)]
+    pub fn epoch(&self) -> u64 {
+        self.epoch.load(Ordering::Acquire)
     }
 
     /// Atomically loads the current active key table for reading on the hot path (lock-free).
@@ -271,15 +321,16 @@ impl SharedJwksStore {
         self.inner.load()
     }
 
-    /// Atomically loads a cloned Arc of the active key table.
+    /// Atomically loads a cloned `Arc` of the active key table.
     #[inline(always)]
     pub fn load_full(&self) -> Arc<JwksKeyTable> {
         self.inner.load_full()
     }
 
-    /// Atomically replaces the active key table with a newly prepared table (from rotator).
+    /// Atomically replaces the active key table and increments the generation epoch (`Release` ordering).
     pub fn update(&self, new_table: JwksKeyTable) {
         self.inner.store(Arc::new(new_table));
+        self.epoch.fetch_add(1, Ordering::Release);
     }
 }
 
@@ -288,45 +339,67 @@ mod tests {
     use super::*;
 
     #[test]
-    fn test_set_kid_index_batch() {
-        let mut table = JwksKeyTable::empty();
-        let hashes: [u64; MAX_JWKS_SLOTS] = [
-            0x1111_2222_3333_4444,
-            0x5555_6666_7777_8888,
-            0x9999_aaaa_bbbb_cccc,
-            0xdddd_eeee_ffff_0000,
-            0x1234_5678_9abc_def0,
-            0x0fed_cba9_8765_4321,
-            0xaaaa_bbbb_cccc_dddd,
-            0xeeee_ffff_0000_1111,
-        ];
+    fn test_long_uuid_and_sha256_thumbprint_kids_match_without_truncation() {
+        let key = VerifierKey::new(JwtAlgorithm::HS256, Some("secret-key"), None).unwrap();
+        let uuid_kid = "550e8400-e29b-41d4-a716-446655440000"; // 36 bytes
+        let sha256_kid = "dGhpcy1pcy1hLTQzLWNoYXItc2hhMjU2LXRodW1icHJpbnQ"; // 47 bytes
 
-        table.set_kid_index_batch(&hashes);
-        assert_eq!(table.kid_index, hashes);
+        let slot0 = JwksKeySlot::try_new(1, uuid_kid, JwtAlgorithm::HS256, key.clone()).unwrap();
+        let slot1 = JwksKeySlot::try_new(2, sha256_kid, JwtAlgorithm::HS256, key).unwrap();
+
+        let mut table = JwksKeyTable::empty();
+        table.populate_batch(
+            [Some(slot0), Some(slot1), None, None, None, None, None, None],
+            0,
+        );
+
+        assert_eq!(table.find_by_raw_kid(uuid_kid).unwrap().internal_kid, 1);
+        assert_eq!(table.find_by_raw_kid(sha256_kid).unwrap().internal_kid, 2);
+
+        let overlong = "x".repeat(MAX_KID_BYTES + 1);
+        assert!(
+            JwksKeySlot::try_new(
+                3,
+                &overlong,
+                JwtAlgorithm::HS256,
+                VerifierKey::new(JwtAlgorithm::HS256, Some("secret"), None).unwrap()
+            )
+            .is_err()
+        );
     }
 
     #[test]
-    fn test_populate_batch() {
-        let mut table = JwksKeyTable::empty();
+    fn test_static_key_matches_arbitrary_idp_kid_only_when_unpaired() {
         let key = VerifierKey::new(JwtAlgorithm::HS256, Some("secret"), None).unwrap();
-        let slot0 = JwksKeySlot::new(1, "key-0", JwtAlgorithm::HS256, key.clone());
-        let slot1 = JwksKeySlot::new(2, "key-1", JwtAlgorithm::HS256, key);
+        let static_table = JwksKeyTable::with_static_key(key.clone(), JwtAlgorithm::HS256);
+        assert!(static_table.resolve_key(Some("auth0-prod-2026")).is_ok());
 
-        let slots: [Option<JwksKeySlot>; MAX_JWKS_SLOTS] =
-            [Some(slot0), Some(slot1), None, None, None, None, None, None];
+        // Once dynamic rotated keys are present alongside static key, unknown kids must reject
+        let mut rotated = JwksKeyTable::empty();
+        let s0 = JwksKeySlot::new_static(JwtAlgorithm::HS256, key.clone());
+        let s1 = JwksKeySlot::new(2, "rotated-1", JwtAlgorithm::HS256, key);
+        rotated.populate_batch([Some(s0), Some(s1), None, None, None, None, None, None], 0);
+        assert_eq!(
+            rotated.resolve_key(Some("rotated-1")).unwrap().internal_kid,
+            2
+        );
+        assert_eq!(
+            rotated.resolve_key(Some("unknown-kid")).err(),
+            Some(JwtVerifyError::UnknownKid)
+        );
+    }
 
-        table.populate_batch(slots, 0);
+    #[test]
+    fn test_shared_store_epoch_increments_on_update() {
+        let store = SharedJwksStore::new(JwksKeyTable::empty());
+        assert_eq!(store.epoch(), 1);
+        assert_eq!(
+            store.load().resolve_key(Some("k1")).err(),
+            Some(JwtVerifyError::NoActiveKeys)
+        );
 
-        assert_eq!(table.active_count, 2);
-        assert_eq!(table.default_slot, 0);
-        assert_ne!(table.kid_index[0], 0);
-        assert_ne!(table.kid_index[1], 0);
-        assert_eq!(table.kid_index[2], 0);
-
-        let found = table.find_by_raw_kid("key-0").expect("key-0 must be found");
-        assert_eq!(found.internal_kid, 1);
-        let found2 = table.find_by_raw_kid("key-1").expect("key-1 must be found");
-        assert_eq!(found2.internal_kid, 2);
-        assert!(table.find_by_raw_kid("key-unknown").is_none());
+        let key = VerifierKey::new(JwtAlgorithm::HS256, Some("secret"), None).unwrap();
+        store.update(JwksKeyTable::with_static_key(key, JwtAlgorithm::HS256));
+        assert_eq!(store.epoch(), 2);
     }
 }

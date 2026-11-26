@@ -1,95 +1,87 @@
-//! JWT Authentication Pre-Upstream Plugin.
+//! JWT Authentication Pre-Upstream Plugin (`jwt_auth::plugin`).
 //!
 //! ```text
 //!                          JWT AUTH PRE-UPSTREAM WORKFLOW
 //!
-//!                      Inbound Request (L7Request)
-//!                                  |
-//!                                  v
-//!                     +--------------------------+
-//!                     | Extract Token            |
-//!                     | (Header / Cookie / Query)|
-//!                     +--------------------------+
-//!                       |                      |
-//!                   (Missing)               (Found)
-//!                       |                      |
-//!                       v                      v
-//!                401 Unauthorized    Compute Token SipHash
-//!                                              |
-//!                     +------------------------+
-//!                     |
-//!                     +---> [Negative Cache Hit?] ---> 401 Unauthorized
-//!                     |
-//!                     +---> [Positive Cache Hit?] ---> Inject Claims & Continue
-//!                     |
-//!                     v (Cache Miss)
-//!          +--------------------------------------+
-//!          | Load SharedJwksStore (ArcSwap guard) |
-//!          +--------------------------------------+
-//!                     |
-//!                     v
-//!          +--------------------------------------+
-//!          | Cryptographic Verify via Key Table   |
-//!          +--------------------------------------+
-//!            |                                  |
-//!         (Valid)                            (Invalid)
-//!            |                                  |
-//!            v                                  v
-//!    Populate Positive Cache            Populate Negative Cache
-//!    Inject Claims & Continue           401 Unauthorized
+//!                      Inbound Request (`L7Request`, L2 Warm)
+//!                                       │
+//!                                       ▼
+//!                   1. Prefetch L1D Control Line (`_MM_HINT_T0`)
+//!                   2. Extract Token via Pre-Hashed `HeaderKey` / Cookie / Query
+//!                         ├── (Missing)      ──► 401 + `Bearer realm="velda-edge"`
+//!                         └── (Bad 2-dot)    ──► 401 + `Bearer error="invalid_token"`
+//!                                       │
+//!                                       ▼
+//!                   3. Convert JWT -> `fp: u128` (`SHA-256(boot_salt || jwt)`)
+//!                   4. Bit-Shift -> `_MM_HINT_T2` L3 Bucket -> 64B SIMD Scan:
+//!                         ├── [Positive Hit] ──► `insert_prehashed` claims & Continue
+//!                         ├── [Reject 401]   ──► 401 + `Bearer error="invalid_token"`
+//!                         ├── [Reject 403]   ──► 403 Forbidden
+//!                         └── [Cache Miss]
+//!                                       │
+//!                                       ▼
+//!                   5. Load `SharedJwksStore` (`ArcSwap` + `epoch`)
+//!                   6. Constant-Time Verify (`HMAC` / `RSA` / `ECDSA` / `EdDSA`)
+//!                         ├── (Valid)        ──► Commit L3 Positive + Inject Claims
+//!                         ├── (Assert Fail)  ──► Commit L3 Forbidden + 403 Forbidden
+//!                         ├── (NoActiveKeys) ──► 401 (Skip Negative Cache during boot)
+//!                         └── (Invalid)      ──► Commit L3 Unauthorized + 401
 //! ```
-//!
-//! # Execution Invariants
-//! - **Route-Scoped Authentication**: Public routes omit this plugin, while protected routes attach it.
-//! - **Fail-Fast Defense**: Rejects invalid, missing, or expired tokens with `401 Unauthorized` before
-//!   leasing backend connections or streaming request bodies.
-//! - **Dual Caching**: Reuses validated claims on positive cache hit without re-verification; caches invalid tokens in negative cache to defeat
-//!   cryptographic exhaustion attacks.
-//! - **Flexible Payloads & Claims Mapping**: Injects extracted claims into downstream request headers for
-//!   consumption by subsequent plugins (e.g., user-scoped `rate_limit`) and backend upstreams.
 
 use std::str::FromStr;
 use std::sync::Arc;
 
-use crate::config::PluginConfig;
 use http::header::{HeaderName, HeaderValue};
-use velda_core::{Action, L7Request, RejectReason};
+use velda_core::{Action, HeaderKey, L7Request, RejectReason};
 
-use super::cache::JwtCache;
-use super::crypto::{JwtAlgorithm, JwtValidationPolicy, VerifierKey, verify_jwt};
+use super::cache::{
+    CacheLookup, DEFAULT_GROUPS_PER_SHARD, DEFAULT_SHARD_COUNT, JwtCache, is_plausible_jwt_shape,
+};
+use super::crypto::{
+    ClaimPath, JwtAlgorithm, JwtValidationPolicy, JwtVerifyError, VerifierKey, verify_jwt,
+};
 use super::table::{JwksKeyTable, SharedJwksStore};
 use crate::capability::{AccessLevel, Direction, PluginCapability, SupportedProtocols};
+use crate::config::PluginConfig;
 use crate::error::PluginError;
 use crate::pre_upstream::PreUpstreamPlugin;
 
-/// Source location from which to extract the JWT token.
+const KEY_COOKIE: HeaderKey = HeaderKey::from_static("cookie");
+const WWW_AUTH_MISSING: HeaderValue = HeaderValue::from_static("Bearer realm=\"velda-edge\"");
+const WWW_AUTH_INVALID: HeaderValue = HeaderValue::from_static("Bearer error=\"invalid_token\"");
+
+/// Pre-compiled token extraction source using pre-hashed [`HeaderKey`] descriptors.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum TokenSource {
-    /// Extracts token from an HTTP header with an optional prefix (e.g. `Authorization: Bearer <token>`).
-    Header { name: HeaderName, prefix: String },
-    /// Extracts token from an HTTP Cookie (e.g. `Cookie: access_token=<token>`).
-    Cookie { name: String },
+    /// Extracts token from HTTP header(s) with an optional case-insensitive prefix (e.g. `"Bearer "`).
+    Header { key: HeaderKey, prefix: Box<str> },
+    /// Extracts token from HTTP `Cookie` header(s) (both `;`-joined HTTP/1.1 and split HTTP/2/3 fields).
+    Cookie { name: Box<str> },
     /// Extracts token from a URL query parameter (e.g. `?token=<token>`).
-    Query { param: String },
+    Query { param: Box<str> },
 }
 
-/// Production JWT authentication and claim injection plugin.
+/// Production JWT authentication and claim projection plugin.
+///
+/// Cache Line 0 (`0x00..0x40`) embeds the 64-byte [`JwtCache`] L1D control block directly inline.
+#[repr(C, align(64))]
 pub struct JwtAuthPlugin {
-    pub id: String,
-    pub algorithm: JwtAlgorithm,
-    pub key_store: Arc<SharedJwksStore>,
-    pub token_sources: Vec<TokenSource>,
-    pub validate_exp: bool,
-    pub clock_skew_secs: u64,
-    pub issuer: Option<String>,
-    pub audience: Option<String>,
-    pub claims_to_headers: Vec<(String, HeaderName)>,
-    pub assert_claims: Vec<(String, String)>,
     pub cache: JwtCache,
+    pub algorithm: JwtAlgorithm,
+    pub validate_exp: bool,
+    has_static_key: bool,
+    pub clock_skew_secs: u64,
+    pub key_store: Arc<SharedJwksStore>,
+    pub token_sources: Box<[TokenSource]>,
+    pub issuer: Option<Box<str>>,
+    pub audience: Option<Box<str>>,
+    pub claims_to_headers: Box<[(ClaimPath, HeaderKey)]>,
+    pub assert_claims: Box<[(ClaimPath, Box<str>)]>,
+    pub id: String,
 }
 
 impl JwtAuthPlugin {
-    /// Deserializes and constructs an instance directly from a [`PluginConfig`].
+    /// Deserializes and compiles an instance directly from a [`PluginConfig`].
     pub fn from_config(config: &PluginConfig) -> Result<Self, PluginError> {
         let cfg = super::validation::validate_jwt_auth_config(&config.id, &config.config).map_err(
             |e| {
@@ -101,12 +93,18 @@ impl JwtAuthPlugin {
         )?;
 
         let algorithm = JwtAlgorithm::from_str(&cfg.algorithm)?;
-        let key = VerifierKey::new(
-            algorithm,
-            cfg.secret_key.as_deref(),
-            cfg.public_key_pem.as_deref(),
-        )?;
-        let key_table = JwksKeyTable::with_static_key(key, algorithm);
+        let (key_table, has_static_key) =
+            if algorithm.is_symmetric() || cfg.public_key_pem.is_some() {
+                let key = VerifierKey::new(
+                    algorithm,
+                    cfg.secret_key.as_deref(),
+                    cfg.public_key_pem.as_deref(),
+                )?;
+                (JwksKeyTable::with_static_key(key, algorithm), true)
+            } else {
+                // Companion `jwks_rotator` mode: initialized empty until rotator populates keys
+                (JwksKeyTable::empty(), false)
+            };
         let key_store = Arc::new(SharedJwksStore::new(key_table));
 
         let mut token_sources = Vec::with_capacity(cfg.token_sources.len());
@@ -120,16 +118,18 @@ impl JwtAuthPlugin {
                         ))
                     })?;
                     token_sources.push(TokenSource::Header {
-                        name: hname,
-                        prefix: prefix.clone().unwrap_or_default(),
+                        key: HeaderKey::from_name(hname),
+                        prefix: prefix.clone().unwrap_or_default().into_boxed_str(),
                     });
                 }
                 super::validation::JwtTokenSourceConfig::Cookie { name } => {
-                    token_sources.push(TokenSource::Cookie { name: name.clone() });
+                    token_sources.push(TokenSource::Cookie {
+                        name: name.clone().into_boxed_str(),
+                    });
                 }
                 super::validation::JwtTokenSourceConfig::Query { param } => {
                     token_sources.push(TokenSource::Query {
-                        param: param.clone(),
+                        param: param.clone().into_boxed_str(),
                     });
                 }
             }
@@ -143,12 +143,18 @@ impl JwtAuthPlugin {
                     config.id
                 ))
             })?;
-            claims_to_headers.push((claim_path.clone(), hdr_name));
+            claims_to_headers.push((
+                ClaimPath::compile(claim_path),
+                HeaderKey::from_name(hdr_name),
+            ));
         }
 
         let mut assert_claims = Vec::with_capacity(cfg.assert_claims.len());
         for (claim_path, val_str) in &cfg.assert_claims {
-            assert_claims.push((claim_path.clone(), val_str.clone()));
+            assert_claims.push((
+                ClaimPath::compile(claim_path),
+                val_str.clone().into_boxed_str(),
+            ));
         }
 
         let negative_ttl = if cfg.cache_ttl_secs == 0 {
@@ -156,20 +162,26 @@ impl JwtAuthPlugin {
         } else {
             10.min(cfg.cache_ttl_secs)
         };
-        let cache = JwtCache::new(64, 2048, cfg.cache_ttl_secs, negative_ttl);
+        let cache = JwtCache::new(
+            DEFAULT_SHARD_COUNT,
+            DEFAULT_GROUPS_PER_SHARD,
+            cfg.cache_ttl_secs,
+            negative_ttl,
+        );
 
         Ok(Self {
-            id: config.id.clone(),
-            algorithm,
-            key_store,
-            token_sources,
-            validate_exp: cfg.validate_exp,
-            clock_skew_secs: cfg.clock_skew_secs,
-            issuer: cfg.issuer,
-            audience: cfg.audience,
-            claims_to_headers,
-            assert_claims,
             cache,
+            algorithm,
+            validate_exp: cfg.validate_exp,
+            has_static_key,
+            clock_skew_secs: cfg.clock_skew_secs,
+            key_store,
+            token_sources: token_sources.into_boxed_slice(),
+            issuer: cfg.issuer.map(String::into_boxed_str),
+            audience: cfg.audience.map(String::into_boxed_str),
+            claims_to_headers: claims_to_headers.into_boxed_slice(),
+            assert_claims: assert_claims.into_boxed_slice(),
+            id: config.id.clone(),
         })
     }
 
@@ -179,20 +191,38 @@ impl JwtAuthPlugin {
         &self.key_store
     }
 
-    /// Replaces the key store with an externally shared store (e.g. wired by jwks_rotator).
+    /// Replaces the key store with an externally shared store.
     pub fn with_shared_key_store(mut self, store: Arc<SharedJwksStore>) -> Self {
         self.key_store = store;
         self
     }
 
-    /// Extracts the raw token string from the request using configured token sources.
+    #[cold]
+    #[inline(never)]
+    fn reject_missing_token(req: &mut L7Request) -> Action {
+        req.headers
+            .insert_bypass(http::header::WWW_AUTHENTICATE, WWW_AUTH_MISSING);
+        Action::Reject(RejectReason::Unauthorized)
+    }
+
+    #[cold]
+    #[inline(never)]
+    fn reject_invalid_token(req: &mut L7Request) -> Action {
+        req.headers
+            .insert_bypass(http::header::WWW_AUTHENTICATE, WWW_AUTH_INVALID);
+        Action::Reject(RejectReason::Unauthorized)
+    }
+
+    /// Extracts the raw token slice from `L7Request` using pre-hashed [`HeaderKey`] lookups.
+    #[inline]
     fn extract_token<'a>(&self, req: &'a L7Request) -> Option<&'a str> {
         for source in &self.token_sources {
             match source {
-                TokenSource::Header { name, prefix } => {
-                    if let Some(val) = req.headers.get(name)
-                        && let Ok(s) = val.to_str()
-                    {
+                TokenSource::Header { key, prefix } => {
+                    for val in req.headers.get_all_prehashed(key) {
+                        let Ok(s) = val.to_str() else {
+                            continue;
+                        };
                         let trimmed = s.trim();
                         if prefix.is_empty() {
                             if !trimmed.is_empty() {
@@ -210,12 +240,13 @@ impl JwtAuthPlugin {
                     }
                 }
                 TokenSource::Cookie { name } => {
-                    if let Some(val) = req.headers.get(http::header::COOKIE)
-                        && let Ok(cookie_str) = val.to_str()
-                    {
+                    for val in req.headers.get_all_prehashed(&KEY_COOKIE) {
+                        let Ok(cookie_str) = val.to_str() else {
+                            continue;
+                        };
                         for pair in cookie_str.split(';') {
                             if let Some((k, v)) = pair.trim().split_once('=')
-                                && k.trim() == name
+                                && k.trim() == name.as_ref()
                             {
                                 let token = v.trim();
                                 if !token.is_empty() {
@@ -229,7 +260,7 @@ impl JwtAuthPlugin {
                     if let Some(query) = req.uri.query() {
                         for pair in query.split('&') {
                             if let Some((k, v)) = pair.split_once('=')
-                                && k == param
+                                && k == param.as_ref()
                             {
                                 let token = v.trim();
                                 if !token.is_empty() {
@@ -257,39 +288,44 @@ impl PreUpstreamPlugin for JwtAuthPlugin {
     }
 
     fn on_upstream_request(&self, req: &mut L7Request, _target_upstream: &mut u16) -> Action {
-        let token_str = match self.extract_token(req) {
-            Some(t) => t,
-            None => {
-                req.headers.insert_bypass(
-                    http::header::WWW_AUTHENTICATE,
-                    HeaderValue::from_static("Bearer realm=\"velda-edge\""),
-                );
-                return Action::Reject(RejectReason::Unauthorized);
-            }
+        // 1. Pull 64B JwtCache control block (`boot_salt` + bit-shift masks) into L1D (`_MM_HINT_T0`)
+        //    while scanning L2-resident `HeaderWorkspace` for the inbound token.
+        self.cache.prefetch_control_l1();
+
+        let Some(token_str) = self.extract_token(req) else {
+            return Self::reject_missing_token(req);
         };
 
-        let token_hash = JwtCache::hash_token(token_str);
-        // Use authoritative pre-sampled ingress timestamp (zero redundant clock syscalls on hot path)
+        // 2. Fast structural 2-dot guard: drop malformed garbage before hashing or touching L3 cache
+        if !is_plausible_jwt_shape(token_str) {
+            return Self::reject_invalid_token(req);
+        }
+
         let now = req.ingress_time_sec();
+        let key_epoch = self.key_store.epoch();
+        let cache_enabled = self.cache.is_enabled();
 
-        // 1. Negative Cache check: fail-fast on known bad tokens
-        if self.cache.is_negative(token_hash, now) {
-            req.headers.insert_bypass(
-                http::header::WWW_AUTHENTICATE,
-                HeaderValue::from_static("Bearer error=\"invalid_token\""),
-            );
-            return Action::Reject(RejectReason::Unauthorized);
-        }
-
-        // 2. Positive Cache check: zero-allocation claims injection on cache hit
-        if let Some(cached_headers) = self.cache.get_valid(token_hash, now) {
-            for (name, val) in cached_headers {
-                req.headers.insert(name, val);
+        // 3. Convert JWT -> `fp: u128` and query bit-shifted L3 SIMD bucket
+        let fp = if cache_enabled {
+            let fp = self.cache.token_to_u128(token_str);
+            match self.cache.lookup(fp, now, key_epoch) {
+                CacheLookup::Positive(cached_headers) => {
+                    if let Some(headers) = cached_headers.as_deref() {
+                        for (key, val) in headers {
+                            req.headers.insert_prehashed(key, val.clone());
+                        }
+                    }
+                    return Action::Continue;
+                }
+                CacheLookup::Unauthorized => return Self::reject_invalid_token(req),
+                CacheLookup::Forbidden => return Action::Reject(RejectReason::Forbidden),
+                CacheLookup::Miss => fp,
             }
-            return Action::Continue;
-        }
+        } else {
+            0
+        };
 
-        // 3. Cache Miss: verify signature and business policies
+        // 4. Cache Miss: verify cryptographic signature and claim policies
         let table_guard = self.key_store.load();
         let policy = JwtValidationPolicy {
             expected_alg: self.algorithm,
@@ -304,28 +340,40 @@ impl PreUpstreamPlugin for JwtAuthPlugin {
 
         match verify_jwt(token_str, &policy, now) {
             Ok(verified) => {
-                for (name, val) in &verified.injected_headers {
-                    req.headers.insert(name.clone(), val.clone());
+                if let Some(headers) = verified.injected_headers.as_deref() {
+                    for (key, val) in headers {
+                        req.headers.insert_prehashed(key, val.clone());
+                    }
                 }
-                self.cache.insert_valid(
-                    token_hash,
-                    verified.exp_epoch_secs,
-                    verified.injected_headers,
-                    now,
-                );
+                if cache_enabled {
+                    self.cache.insert_valid(
+                        fp,
+                        verified.exp_epoch_secs,
+                        verified.injected_headers,
+                        now,
+                        key_epoch,
+                    );
+                }
                 Action::Continue
             }
-            Err("Claim assertion failed") => {
-                // Claim mismatch results in 403 Forbidden
+            Err(err @ JwtVerifyError::ClaimAssertionFailed) => {
+                tracing::debug!(plugin_id = %self.id, error = ?err, "JWT rejected by claim assertion");
+                if cache_enabled {
+                    self.cache.insert_reject(fp, true, now, key_epoch);
+                }
                 Action::Reject(RejectReason::Forbidden)
             }
-            Err(_err_msg) => {
-                self.cache.insert_invalid(token_hash, now);
-                req.headers.insert_bypass(
-                    http::header::WWW_AUTHENTICATE,
-                    HeaderValue::from_static("Bearer error=\"invalid_token\""),
-                );
-                Action::Reject(RejectReason::Unauthorized)
+            Err(JwtVerifyError::NoActiveKeys) => {
+                tracing::debug!(plugin_id = %self.id, "JWT rejected: JWKS key table empty");
+                // Initial background JWKS fetch has not populated keys yet; do not poison negative cache
+                Self::reject_invalid_token(req)
+            }
+            Err(err) => {
+                tracing::debug!(plugin_id = %self.id, error = ?err, now = now, "JWT verification failed");
+                if cache_enabled {
+                    self.cache.insert_reject(fp, false, now, key_epoch);
+                }
+                Self::reject_invalid_token(req)
             }
         }
     }
@@ -348,6 +396,11 @@ impl PreUpstreamPlugin for JwtAuthPlugin {
     #[inline(always)]
     fn shared_jwks_store(&self) -> Option<Arc<SharedJwksStore>> {
         Some(Arc::clone(&self.key_store))
+    }
+
+    #[inline(always)]
+    fn requires_external_jwks(&self) -> bool {
+        !self.has_static_key
     }
 }
 
@@ -391,10 +444,7 @@ mod tests {
             "audience": null,
             "claims_to_headers": claims_to_headers,
             "assert_claims": {},
-            "cache_shards": 16,
-            "cache_shard_capacity": 512,
-            "cache_ttl_secs": 300,
-            "negative_cache_ttl_secs": 10
+            "cache_ttl_secs": 300
         })
     }
 
@@ -424,7 +474,7 @@ mod tests {
     }
 
     #[test]
-    fn test_on_upstream_request_valid_token_with_cache() {
+    fn test_valid_token_cache_hit_and_missing_optional_claim_preserves_client_headers() {
         let secret = "secret-12345678901234567890";
         let config = PluginConfig {
             id: "jwt_auth".into(),
@@ -432,21 +482,31 @@ mod tests {
                 secret,
                 serde_json::json!({
                     "sub": "x-user-id",
-                    "roles": "x-user-roles"
+                    "roles": "x-user-roles",
+                    "preferred_lang": "accept-language"
                 }),
             ),
         };
 
         let plugin = JwtAuthPlugin::from_config(&config).unwrap();
+        // Token includes `sub` and `roles`, omits `preferred_lang`
         let token = create_hs256_token(
             secret,
             r#"{"sub":"user_123","roles":["admin","billing"],"exp":2500000000}"#,
         );
 
-        let mut headers = HeaderWorkspace::empty(4);
+        let mut headers = HeaderWorkspace::empty(6);
         headers.insert(
             AUTHORIZATION,
             HeaderValue::from_str(&format!("Bearer {token}")).unwrap(),
+        );
+        headers.insert(
+            HeaderName::from_static("x-user-id"),
+            HeaderValue::from_static("old_val_overwritten"),
+        );
+        headers.insert(
+            http::header::ACCEPT_LANGUAGE,
+            HeaderValue::from_static("vi-VN"),
         );
 
         let mut req = L7Request::new(
@@ -457,14 +517,16 @@ mod tests {
             Body::Empty,
         );
 
-        // First invocation: Cache Miss -> Cryptographic verification -> Cache Populate
+        // 1. Cold verify -> overwrites present claim header (`x-user-id`), adds `x-user-roles`,
+        //    and leaves absent optional claim header (`accept-language`) untouched!
         let mut target1 = 1;
         let action1 = plugin.on_upstream_request(&mut req, &mut target1);
         assert!(matches!(action1, Action::Continue));
         assert_eq!(req.headers.get("x-user-id").unwrap(), "user_123");
         assert_eq!(req.headers.get("x-user-roles").unwrap(), "admin, billing");
+        assert_eq!(req.headers.get("accept-language").unwrap(), "vi-VN");
 
-        // Second invocation with fresh request: Positive Cache Hit
+        // 2. Second request -> L3 SIMD Positive Cache Hit
         let mut req2 = L7Request::new(
             Method::GET,
             Uri::from_static("/api/resource"),
@@ -484,72 +546,84 @@ mod tests {
     }
 
     #[test]
-    fn test_on_upstream_request_negative_cache() {
-        let secret = "secret-12345678901234567890";
+    fn test_negative_and_forbidden_caching_plus_key_rotation_invalidation() {
+        let secret1 = "secret-11111111111111111111";
+        let secret2 = "secret-22222222222222222222";
         let config = PluginConfig {
             id: "jwt_auth".into(),
-            config: default_jwt_json(secret, serde_json::json!({})),
+            config: serde_json::json!({
+                "algorithm": "HS256",
+                "secret_key": secret1,
+                "token_sources": [{ "type": "header", "name": "authorization", "prefix": "Bearer " }],
+                "validate_exp": true,
+                "clock_skew_secs": 60,
+                "claims_to_headers": {},
+                "assert_claims": { "role": "admin" },
+                "cache_ttl_secs": 300
+            }),
         };
 
         let plugin = JwtAuthPlugin::from_config(&config).unwrap();
-        let bad_token = "invalid.token.signature";
+        let tok_admin =
+            create_hs256_token(secret1, r#"{"sub":"u1","role":"admin","exp":2500000000}"#);
+        let tok_viewer =
+            create_hs256_token(secret1, r#"{"sub":"u2","role":"viewer","exp":2500000000}"#);
 
-        let mut headers = HeaderWorkspace::empty(4);
-        headers.insert(
-            AUTHORIZATION,
-            HeaderValue::from_str(&format!("Bearer {bad_token}")).unwrap(),
-        );
+        let make_req = |tok: &str| {
+            L7Request::new(
+                Method::GET,
+                Uri::from_static("/admin"),
+                Version::HTTP_11,
+                HeaderWorkspace::from_iter([(
+                    AUTHORIZATION,
+                    HeaderValue::from_str(&format!("Bearer {tok}")).unwrap(),
+                )]),
+                Body::Empty,
+            )
+        };
 
-        let mut req = L7Request::new(
-            Method::GET,
-            Uri::from_static("/api/resource"),
-            Version::HTTP_11,
-            headers,
-            Body::Empty,
-        );
-
-        // First attempt: validation fails and gets added to negative cache
-        let mut target1 = 1;
-        let action1 = plugin.on_upstream_request(&mut req, &mut target1);
+        let mut target = 1;
+        // Valid admin passes and populates Positive Cache
         assert!(matches!(
-            action1,
+            plugin.on_upstream_request(&mut make_req(&tok_admin), &mut target),
+            Action::Continue
+        ));
+        // Viewer fails assert_claims -> 403 Forbidden (cached in L3 reject bit)
+        assert!(matches!(
+            plugin.on_upstream_request(&mut make_req(&tok_viewer), &mut target),
+            Action::Reject(RejectReason::Forbidden)
+        ));
+        assert!(matches!(
+            plugin.on_upstream_request(&mut make_req(&tok_viewer), &mut target),
+            Action::Reject(RejectReason::Forbidden)
+        ));
+
+        // Rotate SharedJwksStore to secret2 -> epoch increments, revoking cached tok_admin immediately!
+        let new_key = VerifierKey::new(JwtAlgorithm::HS256, Some(secret2), None).unwrap();
+        plugin
+            .key_store()
+            .update(JwksKeyTable::with_static_key(new_key, JwtAlgorithm::HS256));
+
+        assert!(matches!(
+            plugin.on_upstream_request(&mut make_req(&tok_admin), &mut target),
             Action::Reject(RejectReason::Unauthorized)
         ));
-        assert_eq!(
-            req.headers.get("www-authenticate").unwrap(),
-            "Bearer error=\"invalid_token\""
-        );
-
-        // Second attempt: hits negative cache immediately
-        let mut target2 = 1;
-        let action2 = plugin.on_upstream_request(&mut req, &mut target2);
-        assert!(matches!(
-            action2,
-            Action::Reject(RejectReason::Unauthorized)
-        ));
-        assert_eq!(
-            req.headers.get("www-authenticate").unwrap(),
-            "Bearer error=\"invalid_token\""
-        );
     }
 
     #[test]
-    fn test_token_from_cookie_and_query() {
+    fn test_http2_split_cookie_headers_and_query_extraction() {
         let secret = "cookie-secret";
         let config = PluginConfig {
             id: "jwt_auth".into(),
             config: serde_json::json!({
                 "algorithm": "HS256",
                 "secret_key": secret,
-                "public_key_pem": null,
                 "token_sources": [
                     { "type": "cookie", "name": "auth_cookie" },
                     { "type": "query", "param": "access_token" }
                 ],
                 "validate_exp": true,
                 "clock_skew_secs": 60,
-                "issuer": null,
-                "audience": null,
                 "claims_to_headers": { "sub": "x-user-id" },
                 "assert_claims": {},
                 "cache_ttl_secs": 300
@@ -559,71 +633,41 @@ mod tests {
         let plugin = JwtAuthPlugin::from_config(&config).unwrap();
         let token = create_hs256_token(secret, r#"{"sub":"cookie_user","exp":2500000000}"#);
 
-        // Test cookie extraction
+        // RFC 9113 §8.2.3 split `cookie` header fields: token sits in the SECOND `cookie` header!
         let mut headers = HeaderWorkspace::empty(4);
-        headers.insert(
+        headers.append(http::header::COOKIE, HeaderValue::from_static("theme=dark"));
+        headers.append(
             http::header::COOKIE,
-            HeaderValue::from_str(&format!("theme=dark; auth_cookie={token}; lang=en")).unwrap(),
+            HeaderValue::from_str(&format!("auth_cookie={token}")).unwrap(),
         );
         let mut req = L7Request::new(
             Method::GET,
             Uri::from_static("/api/profile"),
-            Version::HTTP_11,
+            Version::HTTP_2,
             headers,
             Body::Empty,
         );
         let mut target = 1;
-        let action = plugin.on_upstream_request(&mut req, &mut target);
-        assert!(matches!(action, Action::Continue));
+        assert!(matches!(
+            plugin.on_upstream_request(&mut req, &mut target),
+            Action::Continue
+        ));
         assert_eq!(req.headers.get("x-user-id").unwrap(), "cookie_user");
-
-        // Test query param extraction
-        let query_uri = format!("/api/profile?access_token={token}&format=json")
-            .parse::<Uri>()
-            .unwrap();
-        let mut req_query = L7Request::new(
-            Method::GET,
-            query_uri,
-            Version::HTTP_11,
-            HeaderWorkspace::empty(4),
-            Body::Empty,
-        );
-        let mut target_q = 1;
-        let action_query = plugin.on_upstream_request(&mut req_query, &mut target_q);
-        assert!(matches!(action_query, Action::Continue));
-        assert_eq!(req_query.headers.get("x-user-id").unwrap(), "cookie_user");
     }
 
     #[test]
     fn test_malformed_multibyte_utf8_auth_header_does_not_panic() {
         let config = PluginConfig {
             id: "jwt_auth".into(),
-            config: serde_json::json!({
-                "algorithm": "HS256",
-                "secret_key": "my-secret-key",
-                "public_key_pem": null,
-                "token_sources": [
-                    { "type": "header", "name": "authorization", "prefix": "Bearer " }
-                ],
-                "validate_exp": true,
-                "clock_skew_secs": 60,
-                "issuer": null,
-                "audience": null,
-                "claims_to_headers": {},
-                "assert_claims": {},
-                "cache_ttl_secs": 300
-            }),
+            config: default_jwt_json("my-secret-key", serde_json::json!({})),
         };
-
         let plugin = JwtAuthPlugin::from_config(&config).unwrap();
 
-        // 3-byte UTF-8 character (e.g. 'Tiếng Việt' or '日') at the boundary
         let mut headers = HeaderWorkspace::empty(4);
         headers.insert(
             AUTHORIZATION,
             HeaderValue::from_str("Tiếng_Việt_Bearer_Token").unwrap(),
         );
-
         let mut req = L7Request::new(
             Method::GET,
             Uri::from_static("/api/resource"),
@@ -632,7 +676,6 @@ mod tests {
             Body::Empty,
         );
 
-        // Must reject cleanly with 401 without panicking!
         let mut target = 1;
         let action = plugin.on_upstream_request(&mut req, &mut target);
         assert!(matches!(action, Action::Reject(RejectReason::Unauthorized)));

@@ -27,16 +27,11 @@
 //!     | - Connection: close                                   |
 //!     +-------------------------------------------------------+
 //!                            |
-//!                            v (httparse zero-alloc status & header parse)
+//!                            v (httparse status + Content-Length / chunked decode)
 //!     +-------------------------------------------------------+
 //!     | Status 200 OK -> Return JSON Bytes in RAM             |
 //!     +-------------------------------------------------------+
 //! ```
-//!
-//! # Architectural Invariants
-//! - **Strict Background Execution**: Driven entirely on Shadow Logistics runtimes (`SCHED_IDLE`).
-//! - **Bounded Allocation**: Caps response body at 64 KB (fits dozens of keys) to prevent memory exhaustion attacks.
-//! - **Zero Disk I/O**: Operates 100% in RAM buffers.
 
 use std::io::Write as _;
 use std::sync::Arc;
@@ -50,7 +45,7 @@ use tokio_rustls::client::TlsStream;
 use crate::config::OutboundTlsConfig;
 use crate::error::PluginError;
 
-const MAX_JWKS_RESPONSE_BYTES: usize = 64 * 1024; // 64 KB cap
+const MAX_JWKS_RESPONSE_BYTES: usize = 64 * 1024; // 64 KiB cap
 
 enum ClientStream {
     Plain(TcpStream),
@@ -80,7 +75,7 @@ impl ClientStream {
     }
 }
 
-/// Standalone, non-blocking HTTP client for fetching JWKS keys.
+/// Standalone, non-blocking HTTP/1.1 client for fetching JWKS keys on Shadow Workers.
 pub struct JwksFetcher {
     tls_config: Arc<ClientConfig>,
     connect_timeout: Duration,
@@ -92,7 +87,6 @@ impl JwksFetcher {
     pub fn new(request_timeout_secs: u64, tls: &OutboundTlsConfig) -> Result<Self, PluginError> {
         let timeout = Duration::from_secs(request_timeout_secs);
         let connect_timeout = timeout.min(Duration::from_secs(5));
-
         let client_config = tls.build_client_config(&["http/1.1"])?;
 
         Ok(Self {
@@ -133,7 +127,6 @@ impl JwksFetcher {
 
         let mut stream = self.connect_stream(is_tls, host, port).await?;
 
-        // Format minimal HTTP/1.1 GET request
         let mut req_bytes = Vec::with_capacity(256);
         let _ = write!(
             req_bytes,
@@ -147,7 +140,6 @@ impl JwksFetcher {
 
         stream.flush().await.map_err(PluginError::Io)?;
 
-        // Read complete response up to buffer limit
         let mut resp_raw = Vec::with_capacity(8192);
         let mut buf = [0u8; 4096];
         loop {
@@ -156,7 +148,7 @@ impl JwksFetcher {
                 .map_err(|_| PluginError::Config(format!("Read timeout from '{url}'")))?
                 .map_err(PluginError::Io)?;
             if n == 0 {
-                break;
+                return Self::extract_http_body(&resp_raw);
             }
             resp_raw.extend_from_slice(&buf[..n]);
             if resp_raw.len() > MAX_JWKS_RESPONSE_BYTES {
@@ -164,9 +156,12 @@ impl JwksFetcher {
                     "JWKS response exceeded maximum allowable size ({MAX_JWKS_RESPONSE_BYTES} bytes)"
                 )));
             }
+            // Return immediately once Content-Length or chunked EOF (`0\r\n\r\n`) is complete
+            // without blocking on TLS close_notify / TCP FIN from Keep-Alive servers.
+            if let Some(body) = Self::try_extract_http_body_complete(&resp_raw)? {
+                return Ok(body);
+            }
         }
-
-        Self::extract_http_body(&resp_raw)
     }
 
     async fn connect_stream(
@@ -196,17 +191,13 @@ impl JwksFetcher {
         }
     }
 
-    fn extract_http_body(raw: &[u8]) -> Result<Vec<u8>, PluginError> {
+    fn try_extract_http_body_complete(raw: &[u8]) -> Result<Option<Vec<u8>>, PluginError> {
         let mut headers = [httparse::EMPTY_HEADER; 64];
         let mut parsed = httparse::Response::new(&mut headers);
 
         let body_offset = match parsed.parse(raw) {
             Ok(httparse::Status::Complete(offset)) => offset,
-            Ok(httparse::Status::Partial) => {
-                return Err(PluginError::Config(
-                    "Incomplete HTTP response from JWKS server".into(),
-                ));
-            }
+            Ok(httparse::Status::Partial) => return Ok(None),
             Err(e) => {
                 return Err(PluginError::Config(format!(
                     "HTTP response parse error: {e}"
@@ -221,6 +212,140 @@ impl JwksFetcher {
             )));
         }
 
-        Ok(raw[body_offset..].to_vec())
+        let mut is_chunked = false;
+        let mut content_length: Option<usize> = None;
+        for hdr in parsed.headers.iter() {
+            if hdr.name.eq_ignore_ascii_case("transfer-encoding") {
+                if let Ok(val) = std::str::from_utf8(hdr.value)
+                    && val
+                        .split(',')
+                        .any(|t| t.trim().eq_ignore_ascii_case("chunked"))
+                {
+                    is_chunked = true;
+                }
+            } else if hdr.name.eq_ignore_ascii_case("content-length")
+                && let Ok(val) = std::str::from_utf8(hdr.value)
+                && let Ok(len) = val.trim().parse::<usize>()
+            {
+                content_length = Some(len);
+            }
+        }
+
+        let wire_body = &raw[body_offset..];
+        if is_chunked {
+            return try_decode_chunked_body(wire_body);
+        }
+
+        if let Some(len) = content_length {
+            if wire_body.len() >= len {
+                return Ok(Some(wire_body[..len].to_vec()));
+            }
+            return Ok(None);
+        }
+
+        Ok(None)
+    }
+
+    fn extract_http_body(raw: &[u8]) -> Result<Vec<u8>, PluginError> {
+        if let Some(complete) = Self::try_extract_http_body_complete(raw)? {
+            return Ok(complete);
+        }
+        let mut headers = [httparse::EMPTY_HEADER; 64];
+        let mut parsed = httparse::Response::new(&mut headers);
+        let body_offset = match parsed.parse(raw) {
+            Ok(httparse::Status::Complete(offset)) => offset,
+            Ok(httparse::Status::Partial) => {
+                return Err(PluginError::Config(
+                    "Incomplete HTTP response from JWKS server".into(),
+                ));
+            }
+            Err(e) => {
+                return Err(PluginError::Config(format!(
+                    "HTTP response parse error: {e}"
+                )));
+            }
+        };
+        let is_chunked = parsed.headers.iter().any(|hdr| {
+            hdr.name.eq_ignore_ascii_case("transfer-encoding")
+                && std::str::from_utf8(hdr.value).is_ok_and(|v| {
+                    v.split(',')
+                        .any(|t| t.trim().eq_ignore_ascii_case("chunked"))
+                })
+        });
+        let wire_body = &raw[body_offset..];
+        if is_chunked {
+            return try_decode_chunked_body(wire_body)?.ok_or_else(|| {
+                PluginError::Config("Truncated chunked JWKS HTTP body before EOF".into())
+            });
+        }
+        for hdr in parsed.headers.iter() {
+            if hdr.name.eq_ignore_ascii_case("content-length")
+                && let Ok(val) = std::str::from_utf8(hdr.value)
+                && let Ok(len) = val.trim().parse::<usize>()
+            {
+                return Err(PluginError::Config(format!(
+                    "Truncated JWKS HTTP body: expected {len} bytes, got {} bytes",
+                    wire_body.len()
+                )));
+            }
+        }
+        Ok(wire_body.to_vec())
+    }
+}
+
+/// Incrementally decodes RFC 9112 §7.1 HTTP/1.1 `Transfer-Encoding: chunked` frames.
+/// Returns `Ok(None)` when more network bytes are needed, or `Ok(Some(payload))` on `0\r\n\r\n`.
+fn try_decode_chunked_body(mut input: &[u8]) -> Result<Option<Vec<u8>>, PluginError> {
+    let mut out = Vec::with_capacity(input.len());
+    loop {
+        let Some(crlf_pos) = input.windows(2).position(|w| w == b"\r\n") else {
+            return Ok(None);
+        };
+        let size_line = std::str::from_utf8(&input[..crlf_pos]).map_err(|_| {
+            PluginError::Config("Malformed chunked JWKS response: non-ASCII chunk size".into())
+        })?;
+        // Strip optional chunk extensions (`;ext=val`)
+        let hex_part = size_line.split(';').next().unwrap_or("").trim();
+        let chunk_size = usize::from_str_radix(hex_part, 16).map_err(|_| {
+            PluginError::Config(format!(
+                "Malformed chunked JWKS response: invalid hex chunk size '{hex_part}'"
+            ))
+        })?;
+
+        input = &input[crlf_pos + 2..];
+        if chunk_size == 0 {
+            if input.starts_with(b"\r\n") {
+                return Ok(Some(out));
+            }
+            if let Some(trailer_end) = input.windows(4).position(|w| w == b"\r\n\r\n") {
+                let _ = trailer_end;
+                return Ok(Some(out));
+            }
+            return Ok(None);
+        }
+
+        if input.len() < chunk_size + 2 {
+            return Ok(None);
+        }
+        if &input[chunk_size..chunk_size + 2] != b"\r\n" {
+            return Err(PluginError::Config(
+                "Malformed chunked JWKS response: missing CRLF after chunk payload".into(),
+            ));
+        }
+
+        out.extend_from_slice(&input[..chunk_size]);
+        input = &input[chunk_size + 2..];
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_extract_http_body_decodes_chunked_transfer_encoding() {
+        let raw = b"HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nTransfer-Encoding: chunked\r\n\r\n9\r\n{\"keys\":[\r\n3;ext=1\r\n]}\n\r\n0\r\n\r\n";
+        let decoded = JwksFetcher::extract_http_body(raw).unwrap();
+        assert_eq!(decoded, b"{\"keys\":[]}\n");
     }
 }

@@ -1,17 +1,21 @@
-//! Pre-Upstream OAuth 2.0 Token Introspection Plugin Subsystem (`oauth2_introspection`).
+//! Pre-Upstream OAuth 2.0 Token Introspection Subsystem (`oauth2_introspection`).
 //!
-//! Conforms to RFC 7662 OAuth 2.0 Token Introspection specification.
-//! Provides zero-IO in-memory 16-shard caching, persistent HTTP keep-alive connection pooling,
-//! and flexible multi-source token extraction.
+//! ```text
+//!   Warm L3 Hit (SIMD 64B Scan) ──► Synchronous `Action` (0 .await, 0 Future alloc)
+//!   Cold Cache Miss             ──► Async `.await` Single-Flight (`velda-discovery` + TLS/HTTP Keep-Alive)
+//!   Stale Window (10% in 3..10s)──► Serve Warm + Offload Async Refresh to `velda-shadow-{id}` (`coarse_sec`)
+//! ```
 
 pub mod cache;
 pub mod client;
 pub mod plugin;
 pub mod scope;
-
-pub use cache::IntrospectionCache;
-pub use client::IdpKeepAliveClient;
-pub use plugin::Oauth2IntrospectionPlugin;
-
 pub mod validation;
+
+pub use cache::{
+    CacheLookup, ColdOutcome, IntrospectionCache, OAUTH2_CACHE_MEMORY_CEILING_PERCENT,
+    compute_stale_refresh_secs, max_oauth2_cache_bytes_for,
+};
+pub use client::{IdpKeepAliveClient, IntrospectionResponse};
+pub use plugin::Oauth2IntrospectionPlugin;
 pub use validation::*;

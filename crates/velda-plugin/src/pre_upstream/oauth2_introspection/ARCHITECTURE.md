@@ -1,191 +1,88 @@
-# OAuth 2.0 Token Introspection Plugin (`oauth2_introspection`) — Architectural Specification
+# OAuth 2.0 Token Introspection Plugin (`oauth2_introspection`) — Deep Architectural Specification
 
-This document specifies the internal engine design, hot-path execution pipeline, memory invariants, and cooperative multi-tier concurrency model of the **`oauth2_introspection`** pre-upstream plugin (RFC 7662).
-
----
-
-## 1. System Mindset & Architectural Invariants
-
-The `oauth2_introspection` plugin acts as an ultra-high-throughput, zero-IO Layer 7 token authentication and identity enrichment gateway at the edge, enforcing five non-negotiable architectural invariants:
-
-1. **Zero-IO Hot-Path Invariant**:
-   Serving paths **never** parse JSON, allocate dynamic memory, read from disk, or make synchronous network calls on warm requests. Granted scopes and upstream claim headers are pre-materialized into RAM at initial introspection time, reducing hot-path serving to sub-2ns L1 lookups and bulk header injection (`reserve` + `insert`).
-2. **Two-Tier Hardware-Aligned Caching**:
-   - **Tier 1 (Core-Local L1)**: Direct-mapped, zero-lock, zero-atomic cache local to each pinned worker thread (`thread_local!`), delivering sub-2ns lookup latency.
-   - **Tier 2 (Hardware-Sharded L2)**: Dynamically sharded in-memory cache striped across CPU cores with `#[repr(align(64))]` cache-line alignment to eliminate false sharing.
-3. **Smooth Cooperative Worker Coordination (Traffic Worker $\leftrightarrow$ Shadow Worker)**:
-   - **Traffic Workers** (`velda-worker-{id}`, `SCHED_OTHER`): Serve client traffic exclusively. On token stale detection (< 15s remaining), dispatch an asynchronous background revalidation task to low-priority shadow workers via non-blocking queue (`try_dispatch_shadow`). If the queue is saturated, the task is dropped cleanly without blocking the traffic thread or polluting the hot path.
-   - **Shadow Workers** (`velda-shadow-{id}`, `SCHED_IDLE`): Execute HTTP keep-alive calls in background OS idle priority. Upon completion, they update the L2 cache and release the single-flight lease. They never pollute thread-local storage or compete with active client traffic.
-4. **Single-Flight In-Flight Deduplication**:
-   When a token enters its stale window (< 15s remaining), an atomic revalidation lease (`mark_revalidating`) ensures that **exactly one** background refresh task is dispatched across all incoming requests and CPU cores, preventing thundering herd attacks against the Authorization Server.
-5. **Anti-Header Spoofing Security**:
-   All client-supplied request headers matching configured claim targets (e.g. `x-user-id`, `x-client-id`, `x-user-role`) are unconditionally stripped prior to injecting authenticated claims. If an optional claim is absent in the IdP response, fraudulent client headers are removed rather than leaked to upstream backends.
-
----
-
-## 2. End-to-End Request Hot-Path Pipeline
-
-```mermaid
-flowchart TD
-    subgraph Ingress["Phase 1: Ingress & Token Extraction"]
-        A["Incoming L7Request"] --> B{"1. Extract Token\n(Header / Cookie / Query)"}
-        B -- "Missing" --> C["401 Unauthorized\n(missing_token)"]
-        B -- "Extracted (&str)" --> D["2. 128-bit Avalanche Fingerprint\n(token_fingerprint_128)"]
-    end
-
-    subgraph Tier1L1["Phase 2: Core-Local L1 Cache (Thread-Local)"]
-        D --> E{"L1 Lookup (now < l1_exp?)\n[Zero Lock, Zero Atomic]"}
-        E -- "Hit (Fresh)" --> F["Fast-Path Claims Handle\n(< 2ns latency)"]
-        E -- "Miss / Expired" --> G{"Phase 3: Tier 2 Sharded L2 Cache"}
-    end
-
-    subgraph Tier2L2["Phase 3: Hardware-Sharded L2 Cache (64-byte Aligned)"]
-        G -- "Negative Hit" --> H["401 Unauthorized\n(invalid_token, < 15ns)"]
-        G -- "Fresh Hit" --> I["Insert into L1 (l1_exp = exp - 15s)\nReturn Claims"]
-        G -- "Stale Hit (< 15s left)" --> J{"mark_revalidating\n(Single-Flight Deduplication)"}
-        J -- "Won Lease" --> K["Dispatch Shadow Task\n(try_dispatch_shadow)"]
-        J -- "Already In-Flight" --> L["Serve Existing Claims (Hit)"]
-        K --> L
-        G -- "Cold Miss" --> M["Phase 4: Persistent Keep-Alive IdP Query"]
-    end
-
-    subgraph ColdMiss["Phase 4: IdP Network Introspection (RFC 7662)"]
-        M --> N["Query IdP over Keep-Alive Pool\n(With Retry on Closed Socket)"]
-        N -- "Active" --> O["Pre-Materialize Claims & Headers\nStore Positive L2 + Insert L1"]
-        N -- "Inactive" --> P["Store Negative L2 (Anti-DoS)\n401 Unauthorized"]
-        N -- "IdP Error" --> Q{"fallback_behavior"}
-        Q -- "reject" --> R["502 Bad Gateway\n(idp_unavailable)"]
-        Q -- "allow" --> S["Fail-Open: Continue"]
-    end
-
-    subgraph UpstreamDispatch["Phase 5: Scope & Security Enforcement"]
-        F --> T{"Validate Scopes\n(check_scopes)"}
-        I --> T
-        L --> T
-        O --> T
-        T -- "Insufficient" --> U["403 Forbidden\n(insufficient_scope)"]
-        T -- "Satisfied" --> V["Strip Credentials\n(hide_credentials = true)"]
-        V --> W["Anti-Spoofing: Strip Client Target Headers"]
-        W --> X["Bulk Inject Authenticated Claims Headers"]
-        X --> Y["Forward Request (Action::Continue)"]
-    end
+```text
++---------------------------------------------------------------------------------------------------+
+|                   OAUTH2 INTROSPECTION: HYBRID SYNC/ASYNC & 10%-RAM L3 ENGINE                     |
+|                                                                                                   |
+|  [Downstream Request (`L7Request`, HeaderWorkspace warm in L2)]                                   |
+|         │                                                                                         |
+|         ▼                                                                                         |
+|  [1. Synchronous Warm Entry: `try_on_upstream_request`] (0 .await, 0 Future alloc)                |
+|    • `prefetch_control_l1()` pulls 64B `IntrospectionCache` control line (`_MM_HINT_T0`)          |
+|    • Extract token via pre-hashed `HeaderKey` AVX2/SSE2/NEON/SWAR lookups + split HTTP/2 Cookies  |
+|    • Hash `SHA-256(boot_salt || token) -> fp: u128`                                               |
+|    • `_MM_HINT_T2` (`prefetcht2`) -> L3 `BucketGroup` (`tags: TagLine([u8; 64])`)                 |
+|    ├─► `Hit`: apply `insert_prehashed` claims + `hide_credentials` -> `Some(Action::Continue)`    |
+|    ├─► `Stale` (`exp - now <= clamp(ttl/10, 3, 10)`): non-blocking `try_dispatch_shadow` refresh  |
+|    ├─► `Forbidden` / `Unauthorized`: reject `403` / `401` (`0` IdP calls)                         |
+|    └─► `Miss` (or `cache_ttl_seconds == 0`): return `None`                                        |
+|         │                                                                                         |
+|         ▼                                                                                         |
+|  [2. Cold Yield Entry: `on_upstream_request_async` (.await yields `velda-worker-{id}`)]           |
+|    • `InFlightCoordinator` (64 shards, capped at 4,096 concurrent distinct tokens)                |
+|    • Coalesces duplicate concurrent misses onto 1 leader `tokio::sync::broadcast` channel         |
+|    • Leader calls `IdpKeepAliveClient::introspect(token).await`:                                  |
+|        ├─ Endpoint via `velda-discovery` (`SocketAddr` | `HostsFileSource` -> `DnsResolver`)      |
+|        └─ Async `tokio::net::TcpStream` (+ `velda_tls::client::connect` for `https://`)           |
+|    • Commits outcome to L3 SIMD bucket (`exp`/`nbf` float/int parsed, `coarse_sec()`)             |
++---------------------------------------------------------------------------------------------------+
 ```
 
 ---
 
-## 3. Two-Tier Caching Engine Design
+## 1. Execution Model Isolation: Blocking Elimination
 
-```
-+-----------------------------------------------------------------------------------+
-|                              Traffic Worker Thread                                |
-|                                                                                   |
-|  +-----------------------------------------------------------------------------+  |
-|  |                 Tier 1: CoreLocalL1Cache (Thread-Local)                     |  |
-|  |  Direct-Mapped: slot = fp & (L1_SIZE - 1) [64 entries, zero lock/atomic]    |  |
-|  |  Entry: (u128 fp, Arc<CachedClaims>, u64 l1_expires_at)                     |  |
-|  |  Invariant: l1_expires_at = expires_at.saturating_sub(15)                   |  |
-|  +---------------------------------------+-------------------------------------+  |
-|                                          |                                        |
-+------------------------------------------|----------------------------------------+
-                                           | L1 Miss (Fallthrough)
-                                           v
-+-----------------------------------------------------------------------------------+
-|                        Tier 2: IntrospectionCache (L2 RAM)                        |
-|                                                                                   |
-|   Shard Array: Box<[AlignedCacheShard]> (Power of 2, 4 to 512 shards)             |
-|   Shard Index: (fp as usize) & shard_mask                                         |
-|                                                                                   |
-|   +----------------------------------------------------------------------------+  |
-|   | #[repr(align(64))] AlignedCacheShard                                       |  |
-|   |   RwLock<CacheShard>                                                       |  |
-|   |     +-- positive:     FxHashMap<u128, Arc<CachedClaims>>                   |  |
-|   |     +-- negative:     FxHashMap<u128, u64>                                 |  |
-|   |     +-- revalidating: FxHashMap<u128, u64> (In-Flight Dedup)               |  |
-|   +----------------------------------------------------------------------------+  |
-+-----------------------------------------------------------------------------------+
-```
+Earlier versions of `oauth2_introspection` executed synchronous `std::net::TcpStream` I/O inside `on_upstream_request`, blocking the single-threaded core-pinned Tokio runtime (`velda-worker-{id}`) whenever an unseen token arrived.
 
-### 3.1 128-bit Full-Avalanche Fingerprinting (`token_fingerprint_128`)
-Tokens vary widely in format: opaque random strings, UUIDs, or 1000+ byte JWTs with identical headers and signature trailers. 
-The 128-bit fingerprint hashes 100% of the token bytes in 16-byte chunks using `as_chunks::<16>()` and SplitMix64/Golden-Ratio constants:
-```rust
-#[inline]
-pub fn token_fingerprint_128(token: &str) -> u128
-```
-- **Zero Allocations**: Evaluates directly on borrowed `&str` bytes.
-- **Zero Prefix/Suffix Blindness**: Covers every byte of the payload.
-- **Collision Resistance**: $2^{128}$ space eliminates practical collision probability in RAM cache.
-
-### 3.2 Tier 1: Core-Local L1 Cache (`CoreLocalL1Cache`)
-- Pinned directly to the CPU thread via `thread_local!`.
-- Stored as a flat 64-element array: `[Option<L1Entry>; 64]`.
-- Keyed by `u128` fingerprint without storing `token: String` (zero heap allocation on insert).
-- **The Stale-Window Invariant**: `l1_expires_at` is always set to `expires_at.saturating_sub(15)`. During the fresh window, L1 lookups succeed in < 2ns. The instant the token enters its final 15 seconds, L1 naturally misses, forcing a single check into L2.
-
-### 3.3 Tier 2: Hardware-Sharded L2 Cache (`IntrospectionCache`)
-- Scaled dynamically to CPU cores: `(cores * 4).next_power_of_two()`, clamped between 4 and 512 shards.
-- Wrapped in `#[repr(align(64))] AlignedCacheShard(pub RwLock<CacheShard>)`, guaranteeing that every lock and shard sits on an independent cache line to prevent false sharing under extreme multi-core load.
-- Uses `u128` keys across all internal maps (`positive`, `negative`, `revalidating`), completely avoiding repeated string hashing or allocations.
+The redesigned `PreUpstreamPlugin` splits execution cleanly:
+1. **`try_on_upstream_request(&self, req, target_upstream) -> Option<Action>`**:
+   - Invoked first by `velda_plugin::run_pre_upstream_plugins_async` across HTTP/1.1, HTTP/2, HTTP/3, gRPC/TCP, and gRPC/UDP pipelines.
+   - All warm cache paths (`Hit`, `Stale`, `Forbidden`, `Unauthorized`) and missing-token rejections execute synchronously without allocating a `Pin<Box<dyn Future>>` or yielding to the async executor.
+2. **`on_upstream_request_async(...)` (`.await` Cold Path Only)**:
+   - Invoked strictly when `try_on_upstream_request` returns `None` (an uncached token or `cache_ttl_seconds == 0`).
+   - Yields the individual connection coroutine while resolving DNS, executing TLS handshakes, or awaiting RFC 7662 HTTP responses, allowing tens of thousands of other concurrent streams on the same `velda-worker-{id}` thread to proceed uninterrupted.
 
 ---
 
-## 4. Cooperative Worker Coordination (Traffic $\leftrightarrow$ Shadow)
+## 2. Three-Tier Cache Hierarchy & Dynamic 10% RAM Growth (`cache.rs`)
 
-Velda Edge cleanly separates real-time request serving from asynchronous background maintenance:
+### 2.1 Removal of Unbounded `FxHashMap` & Global `thread_local!`
+The previous `CORE_L1_CACHE` global `thread_local!` shared `fp -> CachedClaims` across config reloads without tracking scope changes, creating an authorization bypass if `required_scopes` tightened on reload; and shard `FxHashMap::retain()` scans caused $O(N^2)$ stalls without bounding heap growth.
 
-| Attribute | Primary Traffic Worker (`velda-worker-{id}`) | Shadow Worker (`velda-shadow-{id}`) |
-| :--- | :--- | :--- |
-| **OS Scheduling** | `SCHED_OTHER` (Normal / Real-Time Priority) | `SCHED_IDLE` (Runs only when cores are free) |
-| **Tokio Runtime** | Single-threaded `current_thread` core-pinned | Cooperative multi-task runtime |
-| **Hot Path Access** | Reads L1 (sub-2ns), Reads L2 (sub-15ns) | Never touches L1; Updates L2 on completion |
-| **Network I/O** | Zero I/O on cache hits | Executes HTTP/1.1 Keep-Alive IdP queries |
-| **Saturated Queue** | Drops task immediately (`finish_revalidation`) | Discards backpressure without affecting traffic |
+The new design eliminates both:
+- Each `Oauth2IntrospectionPlugin` owns an isolated `Arc<IntrospectionCache>` keyed by an independent OS CSPRNG 256-bit `boot_salt`, isolating cache entries cleanly across reloads and multi-tenant plugin instances.
+- Token keys are strictly `SHA-256(boot_salt || token) -> u128` (`u128` integer key in GPRs), blocking algorithmic hash-flooding and shard-targeting attacks.
 
-### 4.1 Stale-While-Revalidate Flow
-1. Traffic Worker encounters a token with `remaining_ttl < 15s`.
-2. Traffic Worker calls `cache.mark_revalidating(fp, now)`.
-3. If `true` (lease won):
-   - Constructs revalidation future and calls `crate::hook::try_dispatch_shadow(revalidation_task)`.
-   - If dispatch fails (queue full), immediately calls `cache.finish_revalidation(fp)` and returns the existing valid claims.
-4. If `false` (lease already held by another request):
-   - Serves the existing valid claims immediately as a Hit.
-5. In the background:
-   - Shadow Worker calls `client.introspect(&token)`.
-   - On success: updates L2 with new `expires_at` and clears `revalidating`.
-   - On failure: calls `finish_revalidation(fp)`.
-6. Subsequent requests on any Traffic Worker read L2, acquire the new fresh claims, and repopulate their core-local L1.
+### 2.2 64-Byte L1D Control Line + 10% Host RAM L3 Sizing
+- **`IntrospectionCache`** is compile-time verified at `size_of == 64`, `align == 64`:
+  - `boot_salt: [u8; 32]` (`0x00..0x20`)
+  - `shards: Option<Box<[CacheShard]>>` (`0x20..0x30`, `None` allocates `0` bytes when both TTLs are `0`)
+  - `cache_ttl_secs`, `negative_ttl_secs`, `stale_refresh_secs`, `enabled`, `shard_mask`, `max_groups_log2`, `shard_shift` (`0x30..0x40`)
+- **`compute_cache_geometry(total_memory_bytes, cores)`**:
+  - Reads `velda_core::hardware::global_hardware_topology().memory_bytes()`.
+  - Computes hard budget ceiling: `max_bytes = (total_memory_bytes / 100) * 10` (`10%` of host/cgroup RAM).
+  - Allocates lean initial capacity (`4` `BucketGroup`s per shard $\approx 835\text{ KiB}$ on 64 shards) and dynamically doubles saturated shards in-place (`grow_shard_doubling`, splitting entries via bit-shift `(fp >> shard_shift) & new_mask`) while below `max_groups_per_shard`. Once the **10% RAM ceiling** is hit, `BucketGroup::evict_clock()` enforces bounded O(1) eviction.
 
-### 4.2 Bottleneck Elimination & Multi-Core Resilience Under Chaotic Traffic
-Under high concurrency (e.g. 35,000+ mixed RPS with TLS, mTLS, and HTTP/3 QUIC contending for CPU):
-1. **Zero Channel Blocking**: The dispatch between traffic worker and shadow worker is strictly non-blocking (`try_dispatch_shadow`). Traffic threads never invoke `.await` on channel capacity or block on a busy shadow worker.
-2. **Strict CPU Scheduling Segregation**: Shadow workers run on `SCHED_IDLE` (or low task priority). They yield immediately if a traffic worker needs CPU for cryptographic TLS handshakes or wire framing.
-3. **Graceful Cache Degradation**: If shadow revalidation cannot dispatch (e.g. queue backpressure), the lease is released (`finish_revalidation`), and the traffic worker continues serving the valid token claims until hard expiration.
-4. **Zero Cache-Line Bouncing**: Shards are aligned to 64 bytes (`#[repr(align(64))] AlignedCacheShard`). Independent worker cores read and write separate cache lines, avoiding CPU bus locks on multi-socket AMD EPYC platforms.
+### 2.3 Unified 64-Way `BucketGroup` Layout (`_MM_HINT_T2`)
+- `tags: TagLine([u8; 64])` occupies offset `0x00..0x40` (Cache Line 0), encoding empty (`0x00`), positive (`0x01..=0x7F`), and reject (`0x81..=0xFF`, `401` or `403`) states.
+- `flags: [u8; 64]` stores exact state (`ValidPass`, `ForbiddenScope`, `Unauthorized`) plus bit `0x80` (`FLAG_REVALIDATING`) for lockless single-flight shadow deduplication.
+- Before acquiring a shard `RwLock::read()`, `lookup()` loads `groups_base` and `group_mask` atomically and emits `prefetcht2` (`_MM_HINT_T2` / `prfm pldl3keep`), pulling only the target 64-byte `TagLine` from L3 Shared LLC while L2 remains dedicated to `HeaderWorkspace`.
+- Multi-target SIMD scanners (`AVX2` `vpcmpeqb`, `SSE2`, `aarch64` NEON, and zero-borrow 64-bit `SWAR`) evaluate all 64 tags in one pass; `__rust_alloc` is `0` on cached hits.
 
 ---
 
-## 5. Persistent HTTP Keep-Alive Client (`IdpKeepAliveClient`)
+## 3. Adaptive Stale-While-Revalidate (`10%`, `3..=10s`) & `coarse_sec()`
 
-RFC 7662 network introspection is handled via an optimized persistent connection manager:
-
-1. **Persistent Connection Pool**:
-   - Maintains an idle pool of `TcpStream` instances with `pool_max_idle_connections` capacity and `keepalive_timeout_secs` eviction.
-   - Sockets are configured with `TCP_NODELAY = true` and `SO_KEEPALIVE`.
-2. **Transparent EOF Retry**:
-   - If an Authorization Server closes an idle connection right as a request is sent (remote EOF or `BrokenPipe`), the client detects `is_pooled` and automatically reconnects once with a fresh socket, preventing spurious 502 errors.
-3. **Resource Protection (`MAX_IDP_RESPONSE_SIZE = 64KB`)**:
-   - Introspection response headers and body are strictly capped at 64KB, protecting against misconfigured or compromised IdP endpoints returning infinite streams.
+- `compute_stale_refresh_secs(cache_ttl_seconds)`:
+  - `ttl <= 3s`: `0` (no background refresh window).
+  - `ttl > 3s`: `(ttl / 10).clamp(3, 10)` seconds.
+- Idle pool timestamps (`PooledStream::last_used_sec`), stale entry checks, and background revalidation deadlines rely exclusively on `velda_core::clock::coarse_sec()`, avoiding `Instant::now()` / `clock_gettime` syscall overhead.
+- When a shadow refresh observes `active: false` after user logout, `store_negative` atomically flips the existing L3 slot's `tags` MSB (`0x80`) and `flags` (`FLAG_UNAUTHORIZED`), immediately blocking subsequent requests.
 
 ---
 
-## 6. Security & Anti-Spoofing Guarantees
+## 4. `velda-discovery` DNS, TLS & Chunked Keep-Alive Client (`client.rs`)
 
-1. **Negative Caching (Anti-DoS)**:
-   - Revoked or nonexistent tokens (`active: false`) are cached in RAM for `negative_cache_ttl_seconds` (default: 10s).
-   - Subsequent malicious requests are rejected in < 15ns without touching the IdP.
-2. **Anti-Header Spoofing**:
-   - Clients may attempt to inject headers like `x-user-id: 1` or `x-user-role: superadmin`.
-   - The plugin unconditionally deletes all target headers defined in `claims_to_headers` from `req.headers` before injecting genuine claims, ensuring zero claim leakage.
-3. **Fail-Closed vs Fail-Open (`fallback_behavior`)**:
-   - `reject`: Safely returns `502 Bad Gateway` (`idp_unavailable`) if the IdP is unreachable.
-   - `allow`: Allows fail-open routing for non-critical monitoring routes.
+- **URI Fidelity**: Parses `introspection_url` via `http::Uri`; distinguishes `http://` (default port `80`, plain async `TcpStream`) from `https://` (default port `443`, `velda_tls::client::connect` via `OutboundTlsConfig`), supporting IPv4, bracketed `[IPv6]`, and DNS hostnames with arbitrary ports.
+- **Discovery Integration**: IP literals dial directly; hostnames query `velda_discovery::DnsResolverProvider` (RAM `DnsCache` $\to$ `/etc/hosts` `HostsFileSource` $\to$ `/etc/resolv.conf` UDP DNS with LKG resilience).
+- **Wire Framing**: Parses both `Content-Length` and incremental `Transfer-Encoding: chunked` (with chunk extensions) bounded at `64 KiB`, with single transparent retry when a pooled idle Keep-Alive connection closes remotely.

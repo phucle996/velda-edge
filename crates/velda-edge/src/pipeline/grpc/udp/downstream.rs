@@ -116,7 +116,14 @@ pub async fn process_grpc_udp_request(
     sampling: GrpcSampling,
     runtime: &SharedRuntime,
 ) -> L7Response {
-    let ingress_nanos = req.ingress_time_nanos;
+    let ingress_nanos = if req.ingress_time_nanos != 0 {
+        req.ingress_time_nanos
+    } else {
+        let now = velda_core::clock::now_unix_nanos();
+        req.ingress_time_nanos = now;
+        req.state.ingress_time_nanos = now;
+        now
+    };
     let (log_url_len, log_url_bytes) = {
         let host = velda_http3::server::header::extract_host(&req.headers, &req.uri);
         velda_observability::TelemetryRecord::encode_url(true, host, req.uri.path())
@@ -322,7 +329,8 @@ pub async fn process_grpc_udp_request(
             && let Some(hooks) = &plan.pre_upstream_hooks
         {
             let mut action =
-                velda_plugin::run_pre_upstream_plugins(hooks, &mut req, &mut target_upstream);
+                velda_plugin::run_pre_upstream_plugins_async(hooks, &mut req, &mut target_upstream)
+                    .await;
             while let Action::Delay { duration, and_then } = action {
                 tokio::time::sleep(duration).await;
                 action = *and_then;

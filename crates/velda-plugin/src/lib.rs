@@ -37,5 +37,5 @@ pub use hook::{ShadowTask, set_core_shadow_sender, try_dispatch_shadow};
 pub use plan::RoutePluginPlan;
 pub use post_response::run_post_response_plugins;
 pub use pre_route::run_pre_route_plugins;
-pub use pre_upstream::run_pre_upstream_plugins;
+pub use pre_upstream::{run_pre_upstream_plugins, run_pre_upstream_plugins_async};
 pub use validation::*;

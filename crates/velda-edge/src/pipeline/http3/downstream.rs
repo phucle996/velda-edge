@@ -517,7 +517,8 @@ async fn process_http3_request(
             && let Some(hooks) = &plan.pre_upstream_hooks
         {
             let mut action =
-                velda_plugin::run_pre_upstream_plugins(hooks, &mut req, &mut target_upstream);
+                velda_plugin::run_pre_upstream_plugins_async(hooks, &mut req, &mut target_upstream)
+                    .await;
             req.state.set_upstream(target_upstream);
             while let Action::Delay { duration, and_then } = action {
                 tokio::time::sleep(duration).await;

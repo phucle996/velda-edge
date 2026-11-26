@@ -236,6 +236,8 @@ pub fn build_route_plugin_plan(
 pub fn wire_plugin_dependencies(
     available_plugins: &FxHashMap<String, LoadedPlugin>,
 ) -> Result<(), PluginError> {
+    let mut wired_jwt_targets: rustc_hash::FxHashSet<&str> = rustc_hash::FxHashSet::default();
+
     for (id, plugin) in available_plugins {
         if let LoadedPlugin::Background(bg) = plugin
             && let Some(target_id) = bg.target_jwt_auth_id()
@@ -260,6 +262,7 @@ pub fn wire_plugin_dependencies(
             };
 
             bg.attach_shared_jwks_store(store)?;
+            wired_jwt_targets.insert(target_id);
             tracing::info!(
                 rotator_id = %id,
                 target_id = %target_id,
@@ -267,6 +270,18 @@ pub fn wire_plugin_dependencies(
             );
         }
     }
+
+    for (id, plugin) in available_plugins {
+        if let LoadedPlugin::PreUpstream(pu) = plugin
+            && pu.requires_external_jwks()
+            && !wired_jwt_targets.contains(id.as_str())
+        {
+            return Err(PluginError::Config(format!(
+                "Asymmetric jwt_auth plugin '{id}' has 'public_key_pem' set to null, which requires an active companion 'jwks_rotator' targeting '{id}'"
+            )));
+        }
+    }
+
     Ok(())
 }
 
@@ -327,10 +342,7 @@ mod tests {
                 "audience": null,
                 "claims_to_headers": {},
                 "assert_claims": {},
-                "cache_shards": 16,
-                "cache_shard_capacity": 512,
-                "cache_ttl_secs": 300,
-                "negative_cache_ttl_secs": 10
+                "cache_ttl_secs": 300
             }),
         };
         let p1 = instantiate_plugin(&cfg_jwt, &[]).expect("Should instantiate jwt");
@@ -385,10 +397,7 @@ mod tests {
                 "audience": null,
                 "claims_to_headers": {},
                 "assert_claims": {},
-                "cache_shards": 16,
-                "cache_shard_capacity": 512,
-                "cache_ttl_secs": 300,
-                "negative_cache_ttl_secs": 10
+                "cache_ttl_secs": 300
             }),
         };
         available.insert(
@@ -647,5 +656,34 @@ mod tests {
         assert!(res.is_err());
         let err_msg = res.unwrap_err().to_string();
         assert!(err_msg.contains("requires target 'jwt_auth' plugin 'jwt_auth' to be active"));
+    }
+
+    #[test]
+    fn test_wire_plugin_dependencies_null_pem_without_rotator_fails() {
+        let mut available = FxHashMap::default();
+
+        let cfg_jwt = PluginConfig {
+            id: "jwt_auth".into(),
+            config: serde_json::json!({
+                "algorithm": "RS256",
+                "public_key_pem": null,
+                "token_sources": [{ "type": "header", "name": "authorization", "prefix": "Bearer " }],
+                "validate_exp": true,
+                "clock_skew_secs": 60,
+                "claims_to_headers": {},
+                "assert_claims": {},
+                "cache_ttl_secs": 300
+            }),
+        };
+        available.insert(
+            "jwt_auth".to_string(),
+            instantiate_plugin(&cfg_jwt, &[]).unwrap(),
+        );
+
+        let err = wire_plugin_dependencies(&available).unwrap_err();
+        assert!(
+            err.to_string()
+                .contains("requires an active companion 'jwks_rotator'")
+        );
     }
 }

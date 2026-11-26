@@ -1,59 +1,89 @@
 # OAuth 2.0 Token Introspection Plugin (`oauth2_introspection`)
 
-## Overview
-The `oauth2_introspection` plugin executes during the `pre_upstream` execution phase to validate opaque reference access tokens against an upstream OAuth 2.0 Authorization Server (IdP such as Keycloak, Okta, Auth0, or Ory Hydra) according to **RFC 7662**.
+```text
++---------------------------------------------------------------------------------------------------+
+|                   OAUTH2 INTROSPECTION — HYBRID WARM SYNC / COLD ASYNC ARCHITECTURE               |
+|                                                                                                   |
+|  [L2 Warm: Downstream Request (`HeaderWorkspace` / URI)]                                          |
+|         │                                                                                         |
+|         ▼ 1. Pre-hashed `HeaderKey` / split `Cookie` / URI Query extraction                       |
+|  ┌─────────────────────────────────────────────────────────────────────────────────────────────┐  |
+|  │ [L1D Control Line: 64B `IntrospectionCache` (`_MM_HINT_T0`)]                                │  |
+|  │  - `SHA-256(boot_salt || token)` -> `fp: u128` (16B integer in GPRs, 0 heap alloc)          │  |
+|  │  - `_MM_HINT_T2` (`prefetcht2`) -> L3 64-Way SIMD `BucketGroup` (`tags: [u8; 64]`)          │  |
+|  └──────────────────────┬───────────────────────────────────────────┬─────────────────────────┘  |
+|                          │                                           │                            |
+|                  (99.9%+ Warm Hit / Stale)                   (0.1% Cold Miss / TTL=0)             |
+|                          ▼                                           ▼                            |
+|  ┌──────────────────────────────────────┐    ┌─────────────────────────────────────────────────┐  |
+|  │ Fast Sync Path (0 .await, 0 alloc)   │    │ Non-Blocking `.await` Single-Flight             │  |
+|  │  • `Hit`: inject present claims      │    │  • Coalesces concurrent identical misses        │  |
+|  │  • `Stale` (10% clamped `3..=10s`):  │    │  • `velda-discovery` (`/etc/hosts` + DNS)       │  |
+|  │    offload async refresh to          │    │  • Async Keep-Alive HTTP or `velda_tls` HTTPS   │  |
+|  │    `velda-shadow-{id}` (`coarse_sec`)│    │  • Commit L3 (capped <= 10% host RAM)           │  |
+|  │  • `403` / `401` unified Tag Bit 7   │    │                                                 │  |
+|  └──────────────────────┬───────────────┘    └───────────────────────┬─────────────────────────┘  |
+|                         └──────────────────────┬─────────────────────┘                            |
+|                                                ▼ `Action::Continue`                               |
+|                                  [Upstream Service Request Pipe]                                  |
++---------------------------------------------------------------------------------------------------+
+```
 
-For detailed specifications, see:
-- [ARCHITECTURE.md](./ARCHITECTURE.md) — Internal engine design, 2-tier caching, and cooperative worker coordination.
-- [TEST.md](./TEST.md) — Comprehensive test specification and coverage matrix.
-- [BENCHMARK.md](./BENCHMARK.md) — Empirical high-throughput benchmark results on Azure VM.
+The **`oauth2_introspection`** plugin enforces RFC 7662 OAuth 2.0 Token Introspection for opaque reference tokens (or revocable access tokens) against external Authorization Servers (Ory Hydra, Keycloak, Auth0, Okta, Entra ID).
 
 ---
 
-## Architecture & Performance Invariants
+## 1. What This Plugin Does
 
-1. **Zero-IO Hot Path**: Token verification utilizes a **2-tier caching engine** (Tier-1 Core-Local Thread-Local L1 + Tier-2 Hardware-Sharded L2 with `#[repr(align(64))]` cache-line alignment), delivering sub-2ns L1 lookup latency.
-2. **128-bit Avalanche Fingerprint**: Employs `token_fingerprint_128` across 100% of token bytes with SplitMix64 mixing, eliminating prefix/suffix collision blind spots.
-3. **Single-Flight In-Flight Deduplication**: Stale tokens (< 15s remaining) dispatch exactly one background revalidation lease across all cores, eliminating thundering herd storms against the IdP.
-4. **Cooperative Shadow Revalidation**: Dispatches background revalidations exclusively to dedicated low-priority **Shadow Workers** (`velda-shadow-0`, `SCHED_IDLE`) via non-blocking queues (`try_dispatch_shadow`). If the queue is saturated, tasks drop cleanly without blocking the primary Traffic Worker.
-5. **Anti-Header Spoofing**: Unconditionally strips client-supplied request headers matching configured claim targets prior to injecting authenticated claims, preventing claim injection attacks.
-6. **Persistent HTTP Keep-Alive Pool**: Network introspection to the IdP reuses persistent TCP connections with kernel `SO_KEEPALIVE`, `TCP_NODELAY`, and transparent single-retry on remote closed connections.
-7. **Anti-DoS Negative Caching**: Inactive or revoked tokens (`active: false`) are cached in RAM for `negative_cache_ttl_seconds` to reject subsequent attacks in < 15ns.
-8. **Multi-Source Token Extraction**: Matches exact header names, cookies, and query parameters in configured order with zero-copy header borrowing.
+1. **Non-Blocking Warm/Cold Hybrid Execution**:
+   - **Warm Hits**: Evaluated synchronously via `try_on_upstream_request` with zero `.await` state machines and zero heap allocations on `velda-worker-{id}`.
+   - **Cold Misses**: Handed off to `on_upstream_request_async`, yielding the single stream coroutine cleanly via `.await` with sharded **Single-Flight coalescing** so concurrent misses never block unrelated traffic on the worker thread or stampede the IdP.
+2. **Dynamic 10%-RAM-Capped L3 SIMD Cache (`u128`)**:
+   - Compresses arbitrary-length tokens via keyed `SHA-256(boot_salt || token)` into 128-bit integers (`u128`).
+   - Starts compact (~835 KiB upfront) and dynamically grows shards within a strict **10% host/cgroup RAM ceiling** (`velda-core`), switching to O(1) SIMD clock-hand eviction once the ceiling is reached.
+3. **Adaptive Background Stale-While-Revalidate (`coarse_sec()`)**:
+   - Within the final `10%` of `cache_ttl_seconds` (clamped to `3s..=10s` for TTL `> 3s`), continues serving warm claims and dispatches an async IdP refresh to `velda-shadow-{id}`. If the user has logged out (`active: false`), the shadow task immediately flips the L3 slot to Negative (`401`).
+   - Supports `cache_ttl_seconds: 0` for sensitive routes requiring immediate zero-window revocation.
+4. **`velda-discovery` Resolution + Real HTTP/HTTPS TLS + Chunked Keep-Alive**:
+   - Resolves IdP hostnames through `velda-discovery` (`/etc/hosts`, RAM `DnsCache`, async `/etc/resolv.conf` UDP DNS with LKG fallback), connects directly to IPv4 and `[IPv6]` literals, and enforces real TLS 1.2/1.3 (`velda_tls` + `OutboundTlsConfig`) for `https://` URLs.
 
 ---
 
-## 100% Explicit Configuration
+## 2. Where It Sits in Velda Edge
+
+- **Subsystem**: `crates/velda-plugin/src/pre_upstream/oauth2_introspection/`
+- **Execution Stage**: `PreUpstreamPlugin` (`pbww = 0`; sporadic stale refreshes use `try_dispatch_shadow` to `velda-shadow-{id}`)
+- **Supported Protocols**: `SupportedProtocols::ALL_L7` (HTTP/1.1, HTTP/2, HTTP/3, and gRPC)
+
+---
+
+## 3. Requirements & Prerequisites
+
+1. **Strict Schema (`deny_unknown_fields`)**: Legacy `max_cache_entries` has been removed cleanly; total cache memory is governed automatically by the 10% RAM topology ceiling from `velda-core`.
+2. **Transport Security (`https://`)**: Production deployments passing `client_id` / `client_secret` over untrusted networks should configure `introspection_url` with `https://` and optional custom CA / mTLS certificates under `tls`.
+
+---
+
+## 4. Quick Start Configuration
 
 ```json
 {
   "id": "oauth2_introspection",
   "config": {
-    "introspection_url": "http://127.0.0.1:8080/oauth/introspect",
+    "introspection_url": "https://idp.internal:8443/oauth/introspect",
     "client_id": "velda-edge-gateway",
-    "client_secret": "sec_gateway_secret_key_12345",
+    "client_secret": "replace-with-gateway-secret",
     "auth_method": "client_secret_basic",
-    "token_headers": [
-      "x-access-token",
-      "authorization"
-    ],
-    "token_cookies": [
-      "access_token"
-    ],
-    "token_query_params": [
-      "token"
-    ],
+    "token_headers": ["x-access-token", "authorization"],
+    "token_cookies": ["access_token"],
+    "token_query_params": ["token"],
     "token_type_hint": "access_token",
-    "cache_ttl_seconds": 300,
+    "cache_ttl_seconds": 30,
     "negative_cache_ttl_seconds": 10,
-    "max_cache_entries": 10000,
     "keepalive_timeout_secs": 60,
     "pool_max_idle_connections": 10,
     "request_timeout_ms": 500,
-    "required_scopes": [
-      "read",
-      "orders"
-    ],
+    "required_scopes": ["read", "orders"],
     "claims_to_headers": [
       { "claim": "sub", "header": "x-user-id" },
       { "claim": "client_id", "header": "x-client-id" },
@@ -67,45 +97,9 @@ For detailed specifications, see:
 
 ---
 
-## Downstream Request Examples
+## 5. Documentation Directory
 
-### 1. Via Custom Header
-```bash
-curl -X GET http://127.0.0.1:8080/v1/orders \
-  -H "x-access-token: tok_9a8b7c6d5e4f3a2b1c0d"
-```
-
-### 2. Via Standard Authorization Header
-```bash
-curl -X GET http://127.0.0.1:8080/v1/orders \
-  -H "Authorization: Bearer tok_9a8b7c6d5e4f3a2b1c0d"
-```
-
-### 3. Via Cookie
-```bash
-curl -X GET http://127.0.0.1:8080/v1/orders \
-  --cookie "access_token=tok_9a8b7c6d5e4f3a2b1c0d"
-```
-
-### 4. Via Query Parameter
-```bash
-curl -X GET "http://127.0.0.1:8080/v1/ws?token=tok_9a8b7c6d5e4f3a2b1c0d&channel=notifications"
-```
-
----
-
-## Known Limitations
-
-### `introspection_url` — IPv4 / Hostname Only (No IPv6 Literal)
-
-The internal HTTP Keep-Alive client ([`client.rs`](./client.rs)) parses `introspection_url` using host/port splitting on `:` without bracket parsing.
-
-```json
-// ❌ Not supported:
-"introspection_url": "http://[::1]:8080/oauth/introspect"
-
-// ✅ Supported:
-"introspection_url": "http://127.0.0.1:8080/oauth/introspect"
-"introspection_url": "http://idp.internal:8080/oauth/introspect"
-```
-In production deployments, Authorization Servers are addressed via IPv4 or DNS hostnames.
+- **[RUNBOOK.md](RUNBOOK.md)**: Complete parameter table, revocation-window tuning guide (`0s` vs `15s..30s`), TLS/mTLS recipes, and incident playbooks.
+- **[ARCHITECTURE.md](ARCHITECTURE.md)**: Hardware cache layout (`L1D`/`L2`/`L3`), 10% RAM shard doubling, Single-Flight cold coordinator, `velda-discovery` & async HTTP/HTTPS Keep-Alive design.
+- **[BENCHMARK.md](BENCHMARK.md)**: 5-tier benchmark matrix and verified `x86-64-v3` release assembly audit (`0` `__rust_alloc` calls on warm cache hits).
+- **[TEST.md](TEST.md)**: Verified `cargo test` execution report across all 19 unit & live async mock-IdP tests.

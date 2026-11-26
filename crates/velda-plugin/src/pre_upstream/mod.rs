@@ -7,6 +7,8 @@
 //! - **Bounded Authority**: Returns [`Action::Continue`], [`Action::Respond`] (e.g. 429), or [`Action::Reject`].
 //! - **Target Context Available**: The router has already resolved the target upstream pool and endpoint.
 
+use std::future::Future;
+use std::pin::Pin;
 use std::sync::Arc;
 use velda_core::{Action, L7Request};
 
@@ -68,11 +70,32 @@ pub trait PreUpstreamPlugin: Send + Sync {
     /// Unique identifier of this plugin instance.
     fn id(&self) -> &str;
 
-    /// Evaluated on routed request before sending to upstream backend.
-    ///
-    /// Allows mutating the request, short-circuiting, or dynamically re-routing to an
-    /// alternate target upstream (e.g. Canary traffic splitting) by mutating `target_upstream`.
+    /// Synchronous evaluation used by pure-CPU pre-upstream plugins.
     fn on_upstream_request(&self, req: &mut L7Request, target_upstream: &mut u16) -> Action;
+
+    /// Non-blocking hot-path evaluation invoked first by async downstream pipelines.
+    ///
+    /// Plugins whose warm cache hit path is synchronous return `Some(action)` with zero future
+    /// overhead; on a cold network miss requiring async I/O (e.g. `oauth2_introspection`),
+    /// returning `None` hands off to [`on_upstream_request_async`].
+    #[inline(always)]
+    fn try_on_upstream_request(
+        &self,
+        req: &mut L7Request,
+        target_upstream: &mut u16,
+    ) -> Option<Action> {
+        Some(self.on_upstream_request(req, target_upstream))
+    }
+
+    /// Asynchronous cold-path evaluation invoked when `try_on_upstream_request` returns `None`.
+    fn on_upstream_request_async<'a>(
+        &'a self,
+        req: &'a mut L7Request,
+        target_upstream: &'a mut u16,
+    ) -> Pin<Box<dyn Future<Output = Action> + Send + 'a>> {
+        let action = self.on_upstream_request(req, target_upstream);
+        Box::pin(async move { action })
+    }
 
     /// Declares the reverse-permission capabilities required by this plugin.
     fn capability(&self) -> PluginCapability;
@@ -121,12 +144,16 @@ pub trait PreUpstreamPlugin: Send + Sync {
     ) -> Option<Arc<crate::pre_upstream::jwt_auth::table::SharedJwksStore>> {
         None
     }
+
+    /// Returns `true` when an authentication plugin omitted static public keys (`public_key_pem: null`)
+    /// and strictly requires an active companion `jwks_rotator` to populate its key store.
+    #[inline(always)]
+    fn requires_external_jwks(&self) -> bool {
+        false
+    }
 }
 
-/// Executes a linear chain of pre-upstream plugins.
-///
-/// Short-circuits immediately on the first non-[`Action::Continue`] result and batch-renders
-/// any pending arithmetic header mutations into `req.headers`.
+/// Executes a linear chain of pre-upstream plugins synchronously (for pure-CPU tests & callers).
 #[inline]
 pub fn run_pre_upstream_plugins(
     chain: &[Arc<dyn PreUpstreamPlugin>],
@@ -142,6 +169,36 @@ pub fn run_pre_upstream_plugins(
                     return Action::delay(duration, next);
                 } else {
                     return Action::Delay { duration, and_then };
+                }
+            }
+            action => return action,
+        }
+    }
+    Action::Continue
+}
+
+/// Executes a linear chain of pre-upstream plugins across warm sync and cold `.await` paths.
+///
+/// Warm cache hits execute synchronously via `try_on_upstream_request` with zero `Future` pinning;
+/// only plugins returning `None` (cold cache miss requiring async IdP I/O) yield via `.await`.
+#[inline]
+pub async fn run_pre_upstream_plugins_async(
+    chain: &[Arc<dyn PreUpstreamPlugin>],
+    req: &mut L7Request,
+    target_upstream: &mut u16,
+) -> Action {
+    for plugin in chain {
+        let res = match plugin.try_on_upstream_request(req, target_upstream) {
+            Some(action) => action,
+            None => plugin.on_upstream_request_async(req, target_upstream).await,
+        };
+        match res {
+            Action::Continue => continue,
+            Action::Delay { duration, and_then } => {
+                tokio::time::sleep(duration).await;
+                match *and_then {
+                    Action::Continue => continue,
+                    other => return other,
                 }
             }
             action => return action,

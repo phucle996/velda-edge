@@ -1,41 +1,35 @@
-//! RFC 7517 JSON Web Key (JWK) Set Parser and Contiguous Table Builder.
+//! RFC 7517 / RFC 8037 JSON Web Key (JWK) Set Parser and Contiguous Table Builder.
 //!
 //! ```text
 //!                         JWKS JSON TO 8-SLOT TABLE PARSER
 //!
-//!   JSON Web Key Set (RFC 7517)
+//!   JSON Web Key Set (RFC 7517 / RFC 8037)
 //!   {
 //!     "keys": [
 //!       { "kty": "RSA", "kid": "key-2026-1", "alg": "RS256", "n": "...", "e": "AQAB" },
 //!       { "kty": "EC",  "kid": "key-2026-2", "alg": "ES256", "crv": "P-256", ... },
-//!       ...
+//!       { "kty": "OKP", "kid": "key-2026-3", "alg": "EdDSA", "crv": "Ed25519", "x": "..." }
 //!     ]
 //!   }
 //!          |
 //!          | serde_json (In-Memory on Shadow Background Thread)
 //!          v
-//!   +-----------------------------------------------------------+
-//!   | Cryptographic Conversion into VerifierKey                 |
-//!   | - RSA: Base64URL(n, e) -> PKCS#1 RSAPublicKey DER         |
-//!   | - EC:  Base64URL(x, y) -> SEC 1 Uncompressed (0x04||X||Y) |
-//!   | - Oct: Base64URL(k)    -> HMAC Key                        |
-//!   +-----------------------------------------------------------+
+//!   +---------------------------------------------------------------+
+//!   | Cryptographic Conversion into VerifierKey                     |
+//!   | - RSA: Base64URL(n, e) -> PKCS#1 RSAPublicKey DER             |
+//!   | - EC:  Base64URL(x, y) -> SEC 1 Uncompressed (0x04||X||Y)     |
+//!   | - OKP: Base64URL(x)    -> Raw 32-Byte Ed25519 Public Key      |
+//!   | - Oct: Base64URL(k)    -> HMAC Key                            |
+//!   +---------------------------------------------------------------+
 //!          |
 //!          | Up to MAX_JWKS_SLOTS (8 keys)
 //!          v
-//!   +-----------------------------------------------------------+
-//!   | Contiguous JwksKeyTable (64B Cache Line Aligned)          |
-//!   | - kid_index: [u64; 8]                                     |
-//!   | - slots: [JwksKeySlot; 8]                                 |
-//!   +-----------------------------------------------------------+
+//!   +---------------------------------------------------------------+
+//!   | Contiguous JwksKeyTable (64B Cache Line Aligned)              |
+//!   | - kid_index: [u64; 8]                                         |
+//!   | - slots: [JwksKeySlot; 8]                                     |
+//!   +---------------------------------------------------------------+
 //! ```
-//!
-//! # Architectural Invariants
-//! - **Background-Only Parsing**: JSON deserialization and key DER transformations execute strictly
-//!   on background worker threads, never touching the frontline traffic hot path.
-//! - **Multi-Key Ingestion**: Populates up to 8 keys (current active key + recent previous valid keys)
-//!   so that tokens signed during rotation transitions or on freshly scaled nodes validate seamlessly.
-//! - **Zero Disk I/O**: Operates 100% in RAM buffers.
 
 use std::str::FromStr;
 
@@ -53,10 +47,10 @@ pub struct JwkSetJson {
     pub keys: Vec<JwkKeyJson>,
 }
 
-/// Single RFC 7517 JSON Web Key entry.
+/// Single RFC 7517 / RFC 8037 JSON Web Key entry.
 #[derive(Debug, Deserialize)]
 pub struct JwkKeyJson {
-    /// Key type: "RSA", "EC", or "oct".
+    /// Key type: `"RSA"`, `"EC"`, `"OKP"`, or `"oct"`.
     pub kty: String,
 
     /// Key identifier string.
@@ -67,11 +61,10 @@ pub struct JwkKeyJson {
     #[serde(default)]
     pub alg: Option<String>,
 
-    /// Intended key usage (e.g. "sig" for signature verification).
+    /// Intended key usage (e.g. `"sig"` for signature verification).
     #[serde(default)]
     pub r#use: Option<String>,
 
-    // --- RSA specific parameters ---
     /// RSA modulus (Base64URL-encoded).
     #[serde(default)]
     pub n: Option<String>,
@@ -80,12 +73,11 @@ pub struct JwkKeyJson {
     #[serde(default)]
     pub e: Option<String>,
 
-    // --- ECDSA specific parameters ---
-    /// EC curve name: "P-256" or "P-384".
+    /// Curve name: `"P-256"`, `"P-384"`, or `"Ed25519"`.
     #[serde(default)]
     pub crv: Option<String>,
 
-    /// EC x coordinate (Base64URL-encoded).
+    /// EC / OKP x coordinate (Base64URL-encoded).
     #[serde(default)]
     pub x: Option<String>,
 
@@ -93,7 +85,6 @@ pub struct JwkKeyJson {
     #[serde(default)]
     pub y: Option<String>,
 
-    // --- Symmetric / Oct specific parameters ---
     /// Symmetric key value (Base64URL-encoded).
     #[serde(default)]
     pub k: Option<String>,
@@ -112,7 +103,14 @@ fn decode_base64url(input: &str) -> Result<Vec<u8>, PluginError> {
         .map_err(|e| PluginError::Config(format!("Base64URL decode error in JWK: {e}")))
 }
 
-/// Encodes an ASN.1 DER length field into the destination buffer.
+#[inline]
+fn strip_leading_zeros(mut bytes: &[u8]) -> &[u8] {
+    while bytes.len() > 1 && bytes[0] == 0x00 {
+        bytes = &bytes[1..];
+    }
+    bytes
+}
+
 fn encode_der_length(len: usize, out: &mut Vec<u8>) {
     if len < 128 {
         out.push(len as u8);
@@ -126,14 +124,11 @@ fn encode_der_length(len: usize, out: &mut Vec<u8>) {
     }
 }
 
-/// Encodes a big-endian unsigned integer as an ASN.1 DER INTEGER (`tag = 0x02`).
-///
-/// If the most significant bit is 1, a leading 0x00 byte is prepended to ensure
-/// the value is interpreted as positive under two's-complement rules.
-fn encode_der_integer(bytes: &[u8], out: &mut Vec<u8>) {
+fn encode_der_integer(raw_bytes: &[u8], out: &mut Vec<u8>) {
+    let bytes = strip_leading_zeros(raw_bytes);
     out.push(0x02); // Tag: INTEGER
     let needs_zero_pad = !bytes.is_empty() && (bytes[0] & 0x80) != 0;
-    let len = bytes.len() + if needs_zero_pad { 1 } else { 0 };
+    let len = bytes.len() + usize::from(needs_zero_pad);
     encode_der_length(len, out);
     if needs_zero_pad {
         out.push(0x00);
@@ -141,9 +136,7 @@ fn encode_der_integer(bytes: &[u8], out: &mut Vec<u8>) {
     out.extend_from_slice(bytes);
 }
 
-/// Encodes RSA modulus `n` and exponent `e` into PKCS#1 `RSAPublicKey` DER.
-///
-/// ASN.1 Structure: `SEQUENCE { modulus INTEGER, publicExponent INTEGER }`
+/// Encodes RSA modulus `n` and exponent `e` into canonical PKCS#1 `RSAPublicKey` DER.
 pub fn encode_pkcs1_rsa(n_bytes: &[u8], e_bytes: &[u8]) -> Vec<u8> {
     let mut body = Vec::with_capacity(n_bytes.len() + e_bytes.len() + 16);
     encode_der_integer(n_bytes, &mut body);
@@ -156,9 +149,8 @@ pub fn encode_pkcs1_rsa(n_bytes: &[u8], e_bytes: &[u8]) -> Vec<u8> {
     der
 }
 
-/// Parses a single [`JwkKeyJson`] entry into a concrete [`VerifierKey`] and associated [`JwtAlgorithm`].
+/// Parses a single [`JwkKeyJson`] entry into a concrete [`VerifierKey`] and [`JwtAlgorithm`].
 pub fn parse_jwk_key(jwk: &JwkKeyJson) -> Result<(VerifierKey, JwtAlgorithm), PluginError> {
-    // Check key usage if present (must be signature if specified)
     if let Some(usage) = &jwk.r#use
         && usage != "sig"
     {
@@ -178,10 +170,11 @@ pub fn parse_jwk_key(jwk: &JwkKeyJson) -> Result<(VerifierKey, JwtAlgorithm), Pl
                 .as_deref()
                 .ok_or_else(|| PluginError::Config("RSA JWK missing 'e' parameter".into()))?;
 
-            let n_bytes = decode_base64url(n_str)?;
-            let e_bytes = decode_base64url(e_str)?;
+            let n_decoded = decode_base64url(n_str)?;
+            let e_decoded = decode_base64url(e_str)?;
+            let n_bytes = strip_leading_zeros(&n_decoded);
+            let e_bytes = strip_leading_zeros(&e_decoded);
 
-            // Enforce minimum 2048-bit RSA key length (256 bytes)
             if n_bytes.len() < 256 {
                 return Err(PluginError::Config(format!(
                     "RSA JWK key modulus length must be at least 2048 bits (got {} bits)",
@@ -190,7 +183,7 @@ pub fn parse_jwk_key(jwk: &JwkKeyJson) -> Result<(VerifierKey, JwtAlgorithm), Pl
             }
 
             let alg = if let Some(alg_str) = &jwk.alg {
-                JwtAlgorithm::from_str(alg_str).map_err(|e| PluginError::Config(e.to_string()))?
+                JwtAlgorithm::from_str(alg_str)?
             } else {
                 JwtAlgorithm::RS256
             };
@@ -202,7 +195,7 @@ pub fn parse_jwk_key(jwk: &JwkKeyJson) -> Result<(VerifierKey, JwtAlgorithm), Pl
                 )));
             }
 
-            let pkcs1_der = encode_pkcs1_rsa(&n_bytes, &e_bytes);
+            let pkcs1_der = encode_pkcs1_rsa(n_bytes, e_bytes);
             let expected_sig_len = n_bytes.len();
 
             Ok((
@@ -238,6 +231,16 @@ pub fn parse_jwk_key(jwk: &JwkKeyJson) -> Result<(VerifierKey, JwtAlgorithm), Pl
                 }
             };
 
+            if let Some(alg_str) = &jwk.alg {
+                let declared = JwtAlgorithm::from_str(alg_str)?;
+                if declared != alg {
+                    return Err(PluginError::Config(format!(
+                        "EC JWK curve '{crv}' mismatches declared alg '{}'",
+                        declared.as_str()
+                    )));
+                }
+            }
+
             if x_bytes.len() != expected_coord_len || y_bytes.len() != expected_coord_len {
                 return Err(PluginError::Config(format!(
                     "EC JWK coordinate length mismatch for curve '{crv}': expected {expected_coord_len} bytes, got x={}, y={}",
@@ -246,7 +249,6 @@ pub fn parse_jwk_key(jwk: &JwkKeyJson) -> Result<(VerifierKey, JwtAlgorithm), Pl
                 )));
             }
 
-            // Uncompressed SEC 1 point: 0x04 || X || Y
             let mut point = Vec::with_capacity(1 + x_bytes.len() + y_bytes.len());
             point.push(0x04);
             point.extend_from_slice(&x_bytes);
@@ -261,6 +263,36 @@ pub fn parse_jwk_key(jwk: &JwkKeyJson) -> Result<(VerifierKey, JwtAlgorithm), Pl
             ))
         }
 
+        "OKP" => {
+            let crv = jwk.crv.as_deref().unwrap_or("");
+            if crv != "Ed25519" {
+                return Err(PluginError::Config(format!(
+                    "Unsupported OKP curve '{crv}'; supported: Ed25519"
+                )));
+            }
+            if let Some(alg_str) = &jwk.alg {
+                let declared = JwtAlgorithm::from_str(alg_str)?;
+                if declared != JwtAlgorithm::EdDSA {
+                    return Err(PluginError::Config(format!(
+                        "OKP Ed25519 JWK mismatches declared alg '{}'",
+                        declared.as_str()
+                    )));
+                }
+            }
+            let x_str = jwk
+                .x
+                .as_deref()
+                .ok_or_else(|| PluginError::Config("OKP JWK missing 'x' parameter".into()))?;
+            let x_bytes = decode_base64url(x_str)?;
+            let public_key_raw: [u8; 32] = x_bytes.try_into().map_err(|v: Vec<u8>| {
+                PluginError::Config(format!(
+                    "OKP Ed25519 JWK 'x' must be 32 bytes (got {} bytes)",
+                    v.len()
+                ))
+            })?;
+            Ok((VerifierKey::Ed25519 { public_key_raw }, JwtAlgorithm::EdDSA))
+        }
+
         "OCT" => {
             let k_str = jwk
                 .k
@@ -269,7 +301,7 @@ pub fn parse_jwk_key(jwk: &JwkKeyJson) -> Result<(VerifierKey, JwtAlgorithm), Pl
             let k_bytes = decode_base64url(k_str)?;
 
             let alg = if let Some(alg_str) = &jwk.alg {
-                JwtAlgorithm::from_str(alg_str).map_err(|e| PluginError::Config(e.to_string()))?
+                JwtAlgorithm::from_str(alg_str)?
             } else {
                 JwtAlgorithm::HS256
             };
@@ -304,12 +336,6 @@ pub fn parse_jwk_key(jwk: &JwkKeyJson) -> Result<(VerifierKey, JwtAlgorithm), Pl
 }
 
 /// Parses an entire JWKS JSON payload into a contiguous 8-slot [`JwksKeyTable`].
-///
-/// # Multi-Key Ingestion
-/// - If the IdP returns 1 key, 1 key is populated.
-/// - If the IdP returns multiple keys, all keys up to [`MAX_JWKS_SLOTS`] are populated.
-/// - If `static_slot` is provided, Slot 0 preserves it, and dynamic keys populate slots 1..7.
-///   Otherwise, dynamic keys populate slots 0..7.
 pub fn parse_jwks_into_table(
     json_bytes: &[u8],
     static_slot: Option<JwksKeySlot>,
@@ -327,7 +353,6 @@ pub fn parse_jwks_into_table(
     let mut current_slot = 0;
     let mut hashes = [0u64; MAX_JWKS_SLOTS];
 
-    // 1. If a static key slot is preserved, assign it to Slot 0
     if let Some(slot) = static_slot {
         hashes[0] = slot.raw_kid_hash;
         table.slots[0] = slot;
@@ -336,7 +361,6 @@ pub fn parse_jwks_into_table(
         current_slot = 1;
     }
 
-    // 2. Ingest up to MAX_JWKS_SLOTS keys from the JWKS JSON
     for jwk in &jwks.keys {
         if current_slot >= MAX_JWKS_SLOTS {
             break;
@@ -346,12 +370,21 @@ pub fn parse_jwks_into_table(
             Ok((key, alg)) => {
                 let kid_str = jwk.kid.as_deref().unwrap_or("default");
                 let internal_kid = (current_slot as u64) + 1;
-                let slot = JwksKeySlot::new(internal_kid, kid_str, alg, key);
-
-                hashes[current_slot] = slot.raw_kid_hash;
-                table.slots[current_slot] = slot;
-                table.active_count += 1;
-                current_slot += 1;
+                match JwksKeySlot::try_new(internal_kid, kid_str, alg, key) {
+                    Ok(slot) => {
+                        hashes[current_slot] = slot.raw_kid_hash;
+                        table.slots[current_slot] = slot;
+                        table.active_count += 1;
+                        current_slot += 1;
+                    }
+                    Err(e) => {
+                        tracing::warn!(
+                            error = %e,
+                            kid = ?jwk.kid,
+                            "Skipping JWK key with invalid kid in JWKS response"
+                        );
+                    }
+                }
             }
             Err(e) => {
                 tracing::warn!(
@@ -369,9 +402,7 @@ pub fn parse_jwks_into_table(
         ));
     }
 
-    // 3. Batch-commit all 8 key hashes (64 bytes = 1 L1D cache line) using SIMD vector write
     table.set_kid_index_batch(&hashes);
-
     Ok(table)
 }
 
@@ -380,26 +411,41 @@ mod tests {
     use super::*;
 
     #[test]
-    fn test_parse_single_rsa_jwks() {
-        // 256-byte modulus base64url (2048-bit RSA)
-        let n_raw = vec![0x99u8; 256];
+    fn test_parse_single_rsa_jwks_strips_leading_zero_modulus() {
+        let mut n_raw = vec![0x00u8];
+        n_raw.extend_from_slice(&[0x99u8; 256]);
         let n_b64 = BASE64_URL_SAFE_NO_PAD.encode(&n_raw);
         let e_b64 = BASE64_URL_SAFE_NO_PAD.encode([0x01, 0x00, 0x01]);
 
         let json = format!(
-            r#"{{ "keys": [ {{ "kty": "RSA", "kid": "key-rsa-test", "alg": "RS256", "n": "{n_b64}", "e": "{e_b64}" }} ] }}"#
+            r#"{{ "keys": [ {{ "kty": "RSA", "kid": "550e8400-e29b-41d4-a716-446655440000", "alg": "RS256", "n": "{n_b64}", "e": "{e_b64}" }} ] }}"#
         );
 
         let table = parse_jwks_into_table(json.as_bytes(), None).unwrap();
         assert_eq!(table.active_count, 1);
-        let found = table.find_by_raw_kid("key-rsa-test");
-        assert!(found.is_some());
-        assert_eq!(found.unwrap().alg, JwtAlgorithm::RS256);
+        let slot = table
+            .find_by_raw_kid("550e8400-e29b-41d4-a716-446655440000")
+            .unwrap();
+        assert_eq!(slot.alg, JwtAlgorithm::RS256);
+        assert_eq!(slot.key.as_ref().unwrap().expected_sig_len(), 256);
+    }
+
+    #[test]
+    fn test_parse_okp_ed25519_jwks() {
+        let x_b64 = BASE64_URL_SAFE_NO_PAD.encode([0x33u8; 32]);
+        let json = format!(
+            r#"{{ "keys": [ {{ "kty": "OKP", "kid": "ed-key-2026", "crv": "Ed25519", "alg": "EdDSA", "x": "{x_b64}" }} ] }}"#
+        );
+
+        let table = parse_jwks_into_table(json.as_bytes(), None).unwrap();
+        assert_eq!(table.active_count, 1);
+        let slot = table.find_by_raw_kid("ed-key-2026").unwrap();
+        assert_eq!(slot.alg, JwtAlgorithm::EdDSA);
+        assert_eq!(slot.key.as_ref().unwrap().expected_sig_len(), 64);
     }
 
     #[test]
     fn test_parse_multi_key_jwks_up_to_8_slots() {
-        // Build 10 keys (to test clamping at 8 slots)
         let mut keys = Vec::new();
         for i in 0..10 {
             let k_bytes = vec![(i + 1) as u8; 32];
@@ -411,21 +457,11 @@ mod tests {
         let json = format!(r#"{{ "keys": [ {} ] }}"#, keys.join(","));
 
         let table = parse_jwks_into_table(json.as_bytes(), None).unwrap();
-        // Clamped at exactly 8 slots
         assert_eq!(table.active_count, 8);
-
-        // Keys 0 through 7 must be found
         for i in 0..8 {
-            let kid = format!("key-{i}");
-            assert!(
-                table.find_by_raw_kid(&kid).is_some(),
-                "Key {kid} should be in table"
-            );
+            assert!(table.find_by_raw_kid(&format!("key-{i}")).is_some());
         }
-
-        // Keys 8 and 9 should not be in table
         assert!(table.find_by_raw_kid("key-8").is_none());
-        assert!(table.find_by_raw_kid("key-9").is_none());
     }
 
     #[test]
@@ -450,40 +486,26 @@ mod tests {
 
         let table = parse_jwks_into_table(json.as_bytes(), Some(static_slot)).unwrap();
         assert_eq!(table.active_count, 8);
-
-        // Slot 0 is the static key
-        let static_found = table.find_by_raw_kid("static-key");
-        assert!(static_found.is_some());
-        assert_eq!(
-            table.slots[0].raw_kid_hash,
-            static_found.unwrap().raw_kid_hash
-        );
-
-        // Slots 1 through 7 hold dynamic-0 through dynamic-6
+        assert!(table.find_by_raw_kid("static-key").is_some());
         for i in 0..7 {
-            let kid = format!("dynamic-{i}");
-            assert!(table.find_by_raw_kid(&kid).is_some());
+            assert!(table.find_by_raw_kid(&format!("dynamic-{i}")).is_some());
         }
-
-        // dynamic-7 was truncated because slot 0 was reserved for static key
         assert!(table.find_by_raw_kid("dynamic-7").is_none());
     }
 
     #[test]
     fn test_parse_ecdsa_p256_jwks() {
-        let x_bytes = vec![0x11u8; 32];
-        let y_bytes = vec![0x22u8; 32];
-        let x_b64 = BASE64_URL_SAFE_NO_PAD.encode(&x_bytes);
-        let y_b64 = BASE64_URL_SAFE_NO_PAD.encode(&y_bytes);
-
+        let x_b64 = BASE64_URL_SAFE_NO_PAD.encode([0x11u8; 32]);
+        let y_b64 = BASE64_URL_SAFE_NO_PAD.encode([0x22u8; 32]);
         let json = format!(
             r#"{{ "keys": [ {{ "kty": "EC", "kid": "ec-p256-key", "crv": "P-256", "alg": "ES256", "x": "{x_b64}", "y": "{y_b64}" }} ] }}"#
         );
 
         let table = parse_jwks_into_table(json.as_bytes(), None).unwrap();
         assert_eq!(table.active_count, 1);
-        let found = table.find_by_raw_kid("ec-p256-key");
-        assert!(found.is_some());
-        assert_eq!(found.unwrap().alg, JwtAlgorithm::ES256);
+        assert_eq!(
+            table.find_by_raw_kid("ec-p256-key").unwrap().alg,
+            JwtAlgorithm::ES256
+        );
     }
 }

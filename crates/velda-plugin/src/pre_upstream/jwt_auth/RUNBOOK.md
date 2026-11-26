@@ -1,27 +1,27 @@
 # JWT Authentication Plugin (`jwt_auth`) — SRE Operational Runbook & Configuration Guide
 
-This document is the operational playbook and configuration guide (**SRE Runbook & Tuning Guide**) for engineers configuring, operating, and troubleshooting JWT authentication in Velda Edge.
+Operational reference, strict schema specification, scenario presets, and incident response playbooks for `jwt_auth` in Velda Edge.
 
 ---
 
 ## 1. Configuration Parameter Reference
 
-Velda Edge enforces a **100% Explicit Configuration Invariant**: all parameters must be explicitly declared in `plugins.json`. No implicit defaults exist; unused options must be explicitly supplied as `null` or `{}`.
+`JwtAuthConfig` enforces `#[serde(deny_unknown_fields)]`. The plugin identifier in `plugins.json` must be `"jwt_auth"`.
 
 ```json
 {
-  "id": "api_jwt_auth",
+  "id": "jwt_auth",
   "config": {
     "algorithm": "RS256",
     "secret_key": null,
-    "public_key_pem": "-----BEGIN PUBLIC KEY-----\nMIIBIj...",
+    "public_key_pem": null,
     "token_sources": [
       { "type": "header", "name": "authorization", "prefix": "Bearer " }
     ],
     "validate_exp": true,
     "clock_skew_secs": 60,
-    "issuer": "https://auth.example.com",
-    "audience": "api.velda.io",
+    "issuer": "https://auth.example.com/",
+    "audience": "https://api.example.com",
     "claims_to_headers": {
       "sub": "x-user-id",
       "roles": "x-user-roles"
@@ -34,238 +34,156 @@ Velda Edge enforces a **100% Explicit Configuration Invariant**: all parameters 
 
 ### Parameter Specifications
 
-| Parameter | Type | Required | Allowed Values / Constraints | Operational Meaning & Security Impact |
+| Parameter | Type | Required | Constraints / Allowed Values | Operational & Security Semantics |
 | :--- | :---: | :---: | :--- | :--- |
-| **`algorithm`** | `String` | **Yes** | `"HS256"`, `"HS384"`, `"HS512"`, `"RS256"`, `"RS384"`, `"RS512"`, `"ES256"`, `"ES384"`, `"EdDSA"` | **Algorithm Pinning**: The route will strictly accept only tokens signed with this exact algorithm. Prevents algorithm substitution attacks (such as switching to `alg: "none"` or tricking RSA verifiers with HMAC). |
-| **`secret_key`** | `String` / `null` | **Yes** | Non-empty string for HMAC (`HS*`), `null` for asymmetric | Shared secret key for symmetric HMAC verification. Must be `null` when using asymmetric algorithms (`RS*`, `ES*`). |
-| **`public_key_pem`** | `String` / `null` | **Yes** | Valid PEM string for asymmetric, `null` for HMAC or when dynamic keys are supplied by `jwks_rotator` | Static PEM-encoded public key (X.509 SPKI or PKCS#1). Acts as Slot 0 key when paired with `jwks_rotator`. |
-| **`token_sources`** | `Array` | **Yes** | Non-empty array of extraction source descriptors | Ordered list of token extraction rules evaluated sequentially until a token is found. Supported types: `header`, `cookie`, `query`. |
-| **`validate_exp`** | `bool` | **Yes** | `true` or `false` | When `true`, enforces expiration check: `now_epoch > exp + clock_skew_secs` triggers `401 Unauthorized`. Evaluated against edge ingress time (zero clock syscalls). |
-| **`clock_skew_secs`** | `u64` | **Yes** | `0 ..= 300` seconds | Tolerance window in seconds to absorb clock drift between Identity Provider and edge nodes. Recommended: `60s`. Set to `0` for strict zero-tolerance environments. |
-| **`issuer`** | `String` / `null` | **Yes** | Expected `iss` claim string, or `null` to bypass | Rejects tokens with `403 Forbidden` if the `iss` claim does not exactly match this string. |
-| **`audience`** | `String` / `null` | **Yes** | Expected `aud` claim string, or `null` to bypass | Rejects tokens with `403 Forbidden` if `aud` claim is missing or does not match (supports both string claims and JSON array claims). |
-| **`claims_to_headers`** | `Map<String, String>` | **Yes** | Map of claim path to upstream header name (`{}` if none) | Extracts token claims and injects them as headers for upstream microservices. Supports dot notation for nested claims (e.g. `"user.id": "x-user-id"`). |
-| **`assert_claims`** | `Map<String, String>` | **Yes** | Map of claim path to required literal value (`{}` if none) | Hard access control assertions. If any claim differs from the configured literal, the gateway rejects the request with `403 Forbidden`. |
-| **`cache_ttl_secs`** | `u64` | **Yes** | `0 ..= 86400` seconds | Positive authentication cache TTL. When $> 0$, verified tokens are cached in the lock-striped Dual Cache, bypassing cryptographic math on repeated requests. `0` disables caching. |
+| **`algorithm`** | `String` | **Yes** | `"HS256"`, `"HS384"`, `"HS512"`, `"RS256"`, `"RS384"`, `"RS512"`, `"ES256"`, `"ES384"`, `"EdDSA"` (case-insensitive, normalized) | **Algorithm Pinning**: Enforces a 3-way match between route config, JOSE `alg`, and key slot `alg`. Blocks `alg: "none"` and RSA/HMAC substitution attacks. |
+| **`secret_key`** | `String` / `null` | No (`null`) | Non-empty string for `HS*`; must be `null`/omitted for asymmetric | Symmetric HMAC shared secret. Rejected at sync time if set alongside an asymmetric algorithm. |
+| **`public_key_pem`** | `String` / `null` | No (`null`) | Valid PEM/DER public key (`RSA >= 2048-bit`, `P-256`, `P-384`, `Ed25519`), or `null` | Parsed and validated at `velda-sync` staging time. When `null` on an asymmetric algorithm, an active `jwks_rotator` targeting `"jwt_auth"` is mandatory. |
+| **`token_sources`** | `Array` | **Yes** | Non-empty array of `header`, `cookie`, or `query` descriptors (`deny_unknown_fields`) | Evaluated in declaration order until a non-empty token is extracted. Header and Cookie sources inspect all matching header fields (supporting HTTP/2 split `cookie` headers). |
+| **`validate_exp`** | `bool` | **Yes** | `true` or `false` | When `true`, requires a valid numeric `exp` claim and rejects when `now > exp + clock_skew_secs` (`401 Unauthorized`). |
+| **`clock_skew_secs`** | `u64` | **Yes** | `0 ..= 3600` seconds | Clock drift tolerance applied with `saturating_add` to both `exp` and `nbf` evaluations. |
+| **`issuer`** | `String` / `null` | No (`null`) | Non-empty string, or `null` to disable | Exact match against token `iss` claim. Mismatch returns `401 Unauthorized` (`Bearer error="invalid_token"`). Empty string `""` is rejected at sync time. |
+| **`audience`** | `String` / `null` | No (`null`) | Non-empty string, or `null` to disable | Matches either string `aud` or any element of array `aud`. Mismatch returns `401 Unauthorized`. Empty string `""` is rejected at sync time. |
+| **`claims_to_headers`** | `Map<String, String>` | **Yes** | Dot-separated non-empty claim path $\to$ valid RFC 9110 header name (`{}` if none) | Converts **present** claims into upstream headers (`insert_prehashed`: adds if missing, overwrites if present). Absent claims leave existing request headers untouched. |
+| **`assert_claims`** | `Map<String, String>` | **Yes** | Dot-separated non-empty claim path $\to$ expected literal value (`{}` if none) | RBAC / tenant guard evaluated on strings, booleans, numbers, or array membership. Mismatch returns `403 Forbidden` and caches the `403` decision for `min(10, cache_ttl_secs)`. |
+| **`cache_ttl_secs`** | `u64` | **Yes** | `0 ..= 86400` seconds | Positive L3 SIMD cache ceiling (`effective_exp = min(exp + skew, now + cache_ttl_secs)`). Negative/Forbidden TTL is `min(10, cache_ttl_secs)`. `0` disables caching (`0` bytes allocated). |
 
-### Token Source Format
+### `claims_to_headers` Operational Contract
 
-```json
-// 1. HTTP Header Source (Evaluates Authorization: Bearer <tok>)
-{ "type": "header", "name": "authorization", "prefix": "Bearer " }
-
-// 2. Cookie Source (Evaluates Cookie: access_token=<tok>)
-{ "type": "cookie", "name": "access_token" }
-
-// 3. Query Parameter Source (Evaluates ?token=<tok>)
-{ "type": "query", "param": "token" }
-```
+`claims_to_headers` strictly projects claims **present** in the verified JWT payload:
+- **Claim present in JWT**: Inserts the header if absent, or overwrites all existing occurrences of that header name in `HeaderWorkspace`.
+- **Claim absent from JWT**: Performs **no deletion**, preserving legitimate client-supplied fallback headers (e.g., mapping an optional `"locale"` claim to `"accept-language"`).
+- **Auth-Offloaded Legacy Backends**: If an upstream backend does not inspect the JWT itself and blindly trusts an optional identity header (such as `x-user-roles`) when the claim may be omitted from normal user tokens, place `header_mutation` with `remove_headers: ["x-user-roles"]` **before** `"jwt_auth"` in the route's FIFO `plugins` array.
 
 ---
 
 ## 2. Scenario-Based Configuration Recipes
 
-Use these validated configuration presets for your architecture:
-
-### Scenario A: Zero-Trust Public Edge Gateway (Auth0 / Okta / Entra ID)
-*Goal: Asymmetric security, dynamic key rotation support, claim injection into upstream headers.*
+### Scenario A: Cloud OIDC Edge Gateway with Live JWKS Rotation (`RS256` + `jwks_rotator`)
 
 ```json
-{
-  "id": "public_jwt_auth",
-  "config": {
-    "algorithm": "RS256",
-    "secret_key": null,
-    "public_key_pem": null,
-    "token_sources": [
-      { "type": "header", "name": "authorization", "prefix": "Bearer " }
-    ],
-    "validate_exp": true,
-    "clock_skew_secs": 60,
-    "issuer": "https://auth.company.com/",
-    "audience": "https://api.company.com",
-    "claims_to_headers": {
-      "sub": "x-user-id",
-      "email": "x-user-email",
-      "roles": "x-user-roles",
-      "tenant_id": "x-tenant-id"
-    },
-    "assert_claims": {},
-    "cache_ttl_secs": 300
+[
+  {
+    "id": "jwt_auth",
+    "config": {
+      "algorithm": "RS256",
+      "secret_key": null,
+      "public_key_pem": null,
+      "token_sources": [
+        { "type": "header", "name": "authorization", "prefix": "Bearer " }
+      ],
+      "validate_exp": true,
+      "clock_skew_secs": 60,
+      "issuer": "https://auth.company.com/",
+      "audience": "https://api.company.com",
+      "claims_to_headers": {
+        "sub": "x-user-id",
+        "roles": "x-user-roles",
+        "profile.tenant_id": "x-tenant-id"
+      },
+      "assert_claims": {},
+      "cache_ttl_secs": 300
+    }
+  },
+  {
+    "id": "jwks_rotator",
+    "config": {
+      "target_jwt_auth_id": "jwt_auth",
+      "jwks_uri": "https://auth.company.com/.well-known/jwks.json",
+      "refresh_interval_secs": 300,
+      "request_timeout_secs": 10,
+      "preserve_static_key": false
+    }
   }
-}
+]
 ```
-* **Why this setup**: `public_key_pem` is set to `null` because public keys are dynamically populated by a companion `jwks_rotator`. `cache_ttl_secs: 300` ensures repeated requests from active users skip cryptographic verification, delivering high throughput.
 
----
-
-### Scenario B: High-Throughput Internal Service Mesh (Zero-Alloc Symmetric)
-*Goal: Maximum RPS, lowest latency between microservices.*
+### Scenario B: Internal East-West Service Mesh (`EdDSA` / `HS256`)
 
 ```json
 {
-  "id": "mesh_jwt_auth",
+  "id": "jwt_auth",
   "config": {
     "algorithm": "HS256",
-    "secret_key": "env:MESH_SHARED_SECRET_KEY_STRONG_256",
+    "secret_key": "replace-with-strong-32-byte-random-mesh-secret",
     "public_key_pem": null,
     "token_sources": [
       { "type": "header", "name": "authorization", "prefix": "Bearer " }
     ],
     "validate_exp": true,
     "clock_skew_secs": 30,
-    "issuer": "internal-mesh",
-    "audience": "payment-service",
+    "issuer": "velda-internal-mesh",
+    "audience": "orders-service",
     "claims_to_headers": {
-      "service": "x-caller-service",
-      "role": "x-caller-role"
+      "sub": "x-caller-spiffe"
     },
     "assert_claims": {},
     "cache_ttl_secs": 600
   }
 }
 ```
-* **Why this setup**: HMAC-SHA256 (`HS256`) runs orders of magnitude faster than asymmetric algorithms. With `cache_ttl_secs: 600`, verification cost is amortized across thousands of microservice calls.
 
----
-
-### Scenario C: Strict Financial-Grade / Banking API (FAPI Compliance)
-*Goal: Highest cryptographic assurance, zero clock drift tolerance, mandatory claim assertions.*
+### Scenario C: Zero-Cache Financial Grade API (`ES256`, Live Per-Request Verification)
 
 ```json
 {
-  "id": "banking_jwt_auth",
+  "id": "jwt_auth",
   "config": {
     "algorithm": "ES256",
     "secret_key": null,
-    "public_key_pem": "-----BEGIN PUBLIC KEY-----\nMFkwEwYHKoZIzj0CAQYIKoZIzj0DAQcDQgAE...",
+    "public_key_pem": "-----BEGIN PUBLIC KEY-----\nMFkwEwYHKoZIzj0CAQYIKoZIzj0DAQcDQgAE...\n-----END PUBLIC KEY-----",
     "token_sources": [
       { "type": "header", "name": "authorization", "prefix": "Bearer " }
     ],
     "validate_exp": true,
     "clock_skew_secs": 0,
-    "issuer": "https://auth.bank.com",
-    "audience": "https://fapi.bank.com/v1",
+    "issuer": "https://fapi.bank.example",
+    "audience": "https://payments.bank.example/v1",
     "claims_to_headers": {
-      "sub": "x-client-id",
-      "account_id": "x-account-id"
+      "sub": "x-psu-id"
     },
     "assert_claims": {
-      "acr": "urn:mace:incommon:iap:silver"
+      "acr": "urn:openbanking:psd2:sca"
     },
     "cache_ttl_secs": 0
   }
 }
 ```
-* **Why this setup**: Uses NIST P-256 Elliptic Curve (`ES256`). `clock_skew_secs: 0` ensures expired tokens are rejected immediately with no grace window. `cache_ttl_secs: 0` disables caching so every single banking transaction undergoes live cryptographic verification.
 
 ---
 
-### Scenario D: Multi-Channel Web & Mobile Gateway (Header + Cookie + Query Fallback)
-*Goal: Flexible token extraction supporting single-page apps, cookies, and WebSocket upgrades.*
+## 3. Wire Observability & Reject Mapping
 
-```json
-{
-  "id": "omnichannel_jwt_auth",
-  "config": {
-    "algorithm": "RS256",
-    "secret_key": null,
-    "public_key_pem": "-----BEGIN PUBLIC KEY-----\nMIIBIj...",
-    "token_sources": [
-      { "type": "header", "name": "authorization", "prefix": "Bearer " },
-      { "type": "cookie", "name": "auth_token" },
-      { "type": "query", "param": "access_token" }
-    ],
-    "validate_exp": true,
-    "clock_skew_secs": 60,
-    "issuer": null,
-    "audience": null,
-    "claims_to_headers": {
-      "sub": "x-user-id"
-    },
-    "assert_claims": {},
-    "cache_ttl_secs": 180
-  }
+| Condition | HTTP Wire Response | `WWW-Authenticate` Header | Internal `RejectReason` | gRPC Status |
+| :--- | :---: | :--- | :---: | :---: |
+| Token absent in all `token_sources` | `401 Unauthorized` | `Bearer realm="velda-edge"` | `RejectReason::Unauthorized` | `UNAUTHENTICATED (16)` |
+| Bad dot shape / invalid Base64URL / JSON | `401 Unauthorized` | `Bearer error="invalid_token"` | `RejectReason::Unauthorized` | `UNAUTHENTICATED (16)` |
+| `alg` mismatch / unknown `kid` / bad sig | `401 Unauthorized` | `Bearer error="invalid_token"` | `RejectReason::Unauthorized` | `UNAUTHENTICATED (16)` |
+| Expired `exp` / premature `nbf` / bad `iss` or `aud` | `401 Unauthorized` | `Bearer error="invalid_token"` | `RejectReason::Unauthorized` | `UNAUTHENTICATED (16)` |
+| `assert_claims` mismatch | `403 Forbidden` | *(omitted)* | `RejectReason::Forbidden` | `PERMISSION_DENIED (7)` |
+
+---
+
+## 4. Incident Triage Playbook
+
+### 4.1 Decode Base64URL JWT Segments Safely in Shell
+```bash
+b64url_decode() {
+  local s="$1"
+  local pad=$(( (4 - ${#s} % 4) % 4 ))
+  printf '%s' "$s" | tr '_-' '/+' | awk -v p="$pad" '{ printf "%s", $0; for(i=0;i<p;i++) printf "=" }' | base64 -d 2>/dev/null
 }
-```
-* **Why this setup**: Evaluates the `Authorization` header first. If absent, checks the browser `auth_token` cookie. For WebSocket handshakes where headers cannot be modified by browser JS, falls back to `?access_token=<tok>`.
 
----
-
-## 3. Emergency Incident Triage Matrix
-
-| Severity | Symptoms & Alerts | Root Cause Analysis | Rapid Mitigation Action | SLA |
-| :---: | :--- | :--- | :--- | :---: |
-| **P0** | 100% of traffic rejected with `401 Unauthorized` | Public key corrupted, PEM mismatch, or companion `jwks_rotator` uninitialized | Verify `public_key_pem` or check `jwks_rotator` sync status; inspect `WWW-Authenticate` response | **< 5 min** |
-| **P1** | Spike in `401 Unauthorized` with `Token has expired` | Edge server clock drifted significantly ($> \text{clock\_skew\_secs}$) or client token refresh failed | Sync NTP on edge nodes (`chronyd`); temporarily increase `clock_skew_secs` to `120` | **< 15 min** |
-| **P2** | Elevated `403 Forbidden` with `Issuer mismatch` or `Audience mismatch` | Identity Provider changed default `iss` URL (e.g. trailing slash `/`) or new client using wrong `aud` | Check JWT payload using `jq`; synchronize `issuer` and `audience` in configuration | **< 30 min** |
-| **P3** | High CPU usage on edge workers under invalid token attacks | Malicious caller flooding with forged tokens attempting cryptographic exhaustion | Verify Negative Cache is active; apply rate limiting via `rate_limit` plugin | **< 1 hour** |
-
----
-
-## 4. Diagnostic CLI Toolkit
-
-When an alert fires, use these CLI commands to diagnose authentication issues:
-
-### 4.1 Decode Inbound JWT Token without External Tools
-```bash
-# Decode JOSE Header
-echo "<JWT_TOKEN>" | cut -d'.' -f1 | base64 -d 2>/dev/null | jq .
-
-# Decode Claims Payload
-echo "<JWT_TOKEN>" | cut -d'.' -f2 | base64 -d 2>/dev/null | jq .
+TOKEN="<paste_jwt_here>"
+b64url_decode "$(printf '%s' "$TOKEN" | cut -d'.' -f1)" | jq .
+b64url_decode "$(printf '%s' "$TOKEN" | cut -d'.' -f2)" | jq .
 ```
 
-### 4.2 Inspect Edge Gateway Authentication Response
-```bash
-# Test with Authorization Header
-curl -iv -H "Authorization: Bearer <TOKEN>" http://127.0.0.1:8080/api/v1/resource
+### 4.2 Common Failure Modes & Resolutions
 
-# Check failure reason from response headers
-# Look for: WWW-Authenticate: Bearer realm="velda-edge", error="..."
-```
-
-### 4.3 Inspect `jwt_auth` Operational Logs
-```bash
-# Filter journalctl for authentication rejections
-journalctl -u velda-edge -n 100 --no-pager | grep -E "jwt_auth|Malformed JWT|Algorithm mismatch"
-```
-
----
-
-## 5. Step-by-Step Incident Resolution Playbooks
-
-### Playbook 1: Spike in `401 Unauthorized` (Token Expired or Key Mismatch)
-1. **Extract and inspect sample failing token**:
-   ```bash
-   TOKEN="<paste_sample_token>"
-   EXP=$(echo "$TOKEN" | cut -d'.' -f2 | base64 -d 2>/dev/null | jq -r .exp)
-   NOW=$(date +%s)
-   echo "Token Exp: $EXP, Current Time: $NOW, Diff: $((NOW - EXP))s"
-   ```
-2. **Evaluate Root Cause**:
-   - If `Diff > 0` and greater than `clock_skew_secs`: Client is failing to refresh tokens.
-   - If `Diff < 0` but still rejected: Check `kid` header:
-     ```bash
-     echo "$TOKEN" | cut -d'.' -f1 | base64 -d 2>/dev/null | jq -r .kid
-     ```
-     Verify that this `kid` is present in the `jwks_rotator` table or matches the static key.
-
----
-
-### Playbook 2: Spike in `403 Forbidden` (Claims Assertion / Issuer Mismatch)
-1. **Inspect Token Claims against Configuration**:
-   ```bash
-   echo "$TOKEN" | cut -d'.' -f2 | base64 -d 2>/dev/null | jq '{iss: .iss, aud: .aud}'
-   ```
-2. **Common Pitfalls**:
-   - **Trailing slash issue**: `issuer: "https://auth.company.com"` vs `"https://auth.company.com/"`.
-   - **Audience as array**: If token has `aud: ["api://default", "https://api.company.com"]`, ensure `audience` in config matches one of the array items.
-
----
-
-### Playbook 3: Cryptographic Exhaustion Attack Mitigation
-1. **Verify if negative cache is absorbing bad tokens**:
-   - The negative cache automatically caches hashes of failed tokens for 10 seconds, returning fast rejection without running cryptographic math.
-2. **Apply Route-Level Rate Limiting**:
-   - If malicious traffic persists, engage the `rate_limit` plugin ahead of `jwt_auth` to drop traffic at L4/L7 before running CPU-intensive operations.
+| Symptom | Probable Root Cause | Resolution |
+| :--- | :--- | :--- |
+| Sync rejected: `requires an active companion 'jwks_rotator'` | Asymmetric algorithm configured with `public_key_pem: null` without a `jwks_rotator` plugin targeting `"jwt_auth"`. | Either configure a valid `public_key_pem` or add `jwks_rotator` with `"target_jwt_auth_id": "jwt_auth"`. |
+| Sync rejected: `unknown field` | Legacy fields (`cache_shards`, `cache_shard_capacity`, `negative_cache_ttl_secs`) left in `plugins.json`. | Remove unknown fields; `JwtCache` geometry is hardware-aligned automatically from `cache_ttl_secs`. |
+| `401` with `Bearer error="invalid_token"` despite valid signature | `issuer` trailing slash mismatch (`https://idp/` vs `https://idp`), `audience` mismatch, or host NTP drift exceeding `clock_skew_secs`. | Inspect decoded `iss`, `aud`, `exp`, `nbf` via helper above and verify `chronyc tracking` on edge hosts. |
+| Brief `401` right at cold process boot with `public_key_pem: null` | `jwks_rotator` initial HTTPS fetch is still in flight (`NoActiveKeys`). | Automatic recovery once initial fetch completes (`NoActiveKeys` intentionally skips negative caching so valid tokens are never blacklisted during boot). |
