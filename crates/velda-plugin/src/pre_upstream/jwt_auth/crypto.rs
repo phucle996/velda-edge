@@ -41,24 +41,74 @@ use ring::signature::{self, UnparsedPublicKey};
 use serde::{Deserialize, Serialize};
 use velda_core::HeaderKey;
 
-use super::table::JwksKeyTable;
+use super::claims::{
+    ClaimPath, matches_compiled_assert, parse_numeric_date_ceil, parse_numeric_date_floor,
+    value_to_header_string,
+};
+use super::pem::{extract_raw_public_key, extract_rsa_modulus_len, parse_pem_to_der};
+use super::store::{JwksKeyTable, hash_kid_salted};
 use crate::error::PluginError;
 
-/// Cryptographic algorithms supported for JWT signature verification.
+/// Sentinel `u4` value reserved for unsupported/missing JWT algorithms (including `"none"`).
+pub const ALG_INVALID: u8 = 0x0F;
+
+/// Cryptographic algorithms supported for JWT signature verification, packed as `u4` (`0..=8`).
+#[repr(u8)]
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub enum JwtAlgorithm {
-    HS256,
-    HS384,
-    HS512,
-    RS256,
-    RS384,
-    RS512,
-    ES256,
-    ES384,
-    EdDSA,
+    HS256 = 0,
+    HS384 = 1,
+    HS512 = 2,
+    RS256 = 3,
+    RS384 = 4,
+    RS512 = 5,
+    ES256 = 6,
+    ES384 = 7,
+    EdDSA = 8,
 }
 
 impl JwtAlgorithm {
+    /// Converts this algorithm to its compact 4-bit integer code (`0..=8`).
+    #[inline(always)]
+    pub const fn to_u4(self) -> u8 {
+        self as u8
+    }
+
+    /// Decodes a 4-bit algorithm code (`0..=8`) back to [`JwtAlgorithm`].
+    #[inline(always)]
+    pub const fn from_u4(code: u8) -> Option<Self> {
+        match code {
+            0 => Some(Self::HS256),
+            1 => Some(Self::HS384),
+            2 => Some(Self::HS512),
+            3 => Some(Self::RS256),
+            4 => Some(Self::RS384),
+            5 => Some(Self::RS512),
+            6 => Some(Self::ES256),
+            7 => Some(Self::ES384),
+            8 => Some(Self::EdDSA),
+            _ => None,
+        }
+    }
+
+    /// Parses a JOSE `alg` header string straight to its `u4` integer (`0..=8`), returning `None`
+    /// for `"none"` or unsupported algorithms.
+    #[inline(always)]
+    pub fn parse_alg_u4(s: &str) -> Option<u8> {
+        match s {
+            "HS256" => Some(0),
+            "HS384" => Some(1),
+            "HS512" => Some(2),
+            "RS256" => Some(3),
+            "RS384" => Some(4),
+            "RS512" => Some(5),
+            "ES256" => Some(6),
+            "ES384" => Some(7),
+            "EdDSA" => Some(8),
+            _ => None,
+        }
+    }
+
     /// Returns the canonical RFC 7518 / RFC 8037 algorithm identifier.
     #[inline(always)]
     pub const fn as_str(&self) -> &'static str {
@@ -142,114 +192,6 @@ pub enum JwtVerifyError {
 }
 
 // ============================================================================
-// ASN.1 DER Parser for Universal Key Format Compatibility (SPKI / PKCS#1 / SEC1 / RFC 8410)
-// ============================================================================
-
-/// Reads a single ASN.1 TLV (Tag-Length-Value) element from DER bytes.
-#[inline]
-pub fn read_asn1_tlv(data: &[u8]) -> Option<(u8, &[u8], &[u8])> {
-    if data.len() < 2 {
-        return None;
-    }
-    let tag = data[0];
-    let (len, offset) = if data[1] < 0x80 {
-        (data[1] as usize, 2)
-    } else {
-        let len_bytes = (data[1] & 0x7f) as usize;
-        if len_bytes == 0 || len_bytes > 4 || data.len() < 2 + len_bytes {
-            return None;
-        }
-        let mut l = 0usize;
-        for i in 0..len_bytes {
-            l = (l << 8) | (data[2 + i] as usize);
-        }
-        (l, 2 + len_bytes)
-    };
-
-    if data.len() < offset + len {
-        return None;
-    }
-    Some((tag, &data[offset..offset + len], &data[offset + len..]))
-}
-
-/// Extracts underlying raw public key bytes from X.509 `SubjectPublicKeyInfo` (SPKI)
-/// or PKCS#1 / SEC 1 / raw key structures.
-pub fn extract_raw_public_key(der: &[u8], is_rsa: bool) -> Result<Vec<u8>, PluginError> {
-    if der.is_empty() {
-        return Err(PluginError::Config("Public key DER is empty".into()));
-    }
-
-    // Raw 32-byte Ed25519 key or SEC 1 uncompressed EC point (0x04 || X || Y)
-    if !is_rsa && (der.len() == 32 || der[0] == 0x04) {
-        return Ok(der.to_vec());
-    }
-
-    if der[0] != 0x30 {
-        return Err(PluginError::Config(format!(
-            "Invalid public key DER header: expected SEQUENCE (0x30), found 0x{:02x}",
-            der[0]
-        )));
-    }
-
-    let (tag, value, _) = read_asn1_tlv(der)
-        .ok_or_else(|| PluginError::Config("Malformed ASN.1 SEQUENCE in public key".into()))?;
-    if tag != 0x30 {
-        return Err(PluginError::Config(
-            "Expected SEQUENCE tag in public key".into(),
-        ));
-    }
-
-    let (first_tag, _, rest) = read_asn1_tlv(value)
-        .ok_or_else(|| PluginError::Config("Empty ASN.1 SEQUENCE in public key".into()))?;
-
-    // PKCS#1 RSAPublicKey starts directly with INTEGER (0x02) modulus
-    if is_rsa && first_tag == 0x02 {
-        return Ok(der.to_vec());
-    }
-
-    // X.509 SubjectPublicKeyInfo starts with AlgorithmIdentifier SEQUENCE (0x30)
-    if first_tag == 0x30 {
-        let (second_tag, bitstring_val, _) = read_asn1_tlv(rest).ok_or_else(|| {
-            PluginError::Config("Missing SubjectPublicKey BIT STRING in SPKI".into())
-        })?;
-        if second_tag != 0x03 {
-            return Err(PluginError::Config(format!(
-                "Expected BIT STRING (0x03) in SPKI, found 0x{:02x}",
-                second_tag
-            )));
-        }
-        if bitstring_val.is_empty() {
-            return Err(PluginError::Config("Empty BIT STRING in SPKI".into()));
-        }
-        let unused_bits = bitstring_val[0];
-        if unused_bits != 0 {
-            return Err(PluginError::Config(format!(
-                "Non-zero unused bits in SPKI BIT STRING: {unused_bits}"
-            )));
-        }
-        return Ok(bitstring_val[1..].to_vec());
-    }
-
-    Ok(der.to_vec())
-}
-
-/// Extracts the RSA modulus length in bytes from a PKCS#1 `RSAPublicKey` DER sequence.
-pub fn extract_rsa_modulus_len(pkcs1_der: &[u8]) -> Option<usize> {
-    let (tag, value, _) = read_asn1_tlv(pkcs1_der)?;
-    if tag != 0x30 {
-        return None;
-    }
-    let (tag_n, mut val_n, _) = read_asn1_tlv(value)?;
-    if tag_n != 0x02 || val_n.is_empty() {
-        return None;
-    }
-    while val_n.len() > 1 && val_n[0] == 0x00 {
-        val_n = &val_n[1..];
-    }
-    Some(val_n.len())
-}
-
-// ============================================================================
 // Zero-Allocation Base64URL Decoders
 // ============================================================================
 
@@ -292,37 +234,6 @@ pub fn decode_base64url(s: &str) -> Result<Vec<u8>, JwtVerifyError> {
     }
 }
 
-/// Parses a PEM-encoded public key into raw DER bytes.
-pub fn parse_pem_to_der(pem_str: &str) -> Result<Vec<u8>, PluginError> {
-    let mut in_key = false;
-    let mut b64_lines = String::new();
-    for line in pem_str.lines() {
-        let trimmed = line.trim();
-        if trimmed.starts_with("-----BEGIN") {
-            in_key = true;
-            continue;
-        }
-        if trimmed.starts_with("-----END") {
-            break;
-        }
-        if in_key {
-            b64_lines.push_str(trimmed);
-        }
-    }
-    if b64_lines.is_empty() {
-        if let Ok(der) = BASE64_STANDARD.decode(pem_str.trim()) {
-            return Ok(der);
-        }
-        return Err(PluginError::Config(
-            "Public key PEM must contain valid -----BEGIN/END----- banners or raw base64 DER"
-                .into(),
-        ));
-    }
-    BASE64_STANDARD
-        .decode(&b64_lines)
-        .map_err(|e| PluginError::Config(format!("Failed to base64-decode public key DER: {e}")))
-}
-
 // ============================================================================
 // Verifier Key with Pre-computed Geometry
 // ============================================================================
@@ -332,6 +243,7 @@ pub fn parse_pem_to_der(pem_str: &str) -> Result<Vec<u8>, PluginError> {
 pub enum VerifierKey {
     Hmac {
         key: hmac::Key,
+        raw_secret: Vec<u8>,
         expected_sig_len: usize,
     },
     Rsa {
@@ -348,6 +260,31 @@ pub enum VerifierKey {
 }
 
 impl VerifierKey {
+    /// Constructs an HMAC verifier key from raw secret bytes and pinned symmetric algorithm.
+    pub fn from_hmac_bytes(alg: JwtAlgorithm, secret: &[u8]) -> Result<Self, PluginError> {
+        let (hmac_alg, expected_sig_len) = match alg {
+            JwtAlgorithm::HS256 => (hmac::HMAC_SHA256, 32),
+            JwtAlgorithm::HS384 => (hmac::HMAC_SHA384, 48),
+            JwtAlgorithm::HS512 => (hmac::HMAC_SHA512, 64),
+            other => {
+                return Err(PluginError::Config(format!(
+                    "Algorithm '{}' is not a symmetric HMAC algorithm",
+                    other.as_str()
+                )));
+            }
+        };
+        if secret.is_empty() {
+            return Err(PluginError::Config(
+                "HMAC secret bytes cannot be empty".into(),
+            ));
+        }
+        Ok(Self::Hmac {
+            key: hmac::Key::new(hmac_alg, secret),
+            raw_secret: secret.to_vec(),
+            expected_sig_len,
+        })
+    }
+
     /// Constructs and pre-validates a verifier key from configuration inputs.
     pub fn new(
         alg: JwtAlgorithm,
@@ -361,16 +298,7 @@ impl VerifierKey {
                     alg.as_str()
                 ))
             })?;
-            let (hmac_alg, expected_sig_len) = match alg {
-                JwtAlgorithm::HS256 => (hmac::HMAC_SHA256, 32),
-                JwtAlgorithm::HS384 => (hmac::HMAC_SHA384, 48),
-                JwtAlgorithm::HS512 => (hmac::HMAC_SHA512, 64),
-                _ => unreachable!(),
-            };
-            Ok(Self::Hmac {
-                key: hmac::Key::new(hmac_alg, secret.as_bytes()),
-                expected_sig_len,
-            })
+            Self::from_hmac_bytes(alg, secret.as_bytes())
         } else if alg.is_rsa() {
             let pem = public_key_pem
                 .filter(|s| !s.trim().is_empty())
@@ -455,6 +383,40 @@ impl VerifierKey {
         }
     }
 
+    /// Returns raw cryptographic bytes stored in the contiguous Key Byte Arena.
+    #[inline(always)]
+    pub fn raw_bytes(&self) -> &[u8] {
+        match self {
+            Self::Hmac { raw_secret, .. } => raw_secret,
+            Self::Rsa { public_key_der, .. } => public_key_der,
+            Self::Ecdsa { public_key_raw, .. } => public_key_raw,
+            Self::Ed25519 { public_key_raw } => public_key_raw,
+        }
+    }
+
+    /// Verifies that this cryptographic key material matches `alg`.
+    #[inline(always)]
+    pub fn is_compatible_with(&self, alg: JwtAlgorithm) -> bool {
+        match (self, alg) {
+            (Self::Hmac { .. }, _) => alg.is_symmetric(),
+            (Self::Rsa { .. }, _) => alg.is_rsa(),
+            (
+                Self::Ecdsa {
+                    expected_sig_len, ..
+                },
+                JwtAlgorithm::ES256,
+            ) => *expected_sig_len == 64,
+            (
+                Self::Ecdsa {
+                    expected_sig_len, ..
+                },
+                JwtAlgorithm::ES384,
+            ) => *expected_sig_len == 96,
+            (Self::Ed25519 { .. }, JwtAlgorithm::EdDSA) => true,
+            _ => false,
+        }
+    }
+
     /// Expected signature length in bytes for fail-fast geometry checks before crypto math.
     #[inline(always)]
     pub const fn expected_sig_len(&self) -> usize {
@@ -472,7 +434,6 @@ impl VerifierKey {
         }
     }
 
-    /// Verifies signature over raw signing input bytes in constant time.
     #[inline]
     pub fn verify(
         &self,
@@ -480,245 +441,96 @@ impl VerifierKey {
         signing_input: &[u8],
         signature_bytes: &[u8],
     ) -> Result<(), JwtVerifyError> {
-        if signature_bytes.len() != self.expected_sig_len() {
-            return Err(JwtVerifyError::SignatureLengthMismatch);
-        }
+        let hmac_opt = match self {
+            Self::Hmac { key, .. } => Some(key),
+            _ => None,
+        };
+        verify_slot_signature(
+            alg,
+            self.raw_bytes(),
+            hmac_opt,
+            self.expected_sig_len(),
+            signing_input,
+            signature_bytes,
+        )
+    }
+}
 
-        match (self, alg) {
-            (Self::Hmac { key, .. }, _) if alg.is_symmetric() => {
+/// Constant-time signature verification directly over L3 Key Byte Arena bytes or HMAC key handle.
+#[inline]
+pub fn verify_slot_signature(
+    alg: JwtAlgorithm,
+    key_bytes: &[u8],
+    hmac_key: Option<&hmac::Key>,
+    expected_sig_len: usize,
+    signing_input: &[u8],
+    signature_bytes: &[u8],
+) -> Result<(), JwtVerifyError> {
+    if signature_bytes.len() != expected_sig_len {
+        return Err(JwtVerifyError::SignatureLengthMismatch);
+    }
+
+    match alg {
+        JwtAlgorithm::HS256 | JwtAlgorithm::HS384 | JwtAlgorithm::HS512 => {
+            if let Some(key) = hmac_key {
                 hmac::verify(key, signing_input, signature_bytes)
                     .map_err(|_| JwtVerifyError::InvalidSignature)
-            }
-            (Self::Rsa { public_key_der, .. }, JwtAlgorithm::RS256) => {
-                UnparsedPublicKey::new(&signature::RSA_PKCS1_2048_8192_SHA256, public_key_der)
-                    .verify(signing_input, signature_bytes)
-                    .map_err(|_| JwtVerifyError::InvalidSignature)
-            }
-            (Self::Rsa { public_key_der, .. }, JwtAlgorithm::RS384) => {
-                UnparsedPublicKey::new(&signature::RSA_PKCS1_2048_8192_SHA384, public_key_der)
-                    .verify(signing_input, signature_bytes)
-                    .map_err(|_| JwtVerifyError::InvalidSignature)
-            }
-            (Self::Rsa { public_key_der, .. }, JwtAlgorithm::RS512) => {
-                UnparsedPublicKey::new(&signature::RSA_PKCS1_2048_8192_SHA512, public_key_der)
-                    .verify(signing_input, signature_bytes)
-                    .map_err(|_| JwtVerifyError::InvalidSignature)
-            }
-            (Self::Ecdsa { public_key_raw, .. }, JwtAlgorithm::ES256) => {
-                UnparsedPublicKey::new(&signature::ECDSA_P256_SHA256_FIXED, public_key_raw)
-                    .verify(signing_input, signature_bytes)
-                    .map_err(|_| JwtVerifyError::InvalidSignature)
-            }
-            (Self::Ecdsa { public_key_raw, .. }, JwtAlgorithm::ES384) => {
-                UnparsedPublicKey::new(&signature::ECDSA_P384_SHA384_FIXED, public_key_raw)
-                    .verify(signing_input, signature_bytes)
-                    .map_err(|_| JwtVerifyError::InvalidSignature)
-            }
-            (Self::Ed25519 { public_key_raw }, JwtAlgorithm::EdDSA) => {
-                UnparsedPublicKey::new(&signature::ED25519, public_key_raw)
-                    .verify(signing_input, signature_bytes)
-                    .map_err(|_| JwtVerifyError::InvalidSignature)
-            }
-            _ => Err(JwtVerifyError::AlgorithmMismatch),
-        }
-    }
-}
-
-// ============================================================================
-// Pre-Compiled Claim Resolution & Business Policies
-// ============================================================================
-
-/// Pre-split dot-notation claim path compiled once at configuration load time.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct ClaimPath {
-    segments: Box<[Box<str>]>,
-}
-
-impl ClaimPath {
-    /// Compiles a dot-separated claim path (e.g. `"profile.tenant_id"`).
-    pub fn compile(path: &str) -> Self {
-        let segments = path
-            .split('.')
-            .map(|s| s.to_string().into_boxed_str())
-            .collect::<Vec<_>>()
-            .into_boxed_slice();
-        Self { segments }
-    }
-
-    #[inline]
-    fn walk<'a>(&self, root: &'a serde_json::Value) -> Option<&'a serde_json::Value> {
-        let mut current = root;
-        for seg in &self.segments {
-            match current {
-                serde_json::Value::Object(map) => current = map.get(seg.as_ref())?,
-                _ => return None,
-            }
-        }
-        Some(current)
-    }
-}
-
-fn value_to_header_string(val: &serde_json::Value) -> Option<String> {
-    match val {
-        serde_json::Value::String(s) => Some(s.clone()),
-        serde_json::Value::Number(n) => Some(n.to_string()),
-        serde_json::Value::Bool(b) => Some(if *b { "true".into() } else { "false".into() }),
-        serde_json::Value::Array(arr) => {
-            let mut out = String::new();
-            for item in arr {
-                let piece: Cow<'_, str> = match item {
-                    serde_json::Value::String(s) => Cow::Borrowed(s.as_str()),
-                    serde_json::Value::Number(n) => Cow::Owned(n.to_string()),
-                    _ => continue,
-                };
-                if !out.is_empty() {
-                    out.push_str(", ");
-                }
-                out.push_str(&piece);
-            }
-            if out.is_empty() { None } else { Some(out) }
-        }
-        _ => None,
-    }
-}
-
-/// Resolves a nested claim path from a JSON object using dot notation (e.g., `user.id`).
-pub fn resolve_claim_path(value: &serde_json::Value, path: &str) -> Option<String> {
-    let mut current = value;
-    for segment in path.split('.') {
-        match current {
-            serde_json::Value::Object(map) => current = map.get(segment)?,
-            _ => return None,
-        }
-    }
-    value_to_header_string(current)
-}
-
-#[inline]
-fn scalar_matches_str(val: &serde_json::Value, expected: &str) -> bool {
-    match val {
-        serde_json::Value::String(s) => s == expected,
-        serde_json::Value::Bool(b) => expected == if *b { "true" } else { "false" },
-        serde_json::Value::Number(n) => {
-            if let Some(u) = n.as_u64() {
-                let mut buf = [0u8; 20];
-                format_u64_ascii(u, &mut buf) == expected.as_bytes()
-            } else if let Some(i) = n.as_i64() {
-                let mut buf = [0u8; 21];
-                format_i64_ascii(i, &mut buf) == expected.as_bytes()
             } else {
-                n.to_string() == expected
+                let ring_alg = match alg {
+                    JwtAlgorithm::HS256 => hmac::HMAC_SHA256,
+                    JwtAlgorithm::HS384 => hmac::HMAC_SHA384,
+                    JwtAlgorithm::HS512 => hmac::HMAC_SHA512,
+                    _ => unreachable!(),
+                };
+                hmac::verify(
+                    &hmac::Key::new(ring_alg, key_bytes),
+                    signing_input,
+                    signature_bytes,
+                )
+                .map_err(|_| JwtVerifyError::InvalidSignature)
             }
         }
-        _ => false,
-    }
-}
-
-#[inline]
-fn format_u64_ascii(mut n: u64, buf: &mut [u8; 20]) -> &[u8] {
-    if n == 0 {
-        buf[19] = b'0';
-        return &buf[19..20];
-    }
-    let mut pos = 20usize;
-    while n > 0 {
-        pos -= 1;
-        buf[pos] = b'0' + (n % 10) as u8;
-        n /= 10;
-    }
-    &buf[pos..20]
-}
-
-#[inline]
-fn format_i64_ascii(n: i64, buf: &mut [u8; 21]) -> &[u8] {
-    if n >= 0 {
-        let mut sub = [0u8; 20];
-        let s = format_u64_ascii(n as u64, &mut sub);
-        let start = 21 - s.len();
-        buf[start..21].copy_from_slice(s);
-        return &buf[start..21];
-    }
-    let mag = n.unsigned_abs();
-    let mut sub = [0u8; 20];
-    let s = format_u64_ascii(mag, &mut sub);
-    let start = 20 - s.len();
-    buf[start] = b'-';
-    buf[start + 1..21].copy_from_slice(s);
-    &buf[start..21]
-}
-
-#[inline]
-fn matches_compiled_assert(payload: &serde_json::Value, path: &ClaimPath, expected: &str) -> bool {
-    let Some(current) = path.walk(payload) else {
-        return false;
-    };
-    match current {
-        serde_json::Value::Array(arr) => arr.iter().any(|item| scalar_matches_str(item, expected)),
-        other => scalar_matches_str(other, expected),
-    }
-}
-
-/// Parses an RFC 7519 `NumericDate` (integer or finite float seconds) rounding down (`exp`).
-#[inline]
-fn parse_numeric_date_floor(val: &serde_json::Value) -> Result<u64, JwtVerifyError> {
-    let Some(n) = val.as_number() else {
-        return Err(JwtVerifyError::InvalidNumericDate);
-    };
-    if let Some(u) = n.as_u64() {
-        return Ok(u);
-    }
-    if let Some(i) = n.as_i64() {
-        return Ok(if i <= 0 { 0 } else { i as u64 });
-    }
-    if let Some(f) = n.as_f64()
-        && f.is_finite()
-    {
-        if f <= 0.0 {
-            return Ok(0);
+        JwtAlgorithm::RS256 => {
+            UnparsedPublicKey::new(&signature::RSA_PKCS1_2048_8192_SHA256, key_bytes)
+                .verify(signing_input, signature_bytes)
+                .map_err(|_| JwtVerifyError::InvalidSignature)
         }
-        if f >= u64::MAX as f64 {
-            return Ok(u64::MAX);
+        JwtAlgorithm::RS384 => {
+            UnparsedPublicKey::new(&signature::RSA_PKCS1_2048_8192_SHA384, key_bytes)
+                .verify(signing_input, signature_bytes)
+                .map_err(|_| JwtVerifyError::InvalidSignature)
         }
-        return Ok(f.floor() as u64);
+        JwtAlgorithm::RS512 => {
+            UnparsedPublicKey::new(&signature::RSA_PKCS1_2048_8192_SHA512, key_bytes)
+                .verify(signing_input, signature_bytes)
+                .map_err(|_| JwtVerifyError::InvalidSignature)
+        }
+        JwtAlgorithm::ES256 => {
+            UnparsedPublicKey::new(&signature::ECDSA_P256_SHA256_FIXED, key_bytes)
+                .verify(signing_input, signature_bytes)
+                .map_err(|_| JwtVerifyError::InvalidSignature)
+        }
+        JwtAlgorithm::ES384 => {
+            UnparsedPublicKey::new(&signature::ECDSA_P384_SHA384_FIXED, key_bytes)
+                .verify(signing_input, signature_bytes)
+                .map_err(|_| JwtVerifyError::InvalidSignature)
+        }
+        JwtAlgorithm::EdDSA => UnparsedPublicKey::new(&signature::ED25519, key_bytes)
+            .verify(signing_input, signature_bytes)
+            .map_err(|_| JwtVerifyError::InvalidSignature),
     }
-    Err(JwtVerifyError::InvalidNumericDate)
 }
 
-/// Parses an RFC 7519 `NumericDate` (integer or finite float seconds) rounding up (`nbf`).
-#[inline]
-fn parse_numeric_date_ceil(val: &serde_json::Value) -> Result<u64, JwtVerifyError> {
-    let Some(n) = val.as_number() else {
-        return Err(JwtVerifyError::InvalidNumericDate);
-    };
-    if let Some(u) = n.as_u64() {
-        return Ok(u);
-    }
-    if let Some(i) = n.as_i64() {
-        return Ok(if i <= 0 { 0 } else { i as u64 });
-    }
-    if let Some(f) = n.as_f64()
-        && f.is_finite()
-    {
-        if f <= 0.0 {
-            return Ok(0);
-        }
-        if f >= u64::MAX as f64 {
-            return Ok(u64::MAX);
-        }
-        return Ok(f.ceil() as u64);
-    }
-    Err(JwtVerifyError::InvalidNumericDate)
-}
-
-/// Validated token result containing effective expiration and optional pre-built claim headers.
+/// Validated token result containing expiration, owning key-slot cache tag, and optional headers.
 pub struct VerifiedToken {
     pub exp_epoch_secs: u64,
+    pub key_tag: u64,
     pub injected_headers: Option<Arc<[(HeaderKey, HeaderValue)]>>,
 }
 
-/// Configuration policies and cryptographic keys for JWT verification.
+/// Configuration policies and hardware key store table for JWT verification.
 pub struct JwtValidationPolicy<'a> {
-    pub expected_alg: JwtAlgorithm,
+    pub boot_salt: &'a [u8; 32],
     pub key_table: &'a JwksKeyTable,
     pub validate_exp: bool,
     pub clock_skew_secs: u64,
@@ -736,7 +548,7 @@ struct JoseHeader<'a> {
     kid: Option<&'a str>,
 }
 
-/// Performs full validation of a compact JWT string against cryptographic key and business policies.
+/// Performs full validation of a compact JWT string against L1D/L3 key table and business policies.
 pub fn verify_jwt(
     token: &str,
     policy: &JwtValidationPolicy<'_>,
@@ -761,27 +573,44 @@ pub fn verify_jwt(
     let signature_b64 = &token[second_dot + 1..];
     let signing_input = &token.as_bytes()[..second_dot];
 
-    // 2. Decode JOSE header into 512B stack buffer (zero heap allocation; supports OIDC x5t + UUID/ARN kids)
+    // 2. Decode JOSE header into 512B stack buffer and map `alg` straight to u4 (`0..=8`)
     let mut header_stack_buf = [0u8; 512];
     let header_bytes = decode_base64url_to_slice(header_b64, &mut header_stack_buf)?;
     let header_json: JoseHeader<'_> =
         serde_json::from_slice(header_bytes).map_err(|_| JwtVerifyError::MalformedToken)?;
 
-    if header_json.alg != policy.expected_alg.as_str() {
+    let header_alg_u4 =
+        JwtAlgorithm::parse_alg_u4(header_json.alg).ok_or(JwtVerifyError::AlgorithmMismatch)?;
+
+    // 3. Resolve slot index via L1D tag bitmap + L3 salted `u64` integer `kid` (or primary slot)
+    let slot_idx = match header_json.kid {
+        Some(kid_str) => {
+            let kid_u64 = hash_kid_salted(kid_str.as_bytes(), policy.boot_salt);
+            policy.key_table.resolve_slot_by_kid_u64(kid_u64)?
+        }
+        None => policy.key_table.primary_slot_idx()?,
+    };
+
+    let slot_alg_u4 = policy.key_table.alg_u4(slot_idx);
+    if header_alg_u4 != slot_alg_u4 {
         return Err(JwtVerifyError::AlgorithmMismatch);
     }
+    let slot_alg = JwtAlgorithm::from_u4(slot_alg_u4).ok_or(JwtVerifyError::AlgorithmMismatch)?;
+    let (key_bytes, expected_sig_len) = policy.key_table.key_bytes_for(slot_idx);
+    let hmac_opt = policy.key_table.hmac_key_for(slot_idx);
+    let key_tag = policy.key_table.key_tags.0[slot_idx];
 
-    // 3. Resolve key from contiguous 8-slot table (Cache Line 0 integer scan)
-    let slot = policy.key_table.resolve_key(header_json.kid)?;
-    if slot.alg != policy.expected_alg {
-        return Err(JwtVerifyError::AlgorithmMismatch);
-    }
-    let verifier_key = slot.key.as_ref().ok_or(JwtVerifyError::NoActiveKeys)?;
-
-    // 4. Decode signature onto stack and execute constant-time verification
+    // 4. Decode signature onto stack and execute constant-time verification over L3 Byte Arena
     let mut sig_stack_buf = [0u8; 1024];
     let signature_bytes = decode_base64url_to_slice(signature_b64, &mut sig_stack_buf)?;
-    verifier_key.verify(policy.expected_alg, signing_input, signature_bytes)?;
+    verify_slot_signature(
+        slot_alg,
+        key_bytes,
+        hmac_opt,
+        expected_sig_len,
+        signing_input,
+        signature_bytes,
+    )?;
 
     // 5. Decode JSON payload (stack buffer for tokens <= 2 KiB, heap fallback for larger payloads)
     let mut payload_stack_buf = [0u8; 2048];
@@ -867,6 +696,7 @@ pub fn verify_jwt(
 
     Ok(VerifiedToken {
         exp_epoch_secs: exp_for_cache,
+        key_tag,
         injected_headers,
     })
 }
@@ -920,9 +750,10 @@ mod tests {
         ];
 
         let assert_claims = vec![(ClaimPath::compile("roles"), "admin".into())];
-        let key_table = JwksKeyTable::with_static_key(key, JwtAlgorithm::HS256);
+        let salt = [0x22u8; 32];
+        let key_table = JwksKeyTable::with_static_key(key, JwtAlgorithm::HS256, &salt);
         let policy = JwtValidationPolicy {
-            expected_alg: JwtAlgorithm::HS256,
+            boot_salt: &salt,
             key_table: &key_table,
             validate_exp: true,
             clock_skew_secs: 60,
@@ -957,8 +788,9 @@ mod tests {
             BASE64_STANDARD.encode(&spki_der)
         );
 
+        let salt = [0x33u8; 32];
         let verifier = VerifierKey::new(JwtAlgorithm::EdDSA, None, Some(&pem)).unwrap();
-        let key_table = JwksKeyTable::with_static_key(verifier, JwtAlgorithm::EdDSA);
+        let key_table = JwksKeyTable::with_static_key(verifier, JwtAlgorithm::EdDSA, &salt);
 
         let h_b64 = BASE64_URL_SAFE_NO_PAD.encode(br#"{"alg":"EdDSA","typ":"JWT","kid":"ed-1"}"#);
         let p_b64 = BASE64_URL_SAFE_NO_PAD.encode(br#"{"sub":"ed_user","exp":2000000000}"#);
@@ -970,7 +802,7 @@ mod tests {
         );
 
         let policy = JwtValidationPolicy {
-            expected_alg: JwtAlgorithm::EdDSA,
+            boot_salt: &salt,
             key_table: &key_table,
             validate_exp: true,
             clock_skew_secs: 0,
@@ -986,10 +818,11 @@ mod tests {
     #[test]
     fn test_float_and_malformed_nbf_never_bypass() {
         let secret = "test-secret";
+        let salt = [0x44u8; 32];
         let key = VerifierKey::new(JwtAlgorithm::HS256, Some(secret), None).unwrap();
-        let key_table = JwksKeyTable::with_static_key(key, JwtAlgorithm::HS256);
+        let key_table = JwksKeyTable::with_static_key(key, JwtAlgorithm::HS256, &salt);
         let policy = JwtValidationPolicy {
-            expected_alg: JwtAlgorithm::HS256,
+            boot_salt: &salt,
             key_table: &key_table,
             validate_exp: false,
             clock_skew_secs: 0,
@@ -1014,8 +847,9 @@ mod tests {
 
     #[test]
     fn test_signature_length_and_kid_rotation_errors() {
-        use super::super::table::JwksKeySlot;
+        use super::super::store::KeyEntrySpec;
 
+        let salt = [0x55u8; 32];
         let secret1 = "secret-key-1";
         let secret2 = "secret-key-2";
 
@@ -1040,15 +874,23 @@ mod tests {
         );
 
         let k1 = VerifierKey::new(JwtAlgorithm::HS256, Some(secret1), None).unwrap();
-        let k2 = VerifierKey::new(JwtAlgorithm::HS256, Some(secret2), None).unwrap();
-        let s1 = JwksKeySlot::new(101, "key-1", JwtAlgorithm::HS256, k1);
-        let s2 = JwksKeySlot::new(102, "key-2", JwtAlgorithm::HS256, k2);
-
-        let mut table = JwksKeyTable::empty();
-        table.populate_batch([Some(s1), Some(s2), None, None, None, None, None, None], 0);
+        let k2 = VerifierKey::new(JwtAlgorithm::HS512, Some(secret2), None).unwrap();
+        let entries = [
+            KeyEntrySpec {
+                raw_kid: Some("key-1".into()),
+                alg: JwtAlgorithm::HS256,
+                key: k1,
+            },
+            KeyEntrySpec {
+                raw_kid: Some("key-2".into()),
+                alg: JwtAlgorithm::HS512,
+                key: k2,
+            },
+        ];
+        let table = JwksKeyTable::build_from_entries(&entries, 0, false, true, &salt).unwrap();
 
         let policy = JwtValidationPolicy {
-            expected_alg: JwtAlgorithm::HS256,
+            boot_salt: &salt,
             key_table: &table,
             validate_exp: true,
             clock_skew_secs: 0,

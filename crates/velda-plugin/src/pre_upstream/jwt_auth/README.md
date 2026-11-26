@@ -2,31 +2,34 @@
 
 ```text
 +---------------------------------------------------------------------------------------------------+
-|                             JWT Authentication — 3-Tier Hardware Workflow                         |
+|                     UNIFIED JWT AUTH — INTERNAL & EXTERNAL ETP MODES                              |
+|                                                                                                   |
+|  Config (`mode` encoded as 1 bit in `DirectoryLine::flags`):                                      |
+|    ├─► MODE_INTERNAL (0): Static key (`secret_key` / `public_key_pem`), `pbww() == 0`, 0 net I/O  |
+|    └─► MODE_EXTERNAL (1): Borrows ETP Lease in Shadow (`pbww() 1..=100`, `coarse_sec()` loop)     |
+|                           └─► providers/<etp_kind> ──► private `JwksStore` (`ArcSwap<KeyTable>`)  |
 |                                                                                                   |
 |  [L2 Warm: Downstream Request (`HeaderWorkspace` / URI)]                                          |
 |         │                                                                                         |
 |         ▼ 1. Pre-hashed `HeaderKey` / Cookie / Query extraction + 2-dot structural guard          |
 |  ┌─────────────────────────────────────────────────────────────────────────────────────────────┐  |
 |  │ [L1D Cache Line 0: 64B `JwtCache` Control (`_MM_HINT_T0`)]                                  │  |
-|  │  - `SHA-256(boot_salt || jwt)` -> `fp: u128` (16B integer in GPRs, 0 heap alloc)            │  |
+|  │  - `SHA-256(boot_salt || jwt)` -> `fp: u128` (16B integer, 0 heap alloc)                    │  |
 |  │  - Bit-shift `(fp & shard_mask)` & `((fp >> shift) & group_mask)` -> `_MM_HINT_T2` L3 hint  │  |
 |  └──────────────────────────────────────────────┬──────────────────────────────────────────────┘  |
-|                                                 │                                                 |
 |                                                 ▼                                                 |
 |  ┌─────────────────────────────────────────────────────────────────────────────────────────────┐  |
 |  │ [L3 Shared LLC: Contiguous 64-Way SIMD `BucketGroup` (`#[repr(C, align(64))]`)]             │  |
-|  │  - Cache Line 0 (`tags: [u8; 64]`): AVX2 / SSE2 / NEON / SWAR scan + `tzcnt` -> `slot_idx`  │  |
-|  │  - Unified Tag Bit 7 (`0x80`): Positive (`0x01..0x7F`) + Reject `401`/`403` (`0x81..0xFF`)  │  |
+|  │  - `tags: [u8; 64]` (AVX2/SSE2/NEON/SWAR) -> `key_tags[idx]` vs `JwksKeyTable` slot tag     │  |
 |  │  - Positive Hit -> `insert_prehashed` from `Arc<[(HeaderKey, HeaderValue)]>` (`0` alloc)    │  |
 |  └──────────────────────────────────────────────┬──────────────────────────────────────────────┘  |
 |                                                 │ Cache Miss                                      |
 |                                                 ▼                                                 |
 |  ┌─────────────────────────────────────────────────────────────────────────────────────────────┐  |
-|  │ [Cold Cryptographic Verification (`crypto.rs` + `table.rs`)]                                │  |
-|  │  - `JwksKeyTable` Cache Line 0 `[u64; 8]` lookup (up to 128B `kid`, epoch-tracked rotation) │  |
-|  │  - Constant-time `ring` verify (`HS256/384/512`, `RS256/384/512`, `ES256/384`, `EdDSA`)     │  |
-|  │  - Enforce `exp`, `nbf`, `iss`, `aud`, `assert_claims` -> Commit L3 Bucket & Inject Claims  │  |
+|  │ [Cold Cryptographic Verification (`store.rs` + `crypto.rs`)]                                │  |
+|  │  - L1D `DirectoryLine`: `tags[16]` + `algs_packed` (`16 x u4`) + `valid_mask` (`u16`)       │  |
+|  │  - L3 Integer Meta: salted `kid_ints: [u64; 16]` + `key_spans` -> contiguous `key_bytes`    │  |
+|  │  - Constant-time `ring` verify (`HS*`, `RS*`, `ES*`, `EdDSA`) + Claims Check & Cache Commit │  |
 |  └──────────────────────────────────────────────┬──────────────────────────────────────────────┘  |
 |                                                 │ `Action::Continue`                              |
 |                                                 ▼                                                 |
@@ -34,53 +37,54 @@
 +---------------------------------------------------------------------------------------------------+
 ```
 
-The **`jwt_auth`** plugin is Velda Edge's L7 JSON Web Token (RFC 7519) authentication and claim-projection engine. It verifies symmetric and asymmetric signatures, caches decisions in a contiguous L3 SIMD-indexed table keyed by 128-bit cryptographic fingerprints, and projects present token claims into upstream request headers.
+The **`jwt_auth`** plugin is Velda Edge's unified L7 JSON Web Token (RFC 7519) authentication and key-rotation engine. It verifies symmetric and asymmetric tokens on the hot path using hardware-aligned L1D/L3 key structures and optionally rotates keys asynchronously on Shadow Workers over isolated `velda-etp` connection pools.
 
 ---
 
 ## 1. What This Plugin Does
 
-1. **Multi-Algorithm Constant-Time Signature Verification**:
-   - Supports `HS256`, `HS384`, `HS512`, `RS256`, `RS384`, `RS512`, `ES256`, `ES384`, and `EdDSA` (`Ed25519`, RFC 8037).
-   - Operates with static key material (`secret_key` or `public_key_pem`) or live background key rotation via `jwks_rotator`.
-2. **Three-Tier (`L1D` / `L2` / `L3`) Contiguous SIMD Decision Cache**:
-   - Compresses arbitrary-length JWT strings into 128-bit secret-salted SHA-256 integers (`u128`).
-   - Unifies positive (`200` pass), invalid (`401`), and claim-denied (`403`) decisions in a single 64-way set-associative L3 bucket scanned via `AVX2` / `SSE2` / `NEON` / `SWAR`.
-   - Automatically invalidates cached tokens upon `jwks_rotator` key rotation via atomic `SharedJwksStore` epoch tracking.
-3. **Declarative Policy & Claim Projection**:
-   - Enforces `exp`, `nbf` (integer and float RFC 7519 `NumericDate`), `iss`, `aud`, and `assert_claims`.
-   - Projects present claims (`claims_to_headers`, supporting nested dot paths and arrays) into `HeaderWorkspace` via pre-hashed `HeaderKey` descriptors without deleting unrelated client headers when optional claims are absent.
+1. **Dual-Mode Operation (`internal` Static vs `external` ETP)**:
+   - **`internal` (`MODE_INTERNAL = 0`, `pbww() == 0`)**: Pins a static symmetric (`secret_key`) or asymmetric (`public_key_pem`) key in RAM at config load with zero background tasks or network I/O.
+   - **`external` (`MODE_EXTERNAL = 1`, `pbww() 1..=100`)**: Borrows pre-connected TCP/TLS streams in the Shadow Logistics loop (`velda_core::clock::coarse_sec()`) from an attached `etp_id` across 11 self-contained providers: `vault`, `aws_secrets_manager`, `s3`, `keycloak`, `hydra`, `authelia`, `okta`, `auth0`, `entra_id`, `cognito`, and `oidc`.
+2. **L1D Bit-Mapped `JwksStore` + L3 Key Byte Arena**:
+   - Compresses key resolution into a 64-byte L1D `DirectoryLine` holding `tags: [u8; 16]`, packed 4-bit algorithms (`algs_packed`: 16 x `u4`), `valid_mask: u16` (1 active primary slot + up to 15 standby/overlap slots), and `flags`.
+   - Stores boot-salted 64-bit integer `kid_ints`, per-slot `key_tags`, and `KeySpan` descriptors in L3-aligned lines pointing into a contiguous `key_bytes: Box<[u8]>` Key Byte Arena.
+3. **Granular Per-Key Cache Coherence**:
+   - L3 `JwtCache` tags each verified token entry with its signing slot's `key_tag`. Rotating in new standby keys preserves cached tokens signed by non-retired keys, while modifying or retiring a `kid` invalidates only affected tokens immediately.
 
 ---
 
 ## 2. Where It Sits in Velda Edge
 
 - **Subsystem**: `crates/velda-plugin/src/pre_upstream/jwt_auth/`
-- **Execution Stage**: `PreUpstreamPlugin` (`pbww = 0`, executes inline on Frontline Traffic Workers `velda-worker-{i}`)
-- **Supported Protocols**: `SupportedProtocols::ALL_L7` (HTTP/1.1, HTTP/2, HTTP/3, and gRPC)
-- **Companion Plugin**: Optionally pairs with `jwks_rotator` (`BackgroundPlugin`, `pbww = 5` on Shadow Logistics Workers) sharing an atomic `SharedJwksStore`.
+- **Execution Stage**:
+  - Hot path: `PreUpstreamPlugin` (`on_upstream_request`) on Frontline Traffic Workers (`velda-worker-{i}`).
+  - Background path (when `mode == "external"`): `run_background` scheduled via `pbww` (`1..=100`, default `20`) on Shadow Logistics Workers (`velda-shadow-{i}`).
+- **Supported Protocols**: `SupportedProtocols::ALL_L7` (HTTP/1.1, HTTP/2, HTTP/3, gRPC).
 
 ---
 
 ## 3. Requirements & Prerequisites
 
-1. **Strict Schema (`deny_unknown_fields`)**: Every required field in `JwtAuthConfig` must be declared under `"id": "jwt_auth"`. Unknown fields fail `velda-sync` validation immediately.
-2. **Key Provisioning Invariant**:
-   - Symmetric (`HS256`/`HS384`/`HS512`): requires non-empty `secret_key`; `public_key_pem` must be `null`.
-   - Asymmetric (`RS256`/`RS384`/`RS512`/`ES256`/`ES384`/`EdDSA`): `secret_key` must be `null`; requires either a valid ASN.1 DER/PEM `public_key_pem` (`>= 2048-bit` for RSA) **or** `public_key_pem: null` paired with an active `jwks_rotator` targeting `"jwt_auth"`.
+1. **Strict Schema (`deny_unknown_fields`)**: Invalid or unrecognized fields fail `velda-sync` staging immediately.
+2. **Mode Key Invariants**:
+   - `internal`: Requires `algorithm` and either `secret_key` (`HS*`) or `public_key_pem` (`RS*`/`ES*`/`EdDSA`, `>= 2048-bit` RSA); forbids `etp_id` and `path`; forces `pbww = 0`.
+   - `external`: Requires non-empty `etp_id` referencing a supported `velda-etp` provider in `etp.json`. Both `algorithm` and static keys may be `null` (each ETP slot supplies its own verified `u4` algorithm); when both a static fallback key and `etp_id` exist, ETP keys take Slot 0 primary priority while the static key can optionally remain as a standby slot (`preserve_static_key: true`).
 3. **Wire Status Contract**:
-   - Missing token: `401 Unauthorized` + `WWW-Authenticate: Bearer realm="velda-edge"` (gRPC: `UNAUTHENTICATED`).
-   - Malformed / bad signature / expired / `nbf` / `iss` / `aud` mismatch: `401 Unauthorized` + `WWW-Authenticate: Bearer error="invalid_token"`.
-   - Valid token failing `assert_claims`: `403 Forbidden` (gRPC: `PERMISSION_DENIED`).
+   - Absent token: `401 Unauthorized` + `WWW-Authenticate: Bearer realm="velda-edge"` (gRPC: `UNAUTHENTICATED`).
+   - Invalid token / signature / expired / `nbf` / `iss` / `aud` mismatch / `NoActiveKeys`: `401 Unauthorized` + `WWW-Authenticate: Bearer error="invalid_token"`.
+   - `assert_claims` mismatch: `403 Forbidden` (gRPC: `PERMISSION_DENIED`).
 
 ---
 
 ## 4. Quick Start Configuration
 
+### Static (`internal` mode)
 ```json
 {
   "id": "jwt_auth",
   "config": {
+    "mode": "internal",
     "algorithm": "EdDSA",
     "secret_key": null,
     "public_key_pem": "-----BEGIN PUBLIC KEY-----\nMCowBQYDK2VwAyEA...\n-----END PUBLIC KEY-----",
@@ -91,10 +95,29 @@ The **`jwt_auth`** plugin is Velda Edge's L7 JSON Web Token (RFC 7519) authentic
     "clock_skew_secs": 60,
     "issuer": "https://auth.example.com",
     "audience": "api.velda.io",
-    "claims_to_headers": {
-      "sub": "x-user-id",
-      "roles": "x-user-roles"
-    },
+    "claims_to_headers": { "sub": "x-user-id" },
+    "assert_claims": {},
+    "cache_ttl_secs": 300
+  }
+}
+```
+
+### Live ETP Key Rotation (`external` mode)
+```json
+{
+  "id": "jwt_auth",
+  "config": {
+    "mode": "external",
+    "etp_id": "keycloak-prod",
+    "path": "/realms/velda/protocol/openid-connect/certs",
+    "token_sources": [
+      { "type": "header", "name": "authorization", "prefix": "Bearer " }
+    ],
+    "validate_exp": true,
+    "clock_skew_secs": 60,
+    "issuer": "https://idp.example.com/realms/velda",
+    "audience": "api.velda.io",
+    "claims_to_headers": { "sub": "x-user-id" },
     "assert_claims": {},
     "cache_ttl_secs": 300
   }
@@ -105,7 +128,7 @@ The **`jwt_auth`** plugin is Velda Edge's L7 JSON Web Token (RFC 7519) authentic
 
 ## 5. Documentation Directory
 
-- **[RUNBOOK.md](RUNBOOK.md)**: Complete parameter reference, `claims_to_headers` & `header_mutation` composition guide, production presets, and incident triage playbooks.
-- **[ARCHITECTURE.md](ARCHITECTURE.md)**: Byte-exact `64B` L1D control layout, L3 contiguous 64-way SIMD bucket mechanics, zero-borrow SWAR math proof, and epoch-coherent key rotation.
-- **[BENCHMARK.md](BENCHMARK.md)**: 5-tier benchmark matrix and verified `x86-64-v3` release assembly audit (`0` `__rust_alloc` calls in `on_upstream_request`).
-- **[TEST.md](TEST.md)**: Verified `cargo test` execution report across all 22 `jwt_auth` and 9 `jwks_rotator`/dependency unit tests.
+- **[RUNBOOK.md](RUNBOOK.md)**: Complete parameter reference, `etp.json` pairing recipes (Vault, AWS, S3, Keycloak/Hydra/Authelia/OIDC/Cloud IdPs), wire observability, and triage playbooks.
+- **[ARCHITECTURE.md](ARCHITECTURE.md)**: L1D `DirectoryLine` (64B) bit-map + `u4` algorithm packing, L3 salted integer `kid_ints` + Key Byte Arena, per-`key_tag` cache coherence, and ETP provider isolation.
+- **[BENCHMARK.md](BENCHMARK.md)**: 5-tier benchmark specification and release assembly audit notes.
+- **[TEST.md](TEST.md)**: Live verified `cargo test` execution report across `jwt_auth`, `velda-etp`, and `velda-sync`.

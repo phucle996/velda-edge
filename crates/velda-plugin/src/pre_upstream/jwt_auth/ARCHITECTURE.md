@@ -5,103 +5,91 @@
 |                     JWT AUTHENTICATION: 3-TIER HARDWARE RESIDENCY & EXECUTION                     |
 |                                                                                                   |
 |  [Tier L2: `HeaderWorkspace` / URI]                                                               |
-|    • Token bytes decoded moments earlier on current `velda-worker-{id}` core                      |
+|    • Token decoded at ingress on current `velda-worker-{id}` core                                 |
 |    • Pre-hashed `HeaderKey` AVX2/SSE2/NEON/SWAR lookup (`get_all_prehashed`)                      |
-|    • Structural 2-dot check (`is_plausible_jwt_shape`, <= 16 KiB) rejects junk in ~3 ns           |
+|    • Structural 2-dot check (`is_plausible_jwt_shape`, <= 16 KiB) rejects junk before hashing     |
 |         │                                                                                         |
 |         ▼                                                                                         |
 |  [Tier L1D: 64-Byte `JwtCache` Control Block (`offset 0x00` of `JwtAuthPlugin`, `_MM_HINT_T0`)]   |
 |    • `0x00..0x20` `boot_salt: [u8; 32]`     ──► `SHA-256(boot_salt || jwt)` -> `fp: u128`         |
-|    • `0x20..0x30` `shards: Option<Box<..>>` ──► `None` (0B heap) when `cache_ttl_secs == 0`       |
+|    • `0x20..0x30` `lanes: Option<Box<..>>`  ──► `None` (0B heap) when `cache_ttl_secs == 0`       |
 |    • `0x30..0x38` `default_ttl_secs: u32` | `negative_ttl_secs: u32`                              |
-|    • `0x38..0x40` `shard_mask` | `group_mask` | `group_shift` (`shrx` bit-shift index)            |
+|    • `0x38..0x40` `lane_mask` | `hot_group_mask` | `cold_group_mask` | `enabled` | `has_cold`     |
 |         │                                                                                         |
-|         ├──► `prefetcht2` / `prfm pldl3keep` on `&shard.groups_base[group_idx].tags`              |
-|         │    (OoOE overlaps ~14 ns L3 transfer with `epoch` Acquire load + shard Mutex lock)      |
+|         ├──► Index core-local lane via `current_worker_lane() & lane_mask` (0 Mutex / 0 futex)    |
+|         ├──► `prefetcht2` / `prfm pldl3keep` on `&lane.hot_base[hot_idx].tags`                   |
 |         ▼                                                                                         |
-|  [Tier L3 Shared LLC: Contiguous 64-Way `BucketGroup` (`#[repr(C, align(64))]`)]                  |
-|    • `0x0000..0x0040` `tags: TagLine([u8; 64])`  ──► 1 Cache Line SIMD scan (`vpcmpeqb` + `tzcnt`)|
-|    • `0x0040..0x0440` `keys: [u128; 64]`         ──► Exact 128-bit equality at matched `idx`      |
-|    • `0x0440..0x0640` `expiries: [u64; 64]`      ──► `expiries[idx] > req.ingress_time_sec()`     |
-|    • `0x0640..0x0840` `epochs: [u64; 64]`        ──► `epochs[idx] == key_store.epoch()`           |
-|    • `0x0840..`       `decisions: [CachedDecision; 64]` ──► `Arc<[(HeaderKey, HeaderValue)]>`     |
+|  [Tier L3 Hot Cap (NUMA-Local, <= 4 MiB Total Across All Cores)] ──► On eviction (valid only):    |
+|    • `BucketGroup`: 64B `tags` | `keys` | `expiries` | `key_tags` | `decisions`  ──► Demote    |
+|                                                                                      │            |
+|  [Tier DRAM Cold Spillover (Lazy, <= 2% RAM, max 256 MiB Total)] ◄───────────────────┘            |
+|    • Hit in Cold DRAM swaps/promotes back to Hot L3; 401 sprays never demote into Cold DRAM.      |
 +---------------------------------------------------------------------------------------------------+
 ```
 
 ---
 
-## 1. Cache Hierarchy Residency Design (`L1D` $\leftrightarrow$ `L2` $\leftrightarrow$ `L3`)
+## 1. Private `JwksStore` Hardware Layout (L1D Directory + L3 Integer Meta + Key Byte Arena)
 
-Velda Edge partitions CPU cache tiers explicitly across subsystems (`L1D` for `velda-router` and hot control state, `L2` for per-request `HeaderWorkspace`, `L3` Shared LLC for multi-megabyte shared arenas). `jwt_auth` aligns directly with this physical hierarchy:
+Unlike pointer-heavy `HashMap<String, Key>` tables, [`JwksStore`](store.rs) wraps an `ArcSwap<JwksKeyTable>` owned privately by `JwtAuthPlugin` (`16` slots: `1` active primary slot + up to `15` standby/overlap slots, no redundant `active_count` counter):
 
-1. **L2 Residency of Inbound Token Slice**:
-   - Downstream decoders populate `HeaderWorkspace` on the serving core and keep header blocks warm in L2 (`_MM_HINT_T1`).
-   - Because upstream pipe encoders read `HeaderWorkspace` again immediately after `pre_upstream` to serialize backend frames, `jwt_auth` reads token slices directly through normal temporal loads without issuing redundant non-temporal prefetches on `token_str`, and writes projected claim headers via `insert_prehashed` through the core Store Buffer back into L1D/L2.
-2. **L1D Control Line (`JwtCache`, Compile-Time Verified `64` Bytes)**:
-   - `JwtAuthPlugin` is `#[repr(C, align(64))]` with `cache: JwtCache` placed at byte offset `0x00`.
-   - Entry into `on_upstream_request` issues `_MM_HINT_T0` (`prefetcht0` / `prfm pldl1keep`) on `&self.cache`. All metadata required to convert the JWT into `u128` and bit-shift into the L3 arena (`boot_salt`, `shards` pointer, `shard_mask`, `group_mask`, `group_shift`, and TTLs) resides in that single 64-byte L1D line:
-     ```rust
-     const _: () = assert!(std::mem::size_of::<JwtCache>() == 64);
-     const _: () = assert!(std::mem::align_of::<JwtCache>() == 64);
-     ```
-3. **L3 Shared LLC Bucket Arena (`_MM_HINT_T2` / `pldl3keep`)**:
-   - Default active geometry allocates `64` shards $\times$ `16` groups $\times$ `64` slots = **`65,536` concurrent token slots** (~3.6 MiB contiguous memory), fitting comfortably inside unified L3 LLC (16–64 MiB) without evicting `velda-router` from L1D or `HeaderWorkspace` from L2.
-   - Because L3 is shared across all cores, a token verified on Core 0 is immediately hit in L3 (~14 ns) when subsequent HTTP/2 or `SO_REUSEPORT` requests from that client land on Core $N$.
-   - Writes into `BucketGroup` use standard write-back stores rather than non-temporal streaming stores (`movntdq`), because `movntdq` flushes and invalidates cache lines out of L3 to DRAM (~80 ns), which would defeat cross-core L3 cache hits.
+### Tier 1 — L1D Cache Line 0 (`DirectoryLine`, Exact `64` Bytes)
+
+```text
++---------------------------------------------------------------------------+
+| 0x00..0x10 (16B) | tags: [u8; 16]        | 8-bit kid tag (0x00 = Empty)   |
+| 0x10..0x18 (8B)  | algs_packed: u64      | 16 x u4 algorithms (0..8, 15)  |
+| 0x18..0x1A (2B)  | valid_mask: u16       | Occupancy bitmask (`0` = empty)|
+| 0x1A..0x1B (1B)  | primary_slot: u8      | Primary active slot index      |
+| 0x1B..0x1C (1B)  | flags: u8             | Bit0 Wildcard | Bit1 External  |
+| 0x1C..0x1D (1B)  | tag_shift: u8         | Default 56                     |
+| 0x1D..0x20 (3B)  | _pad: [u8; 3]         | Explicit alignment padding     |
+| 0x20..0x28 (8B)  | table_version_tag: u64| Version tag for unbound rejects|
+| 0x28..0x40 (24B) | _reserved: [u8; 24]   | Tail pad to exact 64B line     |
++---------------------------------------------------------------------------+
+```
+
+Compile-time assertions guarantee `size_of::<DirectoryLine>() == 64`, `align_of::<DirectoryLine>() == 64`, and `offset_of!(JwksKeyTable, dir) == 0`:
+- **Per-Slot `u4` Algorithm Packing**: Every supported JWT algorithm fits in 4 bits (`HS256=0 ..= EdDSA=8`, `ALG_INVALID=0x0F`). Decoding `(algs_packed >> (slot_idx * 4)) & 0x0F` eliminates string comparison on the hot path and enforces exact `header_alg_u4 == slot_alg_u4` checks before reading cryptographic bytes.
+- **Zero `active_count` Overhead**: `valid_mask == 0` encodes empty store (`NoActiveKeys`); `valid_mask & !(1 << primary_slot)` isolates all standby keys cleanly in 1 instruction.
+- **1-Bit Runtime Mode Separation**: `DIR_FLAG_EXTERNAL_MODE` (`1 << 1`) in `DirectoryLine::flags` mirrors `mode_bit` (`0 = internal`, `1 = external`), matching `JwtAuthPlugin::pbww()`.
+
+### Tier 2 & Tier 3 — L3 Metadata Lines & Key Byte Arena
+
+Moving past L1D `DirectoryLine` triggers `_MM_HINT_T2` (`prfm pldl3keep`) onto `kid_ints`:
+1. **`kid_ints: [u64; 16]`** (`2` aligned L3 cache lines = `128B`): Stores integerized `kid` hashes computed once at key ingestion via `Trunc64(SHA-256(boot_salt || b"kid:" || raw_kid))` clamped `>= 2`. Because `boot_salt` already lives inside L1D `JwtCache` at boot across all nodes/restarts, arbitrary-length string `kid`s never pollute cache lines.
+2. **`key_tags: [u64; 16]`** (`128B`): `FNV-1a(kid_u64 || alg_u4 || raw_bytes)` per slot, clamped `>= 2`.
+3. **`key_spans: [KeySpan; 16]`** (`128B`): `{ offset: u32, len: u16, expected_sig_len: u16 }` indexing into the contiguous **`key_bytes: Box<[u8]>`** Key Byte Arena holding raw DER RSA PKCS#1, EC uncompressed points, Ed25519 32B keys, or raw HMAC secrets (paired with optional pre-expanded `ring::hmac::Key` handles).
 
 ---
 
-## 2. Cryptographic `u128` Compression & Forgery Resistance
+## 2. Per-`kid` `key_tag` Cache Coherence Across Rotation
 
-Because a Positive Cache hit **bypasses asymmetric RSA/ECDSA/Ed25519 signature verification**, converting a raw JWT into `u128` must never use an unkeyed algebraic hash (`FxHash` / FNV), which is linearly invertible.
-
-`JwtCache::token_to_u128` computes:
-$$\text{fp} = \text{Trunc}_{128}\!\left(\text{SHA-256}(\text{boot\_salt}_{256} \,\|\, \text{jwt\_bytes})\right)$$
-where `boot_salt` is 32 bytes sampled from OS CSPRNG (`SystemRandom`) at `JwtCache::new`:
-- **Offline Preimage Immunity**: `boot_salt` exists only in process RAM; external callers cannot pre-compute colliding tokens or craft inputs targeting a single `shard_idx` / `group_idx`.
-- **Online Collision Bound**: For $M = 65{,}536$ active cached tokens, the per-request forgery collision probability is:
-  $$P(\text{collision}) \le \frac{65{,}536}{2^{128}} = 2^{-112} \approx 1.9 \times 10^{-34}$$
-- **Fixed Footprint**: Regardless of whether an OIDC JWT is 400 bytes or 8 KiB, its cached key representation is strictly **16 bytes** (`u128`).
+`BucketGroup` replaces coarse global epochs with **`key_tags: [u64; 64]`**:
+- Every valid token entry records the `key_tag` of the `JwksKeyTable` slot whose key verified its signature.
+- Every unbound reject (`UnknownKid`, malformed/expired, `ClaimAssertionFailed`) records `table_version_tag`.
+- On cache hit, [`JwksKeyTable::is_cache_tag_valid`](store.rs) checks the primary slot tag in a single branch (`key_tags.0[p_idx] == cached_tag`), falling back to `standby_mask` bits if needed.
+- **Benefit during rotation**: When an external provider publishes a new primary key (`Slot 0`) while keeping old keys as standby slots (`Slots 1..15`), existing tokens signed by non-retired `kid`s **remain valid cache hits**. The moment a key is retired from all slots or its bytes/algorithm change, its old `key_tag` disappears and cached tokens signed by that key miss immediately.
 
 ---
 
 ## 3. Unified Single-Pass 64-Way SIMD Tag Scanning & Zero-Borrow SWAR
 
-Each `BucketGroup` (`#[repr(C, align(64))]`) places `tags: TagLine([u8; 64])` at offset `0x0000..0x0040` (Cache Line 0). Each byte encodes both occupancy, decision polarity, and 7-bit fingerprint:
+Each `BucketGroup` (`#[repr(C, align(64))]`) places `tags: TagLine([u8; 64])` at offset `0x0000..0x0040`:
 - `0x00`: Empty slot.
-- `0x01..=0x7F` (`Bit 7 = 0`, bits `0..6 = tag7`): Positive verified entry.
-- `0x81..=0xFF` (`Bit 7 = 1`, bits `0..6 = tag7`): Rejected entry (`401 Unauthorized` or `403 Forbidden`).
+- `0x01..=0x7F` (`Bit 7 = 0`): Positive verified entry (`tag7`).
+- `0x81..=0xFF` (`Bit 7 = 1`): Rejected entry (`0x80 | tag7`).
 
-A single lookup masks `(tag & 0x7F) == tag7` (`tag7 in 1..=127`), resolving **both** positive and negative caches in one pass:
-- **Cache Miss**: Inspects exclusively Cache Line 0 (`64` bytes). When `mask == 0`, returns `CacheLookup::Miss` without touching `keys`, `expiries`, `epochs`, or heap pointers.
-- **Multi-Target Compile-Time Dispatch** (zero runtime CPUID sniffing):
-  - `x86_64` + `avx2` (`x86-64-v3`): 2x `_mm256_load_si256` + `_mm256_and_si256` + `_mm256_cmpeq_epi8` + `_mm256_movemask_epi8` $\to$ `u64` mask, traversed via `tzcnt` / `blsr`.
-  - `x86_64` + `sse2` (`x86-64-v1`): 4x 128-bit `_mm_cmpeq_epi8` + `_mm_movemask_epi8`.
-  - `aarch64` (`NEON`): 4x `vld1q_u8` + `vandq_u8` + `vceqq_u8` + bit-weighted `vaddv_u8` lane reduction.
-  - **Universal Portable 64-Bit SWAR Fallback**:
-    Let $x = (w \mathbin{\&} \text{0x7F7F...}) \oplus (\text{0x0101...} \times \text{target7})$. Every byte in $x$ has MSB $0$ ($x_k \in [0, 127]$). Setting MSB before subtracting $1$:
-    $$z = \neg\big((x \mathbin{|} \text{0x8080...}) - \text{0x0101...}\big) \mathbin{\&} \text{0x8080...}$$
-    Because $(x_k \mathbin{|} \text{0x80}) \ge \text{0x80} \ge 1$, subtraction **never borrows across byte boundaries**. Bit 7 of byte $k$ in $z$ is $1$ iff $x_k = 0$. Multiplying $(z \gg 7)$ by `0x0102_0408_1020_4080` and shifting `>> 56` packs all 8 byte MSBs into bits `0..7` with zero carry overflow (maximum byte-6 partial sum is `0xFE < 0x100`).
+Multi-target compile-time dispatch in [`simd.rs`](simd.rs) scans all 64 tags in one pass with zero runtime CPUID sniffing:
+- `x86_64` + `avx2` (`x86-64-v3`): 2x 256-bit `_mm256_cmpeq_epi8` + `_mm256_movemask_epi8` $\to$ `u64` mask (`tzcnt` / `blsr`).
+- `x86_64` + `sse2` (`x86-64-v1`): 4x 128-bit `_mm_cmpeq_epi8` + `_mm_movemask_epi8`.
+- `aarch64` (`NEON`): 4x `vld1q_u8` + `vceqq_u8` + bit-weighted `vaddv_u8`.
+- **Portable 64-Bit Zero-Borrow SWAR Fallback**: Computes $z = \neg\big(((w \mathbin{\&} \text{0x7F7F...}) \oplus (\text{0x0101...} \times \text{target7}) \mathbin{|} \text{0x8080...}) - \text{0x0101...}\big) \mathbin{\&} \text{0x8080...}$ (MSB `0x80` prevents borrow across byte lanes), packing all 8 MSBs via $(z \gg 7) \times \text{0x0102\_0408\_1020\_4080} \gg 56$.
 
 ---
 
-## 4. Contiguous `JwksKeyTable` & Epoch-Coherent Key Rotation
+## 4. Isolated Self-Contained ETP Provider Adapters
 
-1. **Single-Cacheline `kid_index` + 128-Byte `raw_kid` Slots (`table.rs`)**:
-   - `JwksKeyTable` (`#[repr(C, align(64))]`) packs all 8 FNV-1a `u64` key hashes into Cache Line 0 (`0x00..0x40`).
-   - Each `JwksKeySlot` stores up to **128 bytes** of inline `raw_kid` (`MAX_KID_BYTES = 128`), supporting 36-byte UUIDv4 (Cognito/Keycloak), 43-byte Base64URL SHA-256 thumbprints (Entra ID/Okta), and 86-byte SHA-512 identifiers with zero heap allocation and zero silent truncation.
-2. **Lock-Free Rotation Epoch Invalidation**:
-   - `SharedJwksStore` pairs `ArcSwap<JwksKeyTable>` with `epoch: AtomicU64` (initialized to `1`).
-   - When `jwks_rotator` publishes a rotated `JwksKeyTable`, `SharedJwksStore::update` increments `epoch` (`Release`), while frontline workers read `epoch()` (`Acquire`).
-   - Any `JwtCache` slot with `epochs[idx] != current_epoch` immediately misses and re-verifies against the new key table—revoking compromised keys atomically without locking all 64 shards.
-   - During cold boot before `jwks_rotator` completes its first fetch (`active_count == 0` $\to$ `JwtVerifyError::NoActiveKeys`), `jwt_auth` skips negative-cache insertion so valid client tokens are not blacklisted while keys are loading.
-
----
-
-## 5. Allocation & Stack Memory Bounds
-
-- **Cached Hot Path (`Positive`, `Unauthorized`, `Forbidden`)**: **Strictly `0` heap allocations** (`__rust_alloc == 0` verified in `x86-64-v3` release assembly). Positive hits clone an `Option<Arc<[(HeaderKey, HeaderValue)]>>` refcount (`None` when `claims_to_headers` is empty) and write inline `HeaderValue` clones via `HeaderWorkspace::insert_prehashed`.
-- **Cold Verification Path (Cache Miss)**:
-  - JOSE header decodes into a `512`-byte stack buffer (`JoseHeader<'_>` borrows `&str` slices with zero allocation).
-  - Signatures decode into a `1024`-byte stack buffer (covering up to RSA-8192).
-  - Payloads $\le 2\text{ KiB}$ Base64URL-decode onto stack (`Cow::Borrowed`), falling back to `Vec<u8>` (`Cow::Owned`) only for oversized payloads ($> 2\text{ KiB}$), then parse JSON claims once before committing the `Arc<[(HeaderKey, HeaderValue)]>` into L3 for subsequent requests.
+- **Strict Connection/Logic Separation**: `velda-etp` strictly owns TCP/TLS handshake, DNS LKG resolution, pool lifecycle, and transport-level auth (`VaultEtp::resolve_token()`). It knows zero JWT paths or JWK formats.
+- **Isolated Provider Modules (`providers/<kind>/mod.rs`)**: `providers/mod.rs` contains only `pub mod` exports and the top-level match dispatcher `fetch_etp_key_table()`. Every provider folder (`vault`, `aws_secrets_manager`, `s3`, `keycloak`, `hydra`, `authelia`, `okta`, `auth0`, `entra_id`, `cognito`, `oidc`) owns its complete request framing, response decoding (including chunked HTTP/1.1), JWK/JSON extraction, and `(kid, alg, VerifierKey)` assembly end-to-end.
+- **Shadow Worker Execution**: External sync runs inside `JwtAuthPlugin::run_background` using `velda_core::clock::coarse_sec()`, prioritizing ETP keys from Slot 0 onward while appending `static_fallback` as a standby slot only when `preserve_static_key == true`.
