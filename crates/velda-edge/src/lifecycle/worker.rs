@@ -93,6 +93,7 @@ impl RunningWorkerPool {
                 .name(traffic_thread_name)
                 .spawn(move || {
                     velda_plugin::set_core_shadow_sender(shadow_tx);
+                    velda_plugin::set_current_worker_lane(worker_id);
                     velda_connection_pool::set_current_thread_lane(worker_id);
                     velda_observability::set_current_worker_lane(worker_id);
                     velda_observability::sampling::state::seed_worker(worker_id);
