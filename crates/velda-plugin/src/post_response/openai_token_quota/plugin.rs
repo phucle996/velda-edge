@@ -37,8 +37,7 @@ use http::header::HeaderName;
 use tokio::sync::Notify;
 use velda_core::clock::coarse_sec;
 use velda_core::{HeaderWorkspace, L7Response};
-use velda_etp::redis::RedisEtp;
-use velda_etp::{EtpBackend, EtpInstance};
+use velda_etp::EtpInstance;
 
 use crate::BackgroundTaskFuture;
 use crate::capability::{AccessLevel, PluginCapability, SupportedProtocols};
@@ -49,7 +48,9 @@ use crate::post_response::openai_token_quota::config::QuotaMode;
 use crate::post_response::openai_token_quota::local::{
     Fnv1aHasher, MAX_CONSUMER_KEY_LEN, SharedUsageArena, fnv1a_64,
 };
-use crate::post_response::openai_token_quota::redis::{RedisSyncParams, run_redis_sync_loop};
+use crate::post_response::openai_token_quota::providers::{
+    QuotaSyncParams, QuotaSyncProvider, from_etp_instance, run_sync_loop,
+};
 use crate::post_response::openai_token_quota::scanner::scan_token_usage;
 use crate::post_response::openai_token_quota::validation::validate_openai_token_quota_config;
 
@@ -68,7 +69,7 @@ pub struct OpenAiTokenQuotaPlugin {
     pub refill_notify: Arc<Notify>,
     pub redis_connected: Arc<AtomicBool>,
     pub etp_id: Option<String>,
-    pub etp: OnceLock<Arc<RedisEtp>>,
+    pub provider: OnceLock<QuotaSyncProvider>,
     pub micro_quota_batch: u64,
     pub batch_users: usize,
     pub sync_interval_ms: u64,
@@ -110,7 +111,7 @@ impl OpenAiTokenQuotaPlugin {
             refill_notify: Arc::new(Notify::new()),
             redis_connected: Arc::new(AtomicBool::new(false)),
             etp_id: cfg.etp_id,
-            etp: OnceLock::new(),
+            provider: OnceLock::new(),
             micro_quota_batch: cfg.micro_quota_batch,
             batch_users: cfg.batch_users,
             sync_interval_ms: cfg.sync_interval_ms,
@@ -158,18 +159,9 @@ impl PostResponsePlugin for OpenAiTokenQuotaPlugin {
     }
 
     fn attach_etp(&self, instance: &EtpInstance) -> Result<(), PluginError> {
-        match &instance.backend {
-            EtpBackend::Redis(pool) => {
-                let _ = self.etp.set(Arc::clone(pool));
-                Ok(())
-            }
-            _ => Err(PluginError::Config(format!(
-                "Plugin '{}' (openai_token_quota) requires a 'redis' ETP for etp_id '{}', got '{}'",
-                self.id,
-                self.etp_id.as_deref().unwrap_or(""),
-                instance.kind
-            ))),
-        }
+        let provider = from_etp_instance(&self.id, self.etp_id.as_deref(), instance)?;
+        let _ = self.provider.set(provider);
+        Ok(())
     }
 
     fn run_background(
@@ -179,29 +171,29 @@ impl PostResponsePlugin for OpenAiTokenQuotaPlugin {
         if self.mode != QuotaMode::Distributed {
             return None;
         }
-        let etp = match self.etp.get() {
-            Some(pool) => Arc::clone(pool),
+        let provider = match self.provider.get() {
+            Some(p) => p.clone(),
             None => {
                 let msg = format!(
-                    "Plugin '{}' (openai_token_quota) has no attached RedisEtp for etp_id '{}'",
+                    "Plugin '{}' (openai_token_quota) has no attached KV ETP for etp_id '{}'",
                     self.id,
                     self.etp_id.as_deref().unwrap_or("")
                 );
                 return Some(Box::pin(async move { Err(PluginError::Config(msg)) }));
             }
         };
-        let params = RedisSyncParams {
+        let params = QuotaSyncParams {
             plugin_id: self.id.clone(),
             arena: Arc::clone(&self.ledger),
             notify: Arc::clone(&self.refill_notify),
             connected: Arc::clone(&self.redis_connected),
-            etp,
+            provider,
             micro_quota_batch: self.micro_quota_batch,
             batch_users: self.batch_users,
             sync_interval_ms: self.sync_interval_ms,
             pbww: self.shadow_weight,
         };
-        Some(Box::pin(run_redis_sync_loop(params, shutdown)))
+        Some(Box::pin(run_sync_loop(params, shutdown)))
     }
 
     #[inline(always)]

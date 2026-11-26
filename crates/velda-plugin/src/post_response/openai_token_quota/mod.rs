@@ -7,13 +7,13 @@
 //!     ├── scanner.rs     : Single-pass zero-alloc tail byte scanner
 //!     ├── plugin.rs      : PostResponsePlugin hot-path execution
 //!     ├── local/         : Tier 1 — Contiguous k * 4096B SharedUsageArena (128B slots)
-//!     └── redis/         : Tier 2 — Background Shadow Worker (RESP2 Lua micro-quota lease)
+//!     └── providers/     : Tier 2 — Isolated Shadow Sync adapters (Redis, Valkey, Dragonfly, ElastiCache, Memorystore, Upstash)
 //! ```
 
 pub mod config;
 pub mod local;
 pub mod plugin;
-pub mod redis;
+pub mod providers;
 pub mod scanner;
 pub mod validation;
 
