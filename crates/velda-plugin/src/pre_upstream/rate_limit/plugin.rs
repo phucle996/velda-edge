@@ -1,310 +1,115 @@
-//! Rate Limit Plugin (`rate_limit`).
+//! Pre-Upstream `rate_limit` plugin implementation combining Lock-Free L1 `CoreLane`
+//! micro-leasing, 64-shard `CLOCK` `ShardArena`, Hierarchical Multi-Header extraction,
+//! Bounded Soft Overdraft, and Shadow Worker Multi-SoT ETP synchronization.
 //!
-//! Evaluated during `pre_upstream` phase immediately before leasing backend connections.
-//! Provides lock-striped in-memory token bucket / sliding window rate limiting (~15ns hot path)
-//! with optional asynchronous Redis cluster batching.
-//!
-//! Full schema specification, allowed values, and configuration examples:
-//! See [`README.md`](./README.md).
+//! ```text
+//!   Inbound Request (`on_upstream_request`) [Zero-IO, Zero-Alloc Hot Path]
+//!         │
+//!         ├─► 1. Check lock-free `sot_health` flag (`SOT_HEALTH_FAIL_OPEN` / `FAIL_CLOSED`)
+//!         ├─► 2. Extract stack `KeyDigestSet` (`1` key or up to `4` hierarchical tiers)
+//!         ├─► 3. Evaluate each tier against `CoreLane` -> `ShardArena` (`CLOCK` eviction)
+//!         │     ├─ Hard capacity `<= burst_capacity`   ──► Continue + remaining headers
+//!         │     ├─ Soft grace `<= +overdraft_percent%`  ──► Continue + remaining=0
+//!         │     └─ Exceeded                            ──► Reject(429) + bypass headers
+//!         │
+//!         ▼ Shadow Worker (`pbww > 0`, `etp_id = Some(...)`)
+//!     attach_etp(&EtpInstance) ──► RateLimitSotProvider (9 SoT ETPs)
+//!     run_background(shutdown) ──► drain dirty deltas -> atomic SoT upsert -> reconcile
+//! ```
 
-use http::HeaderName;
-use http::header::RETRY_AFTER;
-use velda_core::{Action, L7Request, RejectReason};
+use std::sync::{Arc, OnceLock};
 
-use super::algorithm::{RateLimitAlgorithm, ShardedState};
-use super::key::KeyStrategy;
-use super::redis::{RedisConfig, RedisConnectionPool, TlsSource};
-use crate::capability::{AccessLevel, PluginCapability, SupportedProtocols};
+use http::header::HeaderValue;
+use velda_core::{Action, HeaderKey, L7Request, RejectReason};
+use velda_etp::EtpInstance;
+
+use crate::BackgroundTaskFuture;
+use crate::capability::{AccessLevel, Direction, PluginCapability, SupportedProtocols};
+use crate::config::PluginConfig;
 use crate::error::PluginError;
 use crate::pre_upstream::PreUpstreamPlugin;
+use crate::pre_upstream::rate_limit::arena::{
+    RateLimitArena, SOT_HEALTH_FAIL_CLOSED, SOT_HEALTH_FAIL_OPEN,
+};
+use crate::pre_upstream::rate_limit::key::CompiledKeyExtractor;
+use crate::pre_upstream::rate_limit::providers::{
+    RateLimitSotProvider, from_etp_instance, run_sync_loop,
+};
+use crate::pre_upstream::rate_limit::validation::{
+    RateLimitAlgorithm, RateLimitConfig, validate_rate_limit_config,
+};
 
-/// Storage and synchronization backend.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
-pub enum RateLimitBackend {
-    /// Local in-memory lock-striped concurrent state (Zero Network I/O, microsecond latency).
-    #[default]
-    Memory,
-    /// Distributed Redis synchronization with background shadow batching.
-    Redis,
-}
+const HDR_LIMIT: HeaderKey = HeaderKey::from_static("x-ratelimit-limit");
+const HDR_REMAINING: HeaderKey = HeaderKey::from_static("x-ratelimit-remaining");
+const HDR_RETRY_AFTER: HeaderKey = HeaderKey::from_static("retry-after");
 
-impl RateLimitBackend {
-    /// Parses a backend identifier from configuration string.
-    pub fn parse(s: &str) -> Self {
-        match s.trim().to_ascii_lowercase().as_str() {
-            "redis" => Self::Redis,
-            _ => Self::Memory,
-        }
-    }
-}
-
-/// Fallback behavior when Redis is unreachable or times out.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
-pub enum FallbackBehavior {
-    /// Seamlessly fallback to local in-memory rate limiting with current quotas (Default).
-    #[default]
-    Memory,
-    /// Fail-open: allow request through without rate limiting.
-    Allow,
-    /// Fail-closed: reject request immediately with 429 Too Many Requests.
-    Deny,
-}
-
-impl FallbackBehavior {
-    /// Parses fallback behavior identifier from configuration string.
-    pub fn parse(s: &str) -> Self {
-        match s.trim().to_ascii_lowercase().as_str() {
-            "allow" | "fail_open" => Self::Allow,
-            "deny" | "fail_closed" => Self::Deny,
-            _ => Self::Memory,
-        }
-    }
-}
-
-/// Complete configuration schema for [`RateLimitPlugin`].
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct RateLimitConfig {
-    pub algorithm: RateLimitAlgorithm,
-    pub backend: RateLimitBackend,
-    pub rate_per_second: u64,
-    pub burst_capacity: u64,
-    pub key_strategy: KeyStrategy,
-    pub key_headers: Vec<String>,
-    pub fallback_behavior: FallbackBehavior,
-    pub redis: RedisConfig,
-}
-
-impl Default for RateLimitConfig {
-    fn default() -> Self {
-        Self {
-            algorithm: RateLimitAlgorithm::TokenBucket,
-            backend: RateLimitBackend::Memory,
-            rate_per_second: 1000,
-            burst_capacity: 1000,
-            key_strategy: KeyStrategy::Priority,
-            key_headers: vec!["client_ip".to_string()],
-            fallback_behavior: FallbackBehavior::Memory,
-            redis: RedisConfig::default(),
-        }
-    }
-}
-
-/// Production implementation of the Rate Limiter Pre-Upstream plugin.
+/// High-throughput hierarchical Pre-Upstream rate limiter with pluggable SoT storage ETPs.
 pub struct RateLimitPlugin {
     pub id: String,
     pub config: RateLimitConfig,
-    state: ShardedState,
-    pub redis_pool: RedisConnectionPool,
+    extractor: CompiledKeyExtractor,
+    arena: Arc<RateLimitArena>,
+    sot_provider: OnceLock<RateLimitSotProvider>,
+    limit_header_val: HeaderValue,
 }
 
 impl std::fmt::Debug for RateLimitPlugin {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("RateLimitPlugin")
             .field("id", &self.id)
-            .field("config", &self.config)
-            .field("redis_pool", &self.redis_pool)
+            .field("etp_id", &self.config.etp_id)
+            .field("rate_per_second", &self.config.rate_per_second)
+            .field("burst_capacity", &self.config.burst_capacity)
+            .field("overdraft_percent", &self.config.overdraft_percent)
+            .field("key_strategy", &self.config.key_strategy)
             .finish()
     }
 }
 
 impl RateLimitPlugin {
-    /// Constructs a basic rate limiter instance with default Token Bucket memory backend.
-    pub fn new(id: impl Into<String>, rate_per_second: u64) -> Self {
+    /// Constructs a local node-only fixed-quota rate limiter (`overdraft_percent = 0`).
+    pub fn new(id: impl Into<String>, requests_per_sec: u64) -> Self {
+        let rate = requests_per_sec.max(1);
         let config = RateLimitConfig {
-            rate_per_second,
-            burst_capacity: rate_per_second,
+            algorithm: RateLimitAlgorithm::TokenBucket,
+            rate_per_second: rate,
+            burst_capacity: rate,
+            overdraft_percent: 0,
+            pbww: 0,
             ..RateLimitConfig::default()
         };
         Self::with_config(id, config)
     }
 
-    /// Constructs an instance with custom configuration.
-    pub fn with_config(id: impl Into<String>, config: RateLimitConfig) -> Self {
-        let redis_pool = RedisConnectionPool::new(config.redis.clone());
-
+    /// Constructs a [`RateLimitPlugin`] from an already-validated [`RateLimitConfig`].
+    pub fn with_config(id: impl Into<String>, mut config: RateLimitConfig) -> Self {
+        if config.etp_id.is_none() {
+            config.pbww = 0;
+        }
+        let extractor = CompiledKeyExtractor::new(config.key_strategy, &config.key_headers);
+        let arena = Arc::new(RateLimitArena::new(&config));
+        let limit_header_val = HeaderValue::from_str(&config.burst_capacity.to_string())
+            .unwrap_or_else(|_| HeaderValue::from_static("1000"));
         Self {
             id: id.into(),
             config,
-            state: ShardedState::new(),
-            redis_pool,
+            extractor,
+            arena,
+            sot_provider: OnceLock::new(),
+            limit_header_val,
         }
     }
 
-    /// Deserializes and constructs an instance directly from a [`PluginConfig`].
-    ///
-    /// # Strict Sentinel standard
-    /// Unused or omitted parameters MUST be set to `"none"`.
-    pub fn from_config(config: &crate::config::PluginConfig) -> Result<Self, PluginError> {
-        let cfg = super::validation::validate_rate_limit_config(&config.id, &config.config)
-            .map_err(|e| {
-                PluginError::Config(format!(
-                    "Invalid rate_limit configuration for '{}': {e}",
-                    config.id
-                ))
-            })?;
-
-        let algorithm = RateLimitAlgorithm::parse(&cfg.algorithm);
-        let backend = RateLimitBackend::parse(&cfg.backend);
-        let key_strategy = KeyStrategy::parse(&cfg.key_strategy);
-        let fallback_behavior = FallbackBehavior::parse(&cfg.fallback_behavior);
-
-        let json = &config.config;
-
-        // 7. Batching Configuration
-        let batch_sync_interval_ms = json
-            .get("batch_sync_interval_ms")
-            .and_then(|v| {
-                if let Some(num) = v.as_u64() {
-                    Some(num)
-                } else if let Some(s) = v.as_str() {
-                    s.parse::<u64>().ok()
-                } else {
-                    None
-                }
-            })
-            .unwrap_or(50);
-
-        let batch_max_size = json
-            .get("batch_max_size")
-            .and_then(|v| {
-                if let Some(num) = v.as_u64() {
-                    Some(num as usize)
-                } else if let Some(s) = v.as_str() {
-                    s.parse::<usize>().ok()
-                } else {
-                    None
-                }
-            })
-            .unwrap_or(1000);
-
-        // 8. Redis Configuration
-        let redis_url = json
-            .get("redis_url")
-            .and_then(|v| v.as_str())
-            .and_then(|s| {
-                let t = s.trim();
-                if t.is_empty() || t.eq_ignore_ascii_case("none") {
-                    None
-                } else {
-                    Some(t.to_string())
-                }
-            });
-
-        let redis_username = json
-            .get("redis_username")
-            .and_then(|v| v.as_str())
-            .and_then(|s| {
-                let t = s.trim();
-                if t.is_empty() || t.eq_ignore_ascii_case("none") {
-                    None
-                } else {
-                    Some(t.to_string())
-                }
-            });
-
-        let redis_password = json
-            .get("redis_password")
-            .and_then(|v| v.as_str())
-            .and_then(|s| {
-                let t = s.trim();
-                if t.is_empty() || t.eq_ignore_ascii_case("none") {
-                    None
-                } else {
-                    Some(t.to_string())
-                }
-            });
-
-        let redis_tls_ca = json
-            .get("redis_tls_ca")
-            .and_then(|v| v.as_str())
-            .map(TlsSource::parse)
-            .unwrap_or(TlsSource::None);
-
-        let redis_tls_cert = json
-            .get("redis_tls_cert")
-            .and_then(|v| v.as_str())
-            .map(TlsSource::parse)
-            .unwrap_or(TlsSource::None);
-
-        let redis_tls_key = json
-            .get("redis_tls_key")
-            .and_then(|v| v.as_str())
-            .map(TlsSource::parse)
-            .unwrap_or(TlsSource::None);
-
-        let redis_timeout_ms = json.get("redis_timeout_ms").and_then(|v| {
-            if let Some(num) = v.as_u64() {
-                Some(num)
-            } else if let Some(s) = v.as_str() {
-                s.parse::<u64>().ok()
-            } else {
-                None
-            }
-        });
-
-        let pbww = json
-            .get("pbww")
-            .or_else(|| json.get("shadow_weight"))
-            .and_then(|v| v.as_u64())
-            .map(|w| (w as u32).clamp(1, 100))
-            .unwrap_or(40);
-
-        let redis_cfg = RedisConfig {
-            url: redis_url,
-            username: redis_username,
-            password: redis_password,
-            tls_ca: redis_tls_ca,
-            tls_cert: redis_tls_cert,
-            tls_key: redis_tls_key,
-            timeout_ms: redis_timeout_ms,
-            batch_sync_interval_ms,
-            batch_max_size,
-            pbww,
-        };
-
-        let key_headers = cfg
-            .key_headers
-            .into_iter()
-            .filter(|s| !s.trim().eq_ignore_ascii_case("none"))
-            .collect();
-
-        let parsed_cfg = RateLimitConfig {
-            algorithm,
-            backend,
-            rate_per_second: cfg.rate_per_second,
-            burst_capacity: cfg.burst_capacity,
-            key_strategy,
-            key_headers,
-            fallback_behavior,
-            redis: redis_cfg,
-        };
-
-        Ok(Self::with_config(&config.id, parsed_cfg))
+    /// Parses and compiles a [`RateLimitPlugin`] from declarative [`PluginConfig`].
+    pub fn from_config(cfg: &PluginConfig) -> Result<Self, PluginError> {
+        let parsed = validate_rate_limit_config(&cfg.config)?;
+        Ok(Self::with_config(cfg.id.clone(), parsed))
     }
 
-    /// Resolves rate-limiting client identifier key based on [`KeyStrategy`].
+    /// Exposes the underlying bounded arena for diagnostics or testing.
     #[inline]
-    pub fn resolve_key(&self, req: &L7Request) -> String {
-        self.config
-            .key_strategy
-            .resolve_key(&self.config.key_headers, req)
-    }
-
-    #[cold]
-    #[inline(never)]
-    fn reject_rate_limited(&self, req: &mut L7Request, retry_after: u64) -> Action {
-        const X_RATELIMIT_RESET: HeaderName = HeaderName::from_static("x-ratelimit-reset");
-        const X_RATELIMIT_LIMIT: HeaderName = HeaderName::from_static("x-ratelimit-limit");
-        const X_RATELIMIT_REMAINING: HeaderName = HeaderName::from_static("x-ratelimit-remaining");
-
-        req.headers.insert_bypass_u64(RETRY_AFTER, retry_after);
-        req.headers
-            .insert_bypass_u64(X_RATELIMIT_RESET, retry_after);
-        req.headers
-            .insert_bypass_u64(X_RATELIMIT_LIMIT, self.config.rate_per_second);
-        req.headers.insert_bypass_u64(X_RATELIMIT_REMAINING, 0);
-
-        Action::Reject(RejectReason::TooManyRequests)
+    pub fn arena(&self) -> &Arc<RateLimitArena> {
+        &self.arena
     }
 }
 
@@ -314,314 +119,332 @@ impl PreUpstreamPlugin for RateLimitPlugin {
         &self.id
     }
 
+    fn on_upstream_request(&self, req: &mut L7Request, _targets: &mut u32) -> Action {
+        match self.arena.sot_health() {
+            SOT_HEALTH_FAIL_OPEN => return Action::Continue,
+            SOT_HEALTH_FAIL_CLOSED => {
+                req.headers
+                    .insert_bypass(HDR_RETRY_AFTER.name, HeaderValue::from_static("1"));
+                req.headers
+                    .insert_bypass(HDR_REMAINING.name, HeaderValue::from_static("0"));
+                req.headers
+                    .insert_bypass(HDR_LIMIT.name, self.limit_header_val.clone());
+                return Action::Reject(RejectReason::TooManyRequests);
+            }
+            _ => {}
+        }
+
+        let digests = self.extractor.extract(req);
+        let mut min_remaining = self.config.burst_capacity;
+
+        for item in digests.as_slice() {
+            let dec = self.arena.evaluate_key(item.hash, item.tier);
+            if !dec.allowed {
+                let mut num_buf = [0u8; 24];
+                let nlen = velda_core::lut::decimal::fast_write_u64_slice(
+                    &mut num_buf,
+                    dec.retry_after_secs.max(1),
+                );
+                let retry_val = HeaderValue::from_bytes(&num_buf[..nlen])
+                    .unwrap_or_else(|_| HeaderValue::from_static("1"));
+                req.headers.insert_bypass(HDR_RETRY_AFTER.name, retry_val);
+                req.headers
+                    .insert_bypass(HDR_REMAINING.name, HeaderValue::from_static("0"));
+                req.headers
+                    .insert_bypass(HDR_LIMIT.name, self.limit_header_val.clone());
+                return Action::Reject(RejectReason::TooManyRequests);
+            }
+            if dec.remaining < min_remaining {
+                min_remaining = dec.remaining;
+            }
+        }
+
+        req.headers
+            .insert_prehashed(&HDR_LIMIT, self.limit_header_val.clone());
+        let mut rem_buf = [0u8; 24];
+        let rlen = velda_core::lut::decimal::fast_write_u64_slice(&mut rem_buf, min_remaining);
+        if let Ok(rem_val) = HeaderValue::from_bytes(&rem_buf[..rlen]) {
+            req.headers.insert_prehashed(&HDR_REMAINING, rem_val);
+        }
+        Action::Continue
+    }
+
+    #[inline(always)]
+    fn capability(&self) -> PluginCapability {
+        PluginCapability::header_only(AccessLevel::Write)
+    }
+
+    #[inline(always)]
+    fn supported_protocols(&self) -> SupportedProtocols {
+        SupportedProtocols::ALL_L7
+    }
+
+    #[inline(always)]
+    fn direction(&self) -> Direction {
+        Direction::Request
+    }
+
     #[inline(always)]
     fn pbww(&self) -> u32 {
-        if self.config.backend == RateLimitBackend::Redis && self.config.redis.url.is_some() {
-            self.config.redis.pbww.clamp(1, 100)
-        } else {
-            0
-        }
+        self.config.pbww
+    }
+
+    #[inline]
+    fn etp_id(&self) -> Option<&str> {
+        self.config.etp_id.as_deref()
+    }
+
+    fn attach_etp(&self, instance: &EtpInstance) -> Result<(), PluginError> {
+        let provider = from_etp_instance(instance)?;
+        let _ = self.sot_provider.set(provider);
+        Ok(())
     }
 
     fn run_background(
-        self: std::sync::Arc<Self>,
+        self: Arc<Self>,
         shutdown: tokio::sync::watch::Receiver<bool>,
-    ) -> Option<crate::BackgroundTaskFuture> {
-        if self.config.backend != RateLimitBackend::Redis || self.config.redis.url.is_none() {
-            return None;
-        }
+    ) -> Option<BackgroundTaskFuture> {
+        let provider = self.sot_provider.get()?.clone();
+        let arena = Arc::clone(&self.arena);
+        let config = self.config.clone();
         Some(Box::pin(async move {
-            self.redis_pool.run_shadow_worker(shutdown).await
+            run_sync_loop(provider, arena, config, shutdown).await;
+            Ok(())
         }))
-    }
-
-    /// Evaluates rate limiting on hot path prior to upstream dispatch.
-    ///
-    /// # Performance Contract
-    /// Executes 100% in-memory with lock-striped sharding. Zero Network I/O.
-    fn on_upstream_request(&self, req: &mut L7Request, _target_upstream: &mut u16) -> Action {
-        // Optimization: Zero-allocation direct hashing into FxHasher (eliminating heap String allocations on hot path)
-        let key_hash = self
-            .config
-            .key_strategy
-            .resolve_key_hash(&self.config.key_headers, req);
-
-        // Check backend execution mode
-        let (allowed, retry_after) = match self.config.backend {
-            RateLimitBackend::Memory => self.state.evaluate(
-                key_hash,
-                self.config.algorithm,
-                self.config.rate_per_second,
-                self.config.burst_capacity,
-            ),
-            RateLimitBackend::Redis => {
-                if !self.redis_pool.is_connected() {
-                    // Redis connection dropped: invoke configured fallback behavior
-                    match self.config.fallback_behavior {
-                        FallbackBehavior::Memory => self.state.evaluate(
-                            key_hash,
-                            self.config.algorithm,
-                            self.config.rate_per_second,
-                            self.config.burst_capacity,
-                        ),
-                        FallbackBehavior::Allow => (true, 0),
-                        FallbackBehavior::Deny => (false, 1),
-                    }
-                } else {
-                    // Record request in Redis batch accumulator for shadow synchronization
-                    self.redis_pool.record_hit(key_hash);
-
-                    // Local high-speed enforcement against cluster quota
-                    self.state.evaluate(
-                        key_hash,
-                        self.config.algorithm,
-                        self.config.rate_per_second,
-                        self.config.burst_capacity,
-                    )
-                }
-            }
-        };
-
-        if allowed {
-            Action::Continue
-        } else {
-            self.reject_rate_limited(req, retry_after)
-        }
-    }
-
-    #[inline]
-    fn capability(&self) -> PluginCapability {
-        PluginCapability::header_only(AccessLevel::Read)
-    }
-
-    #[inline]
-    fn supported_protocols(&self) -> SupportedProtocols {
-        SupportedProtocols::ALL_L7
     }
 }
 
 #[cfg(test)]
 mod tests {
-    use super::*;
-    use http::{HeaderValue, Method, Uri, Version};
+    use http::header::HeaderName;
+    use http::{Method, Uri, Version};
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+    use tokio::net::TcpListener;
     use velda_core::{Body, HeaderWorkspace};
+    use velda_etp::registry::build_instance;
+    use velda_etp::{EtpEntryConfig, EtpKind, EtpPoolSettings};
 
-    fn make_test_request(headers: HeaderWorkspace) -> L7Request {
+    use super::*;
+    use crate::pre_upstream::rate_limit::validation::{FallbackBehavior, KeyStrategy};
+
+    fn make_req(headers: &[(&str, &str)], path: &str) -> L7Request {
+        let mut ws = HeaderWorkspace::empty(8);
+        for &(k, v) in headers {
+            ws.insert(
+                HeaderName::from_bytes(k.as_bytes()).unwrap(),
+                HeaderValue::from_str(v).unwrap(),
+            );
+        }
         L7Request::new(
             Method::GET,
-            Uri::from_static("/v1/resource"),
+            path.parse::<Uri>().unwrap(),
             Version::HTTP_11,
-            headers,
+            ws,
             Body::Empty,
         )
     }
 
     #[test]
-    fn test_token_bucket_rate_exhaustion() {
-        // 2 requests per second with burst capacity of 2
-        let plugin = RateLimitPlugin::new("rate-tb", 2);
+    fn test_rate_limit_from_config_rejects_legacy_and_parses_clean() {
+        let legacy = PluginConfig {
+            id: "rate_limit".into(),
+            config: serde_json::json!({
+                "backend": "memory",
+                "rate_per_second": 100
+            }),
+        };
+        assert!(RateLimitPlugin::from_config(&legacy).is_err());
 
-        let mut req = make_test_request(HeaderWorkspace::empty(4));
-
-        let mut target = 1;
-
-        // 1st request -> PASS
-        assert!(matches!(
-            plugin.on_upstream_request(&mut req, &mut target),
-            Action::Continue
-        ));
-        // 2nd request -> PASS (exhausted burst)
-        assert!(matches!(
-            plugin.on_upstream_request(&mut req, &mut target),
-            Action::Continue
-        ));
-        // 3rd request -> 429 TOO_MANY_REQUESTS
-        match plugin.on_upstream_request(&mut req, &mut target) {
-            Action::Reject(reason) => {
-                assert_eq!(reason, RejectReason::TooManyRequests);
-                assert_eq!(req.headers.get_u64("x-ratelimit-remaining"), Some(0));
-                assert_eq!(req.headers.get_u64("x-ratelimit-limit"), Some(2));
-                assert!(req.headers.contains_key("retry-after"));
-                assert_eq!(req.headers.get("x-ratelimit-remaining").unwrap(), "0");
-                assert_eq!(req.headers.get("x-ratelimit-limit").unwrap(), "2");
-                assert!(req.headers.bypass_headers().count() >= 2);
-            }
-            _ => panic!("Expected Action::Reject(TooManyRequests)"),
-        }
+        let clean = PluginConfig {
+            id: "rate_limit".into(),
+            config: serde_json::json!({
+                "algorithm": "sliding_window",
+                "rate_per_second": 200,
+                "burst_capacity": 400,
+                "overdraft_percent": 10,
+                "key_strategy": "hierarchical",
+                "key_headers": ["x-tenant-id", "x-api-key", "client_ip"]
+            }),
+        };
+        let plugin = RateLimitPlugin::from_config(&clean).unwrap();
+        assert_eq!(plugin.pbww(), 0);
+        assert_eq!(plugin.etp_id(), None);
+        assert_eq!(plugin.config.overdraft_percent, 10);
     }
 
     #[test]
-    fn test_fixed_window_algorithm() {
-        let config = RateLimitConfig {
+    fn test_hierarchical_multi_header_blocks_rotating_ip_flood() {
+        let cfg = RateLimitConfig {
             algorithm: RateLimitAlgorithm::FixedWindow,
-            rate_per_second: 1,
-            burst_capacity: 1,
+            rate_per_second: 3,
+            burst_capacity: 3,
+            overdraft_percent: 0,
+            key_strategy: KeyStrategy::Hierarchical,
+            key_headers: vec!["x-tenant-id".into(), "client_ip".into()],
             ..RateLimitConfig::default()
         };
-        let plugin = RateLimitPlugin::with_config("rate-fw", config);
-        let mut req = make_test_request(HeaderWorkspace::empty(4));
-        let mut target = 1;
+        let plugin = RateLimitPlugin::with_config("rate_limit", cfg);
 
-        // 1st request -> PASS
+        // Tenant "acme" uses 3 rotating IPs -> all 3 succeed against tier0 tenant quota (=3)
+        for i in 1..=3 {
+            let ip = format!("10.0.0.{i}");
+            let mut req = make_req(&[("x-tenant-id", "acme"), ("x-forwarded-for", &ip)], "/api");
+            let mut upstream = 0;
+            assert!(matches!(
+                plugin.on_upstream_request(&mut req, &mut upstream),
+                Action::Continue
+            ));
+        }
+
+        // 4th request from brand new IP 10.0.0.99 still belongs to tenant "acme" -> BLOCKED!
+        let mut flood_req = make_req(
+            &[("x-tenant-id", "acme"), ("x-forwarded-for", "10.0.0.99")],
+            "/api",
+        );
+        let mut upstream = 0;
         assert!(matches!(
-            plugin.on_upstream_request(&mut req, &mut target),
+            plugin.on_upstream_request(&mut flood_req, &mut upstream),
+            Action::Reject(RejectReason::TooManyRequests)
+        ));
+
+        // Different tenant "beta" is completely isolated and unaffected!
+        let mut beta_req = make_req(
+            &[("x-tenant-id", "beta"), ("x-forwarded-for", "10.0.0.99")],
+            "/api",
+        );
+        assert!(matches!(
+            plugin.on_upstream_request(&mut beta_req, &mut upstream),
             Action::Continue
         ));
-        // 2nd request in same window -> REJECT 429
+    }
+
+    #[test]
+    fn test_soft_overdraft_absorbs_small_grace_then_blocks_spike() {
+        let cfg = RateLimitConfig {
+            algorithm: RateLimitAlgorithm::TokenBucket,
+            rate_per_second: 10,
+            burst_capacity: 10,
+            overdraft_percent: 20, // grace = +2 => blocks at > 12
+            key_strategy: KeyStrategy::ClientIp,
+            ..RateLimitConfig::default()
+        };
+        let plugin = RateLimitPlugin::with_config("rate_limit", cfg);
+        let mut upstream = 0;
+
+        for _ in 0..12 {
+            let mut req = make_req(&[("x-forwarded-for", "203.0.113.5")], "/");
+            assert!(matches!(
+                plugin.on_upstream_request(&mut req, &mut upstream),
+                Action::Continue
+            ));
+        }
+
+        let mut blocked = make_req(&[("x-forwarded-for", "203.0.113.5")], "/");
         assert!(matches!(
-            plugin.on_upstream_request(&mut req, &mut target),
+            plugin.on_upstream_request(&mut blocked, &mut upstream),
             Action::Reject(RejectReason::TooManyRequests)
         ));
     }
 
-    #[test]
-    fn test_key_strategy_priority_resolution() {
-        let config = RateLimitConfig {
-            key_strategy: KeyStrategy::Priority,
-            key_headers: vec![
-                "x-device-id".to_string(),
-                "x-api-key".to_string(),
-                "client_ip".to_string(),
-            ],
-            rate_per_second: 1,
-            burst_capacity: 1,
-            ..RateLimitConfig::default()
-        };
-        let plugin = RateLimitPlugin::with_config("rate-prio", config);
+    #[tokio::test]
+    async fn test_redis_sot_shadow_sync_reconciles_cluster_totals_and_blocks_peer_overflow() {
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let port = listener.local_addr().unwrap().port();
 
-        // Request 1: has x-device-id
-        let mut h1 = HeaderWorkspace::empty(4);
-        h1.insert("x-device-id", HeaderValue::from_static("device-alpha"));
-        let req1 = make_test_request(h1);
-        assert_eq!(plugin.resolve_key(&req1), "x-device-id:device-alpha");
-
-        // Request 2: no device-id, has x-api-key
-        let mut h2 = HeaderWorkspace::empty(4);
-        h2.insert("x-api-key", HeaderValue::from_static("secret-key-1"));
-        let req2 = make_test_request(h2);
-        assert_eq!(plugin.resolve_key(&req2), "x-api-key:secret-key-1");
-
-        // Request 3: no headers, has x-forwarded-for
-        let mut h3 = HeaderWorkspace::empty(4);
-        h3.insert("x-forwarded-for", HeaderValue::from_static("192.168.1.100"));
-        let req3 = make_test_request(h3);
-        assert_eq!(plugin.resolve_key(&req3), "ip:192.168.1.100");
-    }
-
-    #[test]
-    fn test_key_strategy_composite_resolution() {
-        let config = RateLimitConfig {
-            key_strategy: KeyStrategy::Composite,
-            key_headers: vec![
-                "client_ip".to_string(),
-                "x-device-id".to_string(),
-                "x-api-key".to_string(),
-            ],
-            ..RateLimitConfig::default()
-        };
-        let plugin = RateLimitPlugin::with_config("rate-comp", config);
-
-        let mut headers = HeaderWorkspace::empty(4);
-        headers.insert("x-forwarded-for", HeaderValue::from_static("10.0.0.1"));
-        headers.insert("x-device-id", HeaderValue::from_static("phone-42"));
-        // x-api-key is missing
-
-        let req = make_test_request(headers);
-        let key = plugin.resolve_key(&req);
-        assert_eq!(key, "10.0.0.1:phone-42:none");
-    }
-
-    #[test]
-    fn test_redis_fallback_to_memory_when_disconnected() {
-        let config = RateLimitConfig {
-            backend: RateLimitBackend::Redis,
-            fallback_behavior: FallbackBehavior::Memory,
-            rate_per_second: 1,
-            burst_capacity: 1,
-            ..RateLimitConfig::default()
-        };
-        let plugin = RateLimitPlugin::with_config("rate-redis", config);
-
-        // Simulate Redis disconnection
-        plugin.redis_pool.set_connected(false);
-
-        let mut req = make_test_request(HeaderWorkspace::empty(4));
-        let mut target = 1;
-        // 1st request -> PASS via memory fallback
-        assert!(matches!(
-            plugin.on_upstream_request(&mut req, &mut target),
-            Action::Continue
-        ));
-        // 2nd request -> REJECT 429 via memory fallback
-        assert!(matches!(
-            plugin.on_upstream_request(&mut req, &mut target),
-            Action::Reject(RejectReason::TooManyRequests)
-        ));
-    }
-
-    #[test]
-    fn test_redis_fail_open_allow() {
-        let config = RateLimitConfig {
-            backend: RateLimitBackend::Redis,
-            fallback_behavior: FallbackBehavior::Allow,
-            rate_per_second: 1,
-            burst_capacity: 1,
-            ..RateLimitConfig::default()
-        };
-        let plugin = RateLimitPlugin::with_config("rate-redis-allow", config);
-
-        // Disconnect redis
-        plugin.redis_pool.set_connected(false);
-
-        let mut req = make_test_request(HeaderWorkspace::empty(4));
-        let mut target = 1;
-        // Should continuously pass through (fail-open)
-        assert!(matches!(
-            plugin.on_upstream_request(&mut req, &mut target),
-            Action::Continue
-        ));
-        assert!(matches!(
-            plugin.on_upstream_request(&mut req, &mut target),
-            Action::Continue
-        ));
-    }
-
-    #[test]
-    fn test_strict_none_sentinel_deserialization() {
-        let json_cfg = serde_json::json!({
-            "algorithm": "token_bucket",
-            "backend": "memory",
-            "rate_per_second": 500,
-            "burst_capacity": 1000,
-            "key_strategy": "priority",
-            "key_headers": ["x-device-id", "none", "client_ip"],
-            "fallback_behavior": "memory",
-            "batch_sync_interval_ms": 50,
-            "batch_max_size": 1000,
-            "redis_url": "none",
-            "redis_username": "none",
-            "redis_password": "none",
-            "redis_tls_ca": "none",
-            "redis_tls_cert": "none",
-            "redis_tls_key": "none",
-            "redis_timeout_ms": "none"
+        // Mock Redis returning cluster_total = 50 on first INCRBY
+        let srv = tokio::spawn(async move {
+            while let Ok((mut sock, _)) = listener.accept().await {
+                tokio::spawn(async move {
+                    let mut buf = [0u8; 2048];
+                    while let Ok(n) = sock.read(&mut buf).await {
+                        if n == 0 {
+                            break;
+                        }
+                        // Pipelined batch has SET ... EX 15 NX + INCRBY pairs; reply "+OK\r\n:50\r\n"
+                        let req = String::from_utf8_lossy(&buf[..n]);
+                        let pairs = req.matches("INCRBY").count();
+                        let mut reply = String::new();
+                        for _ in 0..pairs {
+                            reply.push_str("+OK\r\n:50\r\n");
+                        }
+                        if sock.write_all(reply.as_bytes()).await.is_err() {
+                            break;
+                        }
+                    }
+                });
+            }
         });
 
-        let sync_cfg = crate::config::PluginConfig {
-            id: "full-config-test".into(),
-            config: json_cfg,
+        let etp_entry = EtpEntryConfig {
+            id: "redis-rl".into(),
+            kind: EtpKind::Redis,
+            security: velda_etp::EtpTransportSecurity::Plain,
+            pool: EtpPoolSettings {
+                pool_size: 2,
+                connect_timeout_ms: 500,
+                idle_timeout_ms: 5000,
+            },
+            tls: None,
+            settings: serde_json::json!({
+                "host": "127.0.0.1",
+                "port": port
+            }),
         };
+        let instance = build_instance(&etp_entry).unwrap();
 
-        let plugin = RateLimitPlugin::from_config(&sync_cfg).expect("Should parse successfully");
-        assert_eq!(plugin.config.algorithm, RateLimitAlgorithm::TokenBucket);
-        assert_eq!(plugin.config.backend, RateLimitBackend::Memory);
-        assert_eq!(plugin.config.rate_per_second, 500);
-        assert_eq!(plugin.config.burst_capacity, 1000);
-        assert_eq!(plugin.config.key_headers, vec!["x-device-id", "client_ip"]);
-        assert!(plugin.config.redis.url.is_none());
-        assert!(plugin.config.redis.username.is_none());
-        assert!(plugin.config.redis.password.is_none());
-        assert!(plugin.config.redis.tls_ca.is_none());
-        assert!(plugin.config.redis.timeout_ms.is_none());
+        let cfg = RateLimitConfig {
+            algorithm: RateLimitAlgorithm::FixedWindow,
+            etp_id: Some("redis-rl".into()),
+            rate_per_second: 10,
+            burst_capacity: 10,
+            overdraft_percent: 0,
+            key_strategy: KeyStrategy::ClientIp,
+            fallback_behavior: FallbackBehavior::Memory,
+            sync_interval_ms: 25,
+            pbww: 20,
+            ..RateLimitConfig::default()
+        };
+        let plugin = Arc::new(RateLimitPlugin::with_config("rate_limit", cfg));
+        plugin.attach_etp(&instance).unwrap();
+
+        // Kafka instance must be rejected cleanly by attach_etp
+        let kafka_entry = EtpEntryConfig {
+            id: "kafka-bad".into(),
+            kind: EtpKind::Kafka,
+            security: velda_etp::EtpTransportSecurity::Plain,
+            pool: EtpPoolSettings::default(),
+            tls: None,
+            settings: serde_json::json!({ "brokers": ["127.0.0.1:9092"] }),
+        };
+        let kafka_inst = build_instance(&kafka_entry).unwrap();
+        assert!(plugin.attach_etp(&kafka_inst).is_err());
+
+        let (tx, rx) = tokio::sync::watch::channel(false);
+        let bg = Arc::clone(&plugin).run_background(rx).unwrap();
+        let bg_handle = tokio::spawn(bg);
+
+        // First local request passes (used=1 <= 10)
+        let mut req1 = make_req(&[("x-forwarded-for", "198.51.100.7")], "/");
+        let mut upstream = 0;
+        assert!(matches!(
+            plugin.on_upstream_request(&mut req1, &mut upstream),
+            Action::Continue
+        ));
+
+        // Wait briefly for Shadow sync tick -> Redis reports cluster total = 50 -> peer_used = 49
+        tokio::time::sleep(std::time::Duration::from_millis(80)).await;
+
+        let mut req2 = make_req(&[("x-forwarded-for", "198.51.100.7")], "/");
+        assert!(
+            matches!(
+                plugin.on_upstream_request(&mut req2, &mut upstream),
+                Action::Reject(RejectReason::TooManyRequests)
+            ),
+            "peer cluster_total=50 from Redis SoT must block subsequent local requests"
+        );
+
+        let _ = tx.send(true);
+        let _ = bg_handle.await;
+        srv.abort();
     }
 }
