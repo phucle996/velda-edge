@@ -24,6 +24,7 @@ pub async fn serve(
     mut responder: Http2Responder,
     meta: Arc<DownstreamMeta>,
     upstream: &Arc<Http1Upstream>,
+    req_state: &velda_core::RequestState,
     plan: &velda_plugin::RoutePluginPlan,
 ) -> PipeOutcome {
     // 1. Ensure mandatory Host header (RFC 9112 §7.1)
@@ -254,7 +255,12 @@ pub async fn serve(
             // Fast-path guard: Bypasses HeaderWorkspace instantiation & plugin dispatch if route has no hooks.
             // req_head reaches end of life here -> mem::take transfers ownership with zero allocations.
             if let Some(post_hooks) = &plan.post_response_hooks {
-                velda_plugin::run_post_response_plugins(post_hooks, h1_req_headers, &mut l7_resp);
+                velda_plugin::run_post_response_plugins(
+                    post_hooks,
+                    req_state,
+                    h1_req_headers,
+                    &mut l7_resp,
+                );
             }
             meta.inject_response_headers(&mut l7_resp.headers);
             let _ = responder.send_response(&l7_resp);

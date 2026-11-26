@@ -17,10 +17,8 @@
 
 use serde::{Deserialize, Serialize};
 
-use crate::config::{
-    EtpEntryConfig, EtpKind, EtpPoolSettings, extract_endpoint_path, format_host_header,
-};
-use crate::connect::EtpTlsConfig;
+use crate::config::{EtpEntryConfig, EtpKind, EtpPoolSettings, format_host_header, read_base_path};
+use crate::connect::{EtpTlsConfig, EtpTransportSecurity};
 use crate::error::EtpError;
 
 /// Tailored configuration for a ClickHouse HTTP/HTTPS external third-party pool.
@@ -49,6 +47,11 @@ impl ClickHouseEtpConfig {
             });
         }
         entry.validate()?;
+        entry.require_security(&[
+            EtpTransportSecurity::Plain,
+            EtpTransportSecurity::Tls,
+            EtpTransportSecurity::Mtls,
+        ])?;
         let (host, port) = entry.resolve_endpoint()?;
         let obj = entry.settings.as_object().ok_or_else(|| {
             EtpError::Config(format!(
@@ -57,18 +60,9 @@ impl ClickHouseEtpConfig {
             ))
         })?;
 
-        let raw_endpoint = obj
-            .get("endpoint")
-            .or_else(|| obj.get("url"))
-            .and_then(|v| v.as_str())
-            .unwrap_or("");
-        let is_tls = entry.tls.is_some()
-            || raw_endpoint
-                .trim()
-                .to_ascii_lowercase()
-                .starts_with("https://");
+        let is_tls = entry.is_tls_transport();
         let host_header = format_host_header(&host, port, is_tls);
-        let base_path = extract_endpoint_path(raw_endpoint);
+        let base_path = read_base_path(obj, &entry.id)?;
 
         let database = obj
             .get("database")
@@ -103,7 +97,7 @@ impl ClickHouseEtpConfig {
             user,
             password,
             pool: entry.pool.clone(),
-            tls: entry.tls.clone(),
+            tls: entry.effective_tls(),
         })
     }
 }

@@ -411,6 +411,7 @@ fn dispatch_server_events(
                     bytes_received: 0,
                     eof: end_stream,
                     trailers: None,
+                    tee_tx: None,
                 };
                 let responder = Http2Responder {
                     cmd_tx: cmd_tx.clone(),

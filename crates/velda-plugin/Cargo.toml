@@ -6,6 +6,7 @@ license.workspace = true
 
 [dependencies]
 velda-core = { path = "../velda-core" }
+velda-discovery = { path = "../velda-discovery" }
 velda-etp = { path = "../velda-etp" }
 velda-grpc = { path = "../velda-grpc" }
 velda-observability = { path = "../velda-observability" }

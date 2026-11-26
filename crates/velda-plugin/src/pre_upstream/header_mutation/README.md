@@ -1,120 +1,88 @@
 # Header Mutation Plugin (`header_mutation`)
 
-High-performance request header transformation and protocol sanitization plugin evaluated during the `pre_upstream` phase. Modifies outgoing request headers before upstream dispatch, supporting RFC hop-by-hop stripping, header removal, renaming, dynamic variable interpolation, and appending.
+Explicit static request header transformation plugin evaluated during the `pre_upstream` phase directly against `HeaderWorkspace`. Executes only the configured delete (`remove_headers`), overwrite (`set_headers`), and add (`append_headers`) rules — with no implicit hop-by-hop stripping, no hidden header reads, and no dynamic variable fallbacks.
+
+```text
++-----------------------------------------------------------------------------+
+|                        HEADER MUTATION PIPELINE                             |
++-----------------------------------------------------------------------------+
+|  L7Request.headers (HeaderWorkspace)                                        |
+|    |                                                                        |
+|    +---> [0] op_mask == 0? -------- yes -------> Action::Continue           |
+|    |                                                                        |
+|    +---> [1] OP_REMOVE  --> contains_prehashed(&key) --> remove(&key.name)  |
+|    |                        (removes even TAG_BYTE_BYPASS_BIT entries)      |
+|    +---> [2] OP_SET     --> insert_prehashed(&key, static_val)              |
+|    |                        (overwrites all existing matching slots)        |
+|    +---> [3] OP_APPEND  --> append(name, static_val)                        |
+|    |                        (appends a new slot preserving prior values)    |
+|    +---> Action::Continue                                                   |
++-----------------------------------------------------------------------------+
+```
 
 ---
 
-## 1. Overview & Pipeline Specification
+## 1. What This Plugin Does
+
+- **Static Header Deletion (`remove_headers`)**: Checks `HeaderWorkspace` via pre-hashed `HeaderKey` and removes matching header entries, including entries carrying `TAG_BYTE_BYPASS_BIT` (such as `x-request-id`, `x-forwarded-for`, or `host`) when explicitly configured.
+- **Static Header Overwrite (`set_headers`)**: Overwrites or inserts configured static `HeaderValue` entries using `HeaderWorkspace::insert_prehashed`, replacing any multi-value duplicates with the configured single value.
+- **Static Header Addition (`append_headers`)**: Appends configured static `HeaderValue` entries via `HeaderWorkspace::append` while keeping existing values intact.
+- **Strict WYCIWIS Semantics**: Unconfigured headers (including RFC hop-by-hop headers like `Connection`, `TE`, or `Upgrade`) are never read, rewritten, or deleted automatically.
+
+---
+
+## 2. Where It Sits in Velda Edge
 
 | Property | Value |
 | :--- | :--- |
 | **Plugin ID** | `header_mutation` |
-| **Canonical Phase** | `pre_upstream` |
-| **Execution Order** | Strictly FIFO based on route `plugins` declaration order (First declared, first executed) |
-| **Reverse Capability** | `PluginCapability::header_only(AccessLevel::Write)` |
-| **Supported Protocols** | HTTP (`http/1.1`, `http/2`, `http/3`) & gRPC |
-| **Hot-Path Overhead** | Nanosecond-level; **100% Lock-Free**; **0 heap allocations** for static headers |
-
-### What it Protects & Solves
-- **Hop-by-Hop Stripping & Anti-Abuse (CVE-2022-26143)**: Automatically strips RFC 9110 / RFC 7230 hop-by-hop headers (`Connection`, `Keep-Alive`, `Upgrade`, etc.) while protecting sensitive protocol headers (`Host`, `Authorization`, `X-Real-IP`, `X-Request-Id`) from strip abuse.
-- **Header Injection & Dynamic Interpolation**: Authoritatively injects runtime metadata (`$client_ip`, `$request_id`, `$route_id`, `$upstream_id`, `$scheme`) into headers before forwarding upstream.
-- **Anti-Shadowing Header Renaming**: Renames headers in-place on the stack with anti-shadowing protection (clears target header before inserting).
-- **Identity & Traceability**: Eliminates client-spoofed internal headers by wiping blacklisted tokens (`remove_headers`).
+| **Phase** | `pre_upstream` |
+| **Worker Affinity** | Frontline Traffic Workers (`velda-worker-{i}`) |
+| **PBWW (`pbww()`)** | `0` (pure inline hot path, no background scheduler tasks) |
+| **Capability** | `PluginCapability::header_only(AccessLevel::Write)` |
+| **Supported Protocols** | `SupportedProtocols::ALL_HTTP \| SupportedProtocols::GRPC` |
+| **Execution Order** | Strictly `remove` -> `set` -> `append`, following route plugin declaration order |
 
 ---
 
-## 2. 100% Explicit Configuration Invariant
+## 3. Requirements & Prerequisites
 
-> [!IMPORTANT]
-> **Strict Configuration Contract**: Every configuration parameter must be explicitly declared in `plugins.json`. No silent fallbacks or implicit defaults exist. All field values must be intentionally supplied, using empty arrays `[]` or empty maps `{}` for unused actions.
-
-| Field | Type | Required | Constraints / Allowed Values | Recommended Value | Description |
-| :--- | :---: | :---: | :--- | :--- | :--- |
-| `strip_hop_by_hop` | Boolean | **Yes** | `true` or `false` | `true` | Removes RFC 9110 hop-by-hop headers (`Connection`, `Keep-Alive`, `Proxy-Authenticate`, `TE`, `Trailer`, `Transfer-Encoding`, `Upgrade`) and any tokens listed in `Connection`. Enforces anti-abuse protections preventing clients from stripping `Host`, `Authorization`, `X-Real-IP`, etc. (CVE-2022-26143). |
-| `remove_headers` | Array of strings | **Yes** | Valid RFC 9110 header names (`[]` if none) | `["x-internal-secret", "x-debug-mode"]` | Headers to strip from request before upstream dispatch. Essential routing/framing headers (`Host`, `Content-Length`, `Transfer-Encoding`, `X-Request-Id`, and pseudo-headers `:`) cannot be removed. |
-| `rename_headers` | Map<String, String> | No | Source to target header name mapping (`{}` if none) | `{"x-old-auth": "authorization"}` | Renames headers in-place on the stack with anti-shadowing protection. |
-| `set_headers` | Map<String, String> | **Yes** | Key-value pairs of header names and values/variables (`{}` if none) | `{"x-gateway": "velda-edge", "x-request-id": "$request_id"}` | Headers to set/overwrite on outgoing request. Framing and hop-by-hop headers cannot be overwritten. |
-| `append_headers` | Map<String, String> | **Yes** | Key-value pairs of header names and append values (`{}` if none) | `{"x-forwarded-for": "$client_ip"}` | Headers to append values to on outgoing request. |
-
-### Supported Dynamic Variables
-- `$client_ip`: Downstream peer IP address (authoritatively resolved from edge `x-real-ip` first, falling back to nearest right-most `x-forwarded-for`).
-- `$request_id`: Unique monotonic request identifier (zero-allocation Slot 0 W3C header).
-- `$scheme`: Request scheme (`http` or `https`).
-- `$host`: Host authority header or URI authority.
-- `$method`: HTTP request method (`GET`, `POST`, etc.).
-- `$path`: Request URI path.
-- `$$`: Escapes literal `$` character.
+- At least one non-empty rule block must be declared across `remove_headers`, `set_headers`, or `append_headers`.
+- Header names must follow RFC 9110 `tchar` grammar (`1..=256` bytes, no leading/trailing whitespace, no `:` pseudo-header prefix).
+- Header values must contain valid RFC 9110 field characters (`<= 8192` bytes, no `\r`, `\n`, ASCII control characters `< 0x20` except `\t`, or `0x7F`).
+- Unknown JSON fields are rejected (`#[serde(deny_unknown_fields)]`), and case-insensitive duplicates within the same rule block are rejected during `velda-sync` validation.
 
 ---
 
-## 3. Configuration Examples
-
-### Production Manifest (`plugins.json`)
+## 4. Quick Start Configuration
 
 ```json
 {
-  "schema_version": 1,
-  "plugins": [
-    {
-      "id": "header_mutation",
-      "config": {
-        "strip_hop_by_hop": true,
-        "remove_headers": [
-          "x-internal-secret",
-          "x-debug-mode"
-        ],
-        "rename_headers": {
-          "x-client-device": "x-device-type"
-        },
-        "set_headers": {
-          "x-gateway": "velda-edge",
-          "x-request-id": "$request_id",
-          "x-client-ip": "$client_ip",
-          "x-forwarded-proto": "$scheme"
-        },
-        "append_headers": {
-          "x-forwarded-for": "$client_ip"
-        }
-      }
+  "id": "header_mutation",
+  "config": {
+    "remove_headers": [
+      "x-powered-by",
+      "server"
+    ],
+    "set_headers": {
+      "x-gateway-proxy": "velda-edge",
+      "x-forwarded-proto": "https"
+    },
+    "append_headers": {
+      "x-trace-tag": "edge-ingress"
     }
-  ]
+  }
 }
 ```
 
-### Route Attachment (`routes.json`)
-
-```json
-{
-  "id": "checkout-route",
-  "match": {
-    "path": "/api/v2/checkout"
-  },
-  "upstream_id": "checkout-service",
-  "plugins": [
-    "header_mutation",
-    "jwt_auth"
-  ]
-}
-```
+> [!NOTE]
+> Unused rule blocks (`remove_headers`, `set_headers`, `append_headers`) use `#[serde(default)]` and may be omitted individually as long as at least one block is non-empty.
 
 ---
 
-## 4. Security & Anti-Evasion Invariants
+## 5. Documentation Directory
 
-1. **CVE-2022-26143 Hop-by-Hop Strip Defense**:
-   - The plugin prevents malicious downstream clients from stripping essential protocol and security headers (`Host`, `Authorization`, `X-Request-Id`, `X-Real-IP`, `X-Forwarded-For`) by including them inside the `Connection` header.
-2. **Anti-Shadowing Header Renaming**:
-   - Destination header names are wiped clean before inserting the renamed value, eliminating header shadowing and smuggling vulnerabilities.
-3. **CRLF & Header Injection Rejection**:
-   - All static configuration names and values are strictly verified at compile time by `velda-sync` against RFC 9110 character bounds, preventing response splitting and CRLF injection.
-
----
-
-## 5. Documentation Suite Links
-
-For comprehensive architectural design, empirical Azure benchmarks, and security test matrices, refer to the dedicated documents:
-
-- **[Architectural Specification](ARCHITECTURE.md)**: Internal data structures, single-pass hop-by-hop checking, and pre-partitioned static/dynamic arrays.
-- **[Performance Benchmark Report](BENCHMARK.md)**: Live Azure VM cluster measurements, latency percentiles, and 1.48% overhead verification.
-- **[Test Plan & Security Verification](TEST.md)**: Automated unit test suite, CVE-2022-26143 validation, and live cURL reproduction logs.
-
+- **[Operational Runbook](RUNBOOK.md)**: Parameter reference table, configuration recipes, telemetry signals, and incident triage playbook.
+- **[Architectural Specification](ARCHITECTURE.md)**: `#[repr(C, align(64))]` memory layout, `op_mask` dispatch, `HeaderWorkspace` SIMD `tag7` probing, and complexity bounds.
+- **[Performance Benchmark Report](BENCHMARK.md)**: 5-tier diagnostic matrix and verified `x86-64-v3` release assembly audit.
+- **[Test Verification Report](TEST.md)**: `cargo test` commands and verified unit test breakdown across plugin engine and validation modules.

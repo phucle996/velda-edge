@@ -53,6 +53,7 @@ pub async fn serve<IO>(
     framing: Http1BodyFraming,
     upstream: &Arc<Http1Upstream>,
     meta: &DownstreamMeta,
+    req_state: &velda_core::RequestState,
     plan: &velda_plugin::RoutePluginPlan,
 ) -> Result<(), Http1Error>
 where
@@ -101,6 +102,7 @@ where
 
     // 4. If request has no body (e.g. GET, HEAD), forward directly without chunked stream
     if framing == Http1BodyFraming::Empty {
+        velda_http1::server::connection::tee_end(&mut conn.body_tee);
         let req = velda_http1::server::request::Http1ServerRequest::new(
             req_head.method,
             req_head.uri,
@@ -139,7 +141,12 @@ where
                     std::mem::take(&mut resp_head.headers),
                     velda_core::Body::Empty,
                 );
-                velda_plugin::run_post_response_plugins(post_hooks, &req.headers, &mut l7_resp);
+                velda_plugin::run_post_response_plugins(
+                    post_hooks,
+                    req_state,
+                    &req.headers,
+                    &mut l7_resp,
+                );
                 resp_head.status = l7_resp.status;
                 resp_head.headers = l7_resp.headers;
             }
@@ -268,6 +275,7 @@ where
             if total_body_bytes > cfg.max_body_size {
                 return Err(Http1Error::PayloadTooLarge(total_body_bytes));
             }
+            velda_http1::server::connection::tee_chunk(&mut conn.body_tee, slice.clone());
             encode_chunk(&slice, &mut conn.upstream_write_buf);
             if conn.upstream_write_buf.len() >= 65536 {
                 break;
@@ -276,6 +284,7 @@ where
 
         if decoder.is_done() {
             velda_http1::wire::encode_chunked_end(&mut conn.upstream_write_buf);
+            velda_http1::server::connection::tee_end(&mut conn.body_tee);
             sent_terminal = true;
         }
         conn.last_bytes_rx += total_body_bytes as u64;
@@ -299,6 +308,7 @@ where
                         return Err(Http1Error::PayloadTooLarge(total_body_bytes));
                     }
                     conn.last_bytes_rx += slice.len() as u64;
+                    velda_http1::server::connection::tee_chunk(&mut conn.body_tee, slice.clone());
                     send_chunk(&mut *upstream_lease, &slice).await?;
                 }
 
@@ -334,6 +344,7 @@ where
             }
 
             if sent_terminal {
+                velda_http1::server::connection::tee_end(&mut conn.body_tee);
                 send_chunked_end(&mut *upstream_lease).await?;
             }
         }
@@ -359,7 +370,12 @@ where
                 std::mem::take(&mut resp_head.headers),
                 velda_core::Body::Empty,
             );
-            velda_plugin::run_post_response_plugins(post_hooks, &req_head.headers, &mut l7_resp);
+            velda_plugin::run_post_response_plugins(
+                post_hooks,
+                req_state,
+                &req_head.headers,
+                &mut l7_resp,
+            );
             resp_head.status = l7_resp.status;
             resp_head.headers = l7_resp.headers;
         }

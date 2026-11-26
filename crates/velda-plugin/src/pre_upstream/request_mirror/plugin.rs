@@ -1,204 +1,141 @@
-//! Request Mirroring (Traffic Shadowing) Pre-Upstream Plugin (`request_mirror`).
+//! Request Mirroring (Traffic Shadowing) Pre-Upstream Plugin (`request_mirror::plugin`).
 //!
-//! Duplicates incoming client requests asynchronously to a designated shadow upstream
-//! (e.g., staging, load testing, or experimental backend clusters) without affecting
-//! the latency or outcome of the primary request.
+//! ```text
+//!   Core Upstreams Loaded ──► RequestMirrorPlugin::from_config(cfg, upstream_ids)
+//!                               └──► resolves mirror_upstream -> mirror_upstream_id: u16
 //!
-//! # Strict Architectural Invariants
-//! - **Zero Client Latency Impact**: Mirror requests are enqueued via a non-blocking
-//!   queue (`try_send`). Primary request forwarding never blocks or awaits mirror responses.
-//! - **Failure Isolation**: Errors, timeouts, or 5xx responses from the mirror cluster are
-//!   completely discarded and never propagated downstream.
-//! - **Zero-Copy Payload Sharing**: Request bodies are shared using reference-counted `bytes::Bytes`,
-//!   incurring 0 heap memory copying.
-//! - **System Invariant Header**: Always injects `X-Velda-Mirror: true` into the shadow request,
-//!   ensuring backend services recognize shadow traffic for dry-run/sandbox isolation.
+//!   on_upstream_request(req, targets: &mut u32)  [AccessLevel::Read, 0 IO, 0 Header/Body clone]
+//!     ├─► 1. ignore_methods bitmask check (1 bitwise `&`)        -> Action::Continue (no mirror)
+//!     ├─► 2. threshold == 0 / u64::MAX fast paths
+//!     └─► 3. entropy(req.state.request_id) < threshold_u64 (1 CPU `CMP` on SplitMix64 bits)
+//!           ├── true  ──► target_set_mirror(targets, mirror_upstream_id) -> Action::Continue
+//!           └── false ──► leave mirror lane 0xFFFF                     -> Action::Continue
+//! ```
+//!
+//! # Architectural Scope Invariant
+//! Strictly a pure traffic-decision plugin: it does NOT touch sockets, does NOT mutate
+//! `HeaderWorkspace`, and does NOT clone payloads. `velda-edge` pipelines read the upper
+//! 16 bits of `targets` at Phase 5 (once headers and buffered body are finalized) to clone and
+//! dispatch the mirror copy asynchronously via `velda-shadow-{i}`.
 
-use std::sync::Arc;
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::cell::Cell;
 
-use crate::config::PluginConfig;
-use bytes::Bytes;
-use http::header::{HeaderName, HeaderValue};
-use http::{Method, Uri};
-use tokio::sync::mpsc;
-use velda_core::{Action, HeaderWorkspace, L7Request};
+use velda_core::{Action, L7Request};
 
+use super::config::{MethodMask, RequestMirrorConfig, compute_threshold_u64};
+use super::validation::validate_request_mirror_config;
 use crate::capability::{AccessLevel, PluginCapability, SupportedProtocols};
+use crate::config::PluginConfig;
 use crate::error::PluginError;
 use crate::pre_upstream::PreUpstreamPlugin;
+use crate::pre_upstream::targets::target_set_mirror;
 
-use std::sync::RwLock;
-
-static MIRROR_COUNTER: AtomicU64 = AtomicU64::new(0);
-static MIRROR_SENDER: RwLock<Option<mpsc::Sender<MirroredRequest>>> = RwLock::new(None);
-
-/// Initializes the global non-blocking dispatch queue for request mirroring and returns the receiver.
-pub fn init_mirror_queue(capacity: usize) -> mpsc::Receiver<MirroredRequest> {
-    let (tx, rx) = mpsc::channel(capacity);
-    if let Ok(mut lock) = MIRROR_SENDER.write() {
-        *lock = Some(tx);
-    }
-    rx
+thread_local! {
+    /// Fallback SplitMix64 state used ONLY when `req.state.request_id` is 0 (e.g. unit tests).
+    static TEST_ENTROPY_STATE: Cell<u64> = const { Cell::new(0x9E37_79B9_7F4A_7C15) };
 }
 
-/// Returns a clone of the active global non-blocking queue sender.
-pub fn get_mirror_sender() -> Option<mpsc::Sender<MirroredRequest>> {
-    MIRROR_SENDER.read().ok().and_then(|lock| lock.clone())
+#[cold]
+#[inline(never)]
+fn fallback_entropy_u64() -> u64 {
+    TEST_ENTROPY_STATE.with(|c| {
+        let mut x = c.get().wrapping_add(0x9E37_79B9_7F4A_7C15);
+        c.set(x);
+        x = (x ^ (x >> 30)).wrapping_mul(0xBF58_476D_1CE4_E5B9);
+        x = (x ^ (x >> 27)).wrapping_mul(0x94D0_49BB_1331_11EB);
+        x ^ (x >> 31)
+    })
 }
 
-const MIRROR_HEADER_NAME: HeaderName = HeaderName::from_static("x-velda-mirror");
-const MIRROR_HEADER_VALUE: HeaderValue = HeaderValue::from_static("true");
-
-/// Structured representation of a cloned request dispatched to the mirror upstream.
-#[derive(Debug, Clone)]
-pub struct MirroredRequest {
-    /// Logical name of the target mirror upstream.
-    pub target_upstream: String,
-    /// HTTP method of the request.
-    pub method: Method,
-    /// Request URI.
-    pub uri: Uri,
-    /// Cloned headers including the mandatory `x-velda-mirror: true`.
-    pub headers: HeaderWorkspace,
-    /// Zero-copy shared body payload bytes.
-    pub body: Bytes,
-}
-
-/// Configuration settings for the request mirror plugin.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct RequestMirrorConfig {
-    /// Name of the target mirror upstream pool (e.g. `"orders-staging"`).
-    pub mirror_upstream: String,
-    /// Percentage of matching traffic to mirror (0 to 100).
-    pub sample_percent: u32,
-    /// Optional Host header replacement for the mirror request.
-    pub replace_host: Option<String>,
-    /// List of HTTP methods to ignore (e.g. `["DELETE"]`).
-    pub ignore_methods: Vec<String>,
-    /// Maximum capacity of the non-blocking mirror queue.
-    pub queue_capacity: usize,
-}
-
-impl Default for RequestMirrorConfig {
-    fn default() -> Self {
-        Self {
-            mirror_upstream: String::new(),
-            sample_percent: 100,
-            replace_host: None,
-            ignore_methods: Vec::new(),
-            queue_capacity: 65536,
-        }
-    }
-}
-
-/// Request Mirroring Pre-Upstream Plugin.
+/// Pure traffic-control plugin setting the upper 16 mirror bits of the `u32` upstream target word.
 #[derive(Debug, Clone)]
 pub struct RequestMirrorPlugin {
     pub id: String,
     pub config: RequestMirrorConfig,
-    replace_host_val: Option<HeaderValue>,
-    sender: Option<mpsc::Sender<MirroredRequest>>,
-    mirrored_count: Arc<AtomicU64>,
-    dropped_count: Arc<AtomicU64>,
+    pub mirror_upstream_id: u16,
+    threshold_u64: u64,
+    ignore_mask: MethodMask,
 }
 
 impl RequestMirrorPlugin {
-    /// Constructs a new request mirror plugin without an active queue sender (for testing/dry-run).
-    pub fn new(id: impl Into<String>, config: RequestMirrorConfig) -> Result<Self, PluginError> {
-        let replace_host_val = if let Some(ref host) = config.replace_host {
-            Some(HeaderValue::from_str(host).map_err(|e| {
-                PluginError::Config(format!("Invalid replace_host header value '{host}': {e}"))
-            })?)
-        } else {
-            None
-        };
+    /// Constructs a mirror plugin with an already-resolved dense upstream index (`u16`).
+    pub fn new(
+        id: impl Into<String>,
+        config: RequestMirrorConfig,
+        mirror_upstream_id: u16,
+    ) -> Result<Self, PluginError> {
+        if config.mirror_upstream.trim().is_empty() {
+            return Err(PluginError::Config(
+                "mirror_upstream cannot be empty".to_string(),
+            ));
+        }
+        if mirror_upstream_id == crate::pre_upstream::targets::TARGET_UNASSIGNED {
+            return Err(PluginError::Config(
+                "mirror_upstream_id cannot be 0xFFFF (UNASSIGNED)".to_string(),
+            ));
+        }
+        if !(0.0..=100.0).contains(&config.sample_percent) || config.sample_percent.is_nan() {
+            return Err(PluginError::Config(format!(
+                "sample_percent ({}) must be in 0.0..=100.0",
+                config.sample_percent
+            )));
+        }
+
+        let threshold_u64 = compute_threshold_u64(config.sample_percent);
+        let ignore_mask = MethodMask::from_methods(&config.ignore_methods);
 
         Ok(Self {
             id: id.into(),
             config,
-            replace_host_val,
-            sender: None,
-            mirrored_count: Arc::new(AtomicU64::new(0)),
-            dropped_count: Arc::new(AtomicU64::new(0)),
+            mirror_upstream_id,
+            threshold_u64,
+            ignore_mask,
         })
     }
 
-    /// Constructs a new request mirror plugin with an active non-blocking dispatch sender.
-    pub fn with_sender(
-        id: impl Into<String>,
-        config: RequestMirrorConfig,
-        sender: mpsc::Sender<MirroredRequest>,
-    ) -> Result<Self, PluginError> {
-        let mut plugin = Self::new(id, config)?;
-        plugin.sender = Some(sender);
-        Ok(plugin)
-    }
-
-    /// Deserializes and constructs an instance directly from a [`PluginConfig`].
-    pub fn from_config(config: &PluginConfig) -> Result<Self, PluginError> {
-        let cfg = super::validation::validate_request_mirror_config(&config.id, &config.config)
-            .map_err(|e| {
+    /// Parses, validates, and resolves `"mirror_upstream"` directly against pre-loaded `upstream_ids`.
+    pub fn from_config(config: &PluginConfig, upstream_ids: &[&str]) -> Result<Self, PluginError> {
+        let cfg = validate_request_mirror_config(&config.id, &config.config).map_err(|e| {
+            PluginError::Config(format!(
+                "Invalid request_mirror configuration for '{}': {e}",
+                config.id
+            ))
+        })?;
+        let trimmed = cfg.mirror_upstream.trim();
+        let pos = upstream_ids
+            .iter()
+            .position(|u| *u == trimmed)
+            .ok_or_else(|| {
                 PluginError::Config(format!(
-                    "Invalid request_mirror configuration for '{}': {e}",
-                    config.id
+                    "Plugin '{}' targets mirror_upstream '{}', which does not exist in upstreams",
+                    config.id, cfg.mirror_upstream
                 ))
             })?;
-
-        let sample_percent = (cfg.sample_percent.round() as u32).min(100);
-
-        let mut plugin = Self::new(
-            &config.id,
-            RequestMirrorConfig {
-                mirror_upstream: cfg.mirror_upstream,
-                sample_percent,
-                replace_host: cfg.replace_host,
-                ignore_methods: cfg.ignore_methods,
-                queue_capacity: cfg.queue_capacity,
-            },
-        )?;
-
-        if let Some(sender) = get_mirror_sender() {
-            plugin.sender = Some(sender);
-        }
-
-        Ok(plugin)
+        let dense_id = u16::try_from(pos).map_err(|_| {
+            PluginError::Config(format!(
+                "Upstream index for '{}' exceeds u16::MAX",
+                cfg.mirror_upstream
+            ))
+        })?;
+        Self::new(&config.id, cfg, dense_id)
     }
 
-    /// Total number of requests successfully enqueued for mirroring.
-    #[inline]
-    pub fn mirrored_count(&self) -> u64 {
-        self.mirrored_count.load(Ordering::Relaxed)
-    }
-
-    /// Total number of mirror requests dropped due to queue saturation.
-    #[inline]
-    pub fn dropped_count(&self) -> u64 {
-        self.dropped_count.load(Ordering::Relaxed)
-    }
-
-    /// Evaluates whether the request should be sampled for mirroring.
-    #[inline]
+    /// Evaluates whether the request should be mirrored using pre-generated SplitMix64 `request_id` entropy.
+    #[inline(always)]
     pub fn should_mirror(&self, req: &L7Request) -> bool {
-        // 1. Check ignored HTTP methods
-        let method_str = req.method.as_str();
-        for ignored in &self.config.ignore_methods {
-            if ignored.eq_ignore_ascii_case(method_str) {
-                return false;
-            }
-        }
-
-        // 2. Check sample percent boundaries
-        if self.config.sample_percent == 0 {
+        if self.threshold_u64 == 0 || self.ignore_mask.matches(&req.method) {
             return false;
         }
-        if self.config.sample_percent >= 100 {
+        if self.threshold_u64 == u64::MAX {
             return true;
         }
-
-        // 3. Sampling evaluation
-        let count = MIRROR_COUNTER.fetch_add(1, Ordering::Relaxed);
-        (count % 100) < (self.config.sample_percent as u64)
+        let entropy = velda_core::request_id::entropy(req.state.request_id);
+        let sample_val = if entropy != 0 {
+            entropy
+        } else {
+            fallback_entropy_u64()
+        };
+        sample_val < self.threshold_u64
     }
 }
 
@@ -213,58 +150,11 @@ impl PreUpstreamPlugin for RequestMirrorPlugin {
         0
     }
 
-    fn on_upstream_request(&self, req: &mut L7Request, _target_upstream: &mut u16) -> Action {
+    #[inline]
+    fn on_upstream_request(&self, req: &mut L7Request, targets: &mut u32) -> Action {
         if self.should_mirror(req) {
-            // 1. Prepare shadow headers with hardcoded mandatory X-Velda-Mirror: true
-            let mut shadow_headers = req.headers.clone();
-            shadow_headers.insert(MIRROR_HEADER_NAME, MIRROR_HEADER_VALUE);
-
-            if let Some(ref host_val) = self.replace_host_val {
-                shadow_headers.insert(http::header::HOST, host_val.clone());
-            }
-
-            // 2. Zero-copy body sharing via reference-counted Bytes
-            let body_bytes = req.body.to_bytes();
-
-            let shadow = MirroredRequest {
-                target_upstream: self.config.mirror_upstream.clone(),
-                method: req.method.clone(),
-                uri: req.uri.clone(),
-                headers: shadow_headers,
-                body: body_bytes,
-            };
-
-            // 3. Non-blocking queue dispatch (zero client latency impact)
-            let sender = self.sender.as_ref().cloned().or_else(get_mirror_sender);
-            if let Some(ref sender) = sender {
-                match sender.try_send(shadow) {
-                    Ok(_) => {
-                        self.mirrored_count.fetch_add(1, Ordering::Relaxed);
-                    }
-                    Err(_) => {
-                        self.dropped_count.fetch_add(1, Ordering::Relaxed);
-                    }
-                }
-            } else {
-                let target = shadow.target_upstream.clone();
-                let task = Box::pin(async move {
-                    let _ = tokio::time::timeout(
-                        std::time::Duration::from_millis(1000),
-                        dispatch_mirror_request(target, shadow),
-                    )
-                    .await;
-                });
-                match crate::hook::try_dispatch_shadow(task) {
-                    Ok(_) => {
-                        self.mirrored_count.fetch_add(1, Ordering::Relaxed);
-                    }
-                    Err(_) => {
-                        self.dropped_count.fetch_add(1, Ordering::Relaxed);
-                    }
-                }
-            }
+            target_set_mirror(targets, self.mirror_upstream_id);
         }
-
         Action::Continue
     }
 
@@ -279,215 +169,121 @@ impl PreUpstreamPlugin for RequestMirrorPlugin {
     }
 }
 
-/// Dispatches a replicated HTTP/1.1 request directly to the target mirror endpoint.
-///
-/// Discards responses and swallows errors to ensure 100% failure isolation from primary traffic.
-async fn dispatch_mirror_request(target: String, req: MirroredRequest) {
-    let connect_addr = if target.contains(':') {
-        target.clone()
-    } else {
-        format!("{target}:80")
-    };
-
-    if let Ok(mut stream) = tokio::net::TcpStream::connect(&connect_addr).await {
-        let mut buf = bytes::BytesMut::with_capacity(512 + req.body.len());
-        use std::fmt::Write as _;
-        let path = req
-            .uri
-            .path_and_query()
-            .map(|pq| pq.as_str())
-            .unwrap_or("/");
-        let _ = write!(buf, "{} {} HTTP/1.1\r\n", req.method, path);
-        for (k, v) in &req.headers {
-            if k == http::header::CONNECTION {
-                continue;
-            }
-            buf.extend_from_slice(k.as_str().as_bytes());
-            buf.extend_from_slice(b": ");
-            buf.extend_from_slice(v.as_bytes());
-            buf.extend_from_slice(b"\r\n");
-        }
-        if !req.headers.contains_key(http::header::CONTENT_LENGTH) && !req.body.is_empty() {
-            let _ = write!(buf, "content-length: {}\r\n", req.body.len());
-        }
-        buf.extend_from_slice(b"connection: close\r\n\r\n");
-        if !req.body.is_empty() {
-            buf.extend_from_slice(&req.body);
-        }
-        use tokio::io::AsyncWriteExt;
-        if stream.write_all(&buf).await.is_ok() {
-            let _ = stream.flush().await;
-        }
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
-    use http::Version;
+    use crate::pre_upstream::targets::{target_init, target_mirror, target_primary};
+    use http::{HeaderValue, Method, Uri, Version};
     use velda_core::{Body, HeaderWorkspace};
 
-    fn build_test_request(method: Method, headers: HeaderWorkspace, body: Bytes) -> L7Request {
-        L7Request::new(
+    fn make_req(method: Method, request_id: u128) -> L7Request {
+        let mut h = HeaderWorkspace::empty(2);
+        h.insert("host", HeaderValue::from_static("api.prod.internal"));
+        let mut req = L7Request::new(
             method,
             Uri::from_static("/api/v1/orders"),
             Version::HTTP_11,
-            headers,
-            Body::Bytes(body),
-        )
+            h,
+            Body::Bytes(bytes::Bytes::from_static(br#"{"item":"cpu"}"#)),
+        );
+        req.state.request_id = request_id;
+        req
     }
 
     #[test]
-    fn test_request_mirror_always_injects_mandatory_header() {
-        let (tx, mut rx) = mpsc::channel(16);
-        let config = RequestMirrorConfig {
-            mirror_upstream: "staging-cluster".into(),
-            sample_percent: 100,
-            replace_host: Some("staging.internal.net".into()),
-            ignore_methods: Vec::new(),
-            queue_capacity: 16,
+    fn test_mirror_sets_upper_u16_without_mutating_headers_or_primary() {
+        let cfg = RequestMirrorConfig {
+            mirror_upstream: "orders-staging".into(),
+            sample_percent: 100.0,
+            ignore_methods: vec![],
         };
-
-        let plugin = RequestMirrorPlugin::with_sender("mirror-1", config, tx).unwrap();
-
-        let mut headers = HeaderWorkspace::empty(4);
-        headers.insert("x-user-id", HeaderValue::from_static("usr-42"));
-        let mut req = build_test_request(
-            Method::POST,
-            headers,
-            Bytes::from_static(b"{\"item\":\"book\"}"),
-        );
-
-        let mut target = 1;
-        let action = plugin.on_upstream_request(&mut req, &mut target);
-        assert!(matches!(action, Action::Continue));
-
-        let mirrored = rx.try_recv().expect("must receive mirrored request");
-        assert_eq!(mirrored.target_upstream, "staging-cluster");
-        assert_eq!(mirrored.method, Method::POST);
-        assert_eq!(mirrored.body, Bytes::from_static(b"{\"item\":\"book\"}"));
-        assert_eq!(mirrored.headers.get("x-velda-mirror").unwrap(), "true");
+        let plugin = RequestMirrorPlugin::new("mirror", cfg, 4).unwrap();
         assert_eq!(
-            mirrored.headers.get("host").unwrap(),
-            "staging.internal.net"
+            plugin.capability(),
+            PluginCapability::header_only(AccessLevel::Read)
         );
-        assert_eq!(mirrored.headers.get("x-user-id").unwrap(), "usr-42");
 
-        // Verify primary request was untouched regarding mirror header
+        let mut req = make_req(Method::POST, 0x1111_2222_3333_4444);
+        let mut targets = target_init(1);
+        let action = plugin.on_upstream_request(&mut req, &mut targets);
+
+        assert!(matches!(action, Action::Continue));
+        assert_eq!(target_primary(targets), Some(1));
+        assert_eq!(target_mirror(targets), Some(4));
         assert!(!req.headers.contains_key("x-velda-mirror"));
     }
 
     #[test]
-    fn test_request_mirror_ignores_specified_methods() {
-        let (tx, mut rx) = mpsc::channel(16);
-        let config = RequestMirrorConfig {
-            mirror_upstream: "staging-cluster".into(),
-            sample_percent: 100,
-            replace_host: None,
-            ignore_methods: vec!["DELETE".into(), "PATCH".into()],
-            queue_capacity: 16,
+    fn test_mirror_ignores_methods_via_bitmask() {
+        let cfg = RequestMirrorConfig {
+            mirror_upstream: "orders-staging".into(),
+            sample_percent: 100.0,
+            ignore_methods: vec!["DELETE".into(), "PUT".into()],
         };
+        let plugin = RequestMirrorPlugin::new("mirror", cfg, 2).unwrap();
 
-        let plugin = RequestMirrorPlugin::with_sender("mirror-ignore", config, tx).unwrap();
+        let mut req_del = make_req(Method::DELETE, 99);
+        let mut t_del = target_init(0);
+        plugin.on_upstream_request(&mut req_del, &mut t_del);
+        assert_eq!(target_primary(t_del), Some(0));
+        assert_eq!(target_mirror(t_del), None);
 
-        let mut req_del =
-            build_test_request(Method::DELETE, HeaderWorkspace::empty(4), Bytes::new());
-        let mut target_del = 1;
-        plugin.on_upstream_request(&mut req_del, &mut target_del);
-
-        assert!(rx.try_recv().is_err(), "DELETE must be ignored");
-
-        let mut req_post =
-            build_test_request(Method::POST, HeaderWorkspace::empty(4), Bytes::new());
-        let mut target_post = 1;
-        plugin.on_upstream_request(&mut req_post, &mut target_post);
-
-        assert!(rx.try_recv().is_ok(), "POST must be mirrored");
+        let mut req_post = make_req(Method::POST, 99);
+        let mut t_post = target_init(0);
+        plugin.on_upstream_request(&mut req_post, &mut t_post);
+        assert_eq!(target_mirror(t_post), Some(2));
     }
 
     #[test]
-    fn test_request_mirror_queue_full_drops_silently() {
-        // Channel with capacity 1
-        let (tx, _rx) = mpsc::channel(1);
-        let config = RequestMirrorConfig {
-            mirror_upstream: "staging".into(),
-            sample_percent: 100,
-            replace_host: None,
-            ignore_methods: Vec::new(),
-            queue_capacity: 1,
+    fn test_mirror_fractional_sampling_accuracy_on_request_id_entropy() {
+        let cfg = RequestMirrorConfig {
+            mirror_upstream: "orders-staging".into(),
+            sample_percent: 5.0,
+            ignore_methods: vec![],
         };
+        let plugin = RequestMirrorPlugin::new("mirror", cfg, 3).unwrap();
 
-        let plugin = RequestMirrorPlugin::with_sender("mirror-drop", config, tx).unwrap();
+        let mut mirrored = 0usize;
+        let total = 20_000usize;
+        // Deterministic SplitMix64 sequence matching core request_id entropy properties
+        let mut state: u64 = 0x1234_5678_9ABC_DEF0;
+        for i in 0..total {
+            state = state.wrapping_add(0x9E37_79B9_7F4A_7C15);
+            let mut z = (state ^ (state >> 30)).wrapping_mul(0xBF58_476D_1CE4_E5B9);
+            z = (z ^ (z >> 27)).wrapping_mul(0x94D0_49BB_1331_11EB);
+            let entropy = z ^ (z >> 31);
+            let req_id = ((i as u128) << 64) | (entropy as u128).max(1);
 
-        let mut req1 = build_test_request(Method::GET, HeaderWorkspace::empty(4), Bytes::new());
-        let mut target1 = 1;
-        plugin.on_upstream_request(&mut req1, &mut target1); // fills buffer (1/1)
+            let mut req = make_req(Method::GET, req_id);
+            let mut targets = target_init(0);
+            plugin.on_upstream_request(&mut req, &mut targets);
+            if target_mirror(targets) == Some(3) {
+                mirrored += 1;
+            }
+        }
 
-        let mut req2 = build_test_request(Method::GET, HeaderWorkspace::empty(4), Bytes::new());
-        let mut target2 = 1;
-        let action = plugin.on_upstream_request(&mut req2, &mut target2); // buffer full -> dropped!
-
-        // Primary request is unaffected (Continue)
-        assert!(matches!(action, Action::Continue));
-        assert_eq!(plugin.mirrored_count(), 1);
-        assert_eq!(plugin.dropped_count(), 1);
+        // 5% of 20,000 = 1,000 (allow reasonable statistical margin [850..=1150])
+        assert!(
+            (850..=1150).contains(&mirrored),
+            "Expected ~1000 mirrored out of {total}, got {mirrored}"
+        );
     }
 
     #[test]
-    fn test_request_mirror_from_config() {
-        let json_cfg = serde_json::json!({
-            "mirror_upstream": "mock-backend",
-            "sample_percent": 50.0,
-            "replace_host": "mock.local",
-            "ignore_methods": ["DELETE"],
-            "queue_capacity": 65536
-        });
-
-        let config = PluginConfig {
+    fn test_mirror_from_config_resolves_dense_upstream_id() {
+        let cfg = PluginConfig {
             id: "request_mirror".into(),
-            config: json_cfg,
+            config: serde_json::json!({
+                "mirror_upstream": "orders-staging",
+                "sample_percent": 12.5,
+                "ignore_methods": ["HEAD"]
+            }),
         };
+        let plugin = RequestMirrorPlugin::from_config(&cfg, &["orders-prod", "orders-staging"])
+            .expect("should resolve upstream index 1");
+        assert_eq!(plugin.mirror_upstream_id, 1);
 
-        let plugin = RequestMirrorPlugin::from_config(&config).expect("valid config");
-        assert_eq!(plugin.id, "request_mirror");
-        assert_eq!(plugin.config.mirror_upstream, "mock-backend");
-        assert_eq!(plugin.config.sample_percent, 50);
-        assert_eq!(plugin.config.replace_host, Some("mock.local".into()));
-        assert_eq!(plugin.config.ignore_methods, vec!["DELETE"]);
-
-        // Empty config must fail validation
-        let bad_config = PluginConfig {
-            id: "request_mirror".into(),
-            config: serde_json::json!({}),
-        };
-        assert!(RequestMirrorPlugin::from_config(&bad_config).is_err());
-    }
-
-    #[test]
-    fn test_request_mirror_dynamic_global_sender() {
-        let config = RequestMirrorConfig {
-            mirror_upstream: "staging".into(),
-            sample_percent: 100,
-            replace_host: None,
-            ignore_methods: Vec::new(),
-            queue_capacity: 10,
-        };
-
-        // Plugin instantiated without sender (sender == None)
-        let plugin = RequestMirrorPlugin::new("mirror-dynamic", config).unwrap();
-        assert!(plugin.sender.is_none());
-
-        // Later in lifecycle, global mirror queue is initialized
-        let mut rx = init_mirror_queue(10);
-
-        let mut req = build_test_request(Method::GET, HeaderWorkspace::empty(4), Bytes::new());
-        let mut target = 1;
-        let action = plugin.on_upstream_request(&mut req, &mut target);
-
-        assert!(matches!(action, Action::Continue));
-        let shadow = rx
-            .try_recv()
-            .expect("Should receive dynamically dispatched mirror request");
-        assert_eq!(shadow.target_upstream, "staging");
+        let err = RequestMirrorPlugin::from_config(&cfg, &["orders-prod"]);
+        assert!(err.is_err());
     }
 }

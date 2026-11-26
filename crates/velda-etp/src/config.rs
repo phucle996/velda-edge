@@ -1,19 +1,19 @@
-//! External Third-Party (`velda-etp`) declarative configuration, endpoint resolution,
+//! External Third-Party (`velda-etp`) declarative configuration, host/port resolution,
 //! bincode JSON adapter, and deterministic 64-bit FNV-1a fingerprinting.
 //!
 //! ```text
 //!   EtpEntryConfig::validate() / resolve_endpoint() / fingerprint()
 //!         │
 //!         ├─► [1] Validate id != "", pool_size > 0, connect_timeout_ms > 0
-//!         ├─► [2] tls.validate() ──► delegated to connect::EtpTlsConfig
-//!         ├─► [3] resolve_endpoint() ──► host/port | url/endpoint | brokers[] ──► (host, port)
-//!         └─► [4] fingerprint() ──► 64-bit FNV-1a (64-bit block hash + canonical JSON)
+//!         ├─► [2] validate_security() ──► explicit plain | tls | mtls | start_tls invariants
+//!         ├─► [3] resolve_endpoint()  ──► host (+ optional port) | brokers[] | seed_nodes[]
+//!         └─► [4] fingerprint()       ──► 64-bit FNV-1a (64-bit block hash + canonical JSON)
 //!
 //!   FNV-1a Hash Input Stream & Config Layout:
 //!   ┌──────────────────────────────────────────────────────────────────────────────┐
-//!   │ [len+id] [len+kind] [pool_size:8B] [conn_to:8B] [idle_to:8B] [tls_flag:1B]   │
-//!   │ [ca_pem] [cli_cert] [cli_key] [sni] [insecure:1B] [ver:1B] [pin_sha256]      │
-//!   │ [sorted canonical JSON]                                                      │
+//!   │ [len+id] [len+kind] [sec:1B] [pool_size:8B] [conn_to:8B] [idle_to:8B]        │
+//!   │ [tls_flag:1B] [ca_pem] [cli_cert] [cli_key] [sni] [insecure:1B] [ver:1B]     │
+//!   │ [pin_sha256] [sorted canonical JSON]                                         │
 //!   └──────────────────────────────────────────────────────────────────────────────┘
 //! ```
 
@@ -47,6 +47,46 @@ pub enum EtpKind {
     Kafka,
     #[serde(rename = "statsd")]
     Statsd,
+    #[serde(rename = "vault")]
+    Vault,
+    #[serde(rename = "aws_secrets_manager")]
+    AwsSecretsManager,
+    #[serde(rename = "keycloak")]
+    Keycloak,
+    #[serde(rename = "hydra")]
+    Hydra,
+    #[serde(rename = "authelia")]
+    Authelia,
+    #[serde(rename = "okta")]
+    Okta,
+    #[serde(rename = "auth0")]
+    Auth0,
+    #[serde(rename = "entra_id")]
+    EntraId,
+    #[serde(rename = "cognito")]
+    Cognito,
+    #[serde(rename = "oidc")]
+    Oidc,
+    #[serde(rename = "dynamodb")]
+    DynamoDb,
+    #[serde(rename = "memcached")]
+    Memcached,
+    #[serde(rename = "postgres")]
+    Postgres,
+    #[serde(rename = "mysql")]
+    MySql,
+    #[serde(rename = "nats")]
+    Nats,
+    #[serde(rename = "valkey")]
+    Valkey,
+    #[serde(rename = "dragonfly")]
+    Dragonfly,
+    #[serde(rename = "aws_elasticache")]
+    AwsElastiCache,
+    #[serde(rename = "gcp_memorystore")]
+    GcpMemorystore,
+    #[serde(rename = "upstash")]
+    Upstash,
 }
 
 impl EtpKind {
@@ -61,6 +101,26 @@ impl EtpKind {
             Self::Otlp => "otlp",
             Self::Kafka => "kafka",
             Self::Statsd => "statsd",
+            Self::Vault => "vault",
+            Self::AwsSecretsManager => "aws_secrets_manager",
+            Self::Keycloak => "keycloak",
+            Self::Hydra => "hydra",
+            Self::Authelia => "authelia",
+            Self::Okta => "okta",
+            Self::Auth0 => "auth0",
+            Self::EntraId => "entra_id",
+            Self::Cognito => "cognito",
+            Self::Oidc => "oidc",
+            Self::DynamoDb => "dynamodb",
+            Self::Memcached => "memcached",
+            Self::Postgres => "postgres",
+            Self::MySql => "mysql",
+            Self::Nats => "nats",
+            Self::Valkey => "valkey",
+            Self::Dragonfly => "dragonfly",
+            Self::AwsElastiCache => "aws_elasticache",
+            Self::GcpMemorystore => "gcp_memorystore",
+            Self::Upstash => "upstash",
         }
     }
 
@@ -77,6 +137,26 @@ impl EtpKind {
             "otlp" => Some(Self::Otlp),
             "kafka" => Some(Self::Kafka),
             "statsd" => Some(Self::Statsd),
+            "vault" | "openbao" => Some(Self::Vault),
+            "aws_secrets_manager" | "aws_secrets" => Some(Self::AwsSecretsManager),
+            "keycloak" => Some(Self::Keycloak),
+            "hydra" | "ory_hydra" => Some(Self::Hydra),
+            "authelia" => Some(Self::Authelia),
+            "okta" => Some(Self::Okta),
+            "auth0" => Some(Self::Auth0),
+            "entra_id" | "azure_ad" => Some(Self::EntraId),
+            "cognito" | "aws_cognito" => Some(Self::Cognito),
+            "oidc" => Some(Self::Oidc),
+            "dynamodb" | "dynamo_db" => Some(Self::DynamoDb),
+            "memcached" => Some(Self::Memcached),
+            "postgres" | "postgresql" => Some(Self::Postgres),
+            "mysql" | "mariadb" => Some(Self::MySql),
+            "nats" => Some(Self::Nats),
+            "valkey" => Some(Self::Valkey),
+            "dragonfly" | "dragonflydb" => Some(Self::Dragonfly),
+            "aws_elasticache" | "elasticache" => Some(Self::AwsElastiCache),
+            "gcp_memorystore" | "memorystore" => Some(Self::GcpMemorystore),
+            "upstash" => Some(Self::Upstash),
             _ => None,
         }
     }
@@ -84,7 +164,11 @@ impl EtpKind {
     /// Default TCP/UDP port used when a port is omitted from endpoint settings.
     pub const fn default_port(&self, tls_enabled: bool) -> u16 {
         match self {
-            Self::Redis => {
+            Self::Redis
+            | Self::Valkey
+            | Self::Dragonfly
+            | Self::AwsElastiCache
+            | Self::GcpMemorystore => {
                 if tls_enabled {
                     6380
                 } else {
@@ -98,7 +182,7 @@ impl EtpKind {
                     8123
                 }
             }
-            Self::S3 => {
+            Self::S3 | Self::Oidc | Self::Upstash => {
                 if tls_enabled {
                     443
                 } else {
@@ -116,6 +200,26 @@ impl EtpKind {
             Self::Otlp => 4317,
             Self::Kafka => 9092,
             Self::Statsd => 8125,
+            Self::Vault => 8200,
+            Self::AwsSecretsManager
+            | Self::Okta
+            | Self::Auth0
+            | Self::EntraId
+            | Self::Cognito
+            | Self::DynamoDb => 443,
+            Self::Keycloak => {
+                if tls_enabled {
+                    8443
+                } else {
+                    8080
+                }
+            }
+            Self::Hydra => 4444,
+            Self::Authelia => 9091,
+            Self::Memcached => 11211,
+            Self::Postgres => 5432,
+            Self::MySql => 3306,
+            Self::Nats => 4222,
         }
     }
 }
@@ -205,11 +309,24 @@ pub mod json_value_bincode {
 // Declarative Entry Config & Validation
 // ============================================================================
 
+/// Legacy URL-style keys rejected cleanly in favor of explicit `host` + `port` (+ `base_path`).
+const FORBIDDEN_URL_SETTING_KEYS: &[&str] = &[
+    "endpoint",
+    "url",
+    "addr",
+    "address",
+    "endpoints",
+    "directory_url",
+    "jwks_uri",
+    "introspection_url",
+];
+
 /// Declarative configuration for a single External Third-Party dependency.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct EtpEntryConfig {
     pub id: String,
     pub kind: EtpKind,
+    pub security: EtpTransportSecurity,
     #[serde(default)]
     pub pool: EtpPoolSettings,
     #[serde(default)]
@@ -219,15 +336,96 @@ pub struct EtpEntryConfig {
 }
 
 impl EtpEntryConfig {
-    /// Returns the effective transport security mode for this ETP entry.
-    pub fn transport_security(&self) -> EtpTransportSecurity {
-        match &self.tls {
-            Some(tls) => tls.transport_security(),
-            None => EtpTransportSecurity::Plain,
+    /// Returns the declared transport security mode for this ETP entry.
+    #[inline]
+    pub const fn transport_security(&self) -> EtpTransportSecurity {
+        self.security
+    }
+
+    /// Returns `true` when traffic is protected by TLS (`tls`, `mtls`, or `start_tls`).
+    #[inline]
+    pub const fn is_tls_transport(&self) -> bool {
+        !matches!(self.security, EtpTransportSecurity::Plain)
+    }
+
+    /// Returns the compiled TLS settings implied by `self.security` and `self.tls`.
+    ///
+    /// - `Plain` yields `None`.
+    /// - `Tls` and `StartTls` fall back to `EtpTlsConfig::default()` (WebPKI root CAs, TLS 1.3/1.2)
+    ///   when `self.tls` is `None`.
+    /// - `Mtls` returns `self.tls.clone()` (validated to contain `client_cert_pem` + `client_key_pem`).
+    pub fn effective_tls(&self) -> Option<EtpTlsConfig> {
+        match self.security {
+            EtpTransportSecurity::Plain => None,
+            EtpTransportSecurity::Tls | EtpTransportSecurity::StartTls => {
+                Some(self.tls.clone().unwrap_or_default())
+            }
+            EtpTransportSecurity::Mtls => self.tls.clone(),
         }
     }
 
-    /// Validates configuration invariants, TLS syntax, and endpoint target settings.
+    /// Enforces that `self.security` is among the modes supported by a specific ETP provider.
+    pub fn require_security(&self, allowed: &[EtpTransportSecurity]) -> Result<(), EtpError> {
+        if allowed.contains(&self.security) {
+            return Ok(());
+        }
+        let supported: Vec<&str> = allowed.iter().map(EtpTransportSecurity::as_str).collect();
+        Err(EtpError::Config(format!(
+            "ETP '{}' (kind '{}') does not support security '{}'; supported: [{}]",
+            self.id,
+            self.kind.as_str(),
+            self.security.as_str(),
+            supported.join(", ")
+        )))
+    }
+
+    /// Validates consistency between declared `security` mode and `tls` configuration.
+    pub fn validate_security(&self) -> Result<(), EtpError> {
+        match self.security {
+            EtpTransportSecurity::Plain => {
+                if self.tls.is_some() {
+                    return Err(EtpError::Config(format!(
+                        "ETP '{}' has security='plain' and must not configure 'tls'",
+                        self.id
+                    )));
+                }
+            }
+            EtpTransportSecurity::Tls => {
+                if let Some(tls) = &self.tls {
+                    tls.validate()?;
+                    if tls.client_cert_pem.is_some() || tls.client_key_pem.is_some() {
+                        return Err(EtpError::Config(format!(
+                            "ETP '{}' has security='tls' and must not specify client_cert_pem/client_key_pem (use security='mtls')",
+                            self.id
+                        )));
+                    }
+                }
+            }
+            EtpTransportSecurity::Mtls => {
+                let Some(tls) = &self.tls else {
+                    return Err(EtpError::Config(format!(
+                        "ETP '{}' has security='mtls' and requires 'tls' with client_cert_pem and client_key_pem",
+                        self.id
+                    )));
+                };
+                tls.validate()?;
+                if tls.client_cert_pem.is_none() || tls.client_key_pem.is_none() {
+                    return Err(EtpError::Config(format!(
+                        "ETP '{}' has security='mtls' and requires both client_cert_pem and client_key_pem",
+                        self.id
+                    )));
+                }
+            }
+            EtpTransportSecurity::StartTls => {
+                if let Some(tls) = &self.tls {
+                    tls.validate()?;
+                }
+            }
+        }
+        Ok(())
+    }
+
+    /// Validates configuration invariants, security policy, TLS syntax, and host/port settings.
     pub fn validate(&self) -> Result<(), EtpError> {
         if self.id.trim().is_empty() {
             return Err(EtpError::Config("ETP entry 'id' cannot be empty".into()));
@@ -246,14 +444,33 @@ impl EtpEntryConfig {
                 self.id
             )));
         }
-        if let Some(tls) = &self.tls {
-            tls.validate()?;
+        self.validate_security()?;
+
+        let obj = self.settings.as_object().ok_or_else(|| {
+            EtpError::Config(format!("ETP '{}' settings must be a JSON object", self.id))
+        })?;
+
+        for &forbidden in FORBIDDEN_URL_SETTING_KEYS {
+            if let Some(val) = obj.get(forbidden)
+                && !val.is_null()
+            {
+                return Err(EtpError::Config(format!(
+                    "ETP '{}' setting '{}' is not allowed; configure explicit 'host' + optional 'port' (plus 'base_path' for HTTP) and 'security' instead of URLs",
+                    self.id, forbidden
+                )));
+            }
         }
-        if !self.settings.is_object() {
-            return Err(EtpError::Config(format!(
-                "ETP '{}' settings must be a JSON object",
-                self.id
-            )));
+
+        if let Some(bp_val) = obj.get("base_path")
+            && !bp_val.is_null()
+        {
+            let bp = bp_val.as_str().ok_or_else(|| {
+                EtpError::Config(format!(
+                    "ETP '{}' setting 'base_path' must be a string",
+                    self.id
+                ))
+            })?;
+            normalize_base_path(bp, &self.id)?;
         }
 
         let (host, port) = self.resolve_endpoint()?;
@@ -264,7 +481,7 @@ impl EtpEntryConfig {
             )));
         }
 
-        if let Some(bucket) = self.settings.get("bucket").and_then(|v| v.as_str())
+        if let Some(bucket) = obj.get("bucket").and_then(|v| v.as_str())
             && bucket.trim().is_empty()
         {
             return Err(EtpError::Config(format!(
@@ -276,17 +493,17 @@ impl EtpEntryConfig {
         Ok(())
     }
 
-    /// Extracts `(host, port)` from `settings` according to kind-specific conventions.
+    /// Extracts `(host, port)` from `settings` strictly without URL schemes.
     pub fn resolve_endpoint(&self) -> Result<(String, u16), EtpError> {
         let obj = self.settings.as_object().ok_or_else(|| {
             EtpError::Config(format!("ETP '{}' settings must be a JSON object", self.id))
         })?;
 
-        let tls_hint = self.tls.is_some();
+        let is_tls = self.is_tls_transport();
 
         // 1. Explicit `host` (+ optional `port`)
         if let Some(host_val) = obj.get("host") {
-            let host = host_val
+            let raw_host = host_val
                 .as_str()
                 .map(str::trim)
                 .filter(|s| !s.is_empty())
@@ -296,6 +513,7 @@ impl EtpEntryConfig {
                         self.id
                     ))
                 })?;
+            let host = parse_host_only(raw_host, &self.id)?;
             let port = if let Some(port_val) = obj.get("port") {
                 let p = port_val.as_u64().ok_or_else(|| {
                     EtpError::Config(format!(
@@ -310,7 +528,7 @@ impl EtpEntryConfig {
                     ))
                 })?
             } else {
-                self.kind.default_port(tls_hint)
+                self.kind.default_port(is_tls)
             };
             if port == 0 {
                 return Err(EtpError::Config(format!(
@@ -318,36 +536,11 @@ impl EtpEntryConfig {
                     self.id
                 )));
             }
-            return Ok((host.to_string(), port));
+            return Ok((host, port));
         }
 
-        // 2. Single URL / endpoint / address string keys
-        for key in [
-            "endpoint",
-            "url",
-            "addr",
-            "address",
-            "directory_url",
-            "jwks_uri",
-            "introspection_url",
-        ] {
-            if let Some(val) = obj.get(key) {
-                let raw = val
-                    .as_str()
-                    .map(str::trim)
-                    .filter(|s| !s.is_empty())
-                    .ok_or_else(|| {
-                        EtpError::Config(format!(
-                            "ETP '{}' setting '{key}' must be a non-empty string",
-                            self.id
-                        ))
-                    })?;
-                return parse_endpoint_target(raw, self.kind, tls_hint, &self.id);
-            }
-        }
-
-        // 3. Array keys (`brokers` for Kafka, `endpoints` for general multi-node targets)
-        for key in ["brokers", "endpoints"] {
+        // 2. Multi-node array keys (`brokers` for Kafka, `seed_nodes` for cluster KV pools)
+        for key in ["brokers", "seed_nodes"] {
             if let Some(val) = obj.get(key) {
                 let arr = val.as_array().ok_or_else(|| {
                     EtpError::Config(format!(
@@ -362,16 +555,85 @@ impl EtpEntryConfig {
                     .filter(|s| !s.is_empty())
                     .ok_or_else(|| {
                         EtpError::Config(format!(
-                            "ETP '{}' setting '{key}' must contain at least one non-empty endpoint string",
+                            "ETP '{}' setting '{key}' must contain at least one non-empty host[:port] string",
                             self.id
                         ))
                     })?;
-                return parse_endpoint_target(first, self.kind, tls_hint, &self.id);
+                return parse_host_port_target(first, self.kind, is_tls, &self.id);
             }
         }
 
+        // 3. Provider-specific SaaS/Cloud host fields (domain / tenant_id / region)
+        match self.kind {
+            EtpKind::Okta | EtpKind::Auth0 => {
+                if let Some(domain) = obj
+                    .get("domain")
+                    .and_then(|v| v.as_str())
+                    .map(str::trim)
+                    .filter(|s| !s.is_empty())
+                {
+                    let host = parse_host_only(domain, &self.id)?;
+                    return Ok((host, self.kind.default_port(is_tls)));
+                }
+            }
+            EtpKind::EntraId => {
+                if let Some(tenant) = obj
+                    .get("tenant_id")
+                    .and_then(|v| v.as_str())
+                    .map(str::trim)
+                    .filter(|s| !s.is_empty())
+                {
+                    let _ = tenant;
+                    return Ok((
+                        "login.microsoftonline.com".to_string(),
+                        self.kind.default_port(is_tls),
+                    ));
+                }
+            }
+            EtpKind::Cognito => {
+                if let Some(region) = obj
+                    .get("region")
+                    .and_then(|v| v.as_str())
+                    .map(str::trim)
+                    .filter(|s| !s.is_empty())
+                {
+                    return Ok((
+                        format!("cognito-idp.{region}.amazonaws.com"),
+                        self.kind.default_port(is_tls),
+                    ));
+                }
+            }
+            EtpKind::AwsSecretsManager => {
+                if let Some(region) = obj
+                    .get("region")
+                    .and_then(|v| v.as_str())
+                    .map(str::trim)
+                    .filter(|s| !s.is_empty())
+                {
+                    return Ok((
+                        format!("secretsmanager.{region}.amazonaws.com"),
+                        self.kind.default_port(is_tls),
+                    ));
+                }
+            }
+            EtpKind::DynamoDb => {
+                if let Some(region) = obj
+                    .get("region")
+                    .and_then(|v| v.as_str())
+                    .map(str::trim)
+                    .filter(|s| !s.is_empty())
+                {
+                    return Ok((
+                        format!("dynamodb.{region}.amazonaws.com"),
+                        self.kind.default_port(is_tls),
+                    ));
+                }
+            }
+            _ => {}
+        }
+
         Err(EtpError::Config(format!(
-            "ETP '{}' settings missing endpoint specification (host/port, endpoint/url, or brokers)",
+            "ETP '{}' settings missing host/port target specification",
             self.id
         )))
     }
@@ -383,6 +645,13 @@ impl EtpEntryConfig {
         let mut hash: u64 = FNV1A_OFFSET_BASIS;
         fnv1a_write_str(&mut hash, &self.id);
         fnv1a_write_str(&mut hash, self.kind.as_str());
+        let sec_byte = match self.security {
+            EtpTransportSecurity::Plain => 0u8,
+            EtpTransportSecurity::Tls => 1u8,
+            EtpTransportSecurity::Mtls => 2u8,
+            EtpTransportSecurity::StartTls => 3u8,
+        };
+        fnv1a_write_u8(&mut hash, sec_byte);
         fnv1a_write_u64(&mut hash, self.pool.pool_size as u64);
         fnv1a_write_u64(&mut hash, self.pool.connect_timeout_ms);
         fnv1a_write_u64(&mut hash, self.pool.idle_timeout_ms);
@@ -412,77 +681,158 @@ impl EtpEntryConfig {
 }
 
 // ============================================================================
-// Endpoint Target & Path Parsing Helpers
+// Host / Port & Base Path Parsing Helpers (Zero URL Schemes)
 // ============================================================================
 
-pub(crate) fn parse_endpoint_target(
+/// Validates a host-only value (hostname, IPv4, or IPv6) with zero scheme, path, or `:port`.
+pub(crate) fn parse_host_only(raw: &str, id: &str) -> Result<String, EtpError> {
+    let trimmed = raw.trim();
+    if trimmed.is_empty() {
+        return Err(EtpError::Config(format!("ETP '{id}' host cannot be empty")));
+    }
+    if trimmed.contains("://")
+        || trimmed.contains('/')
+        || trimmed.contains('?')
+        || trimmed.contains('#')
+        || trimmed.contains('@')
+        || trimmed.chars().any(char::is_whitespace)
+    {
+        return Err(EtpError::Config(format!(
+            "ETP '{id}' host '{trimmed}' must be a bare hostname or IP without scheme, path, or credentials"
+        )));
+    }
+    if let Some(after_open) = trimmed.strip_prefix('[') {
+        let Some(inner) = after_open.strip_suffix(']') else {
+            return Err(EtpError::Config(format!(
+                "ETP '{id}' host '{trimmed}' must not embed ':port' (use 'port' field instead)"
+            )));
+        };
+        if inner.parse::<std::net::Ipv6Addr>().is_err() {
+            return Err(EtpError::Config(format!(
+                "ETP '{id}' host '{trimmed}' has invalid bracketed IPv6 address"
+            )));
+        }
+        return Ok(inner.to_string());
+    }
+    if trimmed.contains(':') && trimmed.parse::<std::net::Ipv6Addr>().is_err() {
+        return Err(EtpError::Config(format!(
+            "ETP '{id}' host '{trimmed}' must not embed ':port' (use 'port' field instead)"
+        )));
+    }
+    Ok(trimmed.to_string())
+}
+
+/// Parses a `host` or `host:port` node target string (e.g. Kafka broker or cluster seed_node),
+/// rejecting URL schemes, paths, and credentials.
+pub(crate) fn parse_host_port_target(
     raw: &str,
     kind: EtpKind,
-    tls_hint: bool,
+    is_tls: bool,
     id: &str,
 ) -> Result<(String, u16), EtpError> {
-    let (scheme_tls, without_scheme) = if let Some((scheme, rest)) = raw.split_once("://") {
-        let scheme_lower = scheme.to_ascii_lowercase();
-        let is_tls_scheme = matches!(
-            scheme_lower.as_str(),
-            "https" | "rediss" | "wss" | "grpcs" | "tls"
-        );
-        (Some(is_tls_scheme), rest)
-    } else {
-        (None, raw)
-    };
-
-    let authority = without_scheme.split('/').next().unwrap_or(without_scheme);
-    let authority = authority
-        .rsplit_once('@')
-        .map(|(_, host_part)| host_part)
-        .unwrap_or(authority);
-
-    if authority.is_empty() {
+    let trimmed = raw.trim();
+    if trimmed.is_empty() {
         return Err(EtpError::Config(format!(
-            "ETP '{id}' endpoint '{raw}' has an empty host"
+            "ETP '{id}' node target cannot be empty"
+        )));
+    }
+    if trimmed.contains("://")
+        || trimmed.contains('/')
+        || trimmed.contains('?')
+        || trimmed.contains('#')
+        || trimmed.contains('@')
+        || trimmed.chars().any(char::is_whitespace)
+    {
+        return Err(EtpError::Config(format!(
+            "ETP '{id}' target '{trimmed}' must be 'host' or 'host:port' without URL schemes or paths"
         )));
     }
 
-    let is_tls = scheme_tls.unwrap_or(tls_hint);
-
     // Bracketed IPv6 literal: `[::1]:6379` or `[::1]`
-    if let Some(after_open) = authority.strip_prefix('[') {
+    if let Some(after_open) = trimmed.strip_prefix('[') {
         let (addr, rest) = after_open.split_once(']').ok_or_else(|| {
-            EtpError::Config(format!("ETP '{id}' endpoint '{raw}' has unclosed '['"))
+            EtpError::Config(format!("ETP '{id}' target '{trimmed}' has unclosed '['"))
         })?;
-        if addr.is_empty() {
+        if addr.is_empty() || addr.parse::<std::net::Ipv6Addr>().is_err() {
             return Err(EtpError::Config(format!(
-                "ETP '{id}' endpoint '{raw}' has empty IPv6 host"
+                "ETP '{id}' target '{trimmed}' has invalid IPv6 host"
             )));
         }
         let port = if rest.is_empty() {
-            default_port_for_scheme_or_kind(scheme_tls, kind, is_tls)
+            kind.default_port(is_tls)
         } else if let Some(port_str) = rest.strip_prefix(':') {
-            parse_nonzero_port(port_str, id, raw)?
+            parse_nonzero_port(port_str, id, trimmed)?
         } else {
             return Err(EtpError::Config(format!(
-                "ETP '{id}' endpoint '{raw}' has invalid authority suffix '{rest}'"
+                "ETP '{id}' target '{trimmed}' has invalid authority suffix '{rest}'"
             )));
         };
         return Ok((addr.to_string(), port));
     }
 
-    // Standard `host:port` vs bare `host`
-    if let Some((host, port_str)) = authority.rsplit_once(':')
+    // Standard `host:port` vs bare IPv6 / bare hostname
+    if let Some((host, port_str)) = trimmed.rsplit_once(':')
         && !host.contains(':')
     {
         if host.is_empty() {
             return Err(EtpError::Config(format!(
-                "ETP '{id}' endpoint '{raw}' has empty host"
+                "ETP '{id}' target '{trimmed}' has empty host"
             )));
         }
-        let port = parse_nonzero_port(port_str, id, raw)?;
+        let port = parse_nonzero_port(port_str, id, trimmed)?;
         return Ok((host.to_string(), port));
     }
 
-    let port = default_port_for_scheme_or_kind(scheme_tls, kind, is_tls);
-    Ok((authority.to_string(), port))
+    let port = kind.default_port(is_tls);
+    Ok((trimmed.to_string(), port))
+}
+
+/// Validates and canonicalizes an optional HTTP `base_path` (e.g. `"/custom"` or `""`).
+pub(crate) fn normalize_base_path(raw: &str, id: &str) -> Result<String, EtpError> {
+    let trimmed = raw.trim();
+    if trimmed.contains("://") || trimmed.contains('?') || trimmed.contains('#') {
+        return Err(EtpError::Config(format!(
+            "ETP '{id}' base_path '{trimmed}' must be a path prefix, not a URL or query"
+        )));
+    }
+    let trimmed = trimmed.trim_end_matches('/');
+    if trimmed.is_empty() {
+        Ok(String::new())
+    } else if trimmed.starts_with('/') {
+        Ok(trimmed.to_string())
+    } else {
+        Ok(format!("/{trimmed}"))
+    }
+}
+
+/// Extracts optional `settings.base_path` from an ETP JSON settings object.
+pub(crate) fn read_base_path(
+    obj: &serde_json::Map<String, serde_json::Value>,
+    id: &str,
+) -> Result<String, EtpError> {
+    match obj.get("base_path").and_then(|v| v.as_str()) {
+        Some(raw) => normalize_base_path(raw, id),
+        None => Ok(String::new()),
+    }
+}
+
+/// Formats `host` + `port` for URL construction (`[ipv6]:port` vs `host:port`).
+pub(crate) fn format_host_port(host: &str, port: u16) -> String {
+    if host.contains(':') && !host.starts_with('[') {
+        format!("[{host}]:{port}")
+    } else {
+        format!("{host}:{port}")
+    }
+}
+
+/// Formats a canonical HTTP/gRPC endpoint URI derived strictly from `(scheme, host, port, base_path)`.
+pub(crate) fn synthesize_endpoint_uri(
+    scheme: &str,
+    host: &str,
+    port: u16,
+    base_path: &str,
+) -> String {
+    format!("{scheme}://{}{base_path}", format_host_port(host, port))
 }
 
 pub(crate) fn format_host_header(host: &str, port: u16, is_tls: bool) -> String {
@@ -496,39 +846,92 @@ pub(crate) fn format_host_header(host: &str, port: u16, is_tls: bool) -> String 
     }
 }
 
-pub(crate) fn extract_endpoint_path(raw: &str) -> String {
-    let without_scheme = raw.split_once("://").map(|(_, rest)| rest).unwrap_or(raw);
-    match without_scheme.find('/') {
-        Some(idx) => {
-            let path = without_scheme[idx..].trim_end_matches('/');
-            if path.is_empty() {
-                String::new()
-            } else {
-                path.to_string()
-            }
-        }
-        None => String::new(),
-    }
+/// Shared connection-field bundle extracted by HTTP-based ETP configs (`config.rs`).
+pub(crate) struct HttpEndpointFields {
+    pub endpoint: String,
+    pub host: String,
+    pub port: u16,
+    pub host_header: String,
+    pub bearer_token: Option<String>,
+    pub client_id: Option<String>,
+    pub client_secret: Option<String>,
+    pub custom_headers: Vec<(String, String)>,
+    pub tls: Option<EtpTlsConfig>,
 }
 
-fn default_port_for_scheme_or_kind(scheme_tls: Option<bool>, kind: EtpKind, is_tls: bool) -> u16 {
-    if let Some(tls_scheme) = scheme_tls
-        && matches!(kind, EtpKind::S3)
-    {
-        return if tls_scheme { 443 } else { 80 };
+/// Extracts connection endpoint, TLS-aware `Host` header, and optional HTTP client auth fields.
+pub(crate) fn extract_http_endpoint_fields(
+    entry: &EtpEntryConfig,
+    expected_kind: EtpKind,
+) -> Result<HttpEndpointFields, EtpError> {
+    if entry.kind != expected_kind {
+        return Err(EtpError::KindMismatch {
+            id: entry.id.clone(),
+            expected: expected_kind.as_str(),
+            actual: entry.kind.as_str(),
+        });
     }
-    kind.default_port(is_tls)
+    entry.validate()?;
+    entry.require_security(&[
+        EtpTransportSecurity::Plain,
+        EtpTransportSecurity::Tls,
+        EtpTransportSecurity::Mtls,
+    ])?;
+
+    let (host, port) = entry.resolve_endpoint()?;
+    let obj = entry.settings.as_object().ok_or_else(|| {
+        EtpError::Config(format!(
+            "{} ETP '{}' settings must be an object",
+            expected_kind.as_str(),
+            entry.id
+        ))
+    })?;
+
+    let is_tls = entry.is_tls_transport();
+    let base_path = read_base_path(obj, &entry.id)?;
+    let scheme = if is_tls { "https" } else { "http" };
+    let endpoint = synthesize_endpoint_uri(scheme, &host, port, &base_path);
+    let host_header = format_host_header(&host, port, is_tls);
+
+    let opt_str = |key: &str| -> Option<String> {
+        obj.get(key)
+            .and_then(|v| v.as_str())
+            .map(str::trim)
+            .filter(|s| !s.is_empty())
+            .map(ToString::to_string)
+    };
+
+    let mut custom_headers = Vec::new();
+    if let Some(hdrs) = obj.get("headers").and_then(|v| v.as_object()) {
+        for (k, v) in hdrs {
+            if let Some(vs) = v.as_str() {
+                custom_headers.push((k.clone(), vs.to_string()));
+            }
+        }
+    }
+
+    Ok(HttpEndpointFields {
+        endpoint,
+        host,
+        port,
+        host_header,
+        bearer_token: opt_str("bearer_token"),
+        client_id: opt_str("client_id"),
+        client_secret: opt_str("client_secret"),
+        custom_headers,
+        tls: entry.effective_tls(),
+    })
 }
 
 fn parse_nonzero_port(port_str: &str, id: &str, raw: &str) -> Result<u16, EtpError> {
     let port: u16 = port_str.parse().map_err(|_| {
         EtpError::Config(format!(
-            "ETP '{id}' endpoint '{raw}' has invalid port '{port_str}'"
+            "ETP '{id}' target '{raw}' has invalid port '{port_str}'"
         ))
     })?;
     if port == 0 {
         return Err(EtpError::Config(format!(
-            "ETP '{id}' endpoint '{raw}' port must be greater than 0"
+            "ETP '{id}' target '{raw}' port must be greater than 0"
         )));
     }
     Ok(port)

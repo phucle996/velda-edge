@@ -28,21 +28,46 @@
 use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 
+use crate::auth0::Auth0Etp;
+use crate::authelia::AutheliaEtp;
+use crate::aws_elasticache::AwsElastiCacheEtp;
+use crate::aws_secrets_manager::AwsSecretsManagerEtp;
 use crate::clickhouse::ClickHouseEtp;
+use crate::cognito::CognitoEtp;
 use crate::config::{EtpEntryConfig, EtpKind};
+use crate::dragonfly::DragonflyEtp;
+use crate::dynamodb::DynamoDbEtp;
 use crate::elasticsearch::ElasticsearchEtp;
+use crate::entra_id::EntraIdEtp;
 use crate::error::EtpError;
+use crate::gcp_memorystore::GcpMemorystoreEtp;
+use crate::hydra::HydraEtp;
 use crate::kafka::KafkaEtp;
+use crate::keycloak::KeycloakEtp;
 use crate::loki::LokiEtp;
+use crate::memcached::MemcachedEtp;
+use crate::mysql::MysqlEtp;
+use crate::nats::NatsEtp;
+use crate::oidc::OidcEtp;
+use crate::okta::OktaEtp;
 use crate::otlp::OtlpEtp;
+use crate::postgres::PostgresEtp;
 use crate::redis::RedisEtp;
 use crate::s3::S3Etp;
 use crate::statsd::StatsdEtp;
+use crate::upstash::UpstashEtp;
+use crate::valkey::ValkeyEtp;
+use crate::vault::VaultEtp;
 
 /// Concrete, flat enum of per-ETP data source pool engines stored inside [`EtpInstance`].
 #[derive(Debug, Clone)]
 pub enum EtpBackend {
     Redis(Arc<RedisEtp>),
+    Valkey(Arc<ValkeyEtp>),
+    Dragonfly(Arc<DragonflyEtp>),
+    AwsElastiCache(Arc<AwsElastiCacheEtp>),
+    GcpMemorystore(Arc<GcpMemorystoreEtp>),
+    Upstash(Arc<UpstashEtp>),
     ClickHouse(Arc<ClickHouseEtp>),
     S3(Arc<S3Etp>),
     Loki(Arc<LokiEtp>),
@@ -50,6 +75,21 @@ pub enum EtpBackend {
     Otlp(Arc<OtlpEtp>),
     Kafka(Arc<KafkaEtp>),
     Statsd(Arc<StatsdEtp>),
+    Vault(Arc<VaultEtp>),
+    AwsSecretsManager(Arc<AwsSecretsManagerEtp>),
+    Keycloak(Arc<KeycloakEtp>),
+    Hydra(Arc<HydraEtp>),
+    Authelia(Arc<AutheliaEtp>),
+    Okta(Arc<OktaEtp>),
+    Auth0(Arc<Auth0Etp>),
+    EntraId(Arc<EntraIdEtp>),
+    Cognito(Arc<CognitoEtp>),
+    Oidc(Arc<OidcEtp>),
+    DynamoDb(Arc<DynamoDbEtp>),
+    Memcached(Arc<MemcachedEtp>),
+    Postgres(Arc<PostgresEtp>),
+    MySql(Arc<MysqlEtp>),
+    Nats(Arc<NatsEtp>),
 }
 
 /// Instantiated External Third-Party provider entry holding its configuration,
@@ -83,6 +123,32 @@ pub fn build_instance(config: &EtpEntryConfig) -> Result<EtpInstance, EtpError> 
         EtpKind::Otlp => EtpBackend::Otlp(Arc::new(OtlpEtp::from_entry(config)?)),
         EtpKind::Kafka => EtpBackend::Kafka(Arc::new(KafkaEtp::from_entry(config)?)),
         EtpKind::Statsd => EtpBackend::Statsd(Arc::new(StatsdEtp::from_entry(config)?)),
+        EtpKind::Vault => EtpBackend::Vault(Arc::new(VaultEtp::from_entry(config)?)),
+        EtpKind::AwsSecretsManager => {
+            EtpBackend::AwsSecretsManager(Arc::new(AwsSecretsManagerEtp::from_entry(config)?))
+        }
+        EtpKind::Keycloak => EtpBackend::Keycloak(Arc::new(KeycloakEtp::from_entry(config)?)),
+        EtpKind::Hydra => EtpBackend::Hydra(Arc::new(HydraEtp::from_entry(config)?)),
+        EtpKind::Authelia => EtpBackend::Authelia(Arc::new(AutheliaEtp::from_entry(config)?)),
+        EtpKind::Okta => EtpBackend::Okta(Arc::new(OktaEtp::from_entry(config)?)),
+        EtpKind::Auth0 => EtpBackend::Auth0(Arc::new(Auth0Etp::from_entry(config)?)),
+        EtpKind::EntraId => EtpBackend::EntraId(Arc::new(EntraIdEtp::from_entry(config)?)),
+        EtpKind::Cognito => EtpBackend::Cognito(Arc::new(CognitoEtp::from_entry(config)?)),
+        EtpKind::Oidc => EtpBackend::Oidc(Arc::new(OidcEtp::from_entry(config)?)),
+        EtpKind::DynamoDb => EtpBackend::DynamoDb(Arc::new(DynamoDbEtp::from_entry(config)?)),
+        EtpKind::Memcached => EtpBackend::Memcached(Arc::new(MemcachedEtp::from_entry(config)?)),
+        EtpKind::Postgres => EtpBackend::Postgres(Arc::new(PostgresEtp::from_entry(config)?)),
+        EtpKind::MySql => EtpBackend::MySql(Arc::new(MysqlEtp::from_entry(config)?)),
+        EtpKind::Nats => EtpBackend::Nats(Arc::new(NatsEtp::from_entry(config)?)),
+        EtpKind::Valkey => EtpBackend::Valkey(Arc::new(ValkeyEtp::from_entry(config)?)),
+        EtpKind::Dragonfly => EtpBackend::Dragonfly(Arc::new(DragonflyEtp::from_entry(config)?)),
+        EtpKind::AwsElastiCache => {
+            EtpBackend::AwsElastiCache(Arc::new(AwsElastiCacheEtp::from_entry(config)?))
+        }
+        EtpKind::GcpMemorystore => {
+            EtpBackend::GcpMemorystore(Arc::new(GcpMemorystoreEtp::from_entry(config)?))
+        }
+        EtpKind::Upstash => EtpBackend::Upstash(Arc::new(UpstashEtp::from_entry(config)?)),
     };
 
     Ok(EtpInstance {
@@ -126,6 +192,26 @@ pub async fn warm_instance(inst: &EtpInstance) -> Result<(), EtpError> {
         EtpBackend::Otlp(pool) => pool.warm().await,
         EtpBackend::Kafka(pool) => pool.warm().await,
         EtpBackend::Statsd(pool) => pool.warm().await,
+        EtpBackend::Vault(pool) => pool.warm().await,
+        EtpBackend::AwsSecretsManager(pool) => pool.warm().await,
+        EtpBackend::Keycloak(pool) => pool.warm().await,
+        EtpBackend::Hydra(pool) => pool.warm().await,
+        EtpBackend::Authelia(pool) => pool.warm().await,
+        EtpBackend::Okta(pool) => pool.warm().await,
+        EtpBackend::Auth0(pool) => pool.warm().await,
+        EtpBackend::EntraId(pool) => pool.warm().await,
+        EtpBackend::Cognito(pool) => pool.warm().await,
+        EtpBackend::Oidc(pool) => pool.warm().await,
+        EtpBackend::DynamoDb(pool) => pool.warm().await,
+        EtpBackend::Memcached(pool) => pool.warm().await,
+        EtpBackend::Postgres(pool) => pool.warm().await,
+        EtpBackend::MySql(pool) => pool.warm().await,
+        EtpBackend::Nats(pool) => pool.warm().await,
+        EtpBackend::Valkey(pool) => pool.warm().await,
+        EtpBackend::Dragonfly(pool) => pool.warm().await,
+        EtpBackend::AwsElastiCache(pool) => pool.warm().await,
+        EtpBackend::GcpMemorystore(pool) => pool.warm().await,
+        EtpBackend::Upstash(pool) => pool.warm().await,
     }
 }
 

@@ -142,7 +142,12 @@ impl PostResponsePlugin for SecurityHeadersPlugin {
     ///   hardware integer registers in `HeaderWorkspace` (`set_inline_ascii`).
     /// - Headers `> 16` bytes (HSTS `max-age=...`, long CSP) are inserted as zero-copy references.
     #[inline(always)]
-    fn on_response(&self, _req_headers: &velda_core::HeaderWorkspace, resp: &mut L7Response) {
+    fn on_response(
+        &self,
+        _req_state: &velda_core::RequestState,
+        _req_headers: &velda_core::HeaderWorkspace,
+        resp: &mut L7Response,
+    ) {
         let active = self.headers.get(..self.headers_len as usize).unwrap_or(&[]);
         for header in active {
             match header {

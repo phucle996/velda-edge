@@ -21,6 +21,7 @@ pub mod post_response;
 pub mod pre_route;
 pub mod pre_upstream;
 pub mod validation;
+pub(crate) mod wire_baked;
 
 // Root exports are limited to the cross-phase orchestration surface.
 // Plugin types, configs and internal state are reached through their phase module
@@ -29,13 +30,17 @@ pub use background::{BackgroundPlugin, BackgroundTaskFuture};
 pub use capability::{AccessLevel, Direction, PluginCapability, SupportedProtocols};
 pub use config::{OutboundTlsConfig, PluginConfig};
 pub use error::PluginError;
-pub use factory::{
-    LoadedPlugin, build_route_plugin_plan, instantiate_plugin, wire_plugin_dependencies,
-    wire_plugin_etps,
+pub use factory::{LoadedPlugin, build_route_plugin_plan, instantiate_plugin, wire_plugin_etps};
+pub use hook::{
+    ShadowTask, current_worker_lane, set_core_shadow_sender, set_current_worker_lane,
+    try_dispatch_shadow,
 };
-pub use hook::{ShadowTask, set_core_shadow_sender, try_dispatch_shadow};
 pub use plan::RoutePluginPlan;
 pub use post_response::run_post_response_plugins;
 pub use pre_route::run_pre_route_plugins;
-pub use pre_upstream::run_pre_upstream_plugins;
+pub use pre_upstream::{
+    TARGET_UNASSIGNED, TARGETS_CANCELLED, run_pre_upstream_plugins, run_pre_upstream_plugins_async,
+    target_cancel_all, target_init, target_mirror, target_pair, target_primary, target_set_mirror,
+    target_set_primary,
+};
 pub use validation::*;

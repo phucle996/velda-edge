@@ -5,6 +5,7 @@
     {
       "id": "clickhouse-logs",
       "kind": "clickhouse",
+      "security": "plain",
       "pool": {
         "pool_size": 2,
         "connect_timeout_ms": 2000,
@@ -21,6 +22,7 @@
     {
       "id": "loki-logs",
       "kind": "loki",
+      "security": "plain",
       "pool": {
         "pool_size": 2,
         "connect_timeout_ms": 2000,
@@ -28,20 +30,23 @@
       },
       "settings": {
         "protocol": "http",
-        "endpoint": "http://loki.internal:3100",
+        "host": "loki.internal",
+        "port": 3100,
         "tenant_id": "velda-prod"
       }
     },
     {
       "id": "statsd-main",
       "kind": "statsd",
+      "security": "plain",
       "pool": {
         "pool_size": 2,
         "connect_timeout_ms": 2000,
         "idle_timeout_ms": 60000
       },
       "settings": {
-        "endpoint": "127.0.0.1:8125",
+        "host": "127.0.0.1",
+        "port": 8125,
         "flavor": "dogstatsd",
         "prefix": "velda"
       }
@@ -49,6 +54,7 @@
     {
       "id": "kafka-main",
       "kind": "kafka",
+      "security": "plain",
       "pool": {
         "pool_size": 2,
         "connect_timeout_ms": 2000,
@@ -63,6 +69,7 @@
     {
       "id": "otlp-main",
       "kind": "otlp",
+      "security": "plain",
       "pool": {
         "pool_size": 2,
         "connect_timeout_ms": 2000,
@@ -70,8 +77,23 @@
       },
       "settings": {
         "protocol": "http",
-        "endpoint": "http://otel-collector.internal:4318",
+        "host": "otel-collector.internal",
+        "port": 4318,
         "headers": {}
+      }
+    },
+    {
+      "id": "keycloak-prod",
+      "kind": "keycloak",
+      "security": "plain",
+      "pool": {
+        "pool_size": 2,
+        "connect_timeout_ms": 2000,
+        "idle_timeout_ms": 60000
+      },
+      "settings": {
+        "host": "127.0.0.1",
+        "port": 8080
       }
     }
   ]

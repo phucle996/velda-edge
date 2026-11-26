@@ -116,7 +116,14 @@ pub async fn process_grpc_udp_request(
     sampling: GrpcSampling,
     runtime: &SharedRuntime,
 ) -> L7Response {
-    let ingress_nanos = req.ingress_time_nanos;
+    let ingress_nanos = if req.ingress_time_nanos != 0 {
+        req.ingress_time_nanos
+    } else {
+        let now = velda_core::clock::now_unix_nanos();
+        req.ingress_time_nanos = now;
+        req.state.ingress_time_nanos = now;
+        now
+    };
     let (log_url_len, log_url_bytes) = {
         let host = velda_http3::server::header::extract_host(&req.headers, &req.uri);
         velda_observability::TelemetryRecord::encode_url(true, host, req.uri.path())
@@ -241,7 +248,11 @@ pub async fn process_grpc_udp_request(
     };
 
     let route_idx = route.id as usize;
-    let mut target_upstream: u16 = rt.route_to_upstream.get(route_idx).copied().unwrap_or(0);
+    let default_upstream: u16 = rt.route_to_upstream.get(route_idx).copied().unwrap_or(0);
+    let mut target_mask: u32 = velda_plugin::target_init(default_upstream);
+    let mut target_upstream: u16 = default_upstream;
+    req.state.set_route(route.id);
+    req.state.set_upstream(target_upstream);
 
     // ========================================================================
     // [Route Plugin Pipeline Evaluation: pre_route & pre_upstream hooks]
@@ -262,17 +273,17 @@ pub async fn process_grpc_udp_request(
                 Action::Respond(resp) => {
                     short_circuit_resp = Some(resp);
                 }
-                Action::ServeCached(cached) => {
-                    short_circuit_resp = Some(cached.into_l7_response());
-                }
                 Action::Reject(reason) => {
                     // FAST-FAIL INVARIANT: Rejections terminate immediately at the Edge boundary.
                     // Strictly bypasses post_response_hooks (anti-CPDoS & Zero-DDoS CPU burn),
-                    // transforming HeaderWorkspace in-place to preserve only Bit-1 bypass headers.
+                    // retaining only MSB bypass headers while velda-grpc stamps Trailers-Only rejection fields.
                     let grpc_status = GrpcStatus::from_reject_reason(reason);
                     let log_grpc_status = grpc_status;
-                    req.headers
-                        .prepare_for_grpc_rejection(grpc_status, Some(reason.canonical_phrase()));
+                    velda_grpc::GrpcWire::prepare_rejection_headers(
+                        &mut req.headers,
+                        grpc_status,
+                        Some(reason.canonical_phrase()),
+                    );
                     let resp = velda_core::L7Response {
                         status: http::StatusCode::OK,
                         version: http::Version::HTTP_3,
@@ -320,7 +331,11 @@ pub async fn process_grpc_udp_request(
             && let Some(hooks) = &plan.pre_upstream_hooks
         {
             let mut action =
-                velda_plugin::run_pre_upstream_plugins(hooks, &mut req, &mut target_upstream);
+                velda_plugin::run_pre_upstream_plugins_async(hooks, &mut req, &mut target_mask)
+                    .await;
+            target_upstream = velda_plugin::target_primary(target_mask)
+                .unwrap_or(velda_core::UNASSIGNED_UPSTREAM_ID);
+            req.state.set_upstream(target_upstream);
             while let Action::Delay { duration, and_then } = action {
                 tokio::time::sleep(duration).await;
                 action = *and_then;
@@ -331,17 +346,17 @@ pub async fn process_grpc_udp_request(
                 Action::Respond(resp) => {
                     short_circuit_resp = Some(resp);
                 }
-                Action::ServeCached(cached) => {
-                    short_circuit_resp = Some(cached.into_l7_response());
-                }
                 Action::Reject(reason) => {
                     // FAST-FAIL INVARIANT: Rejections terminate immediately at the Edge boundary.
                     // Strictly bypasses post_response_hooks (anti-CPDoS & Zero-DDoS CPU burn),
-                    // transforming HeaderWorkspace in-place to preserve only Bit-1 bypass headers.
+                    // retaining only MSB bypass headers while velda-grpc stamps Trailers-Only rejection fields.
                     let grpc_status = GrpcStatus::from_reject_reason(reason);
                     let log_grpc_status = grpc_status;
-                    req.headers
-                        .prepare_for_grpc_rejection(grpc_status, Some(reason.canonical_phrase()));
+                    velda_grpc::GrpcWire::prepare_rejection_headers(
+                        &mut req.headers,
+                        grpc_status,
+                        Some(reason.canonical_phrase()),
+                    );
                     let resp = velda_core::L7Response {
                         status: http::StatusCode::OK,
                         version: http::Version::HTTP_3,
@@ -389,7 +404,12 @@ pub async fn process_grpc_udp_request(
             resp.headers
                 .set_request_id(req.headers.request_id().clone());
             if let Some(post_hooks) = &plan.post_response_hooks {
-                velda_plugin::run_post_response_plugins(post_hooks, &req.headers, &mut resp);
+                velda_plugin::run_post_response_plugins(
+                    post_hooks,
+                    &req.state,
+                    &req.headers,
+                    &mut resp,
+                );
             }
             let duration_ns = velda_core::clock::now_unix_nanos().saturating_sub(ingress_nanos);
             let bytes_rx = req.body.len() as u64;
@@ -509,6 +529,20 @@ pub async fn process_grpc_udp_request(
             });
         }
         return GrpcStatus::ResourceExhausted.to_l7_response(Some("resource exhausted"));
+    }
+
+    if let Some(mirror_id) = velda_plugin::target_mirror(target_mask)
+        && mirror_id != target_upstream
+        && let Some(mirror_up) = rt.upstreams.grpc.get(mirror_id)
+    {
+        crate::pipeline::mirror::dispatch_grpc_mirror(
+            Arc::clone(mirror_up),
+            req.method.clone(),
+            req.uri.clone(),
+            req.version,
+            req.headers.clone(),
+            req.body.clone(),
+        );
     }
 
     let (pipe_res, pipe_kind) = match upstream_target.as_ref() {
@@ -633,7 +667,7 @@ pub async fn process_grpc_udp_request(
     };
 
     if let Some(post_hooks) = &plan.post_response_hooks {
-        velda_plugin::run_post_response_plugins(post_hooks, &req.headers, &mut resp);
+        velda_plugin::run_post_response_plugins(post_hooks, &req.state, &req.headers, &mut resp);
     }
 
     let duration_ns = velda_core::clock::now_unix_nanos().saturating_sub(ingress_nanos);

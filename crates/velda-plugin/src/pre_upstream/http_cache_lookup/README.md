@@ -1,81 +1,84 @@
 # HTTP Cache Lookup Plugin (`http_cache_lookup`)
 
-High-performance in-memory cache lookup plugin evaluated during the `pre_upstream` lifecycle phase. Computes normalized cache keys, inspects the designated [`HttpCacheStorage`], and serves cached responses with zero-copy payload bytes immediately to the client on `CACHE HIT`.
+In-memory HTTP response cache lookup plugin executed inline during the `pre_upstream` phase on Frontline Traffic Workers. Computes a zero-allocation 64-bit cache key from `(req.state.route_id, req.state.method, compiled_key_headers)`, negotiates payload variants against `Accept-Encoding` and configured priority-ordered `preferred_encodings`, and short-circuits on `HIT` via `Action::Respond(L7Response)`.
+
+```text
++-------------------------------------------------------------------------------+
+|                       HTTP CACHE LOOKUP PIPELINE                              |
++-------------------------------------------------------------------------------+
+|  L7Request (req.state: RequestState, req.headers: HeaderWorkspace)            |
+|    |                                                                          |
+|    +---> [1] method_mask check (req.state.method)                             |
+|    |       └─ unsupported method ──────────────────────────► Action::Continue |
+|    +---> [2] storage.route_key_hash(route_id, method, hdrs, compiled_keys)    |
+|    +---> [3] storage.lookup_variant(hash, accept_encoding, preferred, auth)   |
+|            ├─ AuthBypass / Miss ───────────────────────────► Action::Continue |
+|            └─ Hit ─► HeaderWorkspace + Body::Bytes ─► Action::Respond(resp)   |
++-------------------------------------------------------------------------------+
+```
 
 ---
 
-## 1. Overview & Pipeline Specification
+## 1. What This Plugin Does
+
+- **Route + Method + Header-Segmented Keys**: Keys cache slots strictly by `(req.state.route_id, req.state.method, compiled_key_headers)` rather than host/path/query strings. Route and listener matching have already selected `route_id`; `key_headers` segments entries per user or tenant (`x-user-id`, `x-tenant-id`, etc.), distinguishing missing headers from empty values.
+- **Priority-Ordered Variant Negotiation**:
+  - When the request carries no `Accept-Encoding` header, lookup serves plain-text (`raw_body`) if cached, or misses so upstream populates plain-text.
+  - When `Accept-Encoding` is present, lookup filters available compressed variants strictly through configured priority-ordered `preferred_encodings` (`zstd`, `br`, `gzip`), falling back to `raw_body` if `identity` is acceptable.
+- **Direct `Action::Respond` Delivery**: On `HIT`, builds a clean `HeaderWorkspace` (`Content-Type`, `Content-Length`, `Age`, `X-Cache: HIT`, plus `Content-Encoding` / `Vary: Accept-Encoding` when applicable) paired with zero-copy `Body::Bytes` backed by the cache slab.
+- **RFC 9111 §3.5 Auth Safety Shield**: Bypasses requests carrying `Authorization` when `bypass_authenticated_requests == true` and `authorization` is absent from `key_headers`, unless the cached entry carries `is_public == true`.
+- **Hardware Memory Ceiling**: Validates `max_memory_mb` per plugin and across distinct `zone`s against `max_cache_memory_mb()` (`50%` of system/cgroup RAM from `velda_core::hardware`).
+
+---
+
+## 2. Where It Sits in Velda Edge
 
 | Property | Value |
 | :--- | :--- |
 | **Plugin ID** | `http_cache_lookup` |
-| **Canonical Phase** | `pre_upstream` |
-| **Execution Order** | Strictly FIFO based on route `plugins` declaration order (First declared, first executed) |
-| **Reverse Capability** | `PluginCapability::header_only(AccessLevel::Write)` |
-| **Supported Protocols** | HTTP only (`HTTP/1.1`, `HTTP/2`, `HTTP/3`) |
-| **Hot Path Latency** | ~14ns lookup (Lockless Read CLOCK evaluation, zero disk I/O, zero network calls) |
+| **Phase** | `pre_upstream` |
+| **Worker Affinity** | Frontline Traffic Workers (`velda-worker-{i}`) |
+| **PBWW (`pbww()`)** | `0` (lock-free shard `RwLock::read()` + atomic access bit) |
+| **Capability** | `PluginCapability::header_only(AccessLevel::Read)` |
+| **Supported Protocols** | `SupportedProtocols::ALL_HTTP` (`HTTP/1.1`, `HTTP/2`, `HTTP/3`) |
+| **Zone Pairing** | Shares [`HttpCacheStorage`](../../http_cache/storage.rs) by `zone`; must declare identical `key_headers` as `http_cache_store` on the same `zone`. |
 
 ---
 
-## 2. 100% Explicit Configuration Invariant
+## 3. Configuration Parameters (`plugins.json`)
 
-> [!IMPORTANT]
-> **Strict Configuration Contract**: Every configuration parameter must be explicitly declared in `plugins.json`. No silent fallbacks or implicit defaults exist. All field values must be intentionally supplied according to your infrastructure requirements.
+Every field is explicitly required and unknown fields are rejected at sync (`#[serde(deny_unknown_fields)]`):
 
-| Field | Type | Required | Constraints / Allowed Values | Recommended Value | Description |
-| :--- | :---: | :---: | :--- | :--- | :--- |
-| `zone` | String | **Yes** | Non-empty alphanumeric string (must match `http_cache_store`) | `"api_cache"` | Shared in-memory cache zone identifier. |
-| `cacheable_methods` | Array of strings | **Yes** | Non-empty list of HTTP methods (`"GET"`, `"HEAD"`) | `["GET", "HEAD"]` | HTTP methods eligible for cache lookup. |
-| `ignore_query_order` | Boolean | **Yes** | `true` or `false` | `true` | Sorts query parameters alphabetically so `/items?a=1&b=2` and `/items?b=2&a=1` hit the same entry. |
-| `honor_client_no_cache` | Boolean | **Yes** | `true` or `false` | `false` | If true, honors client `Cache-Control: no-cache` / `Pragma: no-cache`. Set `false` to prevent cache-busting DoS. |
-| `bypass_authenticated_requests` | Boolean | **Yes** | `true` or `false` | `true` | Enforces RFC 9111 §3.5: requests with `Authorization` bypass cache unless partitioned via `key_headers`. |
-| `key_headers` | Array of strings | **Yes** | List of valid RFC 9110 header names (`[]` if none) | `["x-user-id", "authorization"]` | Request header names incorporated into cache key for per-user / multi-tenant caching. |
-| `max_memory_mb` | Integer (usize) | **Yes** | `1 ..= 1048576` (1MB to 1TB) | `256` | Maximum memory limit in megabytes allocated for the in-memory cache zone. |
-| `default_ttl_secs` | Integer (u64) | **Yes** | `1 ..= 31536000` (1s to 1 year) | `300` (5 minutes) | Fallback TTL in seconds when upstream response omits `Cache-Control: max-age`. |
+| Field | Type | Required | Constraints / Allowed Values | Description |
+| :--- | :---: | :---: | :--- | :--- |
+| `zone` | `string` | **Yes** | Non-empty string (must match `http_cache_store`) | Shared in-memory cache storage zone identifier. |
+| `cacheable_methods` | `string[]` | **Yes** | Non-empty list of valid HTTP methods (e.g. `["GET", "HEAD"]`) | Methods evaluated for cache lookup against `req.state.method`. |
+| `bypass_authenticated_requests` | `bool` | **Yes** | `true` or `false` | Bypasses lookup when `Authorization` is present unless partitioned by `key_headers` or marked public. |
+| `key_headers` | `string[]` | **Yes** | Valid RFC 9110 header names (`[]` if none); must match `http_cache_store` for the same `zone` | Headers included in deterministic cache key hashing. |
+| `preferred_encodings` | `string[]` | **Yes** | Non-empty ordered list from `"zstd"`, `"br"`, `"gzip"` (no duplicates) | Priority-ordered encoding allowlist evaluated against `Accept-Encoding`. |
+| `max_memory_mb` | `usize` | **Yes** | `1 ..= max_cache_memory_mb()` (`50%` of host/cgroup RAM from `velda-core`) | Memory budget allocated for this zone if initialized here. |
+| `default_ttl_secs` | `u64` | **Yes** | `1 ..= 31_536_000` | Default TTL fallback in seconds if this plugin initializes the zone storage. |
 
 ---
 
-## 3. RFC 9111 §3.5 Authentication Safety Shield
-
-To prevent accidental cross-user data leakage when private APIs are mistakenly configured with cache plugins:
-1. **Automatic Bypass**: Requests with an `Authorization` header are bypassed by default (`Action::Continue`), unless `key_headers` partitions by the token, or the entry was stored with `Cache-Control: public` / `s-maxage`.
-2. **Per-User Caching**: When `key_headers` includes `authorization` or a user discriminator (such as `x-user-id` or session cookie), each user receives a mathematically isolated cache key:
-   $$\text{Key} = \text{Method} + \text{Host} + \text{Path} + \text{Query} + \mathbf{|\text{authorization}=...|\text{x-user-id}=...}$$
-
----
-
-## 4. Configuration Examples
-
-### Production Manifest (`plugins.json`)
+## 4. Quick Start Configuration
 
 ```json
 {
-  "schema_version": 1,
-  "plugins": [
-    {
-      "id": "http_cache_lookup",
-      "config": {
-        "zone": "api_cache",
-        "cacheable_methods": [
-          "GET",
-          "HEAD"
-        ],
-        "ignore_query_order": true,
-        "honor_client_no_cache": false,
-        "bypass_authenticated_requests": true,
-        "key_headers": [
-          "x-user-id",
-          "authorization"
-        ],
-        "max_memory_mb": 256,
-        "default_ttl_secs": 300
-      }
-    }
-  ]
+  "id": "http_cache_lookup",
+  "config": {
+    "zone": "api_cache",
+    "cacheable_methods": ["GET", "HEAD"],
+    "bypass_authenticated_requests": true,
+    "key_headers": ["x-tenant-id"],
+    "preferred_encodings": ["zstd", "br", "gzip"],
+    "max_memory_mb": 256,
+    "default_ttl_secs": 300
+  }
 }
 ```
 
-### Route Attachment (`routes.json`)
+Attach paired plugins on an HTTP route (`routes.json`):
 
 ```json
 {
@@ -91,18 +94,3 @@ To prevent accidental cross-user data leakage when private APIs are mistakenly c
   ]
 }
 ```
-
----
-
-## 5. Micro-Architectural Foundations & Serving Hot Path
-
-1. **Lockless Read-Lock Shards (`RwLock::read()`)**:
-   - Cache lookup executes under read-locks on 64 lock-striped shards.
-   - Second-chance CLOCK access bit is updated via `AtomicBool::store(true, Ordering::Relaxed)` without bus-locking instructions (`LOCK MOV`), permitting hundreds of frontline workers to query cache concurrently with zero contention.
-2. **Coarse Clock Expiration (`velda_core::coarse_now_sec()`)**:
-   - `is_fresh` evaluates in 1 single CPU instruction register comparison (`CMP EAX, [RSI+4]`), completely eliminating vDSO syscall overhead.
-3. **Pure Payload Model**:
-   - Cache HIT responses are synthesized directly from zero-copy in-memory payload bytes (`Body::Bytes(payload)`).
-   - Only minimal RFC 9110 headers (`Content-Type`, `Content-Length`, `Age`, `X-Cache`, `Content-Encoding`, `Vary`) are generated, guaranteeing zero cross-request header contamination.
-4. **Zero-Lock Miss Pipeline**:
-   - On `CACHE MISS`, `http_cache_lookup` enriches `req.headers` with transient `x-velda-cache-key` and precomputed `x-velda-cache-hash`. `http_cache_store` consumes these headers on response without acquiring global mutexes or re-hashing strings.

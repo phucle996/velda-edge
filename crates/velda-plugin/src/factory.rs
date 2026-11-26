@@ -229,47 +229,6 @@ pub fn build_route_plugin_plan(
     })
 }
 
-/// Wires inter-plugin dependencies between companion plugins (e.g. `jwks_rotator` -> `jwt_auth`).
-///
-/// Enforces that any background service requiring a shared pre-allocated memory store is
-/// authoritatively wired to its target before any serving workers or background tasks start.
-pub fn wire_plugin_dependencies(
-    available_plugins: &FxHashMap<String, LoadedPlugin>,
-) -> Result<(), PluginError> {
-    for (id, plugin) in available_plugins {
-        if let LoadedPlugin::Background(bg) = plugin
-            && let Some(target_id) = bg.target_jwt_auth_id()
-        {
-            let target = available_plugins.get(target_id).ok_or_else(|| {
-                PluginError::Config(format!(
-                    "Background plugin '{id}' requires target 'jwt_auth' plugin '{target_id}' to be active, but none was found"
-                ))
-            })?;
-
-            let store = match target {
-                LoadedPlugin::PreUpstream(pu) => pu.shared_jwks_store().ok_or_else(|| {
-                    PluginError::Config(format!(
-                        "Target plugin '{target_id}' for rotator '{id}' does not provide a SharedJwksStore"
-                    ))
-                })?,
-                _ => {
-                    return Err(PluginError::Config(format!(
-                        "Target plugin '{target_id}' for rotator '{id}' must be a pre_upstream plugin"
-                    )));
-                }
-            };
-
-            bg.attach_shared_jwks_store(store)?;
-            tracing::info!(
-                rotator_id = %id,
-                target_id = %target_id,
-                "Successfully wired SharedJwksStore from jwt_auth to jwks_rotator"
-            );
-        }
-    }
-    Ok(())
-}
-
 /// Wires External Third-Party (`velda-etp`) pool handles from `etp_registry` into any
 /// instantiated pre-upstream, background, or post-response plugins that declare `etp_id()`.
 pub fn wire_plugin_etps(
@@ -327,10 +286,7 @@ mod tests {
                 "audience": null,
                 "claims_to_headers": {},
                 "assert_claims": {},
-                "cache_shards": 16,
-                "cache_shard_capacity": 512,
-                "cache_ttl_secs": 300,
-                "negative_cache_ttl_secs": 10
+                "cache_ttl_secs": 300
             }),
         };
         let p1 = instantiate_plugin(&cfg_jwt, &[]).expect("Should instantiate jwt");
@@ -341,11 +297,11 @@ mod tests {
             id: "rate_limit".into(),
             config: serde_json::json!({
                 "algorithm": "token_bucket",
-                "backend": "memory",
                 "rate_per_second": 500,
                 "burst_capacity": 1000,
-                "key_strategy": "priority",
-                "key_headers": ["client_ip"],
+                "overdraft_percent": 5,
+                "key_strategy": "hierarchical",
+                "key_headers": ["x-tenant-id", "client_ip"],
                 "fallback_behavior": "memory"
             }),
         };
@@ -385,10 +341,7 @@ mod tests {
                 "audience": null,
                 "claims_to_headers": {},
                 "assert_claims": {},
-                "cache_shards": 16,
-                "cache_shard_capacity": 512,
-                "cache_ttl_secs": 300,
-                "negative_cache_ttl_secs": 10
+                "cache_ttl_secs": 300
             }),
         };
         available.insert(
@@ -579,73 +532,5 @@ mod tests {
             }
             _ => panic!("Expected ProtocolMismatch error"),
         }
-    }
-
-    #[test]
-    fn test_wire_plugin_dependencies_success() {
-        let mut available = FxHashMap::default();
-
-        let cfg_jwt = PluginConfig {
-            id: "jwt_auth".into(),
-            config: serde_json::json!({
-                "algorithm": "HS256",
-                "secret_key": "secret-12345678901234567890",
-                "token_sources": [{ "type": "header", "name": "authorization", "prefix": "Bearer " }],
-                "validate_exp": true,
-                "clock_skew_secs": 60,
-                "claims_to_headers": {},
-                "assert_claims": {},
-                "cache_ttl_secs": 300
-            }),
-        };
-        available.insert(
-            "jwt_auth".to_string(),
-            instantiate_plugin(&cfg_jwt, &[]).unwrap(),
-        );
-
-        let cfg_rotator = PluginConfig {
-            id: "jwks_rotator".into(),
-            config: serde_json::json!({
-                "target_jwt_auth_id": "jwt_auth",
-                "jwks_uri": "https://auth.example.com/.well-known/jwks.json",
-                "refresh_interval_secs": 60,
-                "request_timeout_secs": 5,
-                "preserve_static_key": true
-            }),
-        };
-        available.insert(
-            "jwks_rotator".to_string(),
-            instantiate_plugin(&cfg_rotator, &[]).unwrap(),
-        );
-
-        // Wire dependencies
-        let res = wire_plugin_dependencies(&available);
-        assert!(
-            res.is_ok(),
-            "Wiring should succeed when target jwt_auth exists: {res:?}"
-        );
-    }
-
-    #[test]
-    fn test_wire_plugin_dependencies_missing_target_fails() {
-        let mut available = FxHashMap::default();
-
-        let cfg_rotator = PluginConfig {
-            id: "jwks_rotator".into(),
-            config: serde_json::json!({
-                "target_jwt_auth_id": "jwt_auth",
-                "jwks_uri": "https://auth.example.com/.well-known/jwks.json",
-            }),
-        };
-        available.insert(
-            "jwks_rotator".to_string(),
-            instantiate_plugin(&cfg_rotator, &[]).unwrap(),
-        );
-
-        // Wiring must fail because target 'jwt_auth' is absent from available_plugins
-        let res = wire_plugin_dependencies(&available);
-        assert!(res.is_err());
-        let err_msg = res.unwrap_err().to_string();
-        assert!(err_msg.contains("requires target 'jwt_auth' plugin 'jwt_auth' to be active"));
     }
 }

@@ -1,271 +1,171 @@
 # JWT Authentication Plugin (`jwt_auth`) — SRE Operational Runbook & Configuration Guide
 
-This document is the operational playbook and configuration guide (**SRE Runbook & Tuning Guide**) for engineers configuring, operating, and troubleshooting JWT authentication in Velda Edge.
+Operational reference, unified `internal` / `external` schema specification, ETP provider recipes, and incident triage playbooks for `jwt_auth`.
 
 ---
 
 ## 1. Configuration Parameter Reference
 
-Velda Edge enforces a **100% Explicit Configuration Invariant**: all parameters must be explicitly declared in `plugins.json`. No implicit defaults exist; unused options must be explicitly supplied as `null` or `{}`.
-
-```json
-{
-  "id": "api_jwt_auth",
-  "config": {
-    "algorithm": "RS256",
-    "secret_key": null,
-    "public_key_pem": "-----BEGIN PUBLIC KEY-----\nMIIBIj...",
-    "token_sources": [
-      { "type": "header", "name": "authorization", "prefix": "Bearer " }
-    ],
-    "validate_exp": true,
-    "clock_skew_secs": 60,
-    "issuer": "https://auth.example.com",
-    "audience": "api.velda.io",
-    "claims_to_headers": {
-      "sub": "x-user-id",
-      "roles": "x-user-roles"
-    },
-    "assert_claims": {},
-    "cache_ttl_secs": 300
-  }
-}
-```
+`JwtAuthConfig` enforces `#[serde(deny_unknown_fields)]` under plugin ID `"jwt_auth"`.
 
 ### Parameter Specifications
 
-| Parameter | Type | Required | Allowed Values / Constraints | Operational Meaning & Security Impact |
-| :--- | :---: | :---: | :--- | :--- |
-| **`algorithm`** | `String` | **Yes** | `"HS256"`, `"HS384"`, `"HS512"`, `"RS256"`, `"RS384"`, `"RS512"`, `"ES256"`, `"ES384"`, `"EdDSA"` | **Algorithm Pinning**: The route will strictly accept only tokens signed with this exact algorithm. Prevents algorithm substitution attacks (such as switching to `alg: "none"` or tricking RSA verifiers with HMAC). |
-| **`secret_key`** | `String` / `null` | **Yes** | Non-empty string for HMAC (`HS*`), `null` for asymmetric | Shared secret key for symmetric HMAC verification. Must be `null` when using asymmetric algorithms (`RS*`, `ES*`). |
-| **`public_key_pem`** | `String` / `null` | **Yes** | Valid PEM string for asymmetric, `null` for HMAC or when dynamic keys are supplied by `jwks_rotator` | Static PEM-encoded public key (X.509 SPKI or PKCS#1). Acts as Slot 0 key when paired with `jwks_rotator`. |
-| **`token_sources`** | `Array` | **Yes** | Non-empty array of extraction source descriptors | Ordered list of token extraction rules evaluated sequentially until a token is found. Supported types: `header`, `cookie`, `query`. |
-| **`validate_exp`** | `bool` | **Yes** | `true` or `false` | When `true`, enforces expiration check: `now_epoch > exp + clock_skew_secs` triggers `401 Unauthorized`. Evaluated against edge ingress time (zero clock syscalls). |
-| **`clock_skew_secs`** | `u64` | **Yes** | `0 ..= 300` seconds | Tolerance window in seconds to absorb clock drift between Identity Provider and edge nodes. Recommended: `60s`. Set to `0` for strict zero-tolerance environments. |
-| **`issuer`** | `String` / `null` | **Yes** | Expected `iss` claim string, or `null` to bypass | Rejects tokens with `403 Forbidden` if the `iss` claim does not exactly match this string. |
-| **`audience`** | `String` / `null` | **Yes** | Expected `aud` claim string, or `null` to bypass | Rejects tokens with `403 Forbidden` if `aud` claim is missing or does not match (supports both string claims and JSON array claims). |
-| **`claims_to_headers`** | `Map<String, String>` | **Yes** | Map of claim path to upstream header name (`{}` if none) | Extracts token claims and injects them as headers for upstream microservices. Supports dot notation for nested claims (e.g. `"user.id": "x-user-id"`). |
-| **`assert_claims`** | `Map<String, String>` | **Yes** | Map of claim path to required literal value (`{}` if none) | Hard access control assertions. If any claim differs from the configured literal, the gateway rejects the request with `403 Forbidden`. |
-| **`cache_ttl_secs`** | `u64` | **Yes** | `0 ..= 86400` seconds | Positive authentication cache TTL. When $> 0$, verified tokens are cached in the lock-striped Dual Cache, bypassing cryptographic math on repeated requests. `0` disables caching. |
-
-### Token Source Format
-
-```json
-// 1. HTTP Header Source (Evaluates Authorization: Bearer <tok>)
-{ "type": "header", "name": "authorization", "prefix": "Bearer " }
-
-// 2. Cookie Source (Evaluates Cookie: access_token=<tok>)
-{ "type": "cookie", "name": "access_token" }
-
-// 3. Query Parameter Source (Evaluates ?token=<tok>)
-{ "type": "query", "param": "token" }
-```
+| Parameter | Type | Required | Default | Constraints / Operational Semantics |
+| :--- | :---: | :---: | :---: | :--- |
+| **`mode`** | `String` | No | `"internal"` | `"internal"` (`MODE_INTERNAL = 0`, static key only, `pbww = 0`) or `"external"` (`MODE_EXTERNAL = 1`, borrows `etp_id` on Shadow Worker). |
+| **`etp_id`** | `String` / `null` | Conditional | `null` | **Required** non-empty ETP ID in `mode: "external"`; **forbidden** in `mode: "internal"`. Must reference one of the 11 supported auth/secret `EtpKind` entries in `etp.json`. |
+| **`path`** | `String` / `null` | Conditional | `null` | Provider-specific HTTP URI path / SecretId / S3 object key. Forbidden in `internal` mode. Required for `aws_secrets_manager` and `s3`; optional for IdPs and `vault` (uses provider default path when `null`). |
+| **`algorithm`** | `String` / `null` | Conditional | `null` | Supported: `"HS256"`, `"HS384"`, `"HS512"`, `"RS256"`, `"RS384"`, `"RS512"`, `"ES256"`, `"ES384"`, `"EdDSA"`. **Required** whenever `secret_key` or `public_key_pem` is set (`internal` always requires it). Optional (`null`) in pure `external` mode, where ETP keys carry per-slot `u4` `alg`. |
+| **`secret_key`** | `String` / `null` | No | `null` | Shared HMAC secret for `HS*` static key. Rejected if set alongside `public_key_pem` or an asymmetric `algorithm`. |
+| **`public_key_pem`** | `String` / `null` | No | `null` | ASN.1 PEM public key (`RSA >= 2048-bit`, `P-256`, `P-384`, `Ed25519`) for static key. Rejected if set alongside `secret_key` or symmetric `algorithm`. |
+| **`refresh_interval_secs`** | `u64` | No | `300` | External key polling interval in seconds. Clamped to minimum `10` seconds (`velda_core::clock::coarse_sec()`). |
+| **`request_timeout_secs`** | `u64` | No | `10` | Per-request ETP read/write timeout in seconds (`0` normalizes to `10`). |
+| **`preserve_static_key`** | `bool` | No | `true` | In `external` mode with a static fallback configured, retains the static key as a standby slot behind ETP keys (ETP keys always take priority). |
+| **`pbww`** | `u32` | No | `20` | Shadow Worker load-balancing weight (`1..=100` in `external` mode; forced to `0` in `internal` mode). |
+| **`token_sources`** | `Array` | **Yes** | — | Non-empty ordered list of `{ "type": "header", "name", "prefix"? }`, `{ "type": "cookie", "name" }`, or `{ "type": "query", "param" }`. |
+| **`validate_exp`** | `bool` | **Yes** | — | When `true`, requires numeric `exp` claim and rejects tokens where `now > exp.saturating_add(clock_skew_secs)`. |
+| **`clock_skew_secs`** | `u64` | **Yes** | — | Allowed skew in `0..=3600` seconds for `exp` and `nbf`. |
+| **`issuer`** | `String` / `null` | No | `null` | Exact expected `iss` claim string, or `null` to disable check. Empty whitespace string is rejected. |
+| **`audience`** | `String` / `null` | No | `null` | Expected `aud` string (matches string `aud` or element in array `aud`), or `null` to disable. |
+| **`claims_to_headers`** | `Map<String, String>` | **Yes** | — | Dot-path claim $\to$ target RFC 9110 header name (`{}` if none). |
+| **`assert_claims`** | `Map<String, String>` | **Yes** | — | Dot-path claim $\to$ expected literal value (`403 Forbidden` on mismatch; `{}` if none). |
+| **`cache_ttl_secs`** | `u64` | **Yes** | — | `0..=86400` seconds (`effective_exp = min(exp + skew, now + cache_ttl_secs)`). Negative/Forbidden TTL is `min(10, cache_ttl_secs)`. `0` allocates `0` shard bytes. |
 
 ---
 
-## 2. Scenario-Based Configuration Recipes
+## 2. Supported `etp_id` Providers (`velda-etp` Matrix)
 
-Use these validated configuration presets for your architecture:
+| ETP `kind` | Connection Layer Owned by `velda-etp` | Protocol / Auth Semantics Owned by `jwt_auth::providers/<kind>` | Default `path` when omitted |
+| :--- | :--- | :--- | :--- |
+| `"vault"` | TLS/TCP pool + Token or AppRole login cache | Sends `GET {path}` with `X-Vault-Token` (+ `X-Vault-Namespace`); retries once on `403`; parses JWKS / Transit / KV v2 / KV v1 (`secret_key`, `public_key_pem`, `alg`) | `"/v1/identity/oidc/.well-known/keys"` |
+| `"aws_secrets_manager"` | Regional TLS/TCP pool (`secretsmanager.{region}.amazonaws.com`) | Signs `POST /` with AWS4-HMAC-SHA256 (`GetSecretValue` for `SecretId = path`); parses `SecretString` as JWKS or JSON secret | **Required** (`path` = SecretId/ARN) |
+| `"s3"` | S3 endpoint TLS/TCP pool + bucket/region config | Signs `GET /{bucket}/{key}` with AWS4-HMAC-SHA256; parses JWKS or JSON secret | **Required** (`path` = object key) |
+| `"keycloak"` | IdP host/port/TLS `StreamPool` | `GET {path}` JWKS, handles HTTP/1.1 `chunked`, filters `"use": "enc"` | `"/realms/master/protocol/openid-connect/certs"` |
+| `"hydra"` | IdP host/port/TLS `StreamPool` | `GET {path}` Ory Hydra public JWKS endpoint | `"/.well-known/jwks.json"` |
+| `"authelia"` | IdP host/port/TLS `StreamPool` | `GET {path}` Authelia OIDC JWKS endpoint | `"/api/oidc/jwks.json"` |
+| `"okta"` | Tenant domain/host TLS `StreamPool` | `GET {path}` Okta authorization server JWKS | `"/oauth2/default/v1/keys"` |
+| `"auth0"` | Tenant domain/host TLS `StreamPool` | `GET {path}` Auth0 tenant JWKS | `"/.well-known/jwks.json"` |
+| `"entra_id"` | `tenant_id` / host TLS `StreamPool` | `GET {path}` (`/{tenant_id}/discovery/v2.0/keys`) Microsoft Entra ID JWKS | `"/{tenant_id}/discovery/v2.0/keys"` |
+| `"cognito"` | Regional AWS Cognito IDP TLS `StreamPool` | `GET {path}` AWS Cognito User Pool JWKS | **Recommended** (`"/{user_pool_id}/.well-known/jwks.json"`, fallback `"/.well-known/jwks.json"`) |
+| `"oidc"` | Generic OIDC host/endpoint TLS `StreamPool` | `GET {path}` standard RFC 7517 JWKS | `"/.well-known/jwks.json"` |
 
-### Scenario A: Zero-Trust Public Edge Gateway (Auth0 / Okta / Entra ID)
-*Goal: Asymmetric security, dynamic key rotation support, claim injection into upstream headers.*
+---
 
+## 3. Scenario-Based Configuration Recipes
+
+### Scenario A: HashiCorp Vault HMAC Rotation (Pure `external` Mode, Zero Static Keys)
+
+`etp.json`:
 ```json
 {
-  "id": "public_jwt_auth",
+  "id": "vault-auth",
+  "kind": "vault",
+  "pool": { "pool_size": 2, "connect_timeout_ms": 2000, "idle_timeout_ms": 60000 },
+  "settings": {
+    "endpoint": "https://vault.internal:8200",
+    "role_id": "velda-edge-role",
+    "secret_id": "velda-edge-secret",
+    "namespace": "prod"
+  }
+}
+```
+`plugins.json`:
+```json
+{
+  "id": "jwt_auth",
   "config": {
-    "algorithm": "RS256",
+    "mode": "external",
+    "etp_id": "vault-auth",
+    "path": "/v1/secret/data/edge/jwt",
+    "algorithm": null,
     "secret_key": null,
     "public_key_pem": null,
+    "refresh_interval_secs": 120,
+    "request_timeout_secs": 5,
     "token_sources": [
       { "type": "header", "name": "authorization", "prefix": "Bearer " }
     ],
     "validate_exp": true,
-    "clock_skew_secs": 60,
-    "issuer": "https://auth.company.com/",
-    "audience": "https://api.company.com",
-    "claims_to_headers": {
-      "sub": "x-user-id",
-      "email": "x-user-email",
-      "roles": "x-user-roles",
-      "tenant_id": "x-tenant-id"
-    },
+    "clock_skew_secs": 30,
+    "claims_to_headers": { "sub": "x-user-id", "roles": "x-user-roles" },
     "assert_claims": {},
     "cache_ttl_secs": 300
   }
 }
 ```
-* **Why this setup**: `public_key_pem` is set to `null` because public keys are dynamically populated by a companion `jwks_rotator`. `cache_ttl_secs: 300` ensures repeated requests from active users skip cryptographic verification, delivering high throughput.
 
----
-
-### Scenario B: High-Throughput Internal Service Mesh (Zero-Alloc Symmetric)
-*Goal: Maximum RPS, lowest latency between microservices.*
+### Scenario B: Keycloak Multi-Key OIDC (`RS256` + Static Fallback)
 
 ```json
 {
-  "id": "mesh_jwt_auth",
+  "id": "jwt_auth",
   "config": {
+    "mode": "external",
+    "etp_id": "keycloak-main",
+    "path": "/realms/prod/protocol/openid-connect/certs",
+    "algorithm": "RS256",
+    "public_key_pem": "-----BEGIN PUBLIC KEY-----\nMIIBIjAN...\n-----END PUBLIC KEY-----",
+    "preserve_static_key": true,
+    "refresh_interval_secs": 300,
+    "pbww": 10,
+    "token_sources": [
+      { "type": "header", "name": "authorization", "prefix": "Bearer " }
+    ],
+    "validate_exp": true,
+    "clock_skew_secs": 60,
+    "issuer": "https://sso.company.com/realms/prod",
+    "audience": "velda-gateway",
+    "claims_to_headers": { "sub": "x-user-id", "preferred_username": "x-username" },
+    "assert_claims": {},
+    "cache_ttl_secs": 300
+  }
+}
+```
+
+### Scenario C: Internal East-West Mesh (`mode: "internal"`, Zero Network I/O)
+
+```json
+{
+  "id": "jwt_auth",
+  "config": {
+    "mode": "internal",
     "algorithm": "HS256",
-    "secret_key": "env:MESH_SHARED_SECRET_KEY_STRONG_256",
+    "secret_key": "replace-with-strong-32-byte-random-mesh-secret",
     "public_key_pem": null,
     "token_sources": [
       { "type": "header", "name": "authorization", "prefix": "Bearer " }
     ],
     "validate_exp": true,
     "clock_skew_secs": 30,
-    "issuer": "internal-mesh",
-    "audience": "payment-service",
-    "claims_to_headers": {
-      "service": "x-caller-service",
-      "role": "x-caller-role"
-    },
+    "issuer": "velda-internal-mesh",
+    "audience": "orders-service",
+    "claims_to_headers": { "sub": "x-caller-spiffe" },
     "assert_claims": {},
     "cache_ttl_secs": 600
   }
 }
 ```
-* **Why this setup**: HMAC-SHA256 (`HS256`) runs orders of magnitude faster than asymmetric algorithms. With `cache_ttl_secs: 600`, verification cost is amortized across thousands of microservice calls.
 
 ---
 
-### Scenario C: Strict Financial-Grade / Banking API (FAPI Compliance)
-*Goal: Highest cryptographic assurance, zero clock drift tolerance, mandatory claim assertions.*
+## 4. Wire Observability & Reject Mapping
 
-```json
-{
-  "id": "banking_jwt_auth",
-  "config": {
-    "algorithm": "ES256",
-    "secret_key": null,
-    "public_key_pem": "-----BEGIN PUBLIC KEY-----\nMFkwEwYHKoZIzj0CAQYIKoZIzj0DAQcDQgAE...",
-    "token_sources": [
-      { "type": "header", "name": "authorization", "prefix": "Bearer " }
-    ],
-    "validate_exp": true,
-    "clock_skew_secs": 0,
-    "issuer": "https://auth.bank.com",
-    "audience": "https://fapi.bank.com/v1",
-    "claims_to_headers": {
-      "sub": "x-client-id",
-      "account_id": "x-account-id"
-    },
-    "assert_claims": {
-      "acr": "urn:mace:incommon:iap:silver"
-    },
-    "cache_ttl_secs": 0
-  }
-}
-```
-* **Why this setup**: Uses NIST P-256 Elliptic Curve (`ES256`). `clock_skew_secs: 0` ensures expired tokens are rejected immediately with no grace window. `cache_ttl_secs: 0` disables caching so every single banking transaction undergoes live cryptographic verification.
+| Condition | HTTP Wire Response | `WWW-Authenticate` Header | Internal `RejectReason` | gRPC Status |
+| :--- | :---: | :--- | :---: | :---: |
+| Token absent in all `token_sources` | `401 Unauthorized` | `Bearer realm="velda-edge"` | `RejectReason::Unauthorized` | `UNAUTHENTICATED (16)` |
+| Bad dot shape / invalid Base64URL / JSON | `401 Unauthorized` | `Bearer error="invalid_token"` | `RejectReason::Unauthorized` | `UNAUTHENTICATED (16)` |
+| `alg` mismatch / unknown `kid` / bad sig | `401 Unauthorized` | `Bearer error="invalid_token"` | `RejectReason::Unauthorized` | `UNAUTHENTICATED (16)` |
+| Empty `JwksStore` during cold boot (`NoActiveKeys`) | `401 Unauthorized` | `Bearer error="invalid_token"` | `RejectReason::Unauthorized` | `UNAUTHENTICATED (16)` *(not negative-cached)* |
+| Expired `exp` / premature `nbf` / bad `iss` or `aud` | `401 Unauthorized` | `Bearer error="invalid_token"` | `RejectReason::Unauthorized` | `UNAUTHENTICATED (16)` |
+| `assert_claims` mismatch | `403 Forbidden` | *(omitted)* | `RejectReason::Forbidden` | `PERMISSION_DENIED (7)` |
 
 ---
 
-### Scenario D: Multi-Channel Web & Mobile Gateway (Header + Cookie + Query Fallback)
-*Goal: Flexible token extraction supporting single-page apps, cookies, and WebSocket upgrades.*
+## 5. Incident Triage Playbook
 
-```json
-{
-  "id": "omnichannel_jwt_auth",
-  "config": {
-    "algorithm": "RS256",
-    "secret_key": null,
-    "public_key_pem": "-----BEGIN PUBLIC KEY-----\nMIIBIj...",
-    "token_sources": [
-      { "type": "header", "name": "authorization", "prefix": "Bearer " },
-      { "type": "cookie", "name": "auth_token" },
-      { "type": "query", "param": "access_token" }
-    ],
-    "validate_exp": true,
-    "clock_skew_secs": 60,
-    "issuer": null,
-    "audience": null,
-    "claims_to_headers": {
-      "sub": "x-user-id"
-    },
-    "assert_claims": {},
-    "cache_ttl_secs": 180
-  }
-}
-```
-* **Why this setup**: Evaluates the `Authorization` header first. If absent, checks the browser `auth_token` cookie. For WebSocket handshakes where headers cannot be modified by browser JS, falls back to `?access_token=<tok>`.
-
----
-
-## 3. Emergency Incident Triage Matrix
-
-| Severity | Symptoms & Alerts | Root Cause Analysis | Rapid Mitigation Action | SLA |
-| :---: | :--- | :--- | :--- | :---: |
-| **P0** | 100% of traffic rejected with `401 Unauthorized` | Public key corrupted, PEM mismatch, or companion `jwks_rotator` uninitialized | Verify `public_key_pem` or check `jwks_rotator` sync status; inspect `WWW-Authenticate` response | **< 5 min** |
-| **P1** | Spike in `401 Unauthorized` with `Token has expired` | Edge server clock drifted significantly ($> \text{clock\_skew\_secs}$) or client token refresh failed | Sync NTP on edge nodes (`chronyd`); temporarily increase `clock_skew_secs` to `120` | **< 15 min** |
-| **P2** | Elevated `403 Forbidden` with `Issuer mismatch` or `Audience mismatch` | Identity Provider changed default `iss` URL (e.g. trailing slash `/`) or new client using wrong `aud` | Check JWT payload using `jq`; synchronize `issuer` and `audience` in configuration | **< 30 min** |
-| **P3** | High CPU usage on edge workers under invalid token attacks | Malicious caller flooding with forged tokens attempting cryptographic exhaustion | Verify Negative Cache is active; apply rate limiting via `rate_limit` plugin | **< 1 hour** |
-
----
-
-## 4. Diagnostic CLI Toolkit
-
-When an alert fires, use these CLI commands to diagnose authentication issues:
-
-### 4.1 Decode Inbound JWT Token without External Tools
-```bash
-# Decode JOSE Header
-echo "<JWT_TOKEN>" | cut -d'.' -f1 | base64 -d 2>/dev/null | jq .
-
-# Decode Claims Payload
-echo "<JWT_TOKEN>" | cut -d'.' -f2 | base64 -d 2>/dev/null | jq .
-```
-
-### 4.2 Inspect Edge Gateway Authentication Response
-```bash
-# Test with Authorization Header
-curl -iv -H "Authorization: Bearer <TOKEN>" http://127.0.0.1:8080/api/v1/resource
-
-# Check failure reason from response headers
-# Look for: WWW-Authenticate: Bearer realm="velda-edge", error="..."
-```
-
-### 4.3 Inspect `jwt_auth` Operational Logs
-```bash
-# Filter journalctl for authentication rejections
-journalctl -u velda-edge -n 100 --no-pager | grep -E "jwt_auth|Malformed JWT|Algorithm mismatch"
-```
-
----
-
-## 5. Step-by-Step Incident Resolution Playbooks
-
-### Playbook 1: Spike in `401 Unauthorized` (Token Expired or Key Mismatch)
-1. **Extract and inspect sample failing token**:
-   ```bash
-   TOKEN="<paste_sample_token>"
-   EXP=$(echo "$TOKEN" | cut -d'.' -f2 | base64 -d 2>/dev/null | jq -r .exp)
-   NOW=$(date +%s)
-   echo "Token Exp: $EXP, Current Time: $NOW, Diff: $((NOW - EXP))s"
-   ```
-2. **Evaluate Root Cause**:
-   - If `Diff > 0` and greater than `clock_skew_secs`: Client is failing to refresh tokens.
-   - If `Diff < 0` but still rejected: Check `kid` header:
-     ```bash
-     echo "$TOKEN" | cut -d'.' -f1 | base64 -d 2>/dev/null | jq -r .kid
-     ```
-     Verify that this `kid` is present in the `jwks_rotator` table or matches the static key.
-
----
-
-### Playbook 2: Spike in `403 Forbidden` (Claims Assertion / Issuer Mismatch)
-1. **Inspect Token Claims against Configuration**:
-   ```bash
-   echo "$TOKEN" | cut -d'.' -f2 | base64 -d 2>/dev/null | jq '{iss: .iss, aud: .aud}'
-   ```
-2. **Common Pitfalls**:
-   - **Trailing slash issue**: `issuer: "https://auth.company.com"` vs `"https://auth.company.com/"`.
-   - **Audience as array**: If token has `aud: ["api://default", "https://api.company.com"]`, ensure `audience` in config matches one of the array items.
-
----
-
-### Playbook 3: Cryptographic Exhaustion Attack Mitigation
-1. **Verify if negative cache is absorbing bad tokens**:
-   - The negative cache automatically caches hashes of failed tokens for 10 seconds, returning fast rejection without running cryptographic math.
-2. **Apply Route-Level Rate Limiting**:
-   - If malicious traffic persists, engage the `rate_limit` plugin ahead of `jwt_auth` to drop traffic at L4/L7 before running CPU-intensive operations.
+| Symptom | Probable Root Cause | Resolution |
+| :--- | :--- | :--- |
+| Sync rejected: `mode 'internal' forbids 'etp_id'` / `mode 'external' requires non-empty 'etp_id'` | Config forgot `"mode": "external"` when configuring `etp_id`, or left `etp_id` set in `internal` mode. | Set `"mode": "external"` with `"etp_id"` (or remove `etp_id`/`path` for static `internal` mode). |
+| Sync rejected: `static key ... requires 'algorithm'` | Static `secret_key` or `public_key_pem` supplied with `"algorithm": null`. | Specify `"algorithm"` for the static key (external ETP keys do not need plugin-level `"algorithm"`). |
+| Sync rejected: `requires 'path' (SecretId)` or `'path' (object key)` | `aws_secrets_manager` or `s3` ETP used without `"path"`. | Set `"path"` to the AWS secret ID/ARN or S3 object key. |
+| Brief `401` right at boot without static fallback (`NoActiveKeys`) | External ETP initial fetch is in flight. | Recovers automatically after first `sync_keys_once()`; `NoActiveKeys` skips negative caching so valid client tokens are not blacklisted. Optional: provide static standby + `"preserve_static_key": true`. |

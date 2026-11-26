@@ -4,9 +4,10 @@
 //! Manages active TCP/TLS downstream streams, coordinating request head parsing,
 //! body extraction, keep-alive state transitions, buffer compaction, and response flushing.
 
-use bytes::BytesMut;
+use bytes::{Bytes, BytesMut};
 use http::StatusCode;
 use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt};
+use tokio::sync::mpsc;
 use velda_core::{Body, HeaderWorkspace};
 
 use super::request::{
@@ -19,6 +20,35 @@ use super::response::{
 };
 use crate::config::Http1Config;
 use crate::error::Http1Error;
+
+/// Non-blocking stream tee event emitted by [`Http1ServerConnection`] on mirror-enabled routes.
+#[derive(Debug)]
+pub enum Http1BodyTeeEvent {
+    Data(Bytes),
+    End,
+}
+
+/// Pushes one zero-copy payload chunk into an active HTTP/1.1 body tee channel.
+#[inline(always)]
+pub fn tee_chunk(tee: &mut Option<mpsc::Sender<Http1BodyTeeEvent>>, chunk: Bytes) {
+    if chunk.is_empty() {
+        return;
+    }
+    if let Some(tx) = tee.as_ref() {
+        // Reserve 1 slot exclusively for `End` so terminal signaling never hits Full.
+        if tx.capacity() <= 1 || tx.try_send(Http1BodyTeeEvent::Data(chunk)).is_err() {
+            *tee = None;
+        }
+    }
+}
+
+/// Flushes clean EOF into an active HTTP/1.1 body tee channel and consumes it.
+#[inline(always)]
+pub fn tee_end(tee: &mut Option<mpsc::Sender<Http1BodyTeeEvent>>) {
+    if let Some(tx) = tee.take() {
+        let _ = tx.try_send(Http1BodyTeeEvent::End);
+    }
+}
 
 /// An active HTTP/1.1 connection over an asynchronous downstream stream.
 #[repr(align(64))]
@@ -36,6 +66,7 @@ pub struct Http1ServerConnection<IO> {
     pub last_bytes_tx: u64,
     pub last_upstream_ip: u128,
     pub last_upstream_port_be: u16,
+    pub body_tee: Option<mpsc::Sender<Http1BodyTeeEvent>>,
     config: Http1Config,
 }
 
@@ -59,8 +90,15 @@ where
             last_bytes_tx: 0,
             last_upstream_ip: 0,
             last_upstream_port_be: 0,
+            body_tee: None,
             config,
         }
+    }
+
+    /// Attaches a non-blocking tee channel for mirroring the current request body.
+    #[inline]
+    pub fn attach_body_tee(&mut self, tx: mpsc::Sender<Http1BodyTeeEvent>) {
+        self.body_tee = Some(tx);
     }
 
     /// Returns a reference to the active configuration used by this connection.
@@ -98,6 +136,7 @@ where
         enrich: Option<crate::simd::H1IngressEnrich<'_>>,
     ) -> Result<Option<(Http1ServerRequestHead, Http1BodyFraming)>, Http1Error> {
         self.current_request_id = None;
+        self.body_tee = None;
         if self.close_requested {
             return Ok(None);
         }
@@ -161,6 +200,7 @@ where
     /// Reads and decodes the request body according to the given framing.
     pub async fn read_body(&mut self, framing: Http1BodyFraming) -> Result<Body, Http1Error> {
         if framing == Http1BodyFraming::Empty {
+            tee_end(&mut self.body_tee);
             return Ok(Body::Empty);
         }
 
@@ -169,6 +209,12 @@ where
         loop {
             if let Some(body) = decode_body(&mut self.read_buf, framing, &self.config)? {
                 self.last_bytes_rx += body.len() as u64;
+                if self.body_tee.is_some() {
+                    if !body.is_empty() {
+                        tee_chunk(&mut self.body_tee, body.to_bytes());
+                    }
+                    tee_end(&mut self.body_tee);
+                }
                 return Ok(body);
             }
 
@@ -216,11 +262,13 @@ where
         slab_pool: Option<&std::sync::Arc<velda_core::buffer::slab::PayloadSlabPool>>,
     ) -> Result<Body, Http1Error> {
         if framing == Http1BodyFraming::Empty {
+            tee_end(&mut self.body_tee);
             return Ok(Body::Empty);
         }
 
         if let Http1BodyFraming::ContentLength(total_len) = framing {
             if total_len == 0 {
+                tee_end(&mut self.body_tee);
                 return Ok(Body::Empty);
             }
             if total_len > self.config.max_body_size {
@@ -255,6 +303,13 @@ where
                 }
 
                 self.last_bytes_rx += total_len as u64;
+                if self.body_tee.is_some() {
+                    tee_chunk(
+                        &mut self.body_tee,
+                        Bytes::copy_from_slice(&lease[..total_len]),
+                    );
+                    tee_end(&mut self.body_tee);
+                }
                 return Ok(Body::from_slab(lease, total_len));
             }
         }
@@ -266,6 +321,7 @@ where
     /// Reads and decodes the next full HTTP/1.1 request (head + body).
     pub async fn next_request(&mut self) -> Result<Option<Http1ServerRequest>, Http1Error> {
         self.current_request_id = None;
+        self.body_tee = None;
         if self.close_requested {
             return Ok(None);
         }

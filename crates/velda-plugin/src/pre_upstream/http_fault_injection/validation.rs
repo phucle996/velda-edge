@@ -2,6 +2,14 @@
 //!
 //! Enforces a strict declarative contract for HTTP chaos engineering and resilience testing.
 //!
+//! ```text
+//! JSON Config ─▶ serde(deny_unknown_fields) ─▶ Semantic Bounds (status, delay, percentage)
+//!                                                   │
+//!                                                   ├─▶ override + no targeting? ─▶ PluginError
+//!                                                   ├─▶ neither delay nor abort? ─▶ PluginError
+//!                                                   └─▶ OK ─▶ Compiled into HttpFaultInjectionPlugin
+//! ```
+//!
 //! # Strict Declarative Contract (Zero Silent Fallbacks)
 //! - **Strict Protocol Invariant**: Restricted exclusively to HTTP routes (prohibited on gRPC/Raw routes).
 //! - **Bounded Percentage**: Chaos trigger percentages must be between 0 and 100.

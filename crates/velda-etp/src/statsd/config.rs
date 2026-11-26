@@ -18,6 +18,7 @@
 use serde::{Deserialize, Serialize};
 
 use crate::config::{EtpEntryConfig, EtpKind, EtpPoolSettings};
+use crate::connect::EtpTransportSecurity;
 use crate::error::EtpError;
 
 /// StatsD metric line format flavor.
@@ -64,6 +65,7 @@ impl StatsdEtpConfig {
             });
         }
         entry.validate()?;
+        entry.require_security(&[EtpTransportSecurity::Plain])?;
         let (host, port) = entry.resolve_endpoint()?;
         let obj = entry.settings.as_object().ok_or_else(|| {
             EtpError::Config(format!(
@@ -72,15 +74,7 @@ impl StatsdEtpConfig {
             ))
         })?;
 
-        let endpoint = obj
-            .get("endpoint")
-            .or_else(|| obj.get("addr"))
-            .or_else(|| obj.get("address"))
-            .and_then(|v| v.as_str())
-            .map(str::trim)
-            .filter(|s| !s.is_empty())
-            .map(ToString::to_string)
-            .unwrap_or_else(|| format!("{host}:{port}"));
+        let endpoint = format!("{host}:{port}");
 
         let flavor = match obj
             .get("flavor")
@@ -120,10 +114,12 @@ mod tests {
         let with_flavor = StatsdEtpConfig::from_entry(&EtpEntryConfig {
             id: "sd-flavor".into(),
             kind: EtpKind::Statsd,
+            security: EtpTransportSecurity::Plain,
             pool: EtpPoolSettings::default(),
             tls: None,
             settings: serde_json::json!({
-                "endpoint": "127.0.0.1:8125",
+                "host": "127.0.0.1",
+                "port": 8125,
                 "flavor": "dogstatsd",
                 "prefix": "velda"
             }),
@@ -135,6 +131,7 @@ mod tests {
         let with_dialect = StatsdEtpConfig::from_entry(&EtpEntryConfig {
             id: "sd-dialect".into(),
             kind: EtpKind::Statsd,
+            security: EtpTransportSecurity::Plain,
             pool: EtpPoolSettings::default(),
             tls: None,
             settings: serde_json::json!({
@@ -147,5 +144,18 @@ mod tests {
         assert_eq!(with_dialect.flavor, StatsdFlavor::DogStatsd);
         assert_eq!(with_dialect.port, 9125);
         assert_eq!(with_dialect.prefix, None);
+
+        // StatsD UDP rejects non-plain transport security.
+        assert!(
+            StatsdEtpConfig::from_entry(&EtpEntryConfig {
+                id: "sd-tls".into(),
+                kind: EtpKind::Statsd,
+                security: EtpTransportSecurity::Tls,
+                pool: EtpPoolSettings::default(),
+                tls: None,
+                settings: serde_json::json!({ "host": "127.0.0.1" }),
+            })
+            .is_err()
+        );
     }
 }

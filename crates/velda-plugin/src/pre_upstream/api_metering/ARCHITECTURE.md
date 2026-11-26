@@ -10,7 +10,7 @@ Checking a central counter or Redis on every HTTP request creates lock contentio
 
 1. **Tier 1 — Per-Core Desk (`LaneArena`)**: Each CPU core keeps a small, private batch of pre-approved quota ("micro-lease", up to `32` requests) in its own local memory. ~97% of requests only touch their own core's desk — zero cross-core cache fighting.
 2. **Tier 2 — Node Vault (`ShardArena`, 64 shards)**: When a core's micro-lease runs out, it briefly locks one of 64 independent shards to flush what it spent and lease a fresh batch.
-3. **Tier 3 — Background Bank Sync (`RedisEtp`)**: When `etp_id` is configured, a background Shadow Worker periodically batches node deltas to Redis using `HINCRBY`, completely off the request path; when `etp_id` is `None`, the plugin operates purely in-memory on the local node.
+3. **Tier 3 — Background Bank Sync (`providers/*`)**: When `etp_id` is configured, `providers/mod.rs` dispatches cleanly to the selected SoT provider (`redis`, `valkey`, `dragonfly`, `aws_elasticache`, `gcp_memorystore`, `upstash`, `postgres`, `mysql`, `dynamodb`), batching Lua-free `HINCRBY`, parameterized SQL CTE (`velda.velda_api_metering`), or DynamoDB `velda_api_metering` updates completely off the request path; when `etp_id` is `None`, the plugin operates purely in-memory on the local node.
 
 ```mermaid
 flowchart LR
@@ -161,16 +161,16 @@ sequenceDiagram
 
 ---
 
-## 6. Module Map (`9` Focused Files)
+## 6. Module Map
 
 | File | Role |
 | :--- | :--- |
 | `plugin.rs` | `PreUpstreamPlugin` entrypoint (`on_upstream_request`), ETP attachment, cold `400`/`402`/`429` builders. |
-| `algorithm.rs` | `ShardedMeteringState`, 2-phase Check-Then-Commit loop, and Redis delta collection/reconciliation. |
+| `algorithm.rs` | `ShardedMeteringState`, 2-phase Check-Then-Commit loop, and KV delta collection/reconciliation. |
 | `lease.rs` | Per-core lease check, $O(1)$ local deduction, and `#[cold]` node shard refill. |
 | `arena.rs` | `PageSlab<T>` allocator, `LaneArena` (`128B`), `ShardArena` (`192B`), and CLOCK eviction. |
 | `key.rs` | SWAR + SplitMix64 hashing, `AccountKeyChain` (`bit 0`), and `resolve_tier()`. |
 | `window.rs` | `FixedWindow`, `SlidingWindow`, and `TokenBucket` math on `24B` `InlineWindowSlot`. |
 | `config.rs` | JSON config parsing, `CompiledTier` compilation, and grace budget calculation. |
-| `redis.rs` | Background `RedisEtp` `HINCRBY` sync loop (`run_shadow_metering_sync`). |
+| `providers/` | Pure dispatch (`mod.rs`) across 9 self-contained SoT adapters (`redis`, `valkey`, `dragonfly`, `aws_elasticache`, `gcp_memorystore`, `upstash`, `postgres`, `mysql`, `dynamodb`), each separating framing (`wire.rs`/`codec.rs`/`http.rs`/`sigv4.rs`), DDL (`schema.rs`), orchestration (`client.rs`), and `sync.rs`. |
 | `mod.rs` | Crate exports. |

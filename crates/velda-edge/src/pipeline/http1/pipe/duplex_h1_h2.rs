@@ -51,6 +51,7 @@ pub async fn serve<IO>(
     framing: Http1BodyFraming,
     upstream: &Arc<Http2Upstream>,
     meta: &DownstreamMeta,
+    req_state: &velda_core::RequestState,
     plan: &velda_plugin::RoutePluginPlan,
 ) -> Result<(), Http1Error>
 where
@@ -64,6 +65,8 @@ where
         }
         req_head.headers.remove(http::header::EXPECT);
     }
+
+    let mut body_tee = conn.body_tee.take();
 
     let h2_config = Http2Config::auto();
 
@@ -166,6 +169,7 @@ where
 
                     while let Some(chunk) = decoder.decode_step(read_buf)? {
                         *last_bytes_rx += chunk.len() as u64;
+                        velda_http1::server::connection::tee_chunk(&mut body_tee, chunk.clone());
                         send_stream
                             .send_chunk(chunk, false)
                             .await
@@ -212,6 +216,7 @@ where
                         let chunk = read_buf.split_to(chunk_len).freeze();
                         remaining = remaining.saturating_sub(chunk_len);
                         *last_bytes_rx += chunk_len as u64;
+                        velda_http1::server::connection::tee_chunk(&mut body_tee, chunk.clone());
                         send_stream
                             .send_chunk(chunk, false)
                             .await
@@ -236,6 +241,7 @@ where
                             let chunk = read_buf.split_to(chunk_len).freeze();
                             remaining = remaining.saturating_sub(chunk_len);
                             *last_bytes_rx += chunk_len as u64;
+                            velda_http1::server::connection::tee_chunk(&mut body_tee, chunk.clone());
                             send_stream
                                 .send_chunk(chunk, false)
                                 .await
@@ -253,6 +259,9 @@ where
         }
 
         // Conclude upload stream to unblock upstream response completion
+        if upload_finished.load(Ordering::Acquire) {
+            velda_http1::server::connection::tee_end(&mut body_tee);
+        }
         let _ = send_stream.send_data(Bytes::new(), true);
         Ok::<(), Http1Error>(())
     };
@@ -275,7 +284,12 @@ where
                 resp_headers,
                 velda_core::Body::Empty,
             );
-            velda_plugin::run_post_response_plugins(post_hooks, &req_head.headers, &mut l7_resp);
+            velda_plugin::run_post_response_plugins(
+                post_hooks,
+                req_state,
+                &req_head.headers,
+                &mut l7_resp,
+            );
             resp_status = l7_resp.status;
             resp_headers = l7_resp.headers;
         }

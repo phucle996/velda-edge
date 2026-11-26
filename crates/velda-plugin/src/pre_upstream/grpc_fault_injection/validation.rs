@@ -2,6 +2,13 @@
 //!
 //! Enforces a strict declarative contract for gRPC chaos engineering.
 //!
+//! ```text
+//! JSON Config ─▶ serde(deny_unknown_fields) ─▶ Semantic Bounds (grpc_status, delay, percentage)
+//!                                                   │
+//!                                                   ├─▶ neither delay nor abort? ─▶ PluginError
+//!                                                   └─▶ OK ─▶ Compiled into GrpcFaultInjectionPlugin
+//! ```
+//!
 //! # Strict Declarative Contract (Zero Silent Fallbacks)
 //! - **Strict Protocol Invariant**: Restricted exclusively to gRPC routes (prohibited on HTTP/Raw routes).
 //! - **Bounded Percentage**: Chaos trigger percentages must be between 0 and 100.
@@ -14,6 +21,7 @@ use crate::error::PluginError;
 
 /// Declarative synthetic delay configuration for gRPC RPCs.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct GrpcFaultDelayConfig {
     /// Whether synthetic delay injection is active.
     pub enabled: bool,
@@ -25,6 +33,7 @@ pub struct GrpcFaultDelayConfig {
 
 /// Declarative synthetic abort configuration for gRPC RPCs.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct GrpcFaultAbortConfig {
     /// Whether synthetic abort injection is active.
     pub enabled: bool,
@@ -38,6 +47,7 @@ pub struct GrpcFaultAbortConfig {
 
 /// Declarative configuration for the gRPC Fault Injection plugin.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct GrpcFaultInjectionConfig {
     /// Latency injection block.
     pub delay: GrpcFaultDelayConfig,
@@ -56,6 +66,12 @@ pub fn validate_grpc_fault_injection_config(
                 "Plugin '{plugin_id}' has malformed or incomplete grpc_fault_injection config: {e}"
             ))
         })?;
+
+    if !cfg.delay.enabled && !cfg.abort.enabled {
+        return Err(PluginError::Config(format!(
+            "Plugin '{plugin_id}': grpc_fault_injection must enable at least delay or abort"
+        )));
+    }
 
     // 1. Validate Delay Block
     if cfg.delay.percentage > 100 {
@@ -236,5 +252,32 @@ mod tests {
         let res = validate_grpc_fault_injection_config("grpc_fault_missing", &val);
         assert!(res.is_err());
         assert!(res.unwrap_err().to_string().contains("missing field"));
+    }
+
+    #[test]
+    fn test_noop_config_rejected() {
+        let val = json!({
+            "delay": { "enabled": false, "fixed_delay_ms": 0, "percentage": 0 },
+            "abort": { "enabled": false, "grpc_status": 14, "grpc_message": "unavailable", "percentage": 0 }
+        });
+        let res = validate_grpc_fault_injection_config("grpc_fault_noop", &val);
+        assert!(res.is_err());
+        assert!(
+            res.unwrap_err()
+                .to_string()
+                .contains("must enable at least delay or abort")
+        );
+    }
+
+    #[test]
+    fn test_unknown_fields_rejected() {
+        let val = json!({
+            "delay": { "enabled": true, "fixed_delay_ms": 100, "percentage": 50 },
+            "abort": { "enabled": false, "grpc_status": 14, "grpc_message": "unavailable", "percentage": 0 },
+            "unexpected": 1
+        });
+        let res = validate_grpc_fault_injection_config("grpc_fault_unknown", &val);
+        assert!(res.is_err());
+        assert!(res.unwrap_err().to_string().contains("unknown field"));
     }
 }

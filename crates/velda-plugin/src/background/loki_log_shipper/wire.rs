@@ -102,12 +102,8 @@ pub fn bake_wire_template(etp_cfg: &LokiEtpConfig) -> Result<LokiWireTemplate, P
             Ok(LokiWireTemplate::Http { prefix })
         }
         LokiProtocol::Grpc => {
-            let ep_lower = etp_cfg.endpoint.to_ascii_lowercase();
-            let is_tls = etp_cfg.tls.is_some()
-                || ep_lower.starts_with("grpcs://")
-                || ep_lower.starts_with("https://");
             let uri = http::Uri::builder()
-                .scheme(if is_tls { "https" } else { "http" })
+                .scheme(etp_cfg.http_scheme.as_str())
                 .authority(etp_cfg.host_header.as_str())
                 .path_and_query(LOKI_GRPC_PATH)
                 .build()

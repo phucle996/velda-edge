@@ -7,6 +7,8 @@
 //! - **Bounded Authority**: Returns [`Action::Continue`], [`Action::Respond`] (e.g. 429), or [`Action::Reject`].
 //! - **Target Context Available**: The router has already resolved the target upstream pool and endpoint.
 
+use std::future::Future;
+use std::pin::Pin;
 use std::sync::Arc;
 use velda_core::{Action, L7Request};
 
@@ -27,6 +29,7 @@ pub mod oauth2_introspection;
 pub mod rate_limit;
 pub mod request_mirror;
 pub mod request_termination;
+pub mod targets;
 pub mod url_rewrite;
 
 pub use api_key_auth::{ApiKeyAuthConfig, ApiKeyAuthPlugin, ApiKeyEntryConfig};
@@ -37,9 +40,7 @@ pub use api_metering::{
 pub use canary::{CanaryConfig, CanaryPlugin, HeaderRule, RuleOperator};
 pub use csrf::{CsrfConfig, CsrfPlugin};
 pub use grpc_fault_injection::{GrpcAbortConfig, GrpcDelayConfig, GrpcFaultInjectionPlugin};
-pub use header_mutation::{
-    DynamicVar, HeaderMutationConfig, HeaderMutationPlugin, HeaderValueSpec,
-};
+pub use header_mutation::{HeaderMutationConfig, HeaderMutationPlugin};
 pub use hmac_auth::{HmacAuthConfig, HmacAuthPlugin, HmacCredentialConfig};
 pub use http_cache_lookup::{HttpCacheLookupConfig, HttpCacheLookupPlugin};
 pub use http_fault_injection::{
@@ -49,17 +50,17 @@ pub use http_fault_injection::{
 pub use ja4_filter::{Ja4FilterConfig, Ja4FilterPlugin};
 pub use jwt_auth::{JwtAlgorithm, JwtAuthPlugin, TokenSource};
 pub use oauth2_introspection::{
-    ClaimToHeaderConfig, IdpKeepAliveClient, IntrospectionCache, Oauth2IntrospectionConfig,
-    Oauth2IntrospectionPlugin,
+    ClaimToHeaderConfig, IntrospectionCache, Oauth2IntrospectionConfig, Oauth2IntrospectionPlugin,
 };
 pub use rate_limit::{
-    FallbackBehavior, KeyStrategy, RateLimitAlgorithm, RateLimitBackend, RateLimitConfig,
-    RateLimitPlugin, TlsSource,
+    FallbackBehavior, KeyStrategy, RateLimitAlgorithm, RateLimitConfig, RateLimitPlugin,
 };
-pub use request_mirror::{
-    MirroredRequest, RequestMirrorConfig, RequestMirrorPlugin, get_mirror_sender, init_mirror_queue,
-};
+pub use request_mirror::{RequestMirrorConfig, RequestMirrorPlugin};
 pub use request_termination::{RequestTerminationConfig, RequestTerminationPlugin};
+pub use targets::{
+    TARGET_UNASSIGNED, TARGETS_CANCELLED, target_cancel_all, target_init, target_mirror,
+    target_pair, target_primary, target_set_mirror, target_set_primary,
+};
 pub use url_rewrite::{
     CompiledPathStrategy, PathRewriteStrategy, QueryStrategy, ReplacementToken, UrlRewriteConfig,
     UrlRewritePlugin,
@@ -70,11 +71,31 @@ pub trait PreUpstreamPlugin: Send + Sync {
     /// Unique identifier of this plugin instance.
     fn id(&self) -> &str;
 
-    /// Evaluated on routed request before sending to upstream backend.
+    /// Synchronous evaluation used by pure-CPU pre-upstream plugins.
     ///
-    /// Allows mutating the request, short-circuiting, or dynamically re-routing to an
-    /// alternate target upstream (e.g. Canary traffic splitting) by mutating `target_upstream`.
-    fn on_upstream_request(&self, req: &mut L7Request, target_upstream: &mut u16) -> Action;
+    /// `targets` is a bit-packed `u32` routing word: low 16 bits hold the primary
+    /// upstream index and high 16 bits hold the optional mirror upstream index (`0xFFFF` = unassigned).
+    fn on_upstream_request(&self, req: &mut L7Request, targets: &mut u32) -> Action;
+
+    /// Non-blocking hot-path evaluation invoked first by async downstream pipelines.
+    ///
+    /// Plugins whose warm cache hit path is synchronous return `Some(action)` with zero future
+    /// overhead; on a cold network miss requiring async I/O (e.g. `oauth2_introspection`),
+    /// returning `None` hands off to [`on_upstream_request_async`].
+    #[inline(always)]
+    fn try_on_upstream_request(&self, req: &mut L7Request, targets: &mut u32) -> Option<Action> {
+        Some(self.on_upstream_request(req, targets))
+    }
+
+    /// Asynchronous cold-path evaluation invoked when `try_on_upstream_request` returns `None`.
+    fn on_upstream_request_async<'a>(
+        &'a self,
+        req: &'a mut L7Request,
+        targets: &'a mut u32,
+    ) -> Pin<Box<dyn Future<Output = Action> + Send + 'a>> {
+        let action = self.on_upstream_request(req, targets);
+        Box::pin(async move { action })
+    }
 
     /// Declares the reverse-permission capabilities required by this plugin.
     fn capability(&self) -> PluginCapability;
@@ -115,38 +136,69 @@ pub trait PreUpstreamPlugin: Send + Sync {
     ) -> Option<crate::BackgroundTaskFuture> {
         None
     }
-
-    /// Returns the shared JWKS key store if this plugin manages in-memory verification keys (e.g. `jwt_auth`).
-    #[inline(always)]
-    fn shared_jwks_store(
-        &self,
-    ) -> Option<Arc<crate::pre_upstream::jwt_auth::table::SharedJwksStore>> {
-        None
-    }
 }
 
-/// Executes a linear chain of pre-upstream plugins.
-///
-/// Short-circuits immediately on the first non-[`Action::Continue`] result and batch-renders
-/// any pending arithmetic header mutations into `req.headers`.
+/// Executes a linear chain of pre-upstream plugins synchronously (for pure-CPU tests & callers).
 #[inline]
 pub fn run_pre_upstream_plugins(
     chain: &[Arc<dyn PreUpstreamPlugin>],
     req: &mut L7Request,
-    target_upstream: &mut u16,
+    targets: &mut u32,
 ) -> Action {
     for (idx, plugin) in chain.iter().enumerate() {
-        match plugin.on_upstream_request(req, target_upstream) {
+        match plugin.on_upstream_request(req, targets) {
             Action::Continue => continue,
             Action::Delay { duration, and_then } => {
                 if and_then.is_continue() {
-                    let next = run_pre_upstream_plugins(&chain[idx + 1..], req, target_upstream);
+                    let next = run_pre_upstream_plugins(&chain[idx + 1..], req, targets);
                     return Action::delay(duration, next);
                 } else {
+                    target_cancel_all(targets);
                     return Action::Delay { duration, and_then };
                 }
             }
-            action => return action,
+            action => {
+                target_cancel_all(targets);
+                return action;
+            }
+        }
+    }
+    Action::Continue
+}
+
+/// Executes a linear chain of pre-upstream plugins across warm sync and cold `.await` paths.
+///
+/// Warm cache hits execute synchronously via `try_on_upstream_request` with zero `Future` pinning;
+/// only plugins returning `None` (cold cache miss requiring async IdP I/O) yield via `.await`.
+/// Automatically clears both primary and mirror halves of `targets` (`0xFFFF_FFFF`) whenever
+/// any plugin short-circuits with `Action::Reject` or `Action::Respond`.
+#[inline]
+pub async fn run_pre_upstream_plugins_async(
+    chain: &[Arc<dyn PreUpstreamPlugin>],
+    req: &mut L7Request,
+    targets: &mut u32,
+) -> Action {
+    for plugin in chain {
+        let res = match plugin.try_on_upstream_request(req, targets) {
+            Some(action) => action,
+            None => plugin.on_upstream_request_async(req, targets).await,
+        };
+        match res {
+            Action::Continue => continue,
+            Action::Delay { duration, and_then } => {
+                tokio::time::sleep(duration).await;
+                match *and_then {
+                    Action::Continue => continue,
+                    other => {
+                        target_cancel_all(targets);
+                        return other;
+                    }
+                }
+            }
+            action => {
+                target_cancel_all(targets);
+                return action;
+            }
         }
     }
     Action::Continue
@@ -192,7 +244,10 @@ pub fn instantiate(
         "rate_limit" => Ok(Arc::new(RateLimitPlugin::from_config(config)?)),
         "header_mutation" => Ok(Arc::new(HeaderMutationPlugin::from_config(config)?)),
         "canary" => Ok(Arc::new(CanaryPlugin::from_config(config, upstream_ids)?)),
-        "request_mirror" => Ok(Arc::new(RequestMirrorPlugin::from_config(config)?)),
+        "request_mirror" => Ok(Arc::new(RequestMirrorPlugin::from_config(
+            config,
+            upstream_ids,
+        )?)),
         "url_rewrite" => Ok(Arc::new(UrlRewritePlugin::from_config(config)?)),
         "http_cache_lookup" => Ok(Arc::new(HttpCacheLookupPlugin::from_config(config)?)),
         "http_fault_injection" => Ok(Arc::new(HttpFaultInjectionPlugin::from_config(config)?)),
@@ -226,13 +281,8 @@ mod tests {
         let remove_hdrs = vec![HeaderName::from_static("x-internal-secret")];
 
         let config = HeaderMutationConfig {
-            strip_hop_by_hop: true,
             remove: remove_hdrs,
-            rename: Vec::new(),
-            set: set_hdrs
-                .into_iter()
-                .map(|(k, v)| (k, HeaderValueSpec::Static(v)))
-                .collect(),
+            set: set_hdrs,
             append: Vec::new(),
         };
         let plugin = Arc::new(HeaderMutationPlugin::new("mutation-1", config));
@@ -252,7 +302,7 @@ mod tests {
             Body::Empty,
         );
 
-        let mut target = 1;
+        let mut target = target_init(1);
         let action = run_pre_upstream_plugins(&chain, &mut req, &mut target);
         assert!(matches!(action, Action::Continue));
         assert!(!req.headers.contains_key("x-internal-secret"));
@@ -275,7 +325,7 @@ mod tests {
             HeaderWorkspace::empty(4),
             Body::Empty,
         );
-        let mut target1 = 1;
+        let mut target1 = target_init(1);
         let action1 = run_pre_upstream_plugins(&chain, &mut req1, &mut target1);
         assert!(matches!(action1, Action::Continue));
 
@@ -286,8 +336,9 @@ mod tests {
             HeaderWorkspace::empty(4),
             Body::Empty,
         );
-        let mut target2 = 1;
+        let mut target2 = target_init(1);
         let action2 = run_pre_upstream_plugins(&chain, &mut req2, &mut target2);
+        assert_eq!(target2, TARGETS_CANCELLED);
         match action2 {
             Action::Reject(reason) => {
                 assert_eq!(reason, RejectReason::TooManyRequests);
@@ -365,8 +416,9 @@ mod tests {
             Body::Empty,
         );
 
-        let mut target = 1;
+        let mut target = target_init(1);
         let action = run_pre_upstream_plugins(&chain, &mut req, &mut target);
+        assert_eq!(target, TARGETS_CANCELLED);
         match action {
             Action::Respond(resp) => {
                 assert_eq!(resp.status, StatusCode::SERVICE_UNAVAILABLE);
@@ -379,5 +431,90 @@ mod tests {
             }
             _ => panic!("Expected Action::Respond(503)"),
         }
+    }
+
+    #[test]
+    fn test_canary_and_mirror_pack_u32_and_cancel_on_reject() {
+        let canary = Arc::new(
+            CanaryPlugin::new(
+                "canary",
+                CanaryConfig {
+                    canary_upstream: "prod-v2".into(),
+                    ratio: 500,
+                    rules: vec![HeaderRule {
+                        header: HeaderName::from_static("x-canary"),
+                        operator: RuleOperator::Equals,
+                        pattern: (*b"true").into(),
+                    }],
+                    hash_headers: vec![HeaderName::from_static("x-tenant")],
+                },
+                2,
+            )
+            .unwrap(),
+        );
+        let mirror = Arc::new(
+            RequestMirrorPlugin::new(
+                "mirror",
+                RequestMirrorConfig {
+                    mirror_upstream: "staging".into(),
+                    sample_percent: 100.0,
+                    ignore_methods: vec![],
+                },
+                5,
+            )
+            .unwrap(),
+        );
+        let rate_limit = Arc::new(RateLimitPlugin::new("rl", 1));
+
+        // 1. Canary + Mirror both update independent halves of targets u32; original HeaderWorkspace untouched
+        let allow_chain: Vec<Arc<dyn PreUpstreamPlugin>> = vec![canary, mirror.clone()];
+        let mut h = HeaderWorkspace::empty(2);
+        h.insert("x-canary", HeaderValue::from_static("true"));
+        let mut req = L7Request::new(
+            Method::POST,
+            Uri::from_static("/orders"),
+            Version::HTTP_11,
+            h,
+            Body::Bytes(bytes::Bytes::from_static(b"{}")),
+        );
+        let mut targets = target_init(0);
+        let act = run_pre_upstream_plugins(&allow_chain, &mut req, &mut targets);
+        assert!(matches!(act, Action::Continue));
+        assert_eq!(target_primary(targets), Some(2));
+        assert_eq!(target_mirror(targets), Some(5));
+        assert!(!req.headers.contains_key("x-velda-mirror"));
+
+        // 2. Mirror -> Reject clears BOTH halves to TARGETS_CANCELLED (0xFFFF_FFFF)
+        let reject_chain: Vec<Arc<dyn PreUpstreamPlugin>> = vec![mirror, rate_limit];
+        let mut req1 = L7Request::new(
+            Method::GET,
+            Uri::from_static("/orders"),
+            Version::HTTP_11,
+            HeaderWorkspace::empty(2),
+            Body::Empty,
+        );
+        let mut t1 = target_init(0);
+        assert!(matches!(
+            run_pre_upstream_plugins(&reject_chain, &mut req1, &mut t1),
+            Action::Continue
+        ));
+        assert_eq!(target_primary(t1), Some(0));
+        assert_eq!(target_mirror(t1), Some(5));
+
+        let mut req2 = L7Request::new(
+            Method::GET,
+            Uri::from_static("/orders"),
+            Version::HTTP_11,
+            HeaderWorkspace::empty(2),
+            Body::Empty,
+        );
+        let mut t2 = target_init(0);
+        assert!(matches!(
+            run_pre_upstream_plugins(&reject_chain, &mut req2, &mut t2),
+            Action::Reject(RejectReason::TooManyRequests)
+        ));
+        assert_eq!(t2, TARGETS_CANCELLED);
+        assert_eq!(target_primary(t2), None);
+        assert_eq!(target_mirror(t2), None);
     }
 }

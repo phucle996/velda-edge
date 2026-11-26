@@ -1,89 +1,72 @@
 //! Downstream HTTP/3 Pre-Compiled Canonical Early Response Engine (RFC 9114).
 //!
-//! # Protocol Ownership & Wire Mechanics
-//! Enforces Single Responsibility Principle (SRP) by keeping HTTP/3 canonical error
-//! response construction strictly isolated within `velda-http3`.
-//!
-//! # Zero-Copy Hot Path
-//! Directly pairs static ASCII bodies with pre-allocated headers and optional L7 `x-request-id`
-//! without any dynamic heap formatting (`format!`), JSON serialization, or `.to_vec()` heap churn.
+//! ```text
+//!   StatusCode (Early 0-RTT / Connection Error) ──► precompiled_early_response(status, req_id)
+//!   RejectReason (Plugin / WAF / RateLimit)     ──► reject_response(reason, req.headers)
+//!     └─► headers.retain_bypass_only() + RejectStaticMeta { status, content_len_str, body }
+//! ```
 
 use bytes::Bytes;
-use http::header::{CACHE_CONTROL, CONTENT_LENGTH, CONTENT_TYPE, HeaderValue};
+use http::header::HeaderValue;
 use http::{StatusCode, Version};
-use velda_core::{Body, HeaderWorkspace, L7Response};
+use velda_core::{Body, HeaderKey, HeaderWorkspace, L7Response, RejectReason};
 
-/// Pre-compiles a canonical HTTP/3 early error [`L7Response`] with Zero-Copy static payload and pre-allocated headers.
-///
-/// Respects SRP by keeping HTTP/3 response construction strictly within `velda-http3`.
+#[inline]
+const fn status_payload(status: StatusCode) -> (StatusCode, &'static str, &'static [u8]) {
+    let reason = match status {
+        StatusCode::BAD_REQUEST => RejectReason::BadRequest,
+        StatusCode::UNAUTHORIZED => RejectReason::Unauthorized,
+        StatusCode::FORBIDDEN => RejectReason::Forbidden,
+        StatusCode::NOT_FOUND => RejectReason::NotFound,
+        StatusCode::METHOD_NOT_ALLOWED => RejectReason::MethodNotAllowed,
+        StatusCode::REQUEST_TIMEOUT => RejectReason::RequestTimeout,
+        StatusCode::CONFLICT => RejectReason::Conflict,
+        StatusCode::PAYLOAD_TOO_LARGE => RejectReason::PayloadTooLarge,
+        StatusCode::URI_TOO_LONG => RejectReason::UriTooLong,
+        StatusCode::UNSUPPORTED_MEDIA_TYPE => RejectReason::UnsupportedMediaType,
+        StatusCode::TOO_EARLY => {
+            return (
+                StatusCode::TOO_EARLY,
+                "47",
+                b"425 Too Early: non-idempotent request in 0-RTT\n",
+            );
+        }
+        StatusCode::TOO_MANY_REQUESTS => RejectReason::TooManyRequests,
+        StatusCode::REQUEST_HEADER_FIELDS_TOO_LARGE => RejectReason::HeaderFieldsTooLarge,
+        s if s.as_u16() == 499 => RejectReason::ClientClosedRequest,
+        StatusCode::BAD_GATEWAY => RejectReason::BadGateway,
+        StatusCode::SERVICE_UNAVAILABLE => RejectReason::ServiceUnavailable,
+        StatusCode::GATEWAY_TIMEOUT => RejectReason::GatewayTimeout,
+        _ => RejectReason::InternalError,
+    };
+    let meta = velda_core::lut::get_reject_meta(reason);
+    (meta.status, meta.content_len_str, meta.body)
+}
+
+/// Pre-compiles a canonical HTTP/3 early error [`L7Response`] with Zero-Copy static payload.
 #[cold]
 pub fn precompiled_early_response(
     status: StatusCode,
     request_id: Option<&HeaderValue>,
 ) -> L7Response {
-    let (body, status_code): (&'static [u8], StatusCode) = match status {
-        StatusCode::BAD_REQUEST => (b"400 Bad Request\n", StatusCode::BAD_REQUEST),
-        StatusCode::UNAUTHORIZED => (b"401 Unauthorized\n", StatusCode::UNAUTHORIZED),
-        StatusCode::FORBIDDEN => (b"403 Forbidden\n", StatusCode::FORBIDDEN),
-        StatusCode::NOT_FOUND => (b"404 Not Found\n", StatusCode::NOT_FOUND),
-        StatusCode::METHOD_NOT_ALLOWED => {
-            (b"405 Method Not Allowed\n", StatusCode::METHOD_NOT_ALLOWED)
-        }
-        StatusCode::REQUEST_TIMEOUT => (b"408 Request Timeout\n", StatusCode::REQUEST_TIMEOUT),
-        StatusCode::CONFLICT => (b"409 Conflict\n", StatusCode::CONFLICT),
-        StatusCode::PAYLOAD_TOO_LARGE => {
-            (b"413 Payload Too Large\n", StatusCode::PAYLOAD_TOO_LARGE)
-        }
-        StatusCode::URI_TOO_LONG => (b"414 URI Too Long\n", StatusCode::URI_TOO_LONG),
-        StatusCode::UNSUPPORTED_MEDIA_TYPE => (
-            b"415 Unsupported Media Type\n",
-            StatusCode::UNSUPPORTED_MEDIA_TYPE,
-        ),
-        StatusCode::REQUEST_HEADER_FIELDS_TOO_LARGE => (
-            b"431 Request Header Fields Too Large\n",
-            StatusCode::REQUEST_HEADER_FIELDS_TOO_LARGE,
-        ),
-        StatusCode::TOO_EARLY => (
-            b"425 Too Early: non-idempotent request in 0-RTT\n",
-            StatusCode::TOO_EARLY,
-        ),
-        StatusCode::TOO_MANY_REQUESTS => {
-            (b"429 Too Many Requests\n", StatusCode::TOO_MANY_REQUESTS)
-        }
-        StatusCode::INTERNAL_SERVER_ERROR => (
-            b"500 Internal Server Error\n",
-            StatusCode::INTERNAL_SERVER_ERROR,
-        ),
-        StatusCode::BAD_GATEWAY => (b"502 Bad Gateway\n", StatusCode::BAD_GATEWAY),
-        StatusCode::SERVICE_UNAVAILABLE => (
-            b"503 Service Unavailable\n",
-            StatusCode::SERVICE_UNAVAILABLE,
-        ),
-        StatusCode::GATEWAY_TIMEOUT => (b"504 Gateway Timeout\n", StatusCode::GATEWAY_TIMEOUT),
-        s if s.as_u16() == 499 => (b"499 Client Closed Request\n", s),
-        _ => (
-            b"500 Internal Server Error\n",
-            StatusCode::INTERNAL_SERVER_ERROR,
-        ),
-    };
+    const KEY_CACHE_CTRL: HeaderKey = HeaderKey::from_static("cache-control");
+    const KEY_CONTENT_TYPE: HeaderKey = HeaderKey::from_static("content-type");
+    const KEY_CONTENT_LEN: HeaderKey = HeaderKey::from_static("content-length");
+    const KEY_RETRY_AFTER: HeaderKey = HeaderKey::from_static("retry-after");
 
+    let (status_code, content_len_str, body) = status_payload(status);
     let mut ws = match request_id {
         Some(req_id) => HeaderWorkspace::with_request_id(req_id.clone(), 5),
         None => HeaderWorkspace::new(5),
     };
-    ws.insert(
-        CONTENT_TYPE,
+    ws.insert_prehashed(&KEY_CACHE_CTRL, HeaderValue::from_static("no-store"));
+    ws.insert_prehashed(
+        &KEY_CONTENT_TYPE,
         HeaderValue::from_static("text/plain; charset=utf-8"),
     );
-    ws.insert(
-        CONTENT_LENGTH,
-        velda_core::buffer::header::resolve_u64_header_value(body.len() as u64),
-    );
-    // CPDoS defense: edge-generated errors depend on client-induced conditions (oversized URI,
-    // header bombs, blocked origins) and must never be stored by shared caches/CDNs.
-    ws.insert(CACHE_CONTROL, HeaderValue::from_static("no-store"));
-    if status_code == StatusCode::TOO_MANY_REQUESTS {
-        ws.insert_bypass(http::header::RETRY_AFTER, HeaderValue::from_static("1"));
+    ws.insert_prehashed(&KEY_CONTENT_LEN, HeaderValue::from_static(content_len_str));
+    if status_code == StatusCode::TOO_MANY_REQUESTS && !ws.contains_prehashed(&KEY_RETRY_AFTER) {
+        ws.insert_prehashed(&KEY_RETRY_AFTER, HeaderValue::from_static("1"));
     }
 
     L7Response {
@@ -94,19 +77,44 @@ pub fn precompiled_early_response(
     }
 }
 
-/// Pre-compiles an HTTP/3 canonical rejection response directly from protocol-agnostic [`velda_core::RejectReason`].
+/// Builds an HTTP/3 rejection [`L7Response`] in-place from a request [`HeaderWorkspace`],
+/// preserving bypass headers (`x-request-id`, `x-ratelimit-*`, `retry-after`) while stamping
+/// canonical HTTP/3 error headers and static body bytes.
 #[cold]
-pub fn precompiled_reject_response(
-    reason: velda_core::RejectReason,
-    request_id: Option<&HeaderValue>,
-) -> L7Response {
+pub fn reject_response(reason: RejectReason, mut headers: HeaderWorkspace) -> L7Response {
+    const KEY_CACHE_CTRL: HeaderKey = HeaderKey::from_static("cache-control");
+    const KEY_CONTENT_TYPE: HeaderKey = HeaderKey::from_static("content-type");
+    const KEY_CONTENT_LEN: HeaderKey = HeaderKey::from_static("content-length");
+    const KEY_RETRY_AFTER: HeaderKey = HeaderKey::from_static("retry-after");
+
     let meta = velda_core::lut::get_reject_meta(reason);
-    precompiled_early_response(meta.status, request_id)
+    headers.retain_bypass_only();
+    headers.insert_prehashed(&KEY_CACHE_CTRL, HeaderValue::from_static("no-store"));
+    headers.insert_prehashed(
+        &KEY_CONTENT_TYPE,
+        HeaderValue::from_static("text/plain; charset=utf-8"),
+    );
+    headers.insert_prehashed(
+        &KEY_CONTENT_LEN,
+        HeaderValue::from_static(meta.content_len_str),
+    );
+    if meta.status == StatusCode::TOO_MANY_REQUESTS && !headers.contains_prehashed(&KEY_RETRY_AFTER)
+    {
+        headers.insert_prehashed(&KEY_RETRY_AFTER, HeaderValue::from_static("1"));
+    }
+
+    L7Response {
+        status: meta.status,
+        version: Version::HTTP_3,
+        headers,
+        body: Body::Bytes(Bytes::from_static(meta.body)),
+    }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use http::header::{CACHE_CONTROL, CONTENT_LENGTH, CONTENT_TYPE};
 
     #[test]
     fn test_precompiled_early_response_http3() {
@@ -116,12 +124,12 @@ mod tests {
         assert_eq!(resp.status, StatusCode::TOO_EARLY);
         assert_eq!(resp.version, Version::HTTP_3);
         assert_eq!(
-            resp.headers.get("content-type").unwrap(),
+            resp.headers.get(CONTENT_TYPE).unwrap(),
             "text/plain; charset=utf-8"
         );
-        assert_eq!(resp.headers.get("content-length").unwrap(), "47");
+        assert_eq!(resp.headers.get(CONTENT_LENGTH).unwrap(), "47");
         assert_eq!(
-            resp.headers.get("x-request-id").unwrap(),
+            resp.headers.get(&HeaderWorkspace::X_REQUEST_ID).unwrap(),
             "0123456789abcdef0123456789abcdef"
         );
         assert_eq!(
@@ -132,9 +140,6 @@ mod tests {
 
     #[test]
     fn test_reject_reasons_keep_their_status_and_forbid_caching() {
-        use velda_core::RejectReason;
-        // Regression: limits-related rejects once fell through to the 500 fallback on HTTP/3,
-        // and edge errors lacked `Cache-Control: no-store` (CPDoS defense).
         for (reason, expected) in [
             (RejectReason::UriTooLong, StatusCode::URI_TOO_LONG),
             (
@@ -148,9 +153,9 @@ mod tests {
             ),
             (RejectReason::Forbidden, StatusCode::FORBIDDEN),
         ] {
-            let resp = precompiled_reject_response(reason, None);
+            let resp = reject_response(reason, HeaderWorkspace::new(4));
             assert_eq!(resp.status, expected);
-            assert_eq!(resp.headers.get("cache-control").unwrap(), "no-store");
+            assert_eq!(resp.headers.get(CACHE_CONTROL).unwrap(), "no-store");
         }
     }
 
@@ -159,7 +164,18 @@ mod tests {
         let resp = precompiled_early_response(StatusCode::NOT_IMPLEMENTED, None);
         assert_eq!(resp.status, StatusCode::INTERNAL_SERVER_ERROR);
         assert_eq!(resp.version, Version::HTTP_3);
-        // HeaderWorkspace is unconditionally pre-loaded with an authoritative Request ID in Slot 0
-        assert!(resp.headers.get("x-request-id").is_some());
+        assert!(resp.headers.get(&HeaderWorkspace::X_REQUEST_ID).is_some());
+    }
+
+    #[test]
+    fn test_reject_response_http3_retains_bypass_and_sets_defaults() {
+        let mut ws = HeaderWorkspace::new(32);
+        ws.insert(http::header::COOKIE, HeaderValue::from_static("a=b"));
+        let resp = reject_response(RejectReason::TooManyRequests, ws);
+        assert_eq!(resp.status, StatusCode::TOO_MANY_REQUESTS);
+        assert_eq!(resp.version, Version::HTTP_3);
+        assert!(!resp.headers.contains_key(http::header::COOKIE));
+        assert_eq!(resp.headers.get(CACHE_CONTROL).unwrap(), "no-store");
+        assert_eq!(resp.headers.get(http::header::RETRY_AFTER).unwrap(), "1");
     }
 }

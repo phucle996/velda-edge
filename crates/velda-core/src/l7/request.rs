@@ -213,6 +213,7 @@ impl L7Request {
     ) -> Self {
         let headers = headers.into();
         let ingress_time_nanos = headers.ingress_time_nanos;
+        let state_method = crate::lut::HttpMethod::from_http_method(&method);
         Self {
             method,
             uri,
@@ -220,7 +221,7 @@ impl L7Request {
             headers,
             body,
             ingress_time_nanos,
-            state: RequestState::default(),
+            state: RequestState::default().with_method(state_method),
         }
     }
 

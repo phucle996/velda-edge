@@ -4,7 +4,7 @@
 //!   PluginConfig[]
 //!        │
 //!        ▼
-//!   instantiate_plugin() + wire_plugin_dependencies() + wire_plugin_etps()
+//!   instantiate_plugin() + wire_plugin_etps()
 //!        │
 //!        ├──► route.plugins ─► RoutePluginPlan (O(1) hot-path dispatch per route_id)
 //!        │
@@ -25,8 +25,7 @@ use std::sync::Arc;
 use rustc_hash::FxHashMap;
 use velda_core::{ProtocolFamily, StreamingMode};
 use velda_plugin::{
-    LoadedPlugin, RoutePluginPlan, build_route_plugin_plan, instantiate_plugin,
-    wire_plugin_dependencies, wire_plugin_etps,
+    LoadedPlugin, RoutePluginPlan, build_route_plugin_plan, instantiate_plugin, wire_plugin_etps,
 };
 use velda_sync::post_sync::listener::ListenerConfig;
 use velda_sync::post_sync::plugin::PluginConfig;
@@ -129,12 +128,7 @@ pub fn build_plugin_table(
         available_plugins.insert(plugin_cfg.id.clone(), loaded);
     }
 
-    // 1b. Wire inter-plugin dependencies (e.g. jwks_rotator -> jwt_auth SharedJwksStore)
-    wire_plugin_dependencies(&available_plugins).map_err(|e| EdgeError::InvalidConfig {
-        detail: format!("Failed to wire plugin dependencies: {e}"),
-    })?;
-
-    // 1c. Wire External Third-Party (velda-etp) pool instances into background plugins
+    // 1b. Wire External Third-Party (velda-etp) pool instances into ETP-backed plugins
     wire_plugin_etps(&available_plugins, etp_registry).map_err(|e| EdgeError::InvalidConfig {
         detail: format!("Failed to wire plugin ETPs: {e}"),
     })?;
@@ -309,6 +303,7 @@ mod tests {
 
         fn on_response(
             &self,
+            _req_state: &velda_core::RequestState,
             _req: &velda_core::HeaderWorkspace,
             _resp: &mut velda_core::L7Response,
         ) {
@@ -353,7 +348,7 @@ mod tests {
                 pbww: 1,
             })),
             LoadedPlugin::Background(Arc::new(MockBackgroundPlugin {
-                id: "jwks_rotator".into(),
+                id: "jwt_auth_rotator".into(),
                 pbww: 5,
             })),
             LoadedPlugin::Background(Arc::new(MockBackgroundPlugin {

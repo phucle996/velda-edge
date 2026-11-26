@@ -6,7 +6,7 @@ pub mod config;
 pub mod key;
 pub(crate) mod lease;
 pub mod plugin;
-pub mod redis;
+pub mod providers;
 pub(crate) mod window;
 
 pub use algorithm::{

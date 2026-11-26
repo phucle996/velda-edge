@@ -93,7 +93,7 @@ pub struct OpenAiTokenQuotaConfig {
     #[serde(default = "default_micro_quota_batch")]
     pub micro_quota_batch: u64,
 
-    /// Maximum number of consumer keys batched per multi-key Lua `EVAL` round-trip (`1..=512`).
+    /// Maximum number of consumer keys batched per pipelined `DECRBY` round-trip (`1..=512`).
     #[serde(default = "default_batch_users")]
     pub batch_users: usize,
 

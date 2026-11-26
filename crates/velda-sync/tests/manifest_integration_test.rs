@@ -31,11 +31,11 @@ async fn test_end_to_end_manifest_sync_composition() {
 
     let expected_domains = vec![
         "listeners".to_string(),
-        "routes".to_string(),
         "upstreams".to_string(),
-        "plugins".to_string(),
         "tls".to_string(),
         "etp".to_string(),
+        "routes".to_string(),
+        "plugins".to_string(),
     ];
 
     match outcome {
@@ -102,5 +102,71 @@ async fn test_end_to_end_manifest_sync_composition() {
         second_run,
         SyncOutcome::Unchanged,
         "Subsequent reconciliation without changes must be Unchanged"
+    );
+}
+
+#[tokio::test]
+async fn test_sync_composition_validates_etp_before_plugins_and_rejects_mismatched_kind() {
+    let example_dir = common::example_dir();
+    let cfg_dir = tempdir().unwrap();
+    for name in [
+        "manifest.json",
+        "listeners.json",
+        "upstreams.json",
+        "routes.json",
+        "tls.json",
+        "etp.json",
+    ] {
+        fs::copy(example_dir.join(name), cfg_dir.path().join(name)).unwrap();
+    }
+
+    // Add a Redis ETP entry + point oauth2_introspection to it -> sync must validate ETP first
+    // then fail plugin validation on unsupported ETP kind (`redis`).
+    let mut etp_val: serde_json::Value =
+        serde_json::from_str(&fs::read_to_string(cfg_dir.path().join("etp.json")).unwrap())
+            .unwrap();
+    etp_val["etps"]
+        .as_array_mut()
+        .unwrap()
+        .push(serde_json::json!({
+            "id": "redis-wrong",
+            "kind": "redis",
+            "security": "plain",
+            "pool": { "pool_size": 2, "connect_timeout_ms": 2000, "idle_timeout_ms": 60000 },
+            "settings": { "host": "127.0.0.1", "port": 6379 }
+        }));
+    fs::write(
+        cfg_dir.path().join("etp.json"),
+        serde_json::to_vec_pretty(&etp_val).unwrap(),
+    )
+    .unwrap();
+
+    let mut plugins_val: serde_json::Value =
+        serde_json::from_str(&fs::read_to_string(example_dir.join("plugins.json")).unwrap())
+            .unwrap();
+    for p in plugins_val["plugins"].as_array_mut().unwrap() {
+        if p["id"] == "oauth2_introspection" {
+            p["config"]["etp_id"] = serde_json::json!("redis-wrong");
+        }
+    }
+    fs::write(
+        cfg_dir.path().join("plugins.json"),
+        serde_json::to_vec_pretty(&plugins_val).unwrap(),
+    )
+    .unwrap();
+
+    let storage_dir = tempdir().unwrap();
+    let socket_path = storage_dir.path().join("edge_err.sock");
+    let provider = Provider::LocalFile(LocalFileProvider::new(cfg_dir.path()));
+    let mut composition = SyncComposition::new(provider, storage_dir.path(), &socket_path);
+
+    let err = composition.reconcile().await.unwrap_err();
+    assert!(
+        err.to_string().contains("has kind 'redis'"),
+        "expected mismatched ETP kind rejection, got: {err}"
+    );
+    assert!(
+        !storage_dir.path().join("runtime/plugins.bin").exists(),
+        "plugins.bin must not be persisted when ETP kind check fails"
     );
 }

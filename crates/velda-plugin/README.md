@@ -104,12 +104,12 @@ To allow protocol-independent short-circuiting without leaking internal headers:
 | [`canary`](src/pre_upstream/canary/) | HTTP / gRPC | `0` | Deterministic hash/header/weight-based canary upstream rerouting. |
 | [`csrf`](src/pre_upstream/csrf/) | HTTP | `0` | Double-submit cookie / origin-verified CSRF token enforcement. |
 | [`grpc_fault_injection`](src/pre_upstream/grpc_fault_injection/) | gRPC | `0` | Deterministic gRPC status abort & latency fault injection. |
-| [`header_mutation`](src/pre_upstream/header_mutation/) | All L7 | `0` | Request header insertion, dynamic variable substitution, and stripping. |
+| [`header_mutation`](src/pre_upstream/header_mutation/) | All L7 | `0` | Explicit static header remove, overwrite, and append directly on `HeaderWorkspace`. |
 | [`hmac_auth`](src/pre_upstream/hmac_auth/) | HTTP | `0` | HMAC-SHA256 request signature and replay-window verification. |
 | [`http_cache_lookup`](src/pre_upstream/http_cache_lookup/) | HTTP | `0` | Lock-free shared-memory HTTP response cache lookup (short-circuits on HIT). |
 | [`http_fault_injection`](src/pre_upstream/http_fault_injection/) | HTTP | `0` | Scoped HTTP status abort & non-blocking delay fault injection. |
 | [`ja4_filter`](src/pre_upstream/ja4_filter/) | TLS L7 | `0` | TLS JA4 client fingerprint filtering directly against `req.state.ja4`. |
-| [`jwt_auth`](src/pre_upstream/jwt_auth/) | HTTP | `0` | Zero-alloc JWT verification (HS/RS/ES/EdDSA) wired to `jwks_rotator`. |
+| [`jwt_auth`](src/pre_upstream/jwt_auth/) | HTTP | `0` / `5` | Zero-alloc JWT verification (HS/RS/ES/EdDSA) with `internal` static keys or `external` ETP background rotation (`JwksStore`). |
 | [`oauth2_introspection`](src/pre_upstream/oauth2_introspection/) | HTTP | `0` | RFC 7662 token introspection cache with core-local shadow revalidation (`try_dispatch_shadow`). |
 | [`rate_limit`](src/pre_upstream/rate_limit/) | All L7 | `0` / `1..=100` | Lock-striped token/sliding-window limiter & optional Redis batch sync. |
 | [`request_mirror`](src/pre_upstream/request_mirror/) | HTTP | `0` | Sampled traffic mirroring offloaded via `try_dispatch_shadow`. |
@@ -133,7 +133,6 @@ To allow protocol-independent short-circuiting without leaking internal headers:
 | [`clickhouse_log_shipper`](src/background/clickhouse_log_shipper/) | `75` | Native ClickHouse HTTP RowBinary/JSON access log exporter. |
 | [`elasticsearch_log_shipper`](src/background/elasticsearch_log_shipper/) | `60` | Elasticsearch NDJSON bulk access log shipper. |
 | [`health_probe`](src/background/health_probe/) | `1` | Sequential inline `/livez` and `/readyz` Kubernetes probe listener. |
-| [`jwks_rotator`](src/background/jwks_rotator/) | `5` | Background JWKS keyset fetcher wiring into `jwt_auth`'s shared store. |
 | [`kafka_log_shipper`](src/background/kafka_log_shipper/) | `75` | Kafka RecordBatch v2 zstd access log producer. |
 | [`loki_log_shipper`](src/background/loki_log_shipper/) | `80` | Grafana Loki multi-stream protobuf/JSON log exporter. |
 | [`otlp_log_shipper`](src/background/otlp_log_shipper/) | `70` | OpenTelemetry access log exporter over HTTP/gRPC. |

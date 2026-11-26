@@ -1,15 +1,16 @@
 //! HMAC Authentication Configuration Schema & Semantic Validation.
 //!
-//! Enforces a strict declarative contract for Hash-based Message Authentication Code (HMAC)
-//! request signing, anti-tampering, and anti-replay verification conforming to RFC 2104.
+//! Enforces a strict declarative contract for HMAC-SHA256 / HMAC-SHA512 request
+//! verification, anti-tampering, and anti-replay protection.
 //!
-//! # Strict Declarative Contract (Zero Silent Fallbacks)
-//! - **Explicit Credentials**: Non-empty list of access keys and secret keys (min 16 bytes).
-//! - **Valid Headers**: All specified header names must conform to RFC 9110 token grammar.
-//! - **Strict Algorithms**: Supported algorithms are strictly `"hmac-sha256"` and `"hmac-sha512"`.
-//! - **Strict Encodings**: Supported signature encodings are strictly `"hex"` and `"base64"`.
-//! - **Anti-Replay Window**: `clock_skew_seconds` must be strictly positive (> 0 and <= 86400).
-//! - **Explicit Nonce Control**: If `enforce_nonce` is true, `nonce_header` must be included in `signed_headers`.
+//! ```text
+//! JSON Config ─▶ serde(deny_unknown_fields) ─▶ Header / Algorithm / Encoding Checks
+//!                                                   │
+//!                                                   ├─▶ Normalize algo & encoding lowercase
+//!                                                   ├─▶ Validate clock_skew (1..=86400) & signed_headers
+//!                                                   ├─▶ Validate credentials (unique key_id, secret >= 16B)
+//!                                                   └─▶ OK ─▶ Compiled into HmacAuthPlugin
+//! ```
 
 use std::collections::HashSet;
 
@@ -19,6 +20,7 @@ use crate::error::PluginError;
 
 /// Declarative credential configuration for an authorized caller.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct HmacCredentialConfig {
     /// Public access key identifier (e.g. "partner_vnpay_01").
     pub access_key_id: String,
@@ -30,6 +32,7 @@ pub struct HmacCredentialConfig {
 
 /// Declarative configuration for the HMAC Authentication plugin.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct HmacAuthConfig {
     /// Header containing caller's public access key ID (e.g. "x-access-key-id").
     pub access_key_header: String,
@@ -41,9 +44,9 @@ pub struct HmacAuthConfig {
     pub signature_encoding: String,
     /// Header containing request timestamp (e.g. "x-timestamp").
     pub timestamp_header: String,
-    /// Maximum allowed clock skew in seconds (e.g. 60).
+    /// Maximum allowed clock skew in seconds (1..=86400).
     pub clock_skew_seconds: u64,
-    /// Ordered list of header names required to participate in canonical signature.
+    /// Ordered list of header names participating in the canonical signature.
     pub signed_headers: Vec<String>,
     /// Whether to enforce SHA-256 digest verification on request payload.
     pub validate_request_body: bool,
@@ -51,19 +54,21 @@ pub struct HmacAuthConfig {
     pub content_sha256_header: String,
     /// Header containing unique single-use request nonce (e.g. "x-nonce").
     pub nonce_header: String,
-    /// Whether to strictly enforce and track unique single-use request nonces.
+    /// Whether to enforce and track unique single-use request nonces.
     pub enforce_nonce: bool,
     /// Pre-configured authorized caller credentials.
     pub credentials: Vec<HmacCredentialConfig>,
 }
 
-/// Validates RFC 9110 token grammar for header names.
+/// Validates RFC 9110 `tchar` header name grammar (`1..=256` bytes, no pseudo-headers).
 fn is_valid_header_name(h: &str) -> bool {
-    let trimmed = h.trim();
-    if trimmed.is_empty() {
+    if h.is_empty() || h.len() > 256 || h.starts_with(':') {
         return false;
     }
-    trimmed.bytes().all(|b| {
+    if h.starts_with(' ') || h.ends_with(' ') || h.starts_with('\t') || h.ends_with('\t') {
+        return false;
+    }
+    h.bytes().all(|b| {
         b.is_ascii_alphanumeric()
             || matches!(
                 b,
@@ -85,12 +90,12 @@ fn is_valid_header_name(h: &str) -> bool {
     })
 }
 
-/// Validates HMAC Authentication configuration strictly according to production standards.
+/// Validates and normalizes HMAC Authentication configuration.
 pub fn validate_hmac_auth_config(
     plugin_id: &str,
     config_val: &serde_json::Value,
 ) -> Result<HmacAuthConfig, PluginError> {
-    let cfg: HmacAuthConfig = serde_json::from_value(config_val.clone()).map_err(|e| {
+    let mut cfg: HmacAuthConfig = serde_json::from_value(config_val.clone()).map_err(|e| {
         PluginError::Config(format!(
             "Plugin '{plugin_id}' has malformed or incomplete hmac_auth config: {e}"
         ))
@@ -113,7 +118,7 @@ pub fn validate_hmac_auth_config(
         }
     }
 
-    // 2. Validate Algorithm
+    // 2. Validate & Normalize Algorithm
     let algo = cfg.signature_algorithm.trim().to_ascii_lowercase();
     if algo != "hmac-sha256" && algo != "hmac-sha512" {
         return Err(PluginError::Config(format!(
@@ -121,8 +126,9 @@ pub fn validate_hmac_auth_config(
             cfg.signature_algorithm
         )));
     }
+    cfg.signature_algorithm = algo;
 
-    // 3. Validate Encoding
+    // 3. Validate & Normalize Encoding
     let enc = cfg.signature_encoding.trim().to_ascii_lowercase();
     if enc != "hex" && enc != "base64" {
         return Err(PluginError::Config(format!(
@@ -130,6 +136,7 @@ pub fn validate_hmac_auth_config(
             cfg.signature_encoding
         )));
     }
+    cfg.signature_encoding = enc;
 
     // 4. Validate Clock Skew
     if cfg.clock_skew_seconds == 0 || cfg.clock_skew_seconds > 86400 {
@@ -185,20 +192,23 @@ pub fn validate_hmac_auth_config(
     }
 
     let mut key_ids = HashSet::with_capacity(cfg.credentials.len());
-    for (idx, cred) in cfg.credentials.iter().enumerate() {
-        let kid = cred.access_key_id.trim();
+    for (idx, cred) in cfg.credentials.iter_mut().enumerate() {
+        let kid = cred.access_key_id.trim().to_string();
         if kid.is_empty() {
             return Err(PluginError::Config(format!(
                 "Plugin '{plugin_id}': credentials at index {idx} has empty access_key_id"
             )));
         }
-        if !key_ids.insert(kid.to_string()) {
+        if !key_ids.insert(kid.clone()) {
             return Err(PluginError::Config(format!(
                 "Plugin '{plugin_id}': duplicate access_key_id '{kid}' in credentials at index {idx}"
             )));
         }
+        if cred.access_key_id.len() != kid.len() {
+            cred.access_key_id = kid.clone();
+        }
 
-        if cred.secret_key.trim().len() < 16 {
+        if cred.secret_key.len() < 16 || cred.secret_key.trim().len() < 16 {
             return Err(PluginError::Config(format!(
                 "Plugin '{plugin_id}': secret_key for access_key_id '{kid}' must be at least 16 characters for cryptographic safety"
             )));
@@ -214,12 +224,12 @@ mod tests {
     use serde_json::json;
 
     #[test]
-    fn test_valid_hmac_config() {
+    fn test_valid_hmac_config_normalizes_case() {
         let val = json!({
             "access_key_header": "x-access-key-id",
             "signature_header": "x-signature",
-            "signature_algorithm": "hmac-sha256",
-            "signature_encoding": "hex",
+            "signature_algorithm": "HMAC-SHA512",
+            "signature_encoding": "BASE64",
             "timestamp_header": "x-timestamp",
             "clock_skew_seconds": 60,
             "signed_headers": ["host", "x-timestamp", "x-nonce"],
@@ -236,9 +246,9 @@ mod tests {
             ]
         });
 
-        let res = validate_hmac_auth_config("hmac_test", &val);
-        assert!(res.is_ok());
-        let cfg = res.unwrap();
+        let cfg = validate_hmac_auth_config("hmac_test", &val).unwrap();
+        assert_eq!(cfg.signature_algorithm, "hmac-sha512");
+        assert_eq!(cfg.signature_encoding, "base64");
         assert_eq!(cfg.clock_skew_seconds, 60);
         assert_eq!(cfg.credentials.len(), 1);
     }
@@ -299,5 +309,32 @@ mod tests {
                 .to_string()
                 .contains("at least 16 characters")
         );
+    }
+
+    #[test]
+    fn test_unknown_fields_rejected() {
+        let val = json!({
+            "access_key_header": "x-access-key-id",
+            "signature_header": "x-signature",
+            "signature_algorithm": "hmac-sha256",
+            "signature_encoding": "hex",
+            "timestamp_header": "x-timestamp",
+            "clock_skew_seconds": 60,
+            "signed_headers": ["x-timestamp"],
+            "validate_request_body": false,
+            "content_sha256_header": "x-content-sha256",
+            "nonce_header": "x-nonce",
+            "enforce_nonce": false,
+            "credentials": [
+                {
+                    "access_key_id": "client_01",
+                    "secret_key": "sec_0123456789abcdef0123456789"
+                }
+            ],
+            "unexpected": true
+        });
+        let res = validate_hmac_auth_config("hmac_unknown", &val);
+        assert!(res.is_err());
+        assert!(res.unwrap_err().to_string().contains("unknown field"));
     }
 }

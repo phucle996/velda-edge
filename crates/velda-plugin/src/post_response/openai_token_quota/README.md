@@ -40,14 +40,14 @@ flowchart TD
 
 | Field | Type | Required | Default | Description |
 | :--- | :--- | :---: | :---: | :--- |
-| `mode` | `String` | No | `"local"` | `"local"` (RAM-only) or `"distributed"` (Shadow Worker leases micro-quotas from Redis `velda:plugin:<plugin_id>:<key>`). |
+| `mode` | `String` | No | `"local"` | `"local"` (RAM-only) or `"distributed"` (Shadow Worker leases micro-quotas via Lua-free `DECRBY` + compensating `INCRBY` from any supported KV ETP at `velda:plugin:<plugin_id>:<key>`). |
 | `consumer_id_headers` | `Vec<String>` | Yes | — | Ordered request headers combined hierarchically with `.` (e.g. `abc.123`) into a 64-bit FNV-1a consumer hash. |
 | `ledger_slots` | `usize` | No | `4096` | Tổng số slot `128 B` cấp phát trước trong vùng nhớ liên tục `SharedUsageArena` (mỗi user `abc.123` chiếm 1 slot; lũy thừa của 2 trong `64..=1048576`, mặc định `4096` slot = `512 KB`). |
 | `local_default_quota` | `i64` | No | `0` | Hạn mức khởi tạo local mỗi slot trong chế độ `"local"` (`0` = pure counter). |
-| `etp_id` | `String` | If `distributed` | `null` | Identifier của `redis` entry trong `etp.json` / `EtpRegistry` (`RedisEtp`, quản lý endpoint, AUTH, DB, TLS/mTLS & pool). |
-| `micro_quota_batch` | `u64` | No | `5000` | Kích thước gói micro-quota lấy từ Redis mỗi lần refill. |
-| `batch_users` | `usize` | No | `64` | Số lượng consumer keys tối đa gom vào 1 Multi-Key Lua `EVAL` trong 1 Round-Trip (`1..=512`). |
-| `refill_watermark` | `i64` | No | `1000` | Ngưỡng `local_remaining` kích hoạt Shadow Worker xin thêm micro-quota từ Redis. |
+| `etp_id` | `String` | If `distributed` | `null` | Identifier của SoT ETP entry trong `etp.json` / `EtpRegistry` (`redis`, `valkey`, `dragonfly`, `aws_elasticache`, `gcp_memorystore`, `upstash`, `postgres`, `mysql`, hoặc `dynamodb`; SQL/DDB tự khởi tạo `velda.velda_openai_token_quota` / `velda_openai_token_quota`). |
+| `micro_quota_batch` | `u64` | No | `5000` | Kích thước gói micro-quota lấy từ backend KV mỗi lần refill. |
+| `batch_users` | `usize` | No | `64` | Số lượng consumer keys tối đa gom vào 1 pipelined `DECRBY` Round-Trip (gom theo shard khi dùng Cluster, `1..=512`). |
+| `refill_watermark` | `i64` | No | `1000` | Ngưỡng `local_remaining` kích hoạt Shadow Worker xin thêm micro-quota từ KV backend. |
 | `sync_interval_ms` | `u64` | No | `500` | Chu kỳ quét nền của Shadow Worker (ms). |
 | `shadow_weight` | `u32` | No | `25` | Trọng số điều phối tác vụ Shadow Worker (`1..=100`, cùng thang đo `BackgroundPlugin::weight`). |
 

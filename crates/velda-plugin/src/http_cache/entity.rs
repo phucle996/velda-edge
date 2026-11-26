@@ -1,10 +1,11 @@
 //! Cache Entry, Variant Negotiation & Storage Transfer Structures.
 //!
 //! ```text
-//!   negotiate_variant_kind(variant_mask, has_raw, Accept-Encoding)  [0 heap alloc]
-//!     ├─ variant_mask != 0 ─► build stack [CompressionAlgorithm; 3] (Zstd > Brotli > Gzip)
-//!     │                       └─► negotiate_algorithm(accept_encoding, available) -> Hit
-//!     └─ fallback raw_body ─► is_identity_acceptable(accept_encoding) -> Raw Hit | None
+//!   negotiate_variant_kind(variant_mask, has_raw, Accept-Encoding, preferred_encodings)
+//!     ├─ Accept-Encoding: None ──► Raw (if has_raw) | None (Miss -> fill upstream)
+//!     └─ Accept-Encoding: Some ──► filter preferred_encodings by variant_mask (priority order)
+//!                                    ├─ match ─► compressed VariantKind (Zstd / Brotli / Gzip)
+//!                                    └─ none  ─► Raw (if has_raw & identity acceptable) | None
 //! ```
 
 use std::sync::Arc;
@@ -45,60 +46,68 @@ impl VariantKind {
     }
 }
 
-/// Zero-allocation smart variant selector operating purely on a `variant_mask: u8` and `has_raw`.
+/// Zero-allocation smart variant selector operating purely on `variant_mask`, `has_raw`,
+/// client `Accept-Encoding`, and the configured priority-ordered `preferred_encodings`.
 #[inline]
 pub fn negotiate_variant_kind(
     variant_mask: u8,
     has_raw: bool,
     accept_encoding: Option<&http::HeaderValue>,
+    preferred_encodings: &[CompressionAlgorithm],
 ) -> Option<VariantKind> {
-    let mut stack_algos = [CompressionAlgorithm::Gzip; 3];
-    let mut count = 0usize;
+    if let Some(ae) = accept_encoding {
+        if !preferred_encodings.is_empty() && variant_mask != 0 {
+            let mut stack_algos = [CompressionAlgorithm::Gzip; 3];
+            let mut count = 0usize;
 
-    if (variant_mask & VARIANT_BIT_ZSTD) != 0
-        && let Some(slot) = stack_algos.get_mut(count)
-    {
-        *slot = CompressionAlgorithm::Zstd;
-        count += 1;
-    }
-    if (variant_mask & VARIANT_BIT_BROTLI) != 0
-        && let Some(slot) = stack_algos.get_mut(count)
-    {
-        *slot = CompressionAlgorithm::Brotli;
-        count += 1;
-    }
-    if (variant_mask & VARIANT_BIT_GZIP) != 0
-        && let Some(slot) = stack_algos.get_mut(count)
-    {
-        *slot = CompressionAlgorithm::Gzip;
-        count += 1;
-    }
+            for &algo in preferred_encodings {
+                let bit = match algo {
+                    CompressionAlgorithm::Zstd => VARIANT_BIT_ZSTD,
+                    CompressionAlgorithm::Brotli => VARIANT_BIT_BROTLI,
+                    CompressionAlgorithm::Gzip => VARIANT_BIT_GZIP,
+                    CompressionAlgorithm::Deflate => 0,
+                };
+                if bit != 0
+                    && (variant_mask & bit) != 0
+                    && !stack_algos[..count].contains(&algo)
+                    && let Some(slot) = stack_algos.get_mut(count)
+                {
+                    *slot = algo;
+                    count += 1;
+                }
+            }
 
-    if count > 0
-        && let Some(available) = stack_algos.get(..count)
-        && let Some(selected) = negotiate_algorithm(accept_encoding, available)
-    {
-        match selected {
-            CompressionAlgorithm::Zstd => return Some(VariantKind::Zstd),
-            CompressionAlgorithm::Brotli => return Some(VariantKind::Brotli),
-            CompressionAlgorithm::Gzip => return Some(VariantKind::Gzip),
-            CompressionAlgorithm::Deflate => {}
+            if count > 0
+                && let Some(available) = stack_algos.get(..count)
+                && let Some(selected) = negotiate_algorithm(Some(ae), available)
+            {
+                match selected {
+                    CompressionAlgorithm::Zstd => return Some(VariantKind::Zstd),
+                    CompressionAlgorithm::Brotli => return Some(VariantKind::Brotli),
+                    CompressionAlgorithm::Gzip => return Some(VariantKind::Gzip),
+                    CompressionAlgorithm::Deflate => {}
+                }
+            }
         }
-    }
 
-    if has_raw {
-        if let Some(header) = accept_encoding
-            && let Ok(header_str) = header.to_str()
-        {
-            if is_identity_acceptable(header_str) {
+        if has_raw {
+            if let Ok(header_str) = ae.to_str() {
+                if is_identity_acceptable(header_str) {
+                    return Some(VariantKind::Raw);
+                }
+            } else {
                 return Some(VariantKind::Raw);
             }
-        } else {
-            return Some(VariantKind::Raw);
         }
+        return None;
     }
 
-    None
+    // Absent `Accept-Encoding`: strictly serve plain-text (`raw`) if cached, otherwise miss.
+    if has_raw {
+        Some(VariantKind::Raw)
+    } else {
+        None
+    }
 }
 
 /// Pre-compressed wire payload variants for a cached entry.
@@ -245,11 +254,13 @@ impl CacheEntry {
     pub fn negotiate_smart_variant(
         &self,
         accept_encoding: Option<&http::HeaderValue>,
+        preferred_encodings: &[CompressionAlgorithm],
     ) -> Option<(Bytes, Option<http::HeaderValue>)> {
         let kind = negotiate_variant_kind(
             self.variants.mask(),
             self.raw_body.is_some(),
             accept_encoding,
+            preferred_encodings,
         )?;
         let bytes = match kind {
             VariantKind::Zstd => self.variants.zstd.clone()?,
@@ -285,4 +296,73 @@ pub struct StoreVariantParams<'a> {
     pub payload: Bytes,
     pub variants: Option<CompressedVariants>,
     pub is_public: bool,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use http::HeaderValue;
+
+    #[test]
+    fn test_negotiate_variant_without_accept_encoding_requires_raw() {
+        let all_variants = VARIANT_BIT_ZSTD | VARIANT_BIT_BROTLI | VARIANT_BIT_GZIP;
+        let prefs = [
+            CompressionAlgorithm::Zstd,
+            CompressionAlgorithm::Brotli,
+            CompressionAlgorithm::Gzip,
+        ];
+
+        assert_eq!(
+            negotiate_variant_kind(all_variants, true, None, &prefs),
+            Some(VariantKind::Raw)
+        );
+        // Without raw variant, missing Accept-Encoding must miss so upstream can populate plain text.
+        assert_eq!(
+            negotiate_variant_kind(all_variants, false, None, &prefs),
+            None
+        );
+    }
+
+    #[test]
+    fn test_negotiate_variant_follows_configured_priority_and_whitelist() {
+        let all_variants = VARIANT_BIT_ZSTD | VARIANT_BIT_BROTLI | VARIANT_BIT_GZIP;
+        let ae_all = HeaderValue::from_static("gzip, br, zstd");
+
+        // Priority: gzip > br > zstd
+        assert_eq!(
+            negotiate_variant_kind(
+                all_variants,
+                true,
+                Some(&ae_all),
+                &[
+                    CompressionAlgorithm::Gzip,
+                    CompressionAlgorithm::Brotli,
+                    CompressionAlgorithm::Zstd
+                ]
+            ),
+            Some(VariantKind::Gzip)
+        );
+
+        // Allowlist strictly filters out zstd even when cached & requested by client.
+        let ae_zstd_only = HeaderValue::from_static("zstd");
+        let allow_br_gzip = [CompressionAlgorithm::Brotli, CompressionAlgorithm::Gzip];
+        assert_eq!(
+            negotiate_variant_kind(all_variants, true, Some(&ae_zstd_only), &allow_br_gzip),
+            Some(VariantKind::Raw)
+        );
+        assert_eq!(
+            negotiate_variant_kind(all_variants, false, Some(&ae_zstd_only), &allow_br_gzip),
+            None
+        );
+
+        // Empty preference list disables compressed variants and serves plain text or misses.
+        assert_eq!(
+            negotiate_variant_kind(all_variants, true, Some(&ae_all), &[]),
+            Some(VariantKind::Raw)
+        );
+        assert_eq!(
+            negotiate_variant_kind(all_variants, false, Some(&ae_all), &[]),
+            None
+        );
+    }
 }

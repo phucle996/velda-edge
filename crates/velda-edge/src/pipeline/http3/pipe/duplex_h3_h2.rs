@@ -190,7 +190,7 @@ pub async fn serve(
     let mut resp_ws = response.headers;
     if let Some(post_hooks) = &plan.post_response_hooks {
         let mut l7_resp = L7Response::new(response.status, Version::HTTP_3, resp_ws, Body::Empty);
-        velda_plugin::run_post_response_plugins(post_hooks, &req.headers, &mut l7_resp);
+        velda_plugin::run_post_response_plugins(post_hooks, &req.state, &req.headers, &mut l7_resp);
         response.status = l7_resp.status;
         resp_ws = l7_resp.headers;
     }

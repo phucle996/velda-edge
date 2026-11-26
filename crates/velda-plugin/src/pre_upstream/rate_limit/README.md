@@ -1,104 +1,71 @@
-# Rate Limit Plugin (`rate_limit`)
+# Pre-Upstream Rate Limiting Plugin (`rate_limit`)
 
-High-throughput request pacing and traffic shaping engine with multi-algorithm support, dual-backend architecture (in-memory lock-striped concurrent state + distributed Redis synchronization via shadow background workers), flexible key resolution strategies, and resilient failover behaviors.
+## Architecture Overview
 
----
+```text
+  Inbound L7 Request ──► RateLimitPlugin::on_upstream_request() [Hot Path: Zero IO / Zero Alloc]
+                               │
+                               ├─► 1. Lock-free sot_health check (Memory | Allow | Deny)
+                               ├─► 2. CompiledKeyExtractor (CSPRNG boot_salt SWAR hash)
+                               │       └─ Single strategy OR Hierarchical 4-tier cascade [H0, H0|H1, ...]
+                               ├─► 3. RateLimitArena:
+                               │       ├─ L1 CoreLane CAS micro-lease (~ns, zero lock)
+                               │       └─ 64-shard ShardSlab (16-way set-associative CLOCK eviction)
+                               ├─► Allowed (within burst or bounded overdraft grace)
+                               │       └─ Continue + x-ratelimit-limit / x-ratelimit-remaining
+                               └─► Exhausted (exceeds burst + overdraft_percent)
+                                       └─ Reject(TooManyRequests / 429) + bypass headers
 
-## 1. Overview & Pipeline Specification
+  Shadow Logistics Worker (when etp_id != null, pbww > 0):
+  ┌────────────────────────────────────────────────────────────────────────────────────────┐
+  │ collect_dirty_deltas() ──► RateLimitSotProvider (pure dispatch across 9 SoT ETPs):     │
+  │   redis | memcached | dynamodb | postgres | mysql | nats | clickhouse |                │
+  │   elasticsearch | s3   ──► atomic push + reconcile_cluster_totals()                    │
+  └────────────────────────────────────────────────────────────────────────────────────────┘
+```
 
-| Property | Value |
-| :--- | :--- |
-| **Plugin ID** | `rate_limit` |
-| **Canonical Phase** | `pre_upstream` |
-| **Execution Order** | Sequential FIFO based on route's `plugins` declaration order (First declared, first executed) |
-| **Reverse Capability** | `PluginCapability::header_only(AccessLevel::Read)` (Generates `Action::Reject(RejectReason::TooManyRequests)`) |
-| **Supported Protocols** | `ALL_L7` (HTTP/1.1, HTTP/2, HTTP/3, gRPC) |
-| **Hot-Path Overhead** | ~15ns local in-memory lock-striped concurrency; **Zero Network I/O** on traffic worker cores |
+## 1. What This Plugin Does
 
-### What it Protects
-Protects upstream backend services, connection pools, and edge proxy hardware against DDoS amplification, brute-force credential stuffing, API scraping, and upstream resource saturation.
+`rate_limit` protects backend upstreams from traffic spikes, spam bursts, and credential/IP rotation floods across both single-node and multi-node deployments:
+- **Hierarchical Multi-Header Rate Limiting**: Evaluates single keys (`client_ip`, `header`, `route`, `priority`, `composite`) or cumulative cascading header tiers (`hierarchical`) such as `[x-tenant-id, x-api-key, client_ip]` so attackers rotating IPs or keys cannot bypass tenant quotas.
+- **Core-Local Micro-Leasing + Bounded Soft Overdraft**: Uses lock-free per-core L1 `CoreLane` micro-leases (`lease_batch` up to 16 when `burst_capacity >= 64`) over a 64-shard `CLOCK` `ShardArena`, plus configurable bounded `overdraft_percent` grace above `burst_capacity` to prevent false positives from cross-core skew or asynchronous cluster sync jitter.
+- **Multi-SoT ETP Storage Support**: Optionally syncs dirty request deltas and reconciles cluster-wide totals on the Shadow Worker (`pbww > 0`) against any of **9 State-of-Truth (SoT) storage ETPs**: `redis`, `memcached`, `dynamodb`, `postgres`, `mysql`, `nats`, `clickhouse`, `elasticsearch`, and `s3`.
 
----
+## 2. Where It Sits in Velda Edge
 
-## 2. 100% Explicit Configuration Invariant
+- **Pipeline Stage**: `pre_upstream` (`PreUpstreamPlugin`, executed after routing and authentication/WAF filters, before upstream connection acquisition).
+- **Worker Placement**:
+  - Request decision runs strictly synchronously on **Frontline Traffic Workers** (`on_upstream_request`) with zero network calls and zero heap allocations.
+  - Distributed SoT counter push/reconciliation runs asynchronously on **Shadow Logistics Workers** (`run_background`, when `etp_id` is configured and `pbww > 0`).
+- **Supported Protocols**: `SupportedProtocols::ALL_L7` (HTTP/1.1, HTTP/2, HTTP/3, gRPC).
 
-> [!IMPORTANT]
-> **Strict Configuration Contract**: Every configuration parameter must be explicitly declared in `plugins.json`. No silent fallbacks or implicit defaults exist. All field values must be intentionally supplied according to your infrastructure requirements.
+## 3. Requirements & Prerequisites
 
-| Field | Type | Required | Constraints / Allowed Values | Recommended Value | Description |
-| :--- | :---: | :---: | :--- | :--- | :--- |
-| `algorithm` | String | **Yes** | `"token_bucket"` or `"sliding_window"` | `"token_bucket"` | Traffic pacing algorithm. |
-| `backend` | String | **Yes** | `"memory"` or `"redis"` | `"memory"` (single-node) / `"redis"` (distributed) | State store backend for bucket tracking. |
-| `rate_per_second` | Integer (u64) | **Yes** | `1 ..= 10000000` | `1000` | Sustained request rate allowed per second per client key. |
-| `burst_capacity` | Integer (u64) | **Yes** | `1 ..= 10000000` ($\ge \text{rate\_per\_second}$) | `2000` | Maximum burst bucket capacity for absorbing sudden traffic spikes. |
-| `key_strategy` | String | **Yes** | `"client_ip"`, `"header"`, `"route"`, or `"priority"` | `"priority"` | Strategy used to extract the client identification key. |
-| `key_headers` | Array of strings | **Yes** | Non-empty array of valid header names (or `["client_ip"]`) | `["x-api-key", "client_ip"]` | Header names evaluated in order to extract client identity. |
-| `fallback_behavior` | String | **Yes** | `"memory"`, `"allow"`, or `"deny"` | `"memory"` | Failover strategy if distributed Redis synchronization becomes unavailable. |
+- **Local-only mode (`etp_id: null`)**: Zero external dependencies; runs completely in RAM with `pbww = 0`.
+- **Cluster SoT mode (`etp_id: "<id>"`)**: Requires a matching entry in `etp.json` / `etp.bin` whose `kind` belongs to the 9 supported SoT storage ETPs (`redis`, `memcached`, `dynamodb`, `postgres`, `mysql`, `nats`, `clickhouse`, `elasticsearch`, `s3`). Non-SoT ETPs such as `kafka`, `loki`, or identity providers are rejected during `velda-sync` validation and plugin ETP attachment.
 
----
-
-## 3. Headers Contract
-
-### Request Headers Inspected
-- Fields listed in `key_headers` (e.g. `x-api-key`, `authorization`).
-- `"client_ip"` extracts the downstream peer IP from socket or `x-forwarded-for`.
-
-### Response Headers Injected on Limit Exceeded (Virtual 3-Column Tagging)
-When rate limit quota is exhausted, `RateLimitPlugin` tags the following headers as **Bit 1 (Bypass on Reject)** via `req.headers.insert_bypass(...)` and returns `Action::Reject(RejectReason::TooManyRequests)`:
-- `Retry-After`: Estimated cooldown period in seconds until capacity becomes available.
-- `x-ratelimit-reset`: Estimated cooldown period in seconds.
-- `x-ratelimit-limit`: Configured `rate_per_second`.
-- `x-ratelimit-remaining`: `0`.
-- `x-request-id`: Automatically retained from pre-loaded Slot 0 Bit 1 Bypass headers for end-to-end trace correlation.
-
-The downstream ingress engine converts `RejectReason::TooManyRequests` to:
-- **HTTP/1.1, HTTP/2, HTTP/3**: `429 Too Many Requests` early error response containing the Bit 1 bypass headers (including `x-request-id`).
-- **gRPC**: `RESOURCE_EXHAUSTED` status trailer containing the Bit 1 bypass metadata.
-
-All internal Bit 0 request headers are dropped, preventing header reflection or leak of sensitive routing tags.
-
----
-
-## 4. Configuration Examples
-
-### In-Memory Token Bucket Manifest (`plugins.json`)
+## 4. Quick Start Configuration
 
 ```json
 {
-  "schema_version": 1,
-  "plugins": [
-    {
-      "id": "rate_limit",
-      "config": {
-        "algorithm": "token_bucket",
-        "backend": "memory",
-        "rate_per_second": 1000,
-        "burst_capacity": 2000,
-        "key_strategy": "priority",
-        "key_headers": [
-          "x-api-key",
-          "client_ip"
-        ],
-        "fallback_behavior": "memory"
-      }
-    }
-  ]
+  "id": "rate_limit",
+  "config": {
+    "algorithm": "token_bucket",
+    "etp_id": "redis-main",
+    "rate_per_second": 1000,
+    "burst_capacity": 2000,
+    "overdraft_percent": 5,
+    "key_strategy": "hierarchical",
+    "key_headers": ["x-tenant-id", "x-api-key", "client_ip"],
+    "fallback_behavior": "memory",
+    "sync_interval_ms": 200
+  }
 }
 ```
 
-### Route Attachment (`routes.json`)
+## 5. Documentation Directory
 
-```json
-{
-  "id": "api-orders-route",
-  "match": {
-    "path": "/api/v1/orders"
-  },
-  "upstream_id": "orders-backend",
-  "plugins": [
-    "ip_filter",
-    "rate_limit",
-    "jwt_auth"
-  ]
-}
-```
+- [RUNBOOK.md](./RUNBOOK.md) — Complete configuration schema, scenarios, telemetry signals, and incident triage.
+- [ARCHITECTURE.md](./ARCHITECTURE.md) — Internal memory geometry (`CoreLane`, `ShardSlab`), CSPRNG SWAR hashing, and provider dispatch design.
+- [BENCHMARK.md](./BENCHMARK.md) — Standardized 5-tier benchmark matrix and x86-64-v3 assembly verification plan.
+- [TEST.md](./TEST.md) — Executed unit and integration test verification report.

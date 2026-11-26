@@ -63,13 +63,33 @@ use crate::error::EtpError;
 // ============================================================================
 
 /// Transport-level security mode for an ETP connection.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum EtpTransportSecurity {
-    #[default]
     Plain,
     Tls,
     Mtls,
+    #[serde(alias = "starttls")]
+    StartTls,
+}
+
+impl EtpTransportSecurity {
+    /// Canonical lowercase snake_case name matching JSON schema.
+    #[inline]
+    pub const fn as_str(&self) -> &'static str {
+        match self {
+            Self::Plain => "plain",
+            Self::Tls => "tls",
+            Self::Mtls => "mtls",
+            Self::StartTls => "start_tls",
+        }
+    }
+}
+
+impl std::fmt::Display for EtpTransportSecurity {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(self.as_str())
+    }
 }
 
 /// Supported TLS protocol version policies for outbound ETP connections.
@@ -341,15 +361,6 @@ fn parse_private_key_pem(pem: &str) -> Result<PrivateKeyDer<'static>, EtpError> 
 }
 
 impl EtpTlsConfig {
-    /// Derives the transport security mode from the configured TLS fields.
-    pub fn transport_security(&self) -> EtpTransportSecurity {
-        if self.client_cert_pem.is_some() || self.client_key_pem.is_some() {
-            EtpTransportSecurity::Mtls
-        } else {
-            EtpTransportSecurity::Tls
-        }
-    }
-
     /// Parses and validates `pinned_cert_sha256` into `[u64; 4]` little-endian integer words.
     pub fn parse_pinned_sha256_u64x4(&self) -> Result<Option<[u64; 4]>, EtpError> {
         let Some(raw) = &self.pinned_cert_sha256 else {
@@ -803,6 +814,69 @@ impl ColdConnectBlueprint {
             Err(err) => Err(err),
         }
     }
+
+    /// Establishes a fresh raw TCP socket with `TCP_NODELAY` (for StartTLS negotiation before upgrade).
+    pub async fn connect_tcp(&self) -> Result<TcpStream, EtpError> {
+        let timeout_ms = u64::try_from(self.connect_timeout.as_millis()).unwrap_or(u64::MAX);
+        match tokio::time::timeout(self.connect_timeout, connect_tcp_target(&self.target)).await {
+            Ok(res) => res,
+            Err(_) => Err(EtpError::Timeout {
+                id: self.id.to_string(),
+                timeout_ms,
+            }),
+        }
+    }
+
+    /// Upgrades an already-connected TCP socket (after protocol StartTLS negotiation) to [`EtpStream::Tls`].
+    pub async fn upgrade_tls(&self, tcp: TcpStream) -> Result<EtpStream, EtpError> {
+        let Some((client_config, server_name)) = &self.tls else {
+            return Err(EtpError::Tls(format!(
+                "ETP '{}' cannot upgrade to TLS without compiled TLS configuration",
+                self.id
+            )));
+        };
+        let timeout_ms = u64::try_from(self.connect_timeout.as_millis()).unwrap_or(u64::MAX);
+        let connector = TlsConnector::from(Arc::clone(client_config));
+        match tokio::time::timeout(
+            self.connect_timeout,
+            connector.connect(server_name.clone(), tcp),
+        )
+        .await
+        {
+            Ok(Ok(tls_stream)) => Ok(EtpStream::Tls(Box::new(tls_stream))),
+            Ok(Err(e)) => Err(EtpError::Tls(format!("TLS handshake failed: {e}"))),
+            Err(_) => Err(EtpError::Timeout {
+                id: self.id.to_string(),
+                timeout_ms,
+            }),
+        }
+    }
+}
+
+async fn connect_tcp_target(target: &ColdTargetAddr) -> Result<TcpStream, EtpError> {
+    let tcp = match target {
+        ColdTargetAddr::Ip { addr, .. } => TcpStream::connect(*addr).await?,
+        ColdTargetAddr::Dns {
+            host,
+            port,
+            port_be,
+            ..
+        } => {
+            let cached = target.cached_ip_u128();
+            if cached != 0 {
+                let cached_addr = ip_u128_to_socket_addr(cached, *port_be);
+                if let Ok(stream) = TcpStream::connect(cached_addr).await {
+                    stream
+                } else {
+                    connect_and_freeze_dns(target, host, *port).await?
+                }
+            } else {
+                connect_and_freeze_dns(target, host, *port).await?
+            }
+        }
+    };
+    tcp.set_nodelay(true)?;
+    Ok(tcp)
 }
 
 /// Unified TCP or TLS stream connected to an External Third-Party endpoint.
@@ -823,28 +897,7 @@ impl EtpStream {
         let timeout_ms = u64::try_from(timeout.as_millis()).unwrap_or(u64::MAX);
 
         let fut = async {
-            let tcp = match target {
-                ColdTargetAddr::Ip { addr, .. } => TcpStream::connect(*addr).await?,
-                ColdTargetAddr::Dns {
-                    host,
-                    port,
-                    port_be,
-                    ..
-                } => {
-                    let cached = target.cached_ip_u128();
-                    if cached != 0 {
-                        let cached_addr = ip_u128_to_socket_addr(cached, *port_be);
-                        if let Ok(stream) = TcpStream::connect(cached_addr).await {
-                            stream
-                        } else {
-                            connect_and_freeze_dns(target, host, *port).await?
-                        }
-                    } else {
-                        connect_and_freeze_dns(target, host, *port).await?
-                    }
-                }
-            };
-            tcp.set_nodelay(true)?;
+            let tcp = connect_tcp_target(target).await?;
 
             if let Some((client_config, server_name)) = tls {
                 let connector = TlsConnector::from(Arc::clone(client_config));

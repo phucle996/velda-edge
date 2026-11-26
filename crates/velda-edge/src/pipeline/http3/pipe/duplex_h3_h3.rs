@@ -111,7 +111,7 @@ pub async fn serve(
             stream_resp.headers,
             Body::Empty,
         );
-        velda_plugin::run_post_response_plugins(post_hooks, &req.headers, &mut l7_resp);
+        velda_plugin::run_post_response_plugins(post_hooks, &req.state, &req.headers, &mut l7_resp);
         stream_resp.status = l7_resp.status;
         stream_resp.headers = l7_resp.headers;
     }

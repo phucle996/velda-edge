@@ -7,7 +7,7 @@
 //!   [1] parse_etps(raw_json) ──► EtpFile { schema_version == 1, revision, etps }
 //!         │
 //!         ▼
-//!   [2] validate_etps(&file) ──► unique non-empty id, EtpKind, pool > 0, TLS PEM, endpoint
+//!   [2] validate_etps(&file) ──► unique non-empty id, EtpKind, security, pool > 0, TLS, host/port
 //!         │
 //!         ▼
 //!   [3] validate_plugin_etp_references(&plugins, &etps) ──► verify etp_id & kind match
@@ -36,7 +36,7 @@ use std::path::Path;
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use velda_etp::config::json_value_bincode;
-use velda_etp::{EtpEntryConfig, EtpKind, EtpPoolSettings, EtpTlsConfig};
+use velda_etp::{EtpEntryConfig, EtpKind, EtpPoolSettings, EtpTlsConfig, EtpTransportSecurity};
 use velda_plugin::PluginConfig;
 
 use crate::SyncError;
@@ -79,6 +79,7 @@ fn default_settings() -> serde_json::Value {
 pub struct EtpSyncConfig {
     pub id: String,
     pub kind: String,
+    pub security: EtpTransportSecurity,
     #[serde(default)]
     pub pool: EtpPoolSettings,
     #[serde(default)]
@@ -98,6 +99,7 @@ impl EtpSyncConfig {
         Ok(EtpEntryConfig {
             id: trimmed_id,
             kind,
+            security: self.security,
             pool: self.pool.clone(),
             tls: self.tls.clone(),
             settings: self.settings.clone(),
@@ -143,8 +145,8 @@ pub fn parse_etps(raw_json: &[u8]) -> Result<EtpFile, SyncError> {
 // Phase 3: Semantic & Cross-Domain Validation
 // ============================================================================
 
-/// Validates ETP entries for unique IDs, supported kinds, pool bounds, TLS PEM syntax,
-/// and endpoint target configuration.
+/// Validates ETP entries for unique IDs, supported kinds, transport security, pool bounds,
+/// TLS PEM syntax, and host/port target configuration.
 pub fn validate_etps(file: &EtpFile) -> Result<(), SyncError> {
     if file.schema_version != 1 {
         return Err(SyncError::Validation {
@@ -180,21 +182,80 @@ pub fn validate_etps(file: &EtpFile) -> Result<(), SyncError> {
                 domain: "etp".into(),
                 reason: e.to_string(),
             })?;
+        // Run provider-specific settings validation cleanly before writing etp.bin
+        let _ = velda_etp::registry::build_instance(&runtime_entry).map_err(|e| {
+            SyncError::Validation {
+                domain: "etp".into(),
+                reason: e.to_string(),
+            }
+        })?;
     }
 
     Ok(())
 }
 
-fn expected_etp_kind_for_plugin(plugin_id: &str) -> Option<EtpKind> {
+fn allowed_etp_kinds_for_plugin(plugin_id: &str) -> Option<&'static [EtpKind]> {
     match plugin_id {
-        "openai_token_quota" | "rate_limit" | "api_metering" => Some(EtpKind::Redis),
-        "clickhouse_log_shipper" => Some(EtpKind::ClickHouse),
-        "s3_log_shipper" => Some(EtpKind::S3),
-        "loki_log_shipper" => Some(EtpKind::Loki),
-        "elasticsearch_log_shipper" => Some(EtpKind::Elasticsearch),
-        "otlp_metrics_exporter" | "otlp_log_shipper" | "otlp_trace_exporter" => Some(EtpKind::Otlp),
-        "kafka_log_shipper" => Some(EtpKind::Kafka),
-        "statsd_exporter" => Some(EtpKind::Statsd),
+        "openai_token_quota" | "api_metering" => Some(&[
+            EtpKind::Redis,
+            EtpKind::Valkey,
+            EtpKind::Dragonfly,
+            EtpKind::AwsElastiCache,
+            EtpKind::GcpMemorystore,
+            EtpKind::Upstash,
+            EtpKind::Postgres,
+            EtpKind::MySql,
+            EtpKind::DynamoDb,
+        ]),
+        "rate_limit" => Some(&[
+            EtpKind::Redis,
+            EtpKind::Valkey,
+            EtpKind::Dragonfly,
+            EtpKind::AwsElastiCache,
+            EtpKind::GcpMemorystore,
+            EtpKind::Upstash,
+            EtpKind::Memcached,
+            EtpKind::DynamoDb,
+            EtpKind::Postgres,
+            EtpKind::MySql,
+            EtpKind::Nats,
+            EtpKind::ClickHouse,
+            EtpKind::Elasticsearch,
+            EtpKind::S3,
+        ]),
+        "clickhouse_log_shipper" => Some(&[EtpKind::ClickHouse]),
+        "s3_log_shipper" => Some(&[EtpKind::S3]),
+        "loki_log_shipper" => Some(&[EtpKind::Loki]),
+        "elasticsearch_log_shipper" => Some(&[EtpKind::Elasticsearch]),
+        "otlp_metrics_exporter" | "otlp_log_shipper" | "otlp_trace_exporter" => {
+            Some(&[EtpKind::Otlp])
+        }
+        "kafka_log_shipper" => Some(&[EtpKind::Kafka]),
+        "statsd_exporter" => Some(&[EtpKind::Statsd]),
+        "jwt_auth" => Some(&[
+            EtpKind::Vault,
+            EtpKind::AwsSecretsManager,
+            EtpKind::S3,
+            EtpKind::Keycloak,
+            EtpKind::Hydra,
+            EtpKind::Authelia,
+            EtpKind::Okta,
+            EtpKind::Auth0,
+            EtpKind::EntraId,
+            EtpKind::Cognito,
+            EtpKind::Oidc,
+        ]),
+        "oauth2_introspection" => Some(&[
+            EtpKind::Vault,
+            EtpKind::Keycloak,
+            EtpKind::Hydra,
+            EtpKind::Authelia,
+            EtpKind::Okta,
+            EtpKind::Auth0,
+            EtpKind::EntraId,
+            EtpKind::Cognito,
+            EtpKind::Oidc,
+        ]),
         _ => None,
     }
 }
@@ -218,7 +279,7 @@ pub fn validate_plugin_etp_references(
         let Some(obj) = plugin.config.as_object() else {
             continue;
         };
-        let Some(etp_id_val) = obj.get("etp_id") else {
+        let Some(etp_id_val) = obj.get("etp_id").filter(|v| !v.is_null()) else {
             continue;
         };
         let etp_id = etp_id_val
@@ -273,19 +334,32 @@ pub fn validate_plugin_etp_references(
             }
         }
 
-        if let Some(expected_kind) = expected_etp_kind_for_plugin(&plugin.id)
-            && actual_kind != expected_kind
-        {
-            return Err(SyncError::Validation {
-                domain: "plugins".into(),
-                reason: format!(
-                    "Plugin '{}' requires ETP kind '{}', but etp_id '{}' has kind '{}'",
-                    plugin.id,
-                    expected_kind.as_str(),
-                    etp_id,
-                    actual_kind.as_str()
-                ),
-            });
+        match allowed_etp_kinds_for_plugin(&plugin.id) {
+            Some(allowed_kinds) if !allowed_kinds.contains(&actual_kind) => {
+                let expected_list: Vec<&str> = allowed_kinds.iter().map(EtpKind::as_str).collect();
+                return Err(SyncError::Validation {
+                    domain: "plugins".into(),
+                    reason: format!(
+                        "Plugin '{}' requires ETP kind in [{}], but etp_id '{}' has kind '{}'",
+                        plugin.id,
+                        expected_list.join(", "),
+                        etp_id,
+                        actual_kind.as_str()
+                    ),
+                });
+            }
+            None => {
+                return Err(SyncError::Validation {
+                    domain: "plugins".into(),
+                    reason: format!(
+                        "Plugin '{}' does not support 'etp_id' references (referenced '{}' of kind '{}')",
+                        plugin.id,
+                        etp_id,
+                        actual_kind.as_str()
+                    ),
+                });
+            }
+            Some(_) => {}
         }
     }
 
@@ -441,6 +515,7 @@ mod tests {
                 {
                     "id": "redis-main",
                     "kind": "redis",
+                    "security": "plain",
                     "pool": {
                         "pool_size": 8,
                         "connect_timeout_ms": 2000,
@@ -454,8 +529,11 @@ mod tests {
                 {
                     "id": "loki-primary",
                     "kind": "loki",
+                    "security": "tls",
                     "settings": {
-                        "endpoint": "https://loki.example.com:3100/loki/api/v1/push"
+                        "host": "loki.example.com",
+                        "port": 3100,
+                        "base_path": "/loki/api/v1/push"
                     }
                 }
             ]
@@ -492,8 +570,8 @@ mod tests {
             "schema_version": 1,
             "revision": 1,
             "etps": [
-                { "id": "dup", "kind": "redis", "settings": { "host": "127.0.0.1", "port": 6379 } },
-                { "id": "dup", "kind": "loki", "settings": { "host": "127.0.0.1", "port": 3100 } }
+                { "id": "dup", "kind": "redis", "security": "plain", "settings": { "host": "127.0.0.1", "port": 6379 } },
+                { "id": "dup", "kind": "loki", "security": "plain", "settings": { "host": "127.0.0.1", "port": 3100 } }
             ]
         }))
         .unwrap();
@@ -507,6 +585,7 @@ mod tests {
                 {
                     "id": "tls-bad",
                     "kind": "loki",
+                    "security": "tls",
                     "tls": { "ca_cert_pem": "NOT A PEM" },
                     "settings": { "host": "127.0.0.1", "port": 3100 }
                 }
@@ -525,6 +604,7 @@ mod tests {
                 {
                     "id": "tls-ok",
                     "kind": "loki",
+                    "security": "tls",
                     "tls": { "ca_cert_pem": cert.cert.pem() },
                     "settings": { "host": "127.0.0.1", "port": 3100 }
                 }
@@ -533,6 +613,38 @@ mod tests {
         .unwrap();
         let file = parse_etps(&good_pem_json).unwrap();
         validate_etps(&file).unwrap();
+
+        // Rejects URL-style endpoint key and mismatched plain+tls config at sync validation
+        let url_etp_json = serde_json::to_vec(&serde_json::json!({
+            "schema_version": 1,
+            "revision": 1,
+            "etps": [
+                {
+                    "id": "url-rejected",
+                    "kind": "loki",
+                    "security": "plain",
+                    "settings": { "endpoint": "http://127.0.0.1:3100" }
+                }
+            ]
+        }))
+        .unwrap();
+        assert!(validate_etps(&parse_etps(&url_etp_json).unwrap()).is_err());
+
+        let plain_tls_json = serde_json::to_vec(&serde_json::json!({
+            "schema_version": 1,
+            "revision": 1,
+            "etps": [
+                {
+                    "id": "plain-tls-rejected",
+                    "kind": "loki",
+                    "security": "plain",
+                    "tls": { "ca_cert_pem": cert.cert.pem() },
+                    "settings": { "host": "127.0.0.1", "port": 3100 }
+                }
+            ]
+        }))
+        .unwrap();
+        assert!(validate_etps(&parse_etps(&plain_tls_json).unwrap()).is_err());
     }
 
     #[test]
@@ -566,5 +678,301 @@ mod tests {
             config: serde_json::json!({ "etp_id": "redis-main", "etp_kind": "s3" }),
         }];
         assert!(validate_plugin_etp_references(&explicit_mismatch, &etp_file.etps).is_err());
+
+        // Multi-kind jwt_auth accepts Vault, Keycloak, etc. while rejecting Redis
+        let multi_etps = vec![
+            EtpSyncConfig {
+                id: "vault-main".into(),
+                kind: "vault".into(),
+                security: EtpTransportSecurity::Plain,
+                pool: EtpPoolSettings::default(),
+                tls: None,
+                settings: serde_json::json!({ "host": "127.0.0.1", "port": 8200, "token": "root" }),
+            },
+            EtpSyncConfig {
+                id: "kc-main".into(),
+                kind: "keycloak".into(),
+                security: EtpTransportSecurity::Tls,
+                pool: EtpPoolSettings::default(),
+                tls: None,
+                settings: serde_json::json!({ "host": "kc.local", "port": 8443 }),
+            },
+            etp_file.etps[0].clone(),
+        ];
+        validate_plugin_etp_references(
+            &[PluginConfig {
+                id: "jwt_auth".into(),
+                config: serde_json::json!({ "etp_id": "vault-main" }),
+            }],
+            &multi_etps,
+        )
+        .unwrap();
+        validate_plugin_etp_references(
+            &[PluginConfig {
+                id: "jwt_auth".into(),
+                config: serde_json::json!({ "etp_id": "kc-main" }),
+            }],
+            &multi_etps,
+        )
+        .unwrap();
+        validate_plugin_etp_references(
+            &[PluginConfig {
+                id: "jwt_auth".into(),
+                config: serde_json::json!({ "mode": "internal", "etp_id": null }),
+            }],
+            &multi_etps,
+        )
+        .unwrap();
+        assert!(
+            validate_plugin_etp_references(
+                &[PluginConfig {
+                    id: "jwt_auth".into(),
+                    config: serde_json::json!({ "etp_id": "redis-main" }),
+                }],
+                &multi_etps
+            )
+            .is_err()
+        );
+        validate_plugin_etp_references(
+            &[PluginConfig {
+                id: "oauth2_introspection".into(),
+                config: serde_json::json!({ "etp_id": "vault-main" }),
+            }],
+            &multi_etps,
+        )
+        .unwrap();
+        validate_plugin_etp_references(
+            &[PluginConfig {
+                id: "oauth2_introspection".into(),
+                config: serde_json::json!({ "etp_id": "kc-main" }),
+            }],
+            &multi_etps,
+        )
+        .unwrap();
+        assert!(
+            validate_plugin_etp_references(
+                &[PluginConfig {
+                    id: "oauth2_introspection".into(),
+                    config: serde_json::json!({ "etp_id": "redis-main" }),
+                }],
+                &multi_etps
+            )
+            .is_err()
+        );
+        // Arbitrary plugin without ETP support cannot silently accept an etp_id
+        assert!(
+            validate_plugin_etp_references(
+                &[PluginConfig {
+                    id: "cors".into(),
+                    config: serde_json::json!({ "etp_id": "redis-main" }),
+                }],
+                &multi_etps
+            )
+            .is_err()
+        );
+    }
+
+    #[test]
+    fn test_rate_limit_accepts_9_sot_storage_etps_and_rejects_kafka() {
+        let sot_etps = vec![
+            EtpSyncConfig {
+                id: "sot-redis".into(),
+                kind: "redis".into(),
+                security: EtpTransportSecurity::Plain,
+                pool: EtpPoolSettings::default(),
+                tls: None,
+                settings: serde_json::json!({ "host": "127.0.0.1" }),
+            },
+            EtpSyncConfig {
+                id: "sot-mc".into(),
+                kind: "memcached".into(),
+                security: EtpTransportSecurity::Plain,
+                pool: EtpPoolSettings::default(),
+                tls: None,
+                settings: serde_json::json!({ "host": "127.0.0.1" }),
+            },
+            EtpSyncConfig {
+                id: "sot-ddb".into(),
+                kind: "dynamodb".into(),
+                security: EtpTransportSecurity::Tls,
+                pool: EtpPoolSettings::default(),
+                tls: None,
+                settings: serde_json::json!({ "region": "us-east-1" }),
+            },
+            EtpSyncConfig {
+                id: "sot-pg".into(),
+                kind: "postgres".into(),
+                security: EtpTransportSecurity::Plain,
+                pool: EtpPoolSettings::default(),
+                tls: None,
+                settings: serde_json::json!({ "host": "127.0.0.1" }),
+            },
+            EtpSyncConfig {
+                id: "sot-mysql".into(),
+                kind: "mysql".into(),
+                security: EtpTransportSecurity::Plain,
+                pool: EtpPoolSettings::default(),
+                tls: None,
+                settings: serde_json::json!({ "host": "127.0.0.1" }),
+            },
+            EtpSyncConfig {
+                id: "sot-nats".into(),
+                kind: "nats".into(),
+                security: EtpTransportSecurity::Plain,
+                pool: EtpPoolSettings::default(),
+                tls: None,
+                settings: serde_json::json!({ "host": "127.0.0.1" }),
+            },
+            EtpSyncConfig {
+                id: "sot-ch".into(),
+                kind: "clickhouse".into(),
+                security: EtpTransportSecurity::Plain,
+                pool: EtpPoolSettings::default(),
+                tls: None,
+                settings: serde_json::json!({ "host": "127.0.0.1", "port": 8123 }),
+            },
+            EtpSyncConfig {
+                id: "sot-es".into(),
+                kind: "elasticsearch".into(),
+                security: EtpTransportSecurity::Plain,
+                pool: EtpPoolSettings::default(),
+                tls: None,
+                settings: serde_json::json!({ "host": "127.0.0.1", "port": 9200 }),
+            },
+            EtpSyncConfig {
+                id: "sot-s3".into(),
+                kind: "s3".into(),
+                security: EtpTransportSecurity::Plain,
+                pool: EtpPoolSettings::default(),
+                tls: None,
+                settings: serde_json::json!({ "host": "127.0.0.1", "port": 9000, "bucket": "rl" }),
+            },
+            EtpSyncConfig {
+                id: "sot-valkey".into(),
+                kind: "valkey".into(),
+                security: EtpTransportSecurity::Plain,
+                pool: EtpPoolSettings::default(),
+                tls: None,
+                settings: serde_json::json!({ "host": "127.0.0.1" }),
+            },
+            EtpSyncConfig {
+                id: "sot-dragonfly".into(),
+                kind: "dragonfly".into(),
+                security: EtpTransportSecurity::Plain,
+                pool: EtpPoolSettings::default(),
+                tls: None,
+                settings: serde_json::json!({ "host": "127.0.0.1" }),
+            },
+            EtpSyncConfig {
+                id: "sot-aws-ec".into(),
+                kind: "aws_elasticache".into(),
+                security: EtpTransportSecurity::Plain,
+                pool: EtpPoolSettings::default(),
+                tls: None,
+                settings: serde_json::json!({ "host": "127.0.0.1" }),
+            },
+            EtpSyncConfig {
+                id: "sot-gcp-ms".into(),
+                kind: "gcp_memorystore".into(),
+                security: EtpTransportSecurity::Plain,
+                pool: EtpPoolSettings::default(),
+                tls: None,
+                settings: serde_json::json!({ "host": "127.0.0.1" }),
+            },
+            EtpSyncConfig {
+                id: "sot-upstash".into(),
+                kind: "upstash".into(),
+                security: EtpTransportSecurity::Tls,
+                pool: EtpPoolSettings::default(),
+                tls: None,
+                settings: serde_json::json!({ "host": "up.local", "token": "t" }),
+            },
+            EtpSyncConfig {
+                id: "delta-kafka".into(),
+                kind: "kafka".into(),
+                security: EtpTransportSecurity::Plain,
+                pool: EtpPoolSettings::default(),
+                tls: None,
+                settings: serde_json::json!({ "brokers": ["127.0.0.1:9092"] }),
+            },
+        ];
+
+        for sot_id in [
+            "sot-redis",
+            "sot-mc",
+            "sot-ddb",
+            "sot-pg",
+            "sot-mysql",
+            "sot-nats",
+            "sot-ch",
+            "sot-es",
+            "sot-s3",
+            "sot-valkey",
+            "sot-dragonfly",
+            "sot-aws-ec",
+            "sot-gcp-ms",
+            "sot-upstash",
+        ] {
+            validate_plugin_etp_references(
+                &[PluginConfig {
+                    id: "rate_limit".into(),
+                    config: serde_json::json!({ "etp_id": sot_id }),
+                }],
+                &sot_etps,
+            )
+            .unwrap_or_else(|e| panic!("rate_limit should accept {sot_id}: {e}"));
+        }
+
+        for sot_id in [
+            "sot-redis",
+            "sot-valkey",
+            "sot-dragonfly",
+            "sot-aws-ec",
+            "sot-gcp-ms",
+            "sot-upstash",
+            "sot-pg",
+            "sot-mysql",
+            "sot-ddb",
+        ] {
+            for plugin_id in ["api_metering", "openai_token_quota"] {
+                validate_plugin_etp_references(
+                    &[PluginConfig {
+                        id: plugin_id.into(),
+                        config: serde_json::json!({ "etp_id": sot_id }),
+                    }],
+                    &sot_etps,
+                )
+                .unwrap_or_else(|e| panic!("{plugin_id} should accept {sot_id}: {e}"));
+            }
+        }
+
+        // Memcached/ClickHouse/S3 must be rejected for billing/token-quota plugins
+        for rejected in ["sot-mc", "sot-ch", "sot-s3", "delta-kafka"] {
+            for plugin_id in ["api_metering", "openai_token_quota"] {
+                assert!(
+                    validate_plugin_etp_references(
+                        &[PluginConfig {
+                            id: plugin_id.into(),
+                            config: serde_json::json!({ "etp_id": rejected }),
+                        }],
+                        &sot_etps,
+                    )
+                    .is_err(),
+                    "{plugin_id} must reject {rejected}"
+                );
+            }
+        }
+
+        // Kafka is NOT a State-of-Truth storage and must be rejected for rate_limit
+        assert!(
+            validate_plugin_etp_references(
+                &[PluginConfig {
+                    id: "rate_limit".into(),
+                    config: serde_json::json!({ "etp_id": "delta-kafka" }),
+                }],
+                &sot_etps,
+            )
+            .is_err()
+        );
     }
 }

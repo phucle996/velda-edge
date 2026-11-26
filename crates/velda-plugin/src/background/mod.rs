@@ -20,7 +20,6 @@ pub mod acme_cert_rotator;
 pub mod clickhouse_log_shipper;
 pub mod elasticsearch_log_shipper;
 pub mod health_probe;
-pub mod jwks_rotator;
 pub mod kafka_log_shipper;
 pub mod loki_log_shipper;
 pub mod otlp_log_shipper;
@@ -36,7 +35,6 @@ pub use acme_cert_rotator::{AcmeCertRotatorConfig, AcmeCertRotatorPlugin};
 pub use clickhouse_log_shipper::{ClickHouseLogShipperConfig, ClickHouseLogShipperPlugin};
 pub use elasticsearch_log_shipper::{ElasticsearchLogShipperConfig, ElasticsearchLogShipperPlugin};
 pub use health_probe::{HealthProbeConfig, HealthProbePlugin, HealthState};
-pub use jwks_rotator::{JwksRotatorConfig, JwksRotatorPlugin};
 pub use kafka_log_shipper::{KafkaLogShipperConfig, KafkaLogShipperPlugin};
 pub use loki_log_shipper::{LokiLogShipperConfig, LokiLogShipperPlugin};
 pub use otlp_log_shipper::{OtlpLogShipperConfig, OtlpLogShipperPlugin};
@@ -76,24 +74,9 @@ pub trait BackgroundPlugin: Send + Sync {
         Direction::Background
     }
 
-    /// If this background plugin acts as a companion rotator to `jwt_auth`, returns the target `jwt_auth` plugin ID.
-    #[inline(always)]
-    fn target_jwt_auth_id(&self) -> Option<&str> {
-        None
-    }
-
     /// Plugin Background Workload Weight (`0..=100`, where `0` = none, `1..=100` = shadow daemon weight)
     /// representing compute intensity, memory footprint, and cadence for static multi-core LPT bin-packing.
     fn pbww(&self) -> u32;
-
-    /// Attaches the shared pre-allocated [`crate::pre_upstream::jwt_auth::table::SharedJwksStore`] from the target `jwt_auth` plugin.
-    #[inline(always)]
-    fn attach_shared_jwks_store(
-        &self,
-        _store: Arc<crate::pre_upstream::jwt_auth::table::SharedJwksStore>,
-    ) -> Result<(), PluginError> {
-        Ok(())
-    }
 
     /// If this background plugin borrows connections from an External Third-Party (`velda-etp`)
     /// data source, returns the target `etp_id`.
@@ -120,7 +103,6 @@ pub fn owns_id(id: &str) -> bool {
             | "otlp_metrics_exporter"
             | "statsd_exporter"
             | "acme_cert_rotator"
-            | "jwks_rotator"
             | "loki_log_shipper"
             | "std_log_shipper"
             | "otlp_log_shipper"
@@ -159,10 +141,6 @@ pub fn instantiate(
         }
         "acme_cert_rotator" => {
             let rotator = AcmeCertRotatorPlugin::from_config(config)?;
-            Ok(Arc::new(rotator))
-        }
-        "jwks_rotator" => {
-            let rotator = JwksRotatorPlugin::from_config(config)?;
             Ok(Arc::new(rotator))
         }
         "loki_log_shipper" => {

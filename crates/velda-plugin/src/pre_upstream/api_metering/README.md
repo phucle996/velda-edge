@@ -29,7 +29,7 @@ In steady state, almost every request is checked and billed **in-memory on the l
 - **Exact Integer Wallet ($10^{-6}$ Credits)**: Deducts `cost_per_req_micro_credits` using 64-bit signed integers (`1 credit = 1,000,000 micro-credits`) so billing never suffers floating-point rounding drift.
 - **Up to 4 Concurrent Windows per Tier**: Mix `fixed_window`, `sliding_window`, and `token_bucket` (e.g. a 60-second burst limit alongside a 30-day monthly cap).
 - **Predictable Exhaustion Policies**: Choose per tier between `402 Payment Required` (JSON diagnostic body), `429 Too Many Requests`, or `passthrough` (allow traffic while recording overage debt).
-- **Optional Multi-Gateway Redis Sync**: A background Shadow Worker periodically batches local deductions to Redis (`HINCRBY`) without slowing down live traffic.
+- **Optional Multi-Gateway SoT Sync**: A background Shadow Worker periodically batches local deductions using Lua-free `HINCRBY` / parameterized SQL CTE / DynamoDB `UpdateItem` across 9 SoT ETP backends (`redis`, `valkey`, `dragonfly`, `aws_elasticache`, `gcp_memorystore`, `upstash`, `postgres`, `mysql`, `dynamodb`) without slowing down live traffic.
 
 ---
 
@@ -49,7 +49,7 @@ In steady state, almost every request is checked and billed **in-memory on the l
 
 - An L7 listener (`http` or `grpc`).
 - Upstream authentication (such as `api_key_auth`, `jwt_auth`, or `hmac_auth`) or trusted ingress headers supplying at least the first header in `account_headers`.
-- *(Optional)* A `redis` entry in `etp.json` referenced by `etp_id` (omit `etp_id` for node-local-only metering).
+- *(Optional)* A supported SoT ETP (`redis`, `valkey`, `dragonfly`, `aws_elasticache`, `gcp_memorystore`, `upstash`, `postgres`, `mysql`, or `dynamodb`) in `etp.json` referenced by `etp_id` (omit `etp_id` for node-local-only metering; `postgres`/`mysql`/`dynamodb` auto-create `velda.velda_api_metering` / `velda_api_metering`).
 
 ---
 

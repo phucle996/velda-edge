@@ -22,6 +22,7 @@ use crate::pipeline::{DownstreamMeta, PipeOutcome};
 use crate::upstream::Http2Upstream;
 
 /// Serves a client-streaming HTTP/2 downstream stream forwarded to an HTTP/2 upstream backend.
+#[allow(clippy::too_many_arguments)]
 pub async fn serve(
     req_head: Http2ServerRequestHead,
     mut receiver: Http2StreamReceiver,
@@ -29,6 +30,7 @@ pub async fn serve(
     meta: Arc<DownstreamMeta>,
     config: Http2Config,
     upstream: &Arc<Http2Upstream>,
+    req_state: &velda_core::RequestState,
     plan: &velda_plugin::RoutePluginPlan,
 ) -> PipeOutcome {
     // 1. Fail-fast: Acquire upstream multiplexed connection before streaming
@@ -197,7 +199,12 @@ pub async fn serve(
             resp_body,
         );
         if let Some(post_hooks) = &plan.post_response_hooks {
-            velda_plugin::run_post_response_plugins(post_hooks, &req_head.headers, &mut resp);
+            velda_plugin::run_post_response_plugins(
+                post_hooks,
+                req_state,
+                &req_head.headers,
+                &mut resp,
+            );
         }
         meta.inject_response_headers(&mut resp.headers);
         responder.send_response(&resp)?;

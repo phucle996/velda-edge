@@ -1,17 +1,19 @@
-//! Condition Evaluation, Disjoint Interval IP Matching, and Header Overrides.
+//! Condition Evaluation, Disjoint Interval IP Matching, and Pre-Hashed Header Overrides.
 //!
-//! # Architecture & Performance Invariants
-//! - **Disjoint Interval IP Matching**: All IPv4 and IPv6 CIDR prefixes are converted at
-//!   instantiation time into sorted, non-overlapping `[start, end]` integer ranges (`u32` for IPv4,
-//!   `u128` for IPv6). Matching uses $O(\log N)$ binary search (`partition_point`) with zero
-//!   heap allocations and zero linear scanning.
-//! - **Header Matching**: Fast constant-time header lookup for presence or exact string equality.
-//! - **Dynamic Overrides**: Evaluates `x-fault-delay-ms` and `x-fault-abort-code` only when
-//!   `allow_header_override` is explicitly set to `true`. Max delay is strictly clamped to
-//!   `max_override_delay_ms` to prevent Slowloris denial-of-service vulnerabilities.
+//! ```text
+//!   L7Request
+//!     ├─► client_ip ──► req.state.client_ip (or pre-hashed X-Real-IP / X-Forwarded-For)
+//!     │                    └─► IpRangeMatcher::contains (1 range: cmp; N ranges: O(log N) binary search)
+//!     └─► header_match ──► pre-hashed HeaderKey (AVX2/NEON/SWAR zero runtime hash)
+//! ```
 
 use http::header::HeaderName;
-use velda_core::L7Request;
+use velda_core::{HeaderKey, L7Request};
+
+const KEY_X_REAL_IP: HeaderKey = HeaderKey::from_static("x-real-ip");
+const KEY_X_FORWARDED_FOR: HeaderKey = HeaderKey::from_static("x-forwarded-for");
+pub(super) const KEY_FAULT_DELAY_MS: HeaderKey = HeaderKey::from_static("x-fault-delay-ms");
+pub(super) const KEY_FAULT_ABORT_CODE: HeaderKey = HeaderKey::from_static("x-fault-abort-code");
 
 /// Strongly typed matcher for candidate downstream IP addresses using disjoint integer intervals.
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
@@ -169,23 +171,35 @@ fn merge_intervals_u128(mut intervals: Vec<(u128, u128)>) -> Vec<(u128, u128)> {
     merged
 }
 
-/// Rule for matching incoming HTTP request headers.
+/// Rule for matching incoming HTTP request headers using pre-hashed [`HeaderKey`]s.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum HeaderMatchRule {
     /// Matches if header is present, regardless of value.
-    Present(HeaderName),
+    Present(HeaderKey),
     /// Matches if header is present and its UTF-8 value matches `expected`.
-    Exact(HeaderName, String),
+    Exact(HeaderKey, String),
 }
 
 impl HeaderMatchRule {
-    /// Evaluates this rule against request headers.
+    /// Constructs a presence rule from a [`HeaderName`], pre-computing its SIMD tag once.
+    #[inline]
+    pub fn present(name: HeaderName) -> Self {
+        Self::Present(HeaderKey::from_name(name))
+    }
+
+    /// Constructs an exact-value rule from a [`HeaderName`], pre-computing its SIMD tag once.
+    #[inline]
+    pub fn exact(name: HeaderName, expected: impl Into<String>) -> Self {
+        Self::Exact(HeaderKey::from_name(name), expected.into())
+    }
+
+    /// Evaluates this rule against request headers with zero runtime hashing.
     #[inline]
     pub fn matches(&self, headers: &velda_core::HeaderWorkspace) -> bool {
         match self {
-            Self::Present(name) => headers.contains_key(name),
-            Self::Exact(name, expected) => headers
-                .get(name)
+            Self::Present(key) => headers.contains_prehashed(key),
+            Self::Exact(key, expected) => headers
+                .get_prehashed(key)
                 .and_then(|val| val.to_str().ok())
                 .is_some_and(|val| val == expected.as_str()),
         }
@@ -255,18 +269,18 @@ impl HttpFaultCondition {
             return (None, None);
         }
 
-        // Extract and clamp delay override (e.g. x-fault-delay-ms: 250)
+        // Extract and clamp delay override (e.g. x-fault-delay-ms: 250) using pre-hashed lookup.
         let delay_override = req
             .headers
-            .get("x-fault-delay-ms")
+            .get_prehashed(&KEY_FAULT_DELAY_MS)
             .and_then(|v| v.to_str().ok())
             .and_then(|s| s.trim().parse::<u64>().ok())
             .map(|ms| ms.min(self.max_override_delay_ms));
 
-        // Extract and validate abort status code (e.g. x-fault-abort-code: 503)
+        // Extract and validate abort status code (e.g. x-fault-abort-code: 503) using pre-hashed lookup.
         let abort_override = req
             .headers
-            .get("x-fault-abort-code")
+            .get_prehashed(&KEY_FAULT_ABORT_CODE)
             .and_then(|v| v.to_str().ok())
             .and_then(|s| s.trim().parse::<u16>().ok())
             .filter(|&code| (400..=599).contains(&code));
@@ -282,12 +296,18 @@ fn extract_client_ip(req: &L7Request) -> Option<u128> {
         return Some(req.state.client_ip);
     }
     // Security Invariant: Prefer authoritative edge-assigned x-real-ip first to eliminate IP spoofing attacks.
-    if let Some(real_ip) = req.headers.get_ip_u128("x-real-ip") {
-        return Some(real_ip);
+    if let Some(val) = req.headers.get_prehashed(&KEY_X_REAL_IP) {
+        let first = match val.as_bytes().iter().position(|&b| b == b',') {
+            Some(idx) => &val.as_bytes()[..idx],
+            None => val.as_bytes(),
+        };
+        if let Some(real_ip) = velda_core::lut::ip::parse_ip_u128(first.trim_ascii()) {
+            return Some(real_ip);
+        }
     }
 
     // Fall back to nearest proxy (right-most IP in comma-separated list)
-    let val = req.headers.get("x-forwarded-for")?;
+    let val = req.headers.get_prehashed(&KEY_X_FORWARDED_FOR)?;
     let bytes = val.as_bytes();
     let last = match bytes.iter().rposition(|&b| b == b',') {
         Some(idx) => &bytes[idx + 1..],
@@ -339,9 +359,9 @@ mod tests {
     #[test]
     fn test_condition_header_match() {
         let condition = HttpFaultCondition {
-            header_match: Some(HeaderMatchRule::Exact(
+            header_match: Some(HeaderMatchRule::exact(
                 HeaderName::from_static("x-chaos-token"),
-                "secret-qa-xyz".to_string(),
+                "secret-qa-xyz",
             )),
             ..Default::default()
         };

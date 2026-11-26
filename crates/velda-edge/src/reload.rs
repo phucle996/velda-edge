@@ -559,6 +559,7 @@ mod tests {
                 EtpSyncConfig {
                     id: "redis-unchanged".into(),
                     kind: "redis".into(),
+                    security: velda_etp::EtpTransportSecurity::Plain,
                     pool: EtpPoolSettings {
                         pool_size: 2,
                         connect_timeout_ms: 2000,
@@ -570,6 +571,7 @@ mod tests {
                 EtpSyncConfig {
                     id: "loki-mutated".into(),
                     kind: "loki".into(),
+                    security: velda_etp::EtpTransportSecurity::Plain,
                     pool: EtpPoolSettings {
                         pool_size: 2,
                         connect_timeout_ms: 2000,
@@ -615,6 +617,7 @@ mod tests {
                 EtpSyncConfig {
                     id: "loki-mutated".into(),
                     kind: "loki".into(),
+                    security: velda_etp::EtpTransportSecurity::Plain,
                     pool: EtpPoolSettings {
                         pool_size: 2,
                         connect_timeout_ms: 2000,

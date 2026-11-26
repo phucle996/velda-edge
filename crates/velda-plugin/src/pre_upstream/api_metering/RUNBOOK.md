@@ -19,9 +19,9 @@
 | `tiers.<name>.windows[].window_seconds` | `u64` | `2592000` (30 days) | `>= 0` (`0` = pass-through) | Window duration in seconds. |
 | `tiers.<name>.windows[].limit` | `u64` | `10000` | `>= 0` | Max request count (or bucket capacity) within `window_seconds`. |
 | `tiers.<name>.windows[].algorithm` | `String` | `"fixed_window"` | `"fixed"` / `"fixed_window"`, `"sliding_window"`, `"token"` / `"token_bucket"` | Window accounting algorithm. |
-| `etp_id` | `String` | `None` (local-only) | Omit for local-only, or match a `redis` entry in `etp.json` | Presence of `etp_id` enables background `RedisEtp` `HINCRBY` balance reconciliation. |
+| `etp_id` | `String` | `None` (local-only) | Omit for local-only, or match any of the 9 SoT ETPs (`redis`, `valkey`, `dragonfly`, `aws_elasticache`, `gcp_memorystore`, `upstash`, `postgres`, `mysql`, `dynamodb`) in `etp.json` | Enables Lua-free `HINCRBY`, HTTP `/pipeline`, parameterized SQL CTE (`velda.velda_api_metering`), or DynamoDB `velda_api_metering` reconciliation. |
 | `sync_interval_ms` | `u64` | `1000` | `>= 10` ms | Batch reconciliation interval in milliseconds when `etp_id` is set. |
-| `key_prefix` | `String` | `"velda"` | Non-empty string | Redis hash key prefix (`<key_prefix>:metering:consumed`) when `etp_id` is set. |
+| `key_prefix` | `String` | `"velda"` | Non-empty string | Hash key prefix (`<key_prefix>:metering:consumed`) when `etp_id` is set. |
 | `pbww` | `u32` | `35` (or `0` if local-only) | `1..=100` | Background Shadow Worker workload weight when `etp_id` is set. |
 
 ---
