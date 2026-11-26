@@ -93,7 +93,7 @@ Under the Velda Edge Workload Distribution Model, background logistics plugins a
 ### Complementary Static Sharding Recommendation
 * **Target Affinity**: Core 1, 2, or 3.
 * **Anti-Colocation Rule**: Avoid co-locating on Core 0 when Core 0 is strictly dedicated to latency-critical `health_probe` (Weight: 1) and master traffic intake.
-* **Ideal Pairing**: Pair with sleep-bound rotators (`jwks_rotator`, `acme_cert_rotator`) or lightweight UDP exporters (`statsd_exporter`) on secondary cores.
+* **Ideal Pairing**: Pair with sleep-bound rotators (`jwt_auth` in `external` mode, `acme_cert_rotator`) or lightweight UDP exporters (`statsd_exporter`) on secondary cores.
 
 ---
 
