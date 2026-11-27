@@ -37,7 +37,7 @@ use http::header::{HeaderName, HeaderValue};
 use velda_core::{Action, HeaderKey, L7Request, RejectReason};
 use velda_etp::{EtpBackend, EtpInstance};
 
-use super::cache::{CacheLookup, ColdOutcome, IntrospectionCache, MAX_OAUTH2_TOKEN_BYTES};
+use super::cache::{CacheLookupKind, ColdOutcome, IntrospectionCache, MAX_OAUTH2_TOKEN_BYTES};
 use super::inflight::{InFlightCoordinator, revalidate_on_shadow};
 use super::providers::{AuthMethod, IntrospectionCallParams, validate_attached_etp};
 use super::validation::Oauth2IntrospectionConfig;
@@ -363,80 +363,74 @@ impl PreUpstreamPlugin for Oauth2IntrospectionPlugin {
     fn try_on_upstream_request(&self, req: &mut L7Request, _targets: &mut u32) -> Option<Action> {
         self.cache.prefetch_control_l1();
 
-        let Some((token, matched_header)) = self.extract_token(req) else {
-            return Some(Self::reject_missing_token(req));
+        let (fp, matched_header) = {
+            let Some((token, matched_header)) = self.extract_token(req) else {
+                return Some(Self::reject_missing_token(req));
+            };
+            if token.len() > MAX_OAUTH2_TOKEN_BYTES {
+                return Some(Self::reject_invalid_token(req));
+            }
+            if !self.cache.is_enabled() {
+                return None;
+            }
+            (self.cache.token_to_u128(token), matched_header)
         };
-        if token.len() > MAX_OAUTH2_TOKEN_BYTES {
-            return Some(Self::reject_invalid_token(req));
-        }
-
-        if !self.cache.is_enabled() {
-            return None;
-        }
 
         let now = req.ingress_time_sec();
-        let fp = self.cache.token_to_u128(token);
-
-        match self.cache.lookup(fp, now) {
-            CacheLookup::Hit(headers) => {
-                Some(self.apply_allow(req, matched_header, headers.as_ref()))
+        let status = self.cache.lookup_and_apply(fp, now, |pairs| {
+            req.headers.reserve(pairs.len());
+            for (key, val) in pairs {
+                req.headers.insert_prehashed(key, val.clone());
             }
-            CacheLookup::Stale(headers) => {
-                if self.cache.mark_revalidating(fp, now) {
+        });
+
+        match status {
+            CacheLookupKind::Hit => {
+                if self.hide_credentials
+                    && let Some(key) = matched_header
+                {
+                    req.headers.remove(&key.name);
+                }
+                Some(Action::Continue)
+            }
+            CacheLookupKind::Stale => {
+                if self.cache.mark_revalidating(fp, now)
+                    && let Some((token, _)) = self.extract_token(req)
+                {
                     self.dispatch_shadow_revalidation(token, fp);
                 }
-                Some(self.apply_allow(req, matched_header, headers.as_ref()))
+                if self.hide_credentials
+                    && let Some(key) = matched_header
+                {
+                    req.headers.remove(&key.name);
+                }
+                Some(Action::Continue)
             }
-            CacheLookup::Forbidden => Some(Self::reject_insufficient_scope(req)),
-            CacheLookup::Unauthorized => Some(Self::reject_invalid_token(req)),
-            CacheLookup::Miss => None,
+            CacheLookupKind::Forbidden => Some(Self::reject_insufficient_scope(req)),
+            CacheLookupKind::Unauthorized => Some(Self::reject_invalid_token(req)),
+            CacheLookupKind::Miss => None,
         }
     }
 
     fn on_upstream_request_async<'a>(
         &'a self,
         req: &'a mut L7Request,
-        _targets: &'a mut u32,
+        targets: &'a mut u32,
     ) -> Pin<Box<dyn Future<Output = Action> + Send + 'a>> {
         Box::pin(async move {
-            self.cache.prefetch_control_l1();
+            if let Some(action) = self.try_on_upstream_request(req, targets) {
+                return action;
+            }
 
+            // Defer owned `String` allocation strictly to uncached/miss requests requiring async IdP I/O.
             let Some((token, matched_header)) = self.extract_token(req) else {
                 return Self::reject_missing_token(req);
             };
             if token.len() > MAX_OAUTH2_TOKEN_BYTES {
                 return Self::reject_invalid_token(req);
             }
-            let matched_header_cloned = matched_header.cloned();
+            let fp = self.cache.token_to_u128(token);
             let token_owned = token.to_string();
-
-            let fp = self.cache.token_to_u128(&token_owned);
-            let now = req.ingress_time_sec();
-
-            if self.cache.is_enabled() {
-                match self.cache.lookup(fp, now) {
-                    CacheLookup::Hit(headers) => {
-                        return self.apply_allow(
-                            req,
-                            matched_header_cloned.as_ref(),
-                            headers.as_ref(),
-                        );
-                    }
-                    CacheLookup::Stale(headers) => {
-                        if self.cache.mark_revalidating(fp, now) {
-                            self.dispatch_shadow_revalidation(&token_owned, fp);
-                        }
-                        return self.apply_allow(
-                            req,
-                            matched_header_cloned.as_ref(),
-                            headers.as_ref(),
-                        );
-                    }
-                    CacheLookup::Forbidden => return Self::reject_insufficient_scope(req),
-                    CacheLookup::Unauthorized => return Self::reject_invalid_token(req),
-                    CacheLookup::Miss => {}
-                }
-            }
 
             let Some(etp) = self.attached_etp.get() else {
                 return if self.fail_open {
@@ -461,7 +455,7 @@ impl PreUpstreamPlugin for Oauth2IntrospectionPlugin {
 
             match outcome {
                 ColdOutcome::Allow(headers) => {
-                    self.apply_allow(req, matched_header_cloned.as_ref(), headers.as_ref())
+                    self.apply_allow(req, matched_header, headers.as_ref())
                 }
                 ColdOutcome::Forbidden => Self::reject_insufficient_scope(req),
                 ColdOutcome::Unauthorized => Self::reject_invalid_token(req),

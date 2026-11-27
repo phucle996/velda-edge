@@ -90,7 +90,18 @@ pub const fn max_oauth2_cold_dram_bytes_for(total_memory_bytes: usize) -> usize 
     }
 }
 
-/// Outcome returned by [`IntrospectionCache::lookup`].
+/// Outcome tag returned by zero-atomic [`IntrospectionCache::lookup_and_apply`].
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum CacheLookupKind {
+    Miss,
+    Hit,
+    Stale,
+    Forbidden,
+    Unauthorized,
+}
+
+/// Outcome returned by test-only [`IntrospectionCache::lookup`].
+#[cfg(test)]
 #[derive(Clone, Debug)]
 pub enum CacheLookup {
     Miss,
@@ -599,16 +610,25 @@ impl IntrospectionCache {
         ((fp >> 4) as usize) & (self.hot_group_mask as usize)
     }
 
-    /// Performs a lock-free-contended core-local Tier-1 Hot L3 lookup with Cold DRAM promotion.
+    /// Performs a lock-free-contended core-local Tier-1 Hot L3 lookup with Cold DRAM promotion,
+    /// invoking `apply_positive` inline inside the lane guard without cloning `Arc`.
     #[inline]
-    pub fn lookup(&self, fp: u128, now_epoch: u64) -> CacheLookup {
+    pub fn lookup_and_apply<F>(
+        &self,
+        fp: u128,
+        now_epoch: u64,
+        mut apply_positive: F,
+    ) -> CacheLookupKind
+    where
+        F: FnMut(&[(HeaderKey, HeaderValue)]),
+    {
         let Some(lanes) = self.lanes.as_deref() else {
-            return CacheLookup::Miss;
+            return CacheLookupKind::Miss;
         };
 
         let lane_idx = self.current_lane_idx();
         let Some(lane) = lanes.get(lane_idx) else {
-            return CacheLookup::Miss;
+            return CacheLookupKind::Miss;
         };
         let hot_idx = self.hot_group_index(fp);
         let tag7 = Self::tag7_from_fp(fp);
@@ -621,16 +641,16 @@ impl IntrospectionCache {
         }
 
         let Some(mut guard) = lane.acquire_if_init() else {
-            return CacheLookup::Miss;
+            return CacheLookupKind::Miss;
         };
         let cold_groups_cap = lane.cold_groups_per_core;
         let LaneBuckets { hot, cold } = &mut *guard;
         let Some(hot_groups) = hot.as_mut() else {
-            return CacheLookup::Miss;
+            return CacheLookupKind::Miss;
         };
 
         let Some(group) = hot_groups.get_mut(hot_idx) else {
-            return CacheLookup::Miss;
+            return CacheLookupKind::Miss;
         };
         let mut mask = match_tag7_mask64(&group.tags, tag7);
         while mask != 0 {
@@ -647,30 +667,32 @@ impl IntrospectionCache {
                     group.ref_mask &= !(1u64 << idx);
                     drop(guard);
                     drop(old_hdrs);
-                    return CacheLookup::Miss;
+                    return CacheLookupKind::Miss;
                 }
 
                 group.ref_mask |= 1u64 << idx;
                 let flag = group.flags[idx];
                 if (flag & FLAG_UNAUTHORIZED) != 0 {
-                    return CacheLookup::Unauthorized;
+                    return CacheLookupKind::Unauthorized;
                 }
                 if (flag & FLAG_FORBIDDEN_SCOPE) != 0 {
-                    return CacheLookup::Forbidden;
+                    return CacheLookupKind::Forbidden;
                 }
                 if (flag & FLAG_VALID_PASS) != 0 {
-                    let hdrs = group.headers[idx].clone();
+                    if let Some(pairs) = group.headers[idx].as_deref() {
+                        apply_positive(pairs);
+                    }
                     let stale_window = self.stale_refresh_secs as u64;
                     if stale_window > 0 && exp.saturating_sub(now_epoch) <= stale_window {
                         let reval_in_flight = (flag & FLAG_REVALIDATING) != 0
                             && now_epoch.saturating_sub(group.reval_at[idx]) <= stale_window;
                         if !reval_in_flight {
-                            return CacheLookup::Stale(hdrs);
+                            return CacheLookupKind::Stale;
                         }
                     }
-                    return CacheLookup::Hit(hdrs);
+                    return CacheLookupKind::Hit;
                 }
-                return CacheLookup::Miss;
+                return CacheLookupKind::Miss;
             }
             mask &= mask - 1;
         }
@@ -699,12 +721,12 @@ impl IntrospectionCache {
                     if cexp <= now_epoch {
                         drop(guard);
                         drop(chdrs);
-                        return CacheLookup::Miss;
+                        return CacheLookupKind::Miss;
                     }
 
                     // Promote back into Hot L3 while demoting any displaced live victim back to Cold.
                     let Some(hgroup) = hot_groups.get_mut(hot_idx) else {
-                        return CacheLookup::Miss;
+                        return CacheLookupKind::Miss;
                     };
                     let hslot = hgroup.select_slot(fp, tag7, now_epoch);
                     let victim = DisplacedSlot {
@@ -715,26 +737,30 @@ impl IntrospectionCache {
                         reval_at: hgroup.reval_at[hslot],
                         headers: hgroup.headers[hslot].take(),
                     };
+
+                    let stale_window = self.stale_refresh_secs as u64;
+                    let res = if (cflag & FLAG_FORBIDDEN_SCOPE) != 0 {
+                        CacheLookupKind::Forbidden
+                    } else if (cflag & FLAG_VALID_PASS) != 0 {
+                        if let Some(pairs) = chdrs.as_deref() {
+                            apply_positive(pairs);
+                        }
+                        if stale_window > 0 && cexp.saturating_sub(now_epoch) <= stale_window {
+                            CacheLookupKind::Stale
+                        } else {
+                            CacheLookupKind::Hit
+                        }
+                    } else {
+                        CacheLookupKind::Unauthorized
+                    };
+
                     hgroup.tags.0[hslot] = ctag;
                     hgroup.flags[hslot] = cflag & !FLAG_REVALIDATING;
                     hgroup.keys[hslot] = fp;
                     hgroup.expiries[hslot] = cexp;
                     hgroup.reval_at[hslot] = 0;
                     hgroup.ref_mask |= 1u64 << hslot;
-                    hgroup.headers[hslot] = chdrs.clone();
-
-                    let stale_window = self.stale_refresh_secs as u64;
-                    let res = if (cflag & FLAG_FORBIDDEN_SCOPE) != 0 {
-                        CacheLookup::Forbidden
-                    } else if (cflag & FLAG_VALID_PASS) != 0 {
-                        if stale_window > 0 && cexp.saturating_sub(now_epoch) <= stale_window {
-                            CacheLookup::Stale(chdrs)
-                        } else {
-                            CacheLookup::Hit(chdrs)
-                        }
-                    } else {
-                        CacheLookup::Unauthorized
-                    };
+                    hgroup.headers[hslot] = chdrs;
 
                     let dropped = if victim.fp != fp {
                         match try_demote_victim_if_valid(
@@ -768,7 +794,22 @@ impl IntrospectionCache {
             }
         }
 
-        CacheLookup::Miss
+        CacheLookupKind::Miss
+    }
+
+    /// Test-only helper returning cloned cached headers directly.
+    #[cfg(test)]
+    pub fn lookup(&self, fp: u128, now_epoch: u64) -> CacheLookup {
+        let mut cloned: Option<SharedProjectedHeaders> = None;
+        match self.lookup_and_apply(fp, now_epoch, |pairs| {
+            cloned = Some(Arc::from(pairs));
+        }) {
+            CacheLookupKind::Miss => CacheLookup::Miss,
+            CacheLookupKind::Hit => CacheLookup::Hit(cloned),
+            CacheLookupKind::Stale => CacheLookup::Stale(cloned),
+            CacheLookupKind::Forbidden => CacheLookup::Forbidden,
+            CacheLookupKind::Unauthorized => CacheLookup::Unauthorized,
+        }
     }
 
     /// Atomically claims the stale-refresh lease on the calling core lane (`false` if another

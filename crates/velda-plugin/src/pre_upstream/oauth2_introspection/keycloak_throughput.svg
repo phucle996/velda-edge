@@ -1,0 +1,109 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1400 440" width="100%" role="img" aria-label="Real Keycloak 26.0.7 Throughput Comparison under tc netem">
+  <defs>
+    <linearGradient id="veldaPing" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0%" stop-color="#3b82f6"/>
+      <stop offset="100%" stop-color="#1d4ed8"/>
+    </linearGradient>
+    <linearGradient id="velda12k" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0%" stop-color="#06b6d4"/>
+      <stop offset="100%" stop-color="#0369a1"/>
+    </linearGradient>
+    <linearGradient id="compBlue" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0%" stop-color="#273c5a"/>
+      <stop offset="100%" stop-color="#172438"/>
+    </linearGradient>
+  </defs>
+
+  <rect x="1" y="1" width="1398" height="438" rx="12" fill="#161922" stroke="#2d3343" stroke-width="1.5"/>
+
+  <text x="700" y="38" text-anchor="middle" fill="#f1f5f9" font-family="ui-sans-serif, system-ui, -apple-system, Segoe UI, Roboto, sans-serif" font-size="20" font-weight="700">
+    Real Red Hat Keycloak 26.0.7 Throughput (tc netem WAN Shaping)
+  </text>
+  <text x="700" y="60" text-anchor="middle" fill="#94a3b8" font-family="ui-sans-serif, system-ui, -apple-system, Segoe UI, Roboto, sans-serif" font-size="13">
+    Client 6ms±1.5ms (0.02% loss)  |  Backend 1.5ms±0.3ms  |  Keycloak (:8090) 10ms±2ms  |  Clean Macro RPS (non2xx = 0)
+  </text>
+
+  <text x="36" y="230" text-anchor="middle" transform="rotate(-90 36 230)" fill="#cbd5e1" font-family="ui-sans-serif, system-ui, -apple-system, Segoe UI, Roboto, sans-serif" font-size="13" font-weight="600">
+    Requests / sec
+  </text>
+
+  <!-- Horizontal Gridlines (y=95 -> 50k, y=365 -> 0; 54px per 10k) -->
+  <g stroke="#262c3a" stroke-width="1" stroke-dasharray="4 4">
+    <line x1="105" y1="95" x2="1355" y2="95"/>
+    <line x1="105" y1="149" x2="1355" y2="149"/>
+    <line x1="105" y1="203" x2="1355" y2="203"/>
+    <line x1="105" y1="257" x2="1355" y2="257"/>
+    <line x1="105" y1="311" x2="1355" y2="311"/>
+  </g>
+  <line x1="105" y1="365" x2="1355" y2="365" stroke="#475569" stroke-width="1.5"/>
+
+  <g fill="#94a3b8" font-family="ui-monospace, SFMono-Regular, Menlo, monospace" font-size="12" text-anchor="end">
+    <text x="94" y="99">50,000</text>
+    <text x="94" y="153">40,000</text>
+    <text x="94" y="207">30,000</text>
+    <text x="94" y="261">20,000</text>
+    <text x="94" y="315">10,000</text>
+    <text x="94" y="369">0</text>
+  </g>
+
+  <!-- Section Divider between OA01 (/ping c=512) and OA07 (/12kb c=256) -->
+  <line x1="730" y1="86" x2="730" y2="418" stroke="#334155" stroke-width="1.2" stroke-dasharray="5 5"/>
+  <text x="418" y="86" text-anchor="middle" fill="#60a5fa" font-family="ui-sans-serif, system-ui, sans-serif" font-size="12" font-weight="600">
+    OA01: GET /ping (c = 512)
+  </text>
+  <text x="1042" y="86" text-anchor="middle" fill="#38bdf8" font-family="ui-sans-serif, system-ui, sans-serif" font-size="12" font-weight="600">
+    OA07: GET /12kb Payload (c = 256)
+  </text>
+
+  <!-- Bars OA01 (/ping): centers 183, 339, 495, 651; width=86 -->
+  <rect x="140" y="129.7" width="86" height="235.3" rx="6" fill="url(#veldaPing)" stroke="#60a5fa" stroke-width="1.5"/>
+  <rect x="296" y="257.4" width="86" height="107.6" rx="6" fill="url(#compBlue)" stroke="#3b82f6" stroke-width="1.2"/>
+  <rect x="452" y="344.9" width="86" height="20.1" rx="4" fill="#1e293b" stroke="#64748b" stroke-width="1.2"/>
+  <rect x="608" y="349.4" width="86" height="15.6" rx="4" fill="#1e293b" stroke="#64748b" stroke-width="1.2"/>
+
+  <!-- Bars OA07 (/12kb): centers 808, 964, 1120, 1276; width=86 -->
+  <rect x="765" y="227.9" width="86" height="137.1" rx="6" fill="url(#velda12k)" stroke="#38bdf8" stroke-width="1.5"/>
+  <rect x="921" y="284.2" width="86" height="80.8" rx="6" fill="url(#compBlue)" stroke="#0ea5e9" stroke-width="1.2"/>
+  <rect x="1077" y="331.8" width="86" height="33.2" rx="4" fill="#1e293b" stroke="#64748b" stroke-width="1.2"/>
+  <rect x="1233" y="345.0" width="86" height="20.0" rx="4" fill="#1e293b" stroke="#64748b" stroke-width="1.2"/>
+
+  <!-- Bar Value Labels -->
+  <g font-family="ui-monospace, SFMono-Regular, Menlo, monospace" font-size="13" font-weight="700" text-anchor="middle">
+    <text x="183" y="120" fill="#93c5fd">43,580</text>
+    <text x="339" y="248" fill="#cbd5e1">19,921</text>
+    <text x="495" y="336" fill="#cbd5e1">3,728</text>
+    <text x="651" y="340" fill="#cbd5e1">2,895</text>
+
+    <text x="808" y="218" fill="#67e8f9">25,387</text>
+    <text x="964" y="275" fill="#cbd5e1">14,959</text>
+    <text x="1120" y="322" fill="#cbd5e1">6,154</text>
+    <text x="1276" y="336" fill="#cbd5e1">3,707</text>
+  </g>
+
+  <!-- X-Axis Gateway Labels -->
+  <g font-family="ui-sans-serif, system-ui, -apple-system, Segoe UI, Roboto, sans-serif" font-size="13" text-anchor="middle">
+    <text x="183" y="392" fill="#f8fafc" font-weight="700">Velda Edge</text>
+    <text x="183" y="410" fill="#60a5fa" font-size="11">Cached (2.19x)</text>
+
+    <text x="339" y="392" fill="#e2e8f0" font-weight="600">APISIX 3.11</text>
+    <text x="339" y="410" fill="#94a3b8" font-size="11">OIDC Cached</text>
+
+    <text x="495" y="392" fill="#e2e8f0" font-weight="600">Envoy v1.32</text>
+    <text x="495" y="410" fill="#94a3b8" font-size="11">Lua httpCall</text>
+
+    <text x="651" y="392" fill="#e2e8f0" font-weight="600">Nginx 1.24</text>
+    <text x="651" y="410" fill="#94a3b8" font-size="11">auth_request</text>
+
+    <text x="808" y="392" fill="#f8fafc" font-weight="700">Velda Edge</text>
+    <text x="808" y="410" fill="#38bdf8" font-size="11">12KB (1.70x)</text>
+
+    <text x="964" y="392" fill="#e2e8f0" font-weight="600">APISIX 3.11</text>
+    <text x="964" y="410" fill="#94a3b8" font-size="11">12KB Cached</text>
+
+    <text x="1120" y="392" fill="#e2e8f0" font-weight="600">Envoy v1.32</text>
+    <text x="1120" y="410" fill="#94a3b8" font-size="11">12KB Lua</text>
+
+    <text x="1276" y="392" fill="#e2e8f0" font-weight="600">Nginx 1.24</text>
+    <text x="1276" y="410" fill="#94a3b8" font-size="11">12KB auth_req</text>
+  </g>
+</svg>

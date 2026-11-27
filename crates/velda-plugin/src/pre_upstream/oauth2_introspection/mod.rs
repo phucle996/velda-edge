@@ -14,7 +14,7 @@ pub mod scope;
 pub mod validation;
 
 pub use cache::{
-    COLD_DRAM_MEMORY_PERCENT, CacheLookup, ColdOutcome, GROUP_WIDTH, IntrospectionCache,
+    COLD_DRAM_MEMORY_PERCENT, CacheLookupKind, ColdOutcome, GROUP_WIDTH, IntrospectionCache,
     MAX_COLD_DRAM_TOTAL_BYTES, MAX_HOT_L3_TOTAL_BYTES, MAX_OAUTH2_TOKEN_BYTES,
     compute_stale_refresh_secs, max_oauth2_cold_dram_bytes_for,
 };
