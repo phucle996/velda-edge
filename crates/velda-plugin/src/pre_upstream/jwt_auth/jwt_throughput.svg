@@ -1,0 +1,123 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1400 475" width="100%" role="img" aria-label="JWT Auth Real-Provider Benchmark Throughput under tc netem">
+  <defs>
+    <linearGradient id="veldaBlue" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0%" stop-color="#3b82f6"/>
+      <stop offset="100%" stop-color="#1d4ed8"/>
+    </linearGradient>
+    <linearGradient id="veldaCyan" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0%" stop-color="#06b6d4"/>
+      <stop offset="100%" stop-color="#0369a1"/>
+    </linearGradient>
+    <linearGradient id="veldaEmerald" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0%" stop-color="#10b981"/>
+      <stop offset="100%" stop-color="#047857"/>
+    </linearGradient>
+    <linearGradient id="compSlate" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0%" stop-color="#273c5a"/>
+      <stop offset="100%" stop-color="#172438"/>
+    </linearGradient>
+  </defs>
+
+  <rect x="1" y="1" width="1398" height="473" rx="12" fill="#161922" stroke="#2d3343" stroke-width="1.5"/>
+
+  <text x="700" y="36" text-anchor="middle" fill="#f1f5f9" font-family="ui-sans-serif, system-ui, -apple-system, Segoe UI, Roboto, sans-serif" font-size="20" font-weight="700">
+    Real-Provider JWT Auth Throughput (Keycloak 26.0.7 + HashiCorp Vault 1.18, tc netem)
+  </text>
+  <text x="700" y="58" text-anchor="middle" fill="#94a3b8" font-family="ui-sans-serif, system-ui, -apple-system, Segoe UI, Roboto, sans-serif" font-size="13">
+    Client 6ms±1.5ms (0.02% loss)  |  Backend 1.5ms±0.3ms  |  IdP 10ms±2ms  |  *Envoy JW01 suffered 40,314 non-2xx errors under cold JWKS rush
+  </text>
+
+  <text x="36" y="257" text-anchor="middle" transform="rotate(-90 36 257)" fill="#cbd5e1" font-family="ui-sans-serif, system-ui, sans-serif" font-size="13" font-weight="600">
+    Requests / sec
+  </text>
+
+  <!-- Section Headers placed cleanly above top gridline with 30px clearance -->
+  <line x1="730" y1="78" x2="730" y2="449" stroke="#334155" stroke-width="1.2" stroke-dasharray="5 5"/>
+  <text x="417" y="88" text-anchor="middle" fill="#60a5fa" font-family="ui-sans-serif, system-ui, sans-serif" font-size="13" font-weight="600">
+    JW01: Keycloak 26.0.7 RS256 (/ping, c = 512)
+  </text>
+  <text x="1042" y="88" text-anchor="middle" fill="#34d399" font-family="ui-sans-serif, system-ui, sans-serif" font-size="13" font-weight="600">
+    JW03/JW04 Rotation &amp; JW07 12KB Payload (c = 256)
+  </text>
+
+  <!-- Gridlines: y=122 (50k) .. y=392 (0), step=54px per 10k -->
+  <g stroke="#262c3a" stroke-width="1" stroke-dasharray="4 4">
+    <line x1="105" y1="122" x2="1355" y2="122"/>
+    <line x1="105" y1="176" x2="1355" y2="176"/>
+    <line x1="105" y1="230" x2="1355" y2="230"/>
+    <line x1="105" y1="284" x2="1355" y2="284"/>
+    <line x1="105" y1="338" x2="1355" y2="338"/>
+  </g>
+  <line x1="105" y1="392" x2="1355" y2="392" stroke="#475569" stroke-width="1.5"/>
+
+  <g fill="#94a3b8" font-family="ui-monospace, SFMono-Regular, Menlo, monospace" font-size="12" text-anchor="end">
+    <text x="94" y="126">50,000</text>
+    <text x="94" y="180">40,000</text>
+    <text x="94" y="234">30,000</text>
+    <text x="94" y="288">20,000</text>
+    <text x="94" y="342">10,000</text>
+    <text x="94" y="396">0</text>
+  </g>
+
+  <!-- JW01 Bars (centers 167.5, 292.5, 417.5, 542.5, 667.5; w=76) -->
+  <rect x="129.5" y="160.8" width="76" height="231.2" rx="6" fill="url(#veldaBlue)" stroke="#60a5fa" stroke-width="1.5"/>
+  <rect x="254.5" y="163.8" width="76" height="228.2" rx="6" fill="url(#veldaCyan)" stroke="#38bdf8" stroke-width="1.5"/>
+  <rect x="379.5" y="233.2" width="76" height="158.8" rx="6" fill="url(#compSlate)" stroke="#3b82f6" stroke-width="1.2"/>
+  <rect x="504.5" y="327.0" width="76" height="65.0" rx="4" fill="#1e293b" stroke="#64748b" stroke-width="1.2"/>
+  <rect x="629.5" y="350.0" width="76" height="42.0" rx="4" fill="#1e293b" stroke="#64748b" stroke-width="1.2"/>
+
+  <!-- JW04 / JW03 / JW07 Bars (centers 792.5, 917.5, 1042.5, 1167.5, 1292.5; w=76) -->
+  <rect x="754.5" y="122.9" width="76" height="269.1" rx="6" fill="url(#veldaEmerald)" stroke="#34d399" stroke-width="1.5"/>
+  <rect x="879.5" y="123.3" width="76" height="268.7" rx="6" fill="url(#veldaEmerald)" stroke="#34d399" stroke-width="1.2"/>
+  <rect x="1004.5" y="260.3" width="76" height="131.7" rx="6" fill="url(#veldaCyan)" stroke="#38bdf8" stroke-width="1.5"/>
+  <rect x="1129.5" y="289.6" width="76" height="102.4" rx="6" fill="url(#compSlate)" stroke="#0ea5e9" stroke-width="1.2"/>
+  <rect x="1254.5" y="356.3" width="76" height="35.7" rx="4" fill="#1e293b" stroke="#64748b" stroke-width="1.2"/>
+
+  <!-- Value Labels -->
+  <g font-family="ui-monospace, SFMono-Regular, Menlo, monospace" font-size="12.5" font-weight="700" text-anchor="middle">
+    <text x="167.5" y="151" fill="#93c5fd">42,810</text>
+    <text x="292.5" y="154" fill="#67e8f9">42,261</text>
+    <text x="417.5" y="224" fill="#cbd5e1">29,413</text>
+    <text x="542.5" y="318" fill="#fca5a5">12,040*</text>
+    <text x="667.5" y="341" fill="#cbd5e1">7,777</text>
+
+    <text x="792.5" y="114" fill="#6ee7b7">49,827</text>
+    <text x="917.5" y="114" fill="#6ee7b7">49,753</text>
+    <text x="1042.5" y="251" fill="#67e8f9">24,394</text>
+    <text x="1167.5" y="281" fill="#cbd5e1">18,969</text>
+    <text x="1292.5" y="347" fill="#cbd5e1">6,614</text>
+  </g>
+
+  <!-- X-Axis Labels -->
+  <g font-family="ui-sans-serif, system-ui, -apple-system, Segoe UI, Roboto, sans-serif" font-size="12.5" text-anchor="middle">
+    <text x="167.5" y="419" fill="#f8fafc" font-weight="700">Velda Dyn</text>
+    <text x="167.5" y="437" fill="#60a5fa" font-size="11">KC JWKS</text>
+
+    <text x="292.5" y="419" fill="#f8fafc" font-weight="700">Velda Static</text>
+    <text x="292.5" y="437" fill="#38bdf8" font-size="11">RS256 PEM</text>
+
+    <text x="417.5" y="419" fill="#e2e8f0" font-weight="600">HAProxy 2.8</text>
+    <text x="417.5" y="437" fill="#94a3b8" font-size="11">Static RS256</text>
+
+    <text x="542.5" y="419" fill="#e2e8f0" font-weight="600">Envoy 1.32</text>
+    <text x="542.5" y="437" fill="#94a3b8" font-size="11">remote_jwks*</text>
+
+    <text x="667.5" y="419" fill="#e2e8f0" font-weight="600">APISIX 3.11</text>
+    <text x="667.5" y="437" fill="#94a3b8" font-size="11">use_jwks</text>
+
+    <text x="792.5" y="419" fill="#f8fafc" font-weight="700">Vault Live Rot</text>
+    <text x="792.5" y="437" fill="#34d399" font-size="11">v1-&gt;v5 24s</text>
+
+    <text x="917.5" y="419" fill="#f8fafc" font-weight="700">Vault 16-Slot</text>
+    <text x="917.5" y="437" fill="#34d399" font-size="11">Slot15 Oldest</text>
+
+    <text x="1042.5" y="419" fill="#f8fafc" font-weight="700">Velda 12KB</text>
+    <text x="1042.5" y="437" fill="#38bdf8" font-size="11">JW07 (c=256)</text>
+
+    <text x="1167.5" y="419" fill="#e2e8f0" font-weight="600">HAProxy 12KB</text>
+    <text x="1167.5" y="437" fill="#94a3b8" font-size="11">JW07 (c=256)</text>
+
+    <text x="1292.5" y="419" fill="#e2e8f0" font-weight="600">APISIX 12KB</text>
+    <text x="1292.5" y="437" fill="#94a3b8" font-size="11">JW07 (c=256)</text>
+  </g>
+</svg>

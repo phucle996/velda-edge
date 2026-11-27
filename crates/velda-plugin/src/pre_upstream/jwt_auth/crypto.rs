@@ -41,10 +41,7 @@ use ring::signature::{self, UnparsedPublicKey};
 use serde::{Deserialize, Serialize};
 use velda_core::HeaderKey;
 
-use super::claims::{
-    ClaimPath, matches_compiled_assert, parse_numeric_date_ceil, parse_numeric_date_floor,
-    value_to_header_string,
-};
+use super::claims::{ClaimPath, eval_jwt_payload_streaming};
 use super::pem::{extract_raw_public_key, extract_rsa_modulus_len, parse_pem_to_der};
 use super::store::{JwksKeyTable, hash_kid_salted};
 use crate::error::PluginError;
@@ -549,6 +546,12 @@ struct JoseHeader<'a> {
 }
 
 /// Performs full validation of a compact JWT string against L1D/L3 key table and business policies.
+///
+/// Intentionally NOT annotated with `#[cold]`: when operators disable caching (`cache_ttl_secs: 0`),
+/// every request enters `verify_jwt` on the hot path, and `#[cold]` causes LLVM to optimize for size
+/// (`-Os`), split code into `.text.unlikely`, and invert branch prediction weights.
+/// Any future isolation of its stack scratch buffers for `cache_ttl_secs > 0` should use
+/// `#[inline(never)]` without `#[cold]` and be validated via `perf stat`.
 pub fn verify_jwt(
     token: &str,
     policy: &JwtValidationPolicy<'_>,
@@ -612,7 +615,7 @@ pub fn verify_jwt(
         signature_bytes,
     )?;
 
-    // 5. Decode JSON payload (stack buffer for tokens <= 2 KiB, heap fallback for larger payloads)
+    // 5. Decode JSON payload (stack buffer for <= 2 KiB) & evaluate claims in 1 streaming pass (0 Value DOM)
     let mut payload_stack_buf = [0u8; 2048];
     let payload_bytes = if payload_b64.len() <= 2048 * 4 / 3 {
         let slice = decode_base64url_to_slice(payload_b64, &mut payload_stack_buf)?;
@@ -621,83 +624,21 @@ pub fn verify_jwt(
         Cow::Owned(decode_base64url(payload_b64)?)
     };
 
-    let payload: serde_json::Value =
-        serde_json::from_slice(&payload_bytes).map_err(|_| JwtVerifyError::MalformedToken)?;
-
-    // 6. Expiration (`exp`) & Not-Before (`nbf`) validation with RFC 7519 NumericDate & overflow safety
-    let exp_for_cache = if policy.validate_exp {
-        let exp_val = payload
-            .get("exp")
-            .filter(|v| !v.is_null())
-            .ok_or(JwtVerifyError::MissingExp)?;
-        let exp = parse_numeric_date_floor(exp_val)?;
-        let skewed_exp = exp.saturating_add(policy.clock_skew_secs);
-        if now_epoch > skewed_exp {
-            return Err(JwtVerifyError::TokenExpired);
-        }
-        skewed_exp
-    } else {
-        u64::MAX
-    };
-
-    if let Some(nbf_val) = payload.get("nbf").filter(|v| !v.is_null()) {
-        let nbf = parse_numeric_date_ceil(nbf_val)?;
-        if now_epoch.saturating_add(policy.clock_skew_secs) < nbf {
-            return Err(JwtVerifyError::TokenNotBefore);
-        }
-    }
-
-    // 7. Strict Issuer (`iss`) check
-    if let Some(iss) = policy.expected_issuer {
-        let token_iss = payload.get("iss").and_then(|v| v.as_str());
-        if token_iss != Some(iss) {
-            return Err(JwtVerifyError::IssuerMismatch);
-        }
-    }
-
-    // 8. Strict Audience (`aud`) check
-    if let Some(aud) = policy.expected_audience {
-        let matches_aud = match payload.get("aud") {
-            Some(serde_json::Value::String(s)) => s == aud,
-            Some(serde_json::Value::Array(arr)) => arr.iter().any(|v| v.as_str() == Some(aud)),
-            _ => false,
-        };
-        if !matches_aud {
-            return Err(JwtVerifyError::AudienceMismatch);
-        }
-    }
-
-    // 9. Assert claims (RBAC / tenant assertions)
-    for (claim_path, expected_val) in policy.assert_claims {
-        if !matches_compiled_assert(&payload, claim_path, expected_val) {
-            return Err(JwtVerifyError::ClaimAssertionFailed);
-        }
-    }
-
-    // 10. Extract present claims into pre-hashed `(HeaderKey, HeaderValue)` slice
-    let injected_headers = if policy.claims_to_headers.is_empty() {
-        None
-    } else {
-        let mut pairs = Vec::with_capacity(policy.claims_to_headers.len());
-        for (claim_path, header_key) in policy.claims_to_headers {
-            if let Some(raw_val) = claim_path.walk(&payload)
-                && let Some(val_str) = value_to_header_string(raw_val)
-                && let Ok(hdr_val) = HeaderValue::try_from(val_str)
-            {
-                pairs.push((header_key.clone(), hdr_val));
-            }
-        }
-        if pairs.is_empty() {
-            None
-        } else {
-            Some(Arc::from(pairs))
-        }
-    };
+    let evaluated = eval_jwt_payload_streaming(
+        &payload_bytes,
+        policy.validate_exp,
+        policy.clock_skew_secs,
+        policy.expected_issuer,
+        policy.expected_audience,
+        policy.claims_to_headers,
+        policy.assert_claims,
+        now_epoch,
+    )?;
 
     Ok(VerifiedToken {
-        exp_epoch_secs: exp_for_cache,
+        exp_epoch_secs: evaluated.exp_epoch_secs,
         key_tag,
-        injected_headers,
+        injected_headers: evaluated.injected_headers,
     })
 }
 

@@ -155,7 +155,17 @@ pub enum CachedDecision {
     Valid(Option<Arc<[(HeaderKey, HeaderValue)]>>),
 }
 
-/// Outcome returned by a single-pass [`JwtCache::lookup`] operation.
+/// Outcome tag returned by lock-free [`JwtCache::lookup_and_apply`] without cloning `Arc`.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum CacheHitKind {
+    Miss,
+    Positive,
+    Unauthorized,
+    Forbidden,
+}
+
+/// Outcome returned by test-only [`JwtCache::lookup`] helper.
+#[cfg(test)]
 #[derive(Clone, Debug)]
 pub enum CacheLookup {
     Miss,
@@ -588,14 +598,23 @@ impl JwtCache {
         (lane_idx, hot_idx, cold_idx, tag7)
     }
 
-    /// Two-tier per-core lookup:
+    /// Two-tier per-core lookup applying positive headers inline without cloning `Arc`:
     /// 1. Hot L3 tier (`_MM_HINT_T2` prefetch + 64B SIMD tag scan).
-    /// 2. On Hot miss, checks Cold DRAM spillover (`cold_groups`); valid hits promote back to Hot L3
-    ///    while demoting the displaced Hot L3 victim down to Cold DRAM cleanly.
+    /// 2. On Hot miss, checks Cold DRAM spillover (`cold_groups`); valid hits apply headers inline,
+    ///    promote back to Hot L3, and demote displaced Hot L3 victims down to Cold DRAM cleanly.
     #[inline]
-    pub fn lookup(&self, fp: u128, now_epoch: u64, key_table: &JwksKeyTable) -> CacheLookup {
+    pub fn lookup_and_apply<F>(
+        &self,
+        fp: u128,
+        now_epoch: u64,
+        key_table: &JwksKeyTable,
+        mut apply_positive: F,
+    ) -> CacheHitKind
+    where
+        F: FnMut(&[(HeaderKey, HeaderValue)]),
+    {
         let Some(lanes) = self.lanes.as_deref() else {
-            return CacheLookup::Miss;
+            return CacheHitKind::Miss;
         };
 
         let (lane_idx, hot_idx, cold_idx, tag7) = self.split_fp(fp);
@@ -603,12 +622,12 @@ impl JwtCache {
 
         let base = lane.hot_base.load(Ordering::Relaxed);
         if base.is_null() {
-            return CacheLookup::Miss;
+            return CacheHitKind::Miss;
         }
         prefetch_bucket_l3(unsafe { base.add(hot_idx) as *const u8 });
 
         let Some(guard) = lane.acquire_if_init() else {
-            return CacheLookup::Miss;
+            return CacheHitKind::Miss;
         };
 
         let mut discarded = CachedDecision::Empty;
@@ -627,15 +646,18 @@ impl JwtCache {
                                 &mut hgroup.decisions[idx],
                                 CachedDecision::Empty,
                             );
-                            break 'probe CacheLookup::Miss;
+                            break 'probe CacheHitKind::Miss;
                         }
                         break 'probe match &hgroup.decisions[idx] {
                             CachedDecision::Valid(headers) => {
-                                CacheLookup::Positive(headers.clone())
+                                if let Some(pairs) = headers.as_deref() {
+                                    apply_positive(pairs);
+                                }
+                                CacheHitKind::Positive
                             }
-                            CachedDecision::Unauthorized => CacheLookup::Unauthorized,
-                            CachedDecision::Forbidden => CacheLookup::Forbidden,
-                            CachedDecision::Empty => CacheLookup::Miss,
+                            CachedDecision::Unauthorized => CacheHitKind::Unauthorized,
+                            CachedDecision::Forbidden => CacheHitKind::Forbidden,
+                            CachedDecision::Empty => CacheHitKind::Miss,
                         };
                     }
                     mask &= mask - 1;
@@ -658,19 +680,22 @@ impl JwtCache {
                                 &mut cgroup.decisions[cidx],
                                 CachedDecision::Empty,
                             );
-                            break 'probe CacheLookup::Miss;
+                            break 'probe CacheHitKind::Miss;
                         }
 
                         let hit = match &cgroup.decisions[cidx] {
                             CachedDecision::Valid(headers) => {
-                                CacheLookup::Positive(headers.clone())
+                                if let Some(pairs) = headers.as_deref() {
+                                    apply_positive(pairs);
+                                }
+                                CacheHitKind::Positive
                             }
-                            CachedDecision::Unauthorized => CacheLookup::Unauthorized,
-                            CachedDecision::Forbidden => CacheLookup::Forbidden,
-                            CachedDecision::Empty => CacheLookup::Miss,
+                            CachedDecision::Unauthorized => CacheHitKind::Unauthorized,
+                            CachedDecision::Forbidden => CacheHitKind::Forbidden,
+                            CachedDecision::Empty => CacheHitKind::Miss,
                         };
-                        if matches!(hit, CacheLookup::Miss) {
-                            break 'probe CacheLookup::Miss;
+                        if hit == CacheHitKind::Miss {
+                            break 'probe CacheHitKind::Miss;
                         }
 
                         // Extract Cold DRAM slot before swapping into Hot L3 tier
@@ -721,12 +746,26 @@ impl JwtCache {
                 }
             }
 
-            CacheLookup::Miss
+            CacheHitKind::Miss
         };
 
         drop(guard);
         drop(discarded);
         outcome
+    }
+
+    /// Test-only helper returning cloned cached headers directly.
+    #[cfg(test)]
+    pub fn lookup(&self, fp: u128, now_epoch: u64, key_table: &JwksKeyTable) -> CacheLookup {
+        let mut cloned: Option<Arc<[(HeaderKey, HeaderValue)]>> = None;
+        match self.lookup_and_apply(fp, now_epoch, key_table, |pairs| {
+            cloned = Some(Arc::from(pairs));
+        }) {
+            CacheHitKind::Miss => CacheLookup::Miss,
+            CacheHitKind::Positive => CacheLookup::Positive(cloned),
+            CacheHitKind::Unauthorized => CacheLookup::Unauthorized,
+            CacheHitKind::Forbidden => CacheLookup::Forbidden,
+        }
     }
 
     /// Inserts a verified token decision into Hot L3, demoting any valid unexpired occupant down

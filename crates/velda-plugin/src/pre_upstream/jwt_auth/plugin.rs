@@ -20,15 +20,16 @@
 //! ```
 
 use std::str::FromStr;
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, OnceLock};
 use std::time::Duration;
 
 use http::header::{HeaderName, HeaderValue};
-use tokio::sync::watch;
+use tokio::sync::{Notify, watch};
 use velda_core::{Action, HeaderKey, L7Request, RejectReason};
 use velda_etp::{EtpBackend, EtpInstance};
 
-use super::cache::{CacheLookup, JwtCache, is_plausible_jwt_shape};
+use super::cache::{CacheHitKind, JwtCache, is_plausible_jwt_shape};
 use super::claims::ClaimPath;
 use super::crypto::{JwtAlgorithm, JwtValidationPolicy, JwtVerifyError, VerifierKey, verify_jwt};
 use super::providers::fetch_etp_key_table;
@@ -43,6 +44,7 @@ use crate::pre_upstream::PreUpstreamPlugin;
 const KEY_COOKIE: HeaderKey = HeaderKey::from_static("cookie");
 const WWW_AUTH_MISSING: HeaderValue = HeaderValue::from_static("Bearer realm=\"velda-edge\"");
 const WWW_AUTH_INVALID: HeaderValue = HeaderValue::from_static("Bearer error=\"invalid_token\"");
+const UNKNOWN_KID_RESYNC_COOLDOWN_SECS: u64 = 2;
 
 /// Pre-compiled token extraction source using pre-hashed [`HeaderKey`] descriptors.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -94,6 +96,8 @@ pub struct JwtAuthPlugin {
     pub claims_to_headers: Box<[(ClaimPath, HeaderKey)]>,
     pub assert_claims: Box<[(ClaimPath, Box<str>)]>,
     pub id: String,
+    unknown_kid_notify: Notify,
+    last_demand_sync_sec: AtomicU64,
 }
 
 impl JwtAuthPlugin {
@@ -238,7 +242,30 @@ impl JwtAuthPlugin {
             claims_to_headers: claims_to_headers.into_boxed_slice(),
             assert_claims: assert_claims.into_boxed_slice(),
             id: config.id.clone(),
+            unknown_kid_notify: Notify::new(),
+            last_demand_sync_sec: AtomicU64::new(0),
         })
+    }
+
+    /// Triggers at most one Shadow JWKS sync every `UNKNOWN_KID_RESYNC_COOLDOWN_SECS` when an
+    /// unrecognized `kid` arrives in `external` mode, using 0 blocking I/O on the Frontline thread.
+    #[inline]
+    fn maybe_trigger_unknown_kid_sync(&self, now_sec: u64) {
+        if self.mode_bit != MODE_EXTERNAL || self.pbww_weight == 0 {
+            return;
+        }
+        let prev = self.last_demand_sync_sec.load(Ordering::Relaxed);
+        if prev != 0 && now_sec.saturating_sub(prev) < UNKNOWN_KID_RESYNC_COOLDOWN_SECS {
+            return;
+        }
+        let next_stamp = now_sec.max(1);
+        if self
+            .last_demand_sync_sec
+            .compare_exchange(prev, next_stamp, Ordering::AcqRel, Ordering::Relaxed)
+            .is_ok()
+        {
+            self.unknown_kid_notify.notify_one();
+        }
     }
 
     /// Executes one key-fetch and atomic [`JwksStore`] swap against the attached ETP instance.
@@ -430,6 +457,21 @@ impl PreUpstreamPlugin for JwtAuthPlugin {
                             return Ok(());
                         }
                     }
+                    _ = self.unknown_kid_notify.notified() => {
+                        tracing::info!(
+                            plugin_id = %self.id,
+                            "Waking jwt_auth Shadow key rotation daemon on UnknownKid signal"
+                        );
+                        if let Err(err) = self.sync_keys_once().await {
+                            tracing::warn!(
+                                plugin_id = %self.id,
+                                error = %err,
+                                "On-demand jwt_auth ETP key sync failed; retaining LKG JwksStore"
+                            );
+                        }
+                        next_sync_sec = velda_core::clock::coarse_sec()
+                            .saturating_add(self.refresh_interval_secs);
+                    }
                     _ = tokio::time::sleep(Duration::from_millis(250)) => {
                         let now_sec = velda_core::clock::coarse_sec();
                         if now_sec >= next_sync_sec {
@@ -453,39 +495,48 @@ impl PreUpstreamPlugin for JwtAuthPlugin {
         // 1. Pull 64B JwtCache control block into L1D (`_MM_HINT_T0`)
         self.cache.prefetch_control_l1();
 
-        let Some(token_str) = self.extract_token(req) else {
-            return Self::reject_missing_token(req);
-        };
-
-        if !is_plausible_jwt_shape(token_str) {
-            return Self::reject_invalid_token(req);
-        }
-
         let now = req.ingress_time_sec();
         let table_guard = self.key_store.load();
         let cache_enabled = self.cache.is_enabled();
 
-        // 2. Check L3 JwtCache validated against per-`kid` key_tags in JwksStore
+        // 2. Check L3 JwtCache via zero-atomic `lookup_and_apply` against JwksStore key_tags
         let fp = if cache_enabled {
-            let fp = self.cache.token_to_u128(token_str);
-            match self.cache.lookup(fp, now, &table_guard) {
-                CacheLookup::Positive(cached_headers) => {
-                    if let Some(headers) = cached_headers.as_deref() {
-                        for (key, val) in headers {
-                            req.headers.insert_prehashed(key, val.clone());
-                        }
-                    }
-                    return Action::Continue;
+            let fp = {
+                let Some(token_str) = self.extract_token(req) else {
+                    return Self::reject_missing_token(req);
+                };
+                if !is_plausible_jwt_shape(token_str) {
+                    return Self::reject_invalid_token(req);
                 }
-                CacheLookup::Unauthorized => return Self::reject_invalid_token(req),
-                CacheLookup::Forbidden => return Action::Reject(RejectReason::Forbidden),
-                CacheLookup::Miss => fp,
+                self.cache.token_to_u128(token_str)
+            };
+
+            match self
+                .cache
+                .lookup_and_apply(fp, now, &table_guard, |headers| {
+                    for (key, val) in headers {
+                        req.headers.insert_prehashed(key, val.clone());
+                    }
+                }) {
+                CacheHitKind::Positive => return Action::Continue,
+                CacheHitKind::Unauthorized => return Self::reject_invalid_token(req),
+                CacheHitKind::Forbidden => return Action::Reject(RejectReason::Forbidden),
+                CacheHitKind::Miss => {}
             }
+            fp
         } else {
             0
         };
 
-        // 3. Cache Miss: verify signature using L1D/L3 JwksStore + per-slot u4 alg
+        let Some(token_str) = self.extract_token(req) else {
+            return Self::reject_missing_token(req);
+        };
+        if !cache_enabled && !is_plausible_jwt_shape(token_str) {
+            return Self::reject_invalid_token(req);
+        }
+
+        // 3. Cache Miss (or uncached `cache_ttl_secs: 0` hot path): verify signature via L1D/L3 JwksStore + per-slot u4 alg.
+        // Kept non-#[cold] so uncached traffic avoids `.text.unlikely` / `-Os` degradation.
         let policy = JwtValidationPolicy {
             boot_salt: self.cache.boot_salt(),
             key_table: &table_guard,
@@ -531,10 +582,14 @@ impl PreUpstreamPlugin for JwtAuthPlugin {
             }
             Err(JwtVerifyError::NoActiveKeys) => {
                 tracing::debug!(plugin_id = %self.id, "JWT rejected: JwksStore empty");
+                self.maybe_trigger_unknown_kid_sync(now);
                 Self::reject_invalid_token(req)
             }
             Err(err) => {
                 tracing::debug!(plugin_id = %self.id, error = ?err, now = now, "JWT verification failed");
+                if err == JwtVerifyError::UnknownKid {
+                    self.maybe_trigger_unknown_kid_sync(now);
+                }
                 if cache_enabled {
                     self.cache.insert_reject(
                         fp,
@@ -785,5 +840,158 @@ mod tests {
         );
 
         srv.abort();
+    }
+
+    #[tokio::test]
+    async fn test_unknown_kid_triggers_rate_limited_shadow_resync_and_recovers() {
+        use std::sync::atomic::{AtomicUsize, Ordering as AtomicOrdering};
+
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let port = listener.local_addr().unwrap().port();
+        let fetch_count = Arc::new(AtomicUsize::new(0));
+        let fetch_count_srv = Arc::clone(&fetch_count);
+
+        let srv = tokio::spawn(async move {
+            loop {
+                let Ok((mut s, _)) = listener.accept().await else {
+                    break;
+                };
+                let cnt = Arc::clone(&fetch_count_srv);
+                tokio::spawn(async move {
+                    let mut buf = [0u8; 2048];
+                    let Ok(bytes) = s.read(&mut buf).await else {
+                        return;
+                    };
+                    if bytes == 0 {
+                        return;
+                    }
+                    let n = cnt.fetch_add(1, AtomicOrdering::SeqCst) + 1;
+                    let body = if n == 1 {
+                        serde_json::json!({
+                            "data": { "data": { "kid": "v1", "alg": "HS256", "secret_key": "sec-v1" } }
+                        })
+                    } else {
+                        serde_json::json!({
+                            "data": { "data": { "kid": "v2", "alg": "HS256", "secret_key": "sec-v2" } }
+                        })
+                    }
+                    .to_string();
+                    let resp = format!(
+                        "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+                        body.len()
+                    );
+                    let _ = s.write_all(resp.as_bytes()).await;
+                    let _ = s.flush().await;
+                });
+            }
+        });
+
+        let etp_reg = build_registry(&[EtpEntryConfig {
+            id: "vault-rot".into(),
+            kind: EtpKind::Vault,
+            security: EtpTransportSecurity::Plain,
+            pool: EtpPoolSettings {
+                pool_size: 1,
+                connect_timeout_ms: 2000,
+                idle_timeout_ms: 30_000,
+            },
+            tls: None,
+            settings: serde_json::json!({ "host": "127.0.0.1", "port": port, "token": "root" }),
+        }])
+        .unwrap();
+
+        let cfg = PluginConfig {
+            id: "jwt_auth".into(),
+            config: serde_json::json!({
+                "mode": "external",
+                "etp_id": "vault-rot",
+                "path": "/v1/secret/data/jwt",
+                "refresh_interval_secs": 300,
+                "token_sources": [{ "type": "header", "name": "authorization", "prefix": "Bearer " }],
+                "validate_exp": true,
+                "clock_skew_secs": 60,
+                "claims_to_headers": { "sub": "x-user" },
+                "assert_claims": {},
+                "cache_ttl_secs": 300
+            }),
+        };
+        let plugin = Arc::new(JwtAuthPlugin::from_config(&cfg).unwrap());
+        plugin
+            .attach_etp(etp_reg.entries.get("vault-rot").unwrap())
+            .unwrap();
+
+        let (tx, rx) = watch::channel(false);
+        let bg = plugin.clone().run_background(rx).unwrap();
+        let bg_handle = tokio::spawn(bg);
+
+        // Wait for initial sync (fetch #1 -> kid v1)
+        for _ in 0..40 {
+            if fetch_count.load(AtomicOrdering::SeqCst) >= 1 && plugin.key_store.load().has_keys() {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(25)).await;
+        }
+        assert_eq!(fetch_count.load(AtomicOrdering::SeqCst), 1);
+
+        let tok_v2 = create_hs_token(
+            JwtAlgorithm::HS256,
+            Some("v2"),
+            "sec-v2",
+            r#"{"sub":"bob","exp":2000000000}"#,
+        );
+        let mk_req = |t: &str, ts_sec: u64| {
+            let mut h = HeaderWorkspace::new(16);
+            h.insert(
+                AUTHORIZATION,
+                HeaderValue::from_str(&format!("Bearer {t}")).unwrap(),
+            );
+            let mut req = L7Request::new(
+                Method::GET,
+                Uri::from_static("http://example.com/v1"),
+                Version::HTTP_11,
+                h,
+                Body::Empty,
+            );
+            req.ingress_time_nanos = ts_sec * 1_000_000_000;
+            req
+        };
+
+        let mut up = 0;
+        // Flood UnknownKid inside cooldown -> triggers only ONE immediate background sync
+        let mut req1 = mk_req(&tok_v2, 1_700_000_000);
+        assert!(matches!(
+            plugin.on_upstream_request(&mut req1, &mut up),
+            Action::Reject(RejectReason::Unauthorized)
+        ));
+        let mut req2 = mk_req(&tok_v2, 1_700_000_000);
+        assert!(matches!(
+            plugin.on_upstream_request(&mut req2, &mut up),
+            Action::Reject(RejectReason::Unauthorized)
+        ));
+
+        // Shadow wakes immediately without waiting 300s and loads v2 (fetch #2)
+        for _ in 0..40 {
+            if fetch_count.load(AtomicOrdering::SeqCst) >= 2 {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(25)).await;
+        }
+        assert_eq!(fetch_count.load(AtomicOrdering::SeqCst), 2);
+
+        // Give store a moment to finish swapping after fetch #2
+        for _ in 0..40 {
+            let mut req3 = mk_req(&tok_v2, 1_700_000_001);
+            if matches!(
+                plugin.on_upstream_request(&mut req3, &mut up),
+                Action::Continue
+            ) {
+                let _ = tx.send(true);
+                let _ = bg_handle.await;
+                srv.abort();
+                return;
+            }
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+        panic!("Expected UnknownKid demand sync to recover v2 within cooldown window");
     }
 }

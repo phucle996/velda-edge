@@ -22,7 +22,7 @@ pub mod simd;
 pub mod store;
 pub mod validation;
 
-pub use cache::{CacheLookup, CachedDecision, GROUP_WIDTH, JwtCache, is_plausible_jwt_shape};
+pub use cache::{CacheHitKind, CachedDecision, GROUP_WIDTH, JwtCache, is_plausible_jwt_shape};
 pub use claims::{ClaimPath, resolve_claim_path};
 pub use crypto::{
     ALG_INVALID, JwtAlgorithm, JwtValidationPolicy, JwtVerifyError, VerifiedToken, VerifierKey,
