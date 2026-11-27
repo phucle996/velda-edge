@@ -117,6 +117,7 @@ pub async fn push_and_read_totals(
 
     let mut lease = etp.acquire().await?;
     let mut resp_buf = Vec::with_capacity(2048);
+    let mut inserted = false;
     let mut last_err = EtpError::Timeout {
         id: etp.config.id.clone(),
         timeout_ms: u64::try_from(io_timeout.as_millis()).unwrap_or(u64::MAX),
@@ -125,15 +126,18 @@ pub async fn push_and_read_totals(
     for attempt in 0..2 {
         let res: Result<Result<Vec<ReconciledClusterTotal>, EtpError>, _> =
             tokio::time::timeout(io_timeout, async {
-                lease.write_all(&insert_head).await?;
-                lease.write_all(&tsv_buf).await?;
-                lease.flush().await?;
-                let (st1, b1) = read_http1_response(&mut lease, &mut resp_buf).await?;
-                if !(200..300).contains(&st1) {
-                    return Err(EtpError::Io(Error::other(format!(
-                        "ClickHouse INSERT HTTP {st1}: {}",
-                        String::from_utf8_lossy(&b1)
-                    ))));
+                if !inserted {
+                    lease.write_all(&insert_head).await?;
+                    lease.write_all(&tsv_buf).await?;
+                    lease.flush().await?;
+                    let (st1, b1) = read_http1_response(&mut lease, &mut resp_buf).await?;
+                    if !(200..300).contains(&st1) {
+                        return Err(EtpError::Io(Error::other(format!(
+                            "ClickHouse INSERT HTTP {st1}: {}",
+                            String::from_utf8_lossy(&b1)
+                        ))));
+                    }
+                    inserted = true;
                 }
 
                 lease.write_all(&select_head).await?;
@@ -180,13 +184,28 @@ pub async fn push_and_read_totals(
                     continue;
                 }
                 lease.recreate_in_background();
-                return Err(last_err);
+                break;
             }
             Err(_) => {
                 lease.recreate_in_background();
-                return Err(last_err);
+                break;
             }
         }
+    }
+
+    // If INSERT already succeeded durably on ClickHouse and only SELECT failed, avoid
+    // returning Err (which would requeue and double-insert on SummingMergeTree).
+    if inserted {
+        return Ok(deltas
+            .iter()
+            .map(|d| ReconciledClusterTotal {
+                key_hash: d.key_hash,
+                tier: d.tier,
+                pushed_delta: d.delta,
+                window_epoch: d.window_epoch,
+                cluster_total: d.delta,
+            })
+            .collect());
     }
 
     Err(last_err)

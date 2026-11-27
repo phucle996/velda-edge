@@ -25,9 +25,12 @@
 
 ## 3. Bounded Arena & Eviction Invariants (`arena.rs`)
 
-- **No `MAX_ENTRIES` Lockout DoS**: Earlier implementations stopped inserting new IPs when shards filled up or ran `Vec::retain()` scans causing latency spikes. Now `ShardSlab` allocates a fixed `Box<[SlabSlot]>` partitioned into `SET_WAYS = 16`-slot associative sets.
-- **Bounded Worst-Case O(1) Eviction**: Each set maintains a local `u8` `CLOCK` hand (`set_clocks[set_idx]`). An eviction sweep inspects at most `SET_WAYS + 1 = 17` contiguous `SlabSlot`s, clearing `ref_bit` on first pass and replacing the first cold slot cleanly.
-- **Monotonic Timing (`Instant`)**: `RateLimitArena::now_ms()` computes elapsed milliseconds from a process-local `Instant` anchor (starting at offset `1000ms`), preventing NTP backward clock steps from breaking window rollovers or token refill deltas.
+- **Hardware-Sized Per-Core `CoreLane` & Lock-Free Fast-Reject**: `RateLimitArena` sizes L1 `CoreLane`s dynamically from `velda_core::hardware::probe_cpu()` and `velda_core::worker::get_allowed_cores()` (supporting 2 cores to 128+ cores via `thread_local! LOCAL_CORE_LANE`). Each 64-bit `AtomicU64` lane slot caches both positive micro-leases (packing exact `bucket_rem` and `batch_rem`) and exhausted fast-reject entries (eliminating mutex contention when hot keys are flooded even under small `burst_capacity`).
+- **Set-SoA Cache Layout (`SlabSet` + `SlotBody`)**: Each 64-shard `ShardSlab` is partitioned into power-of-2 `SlabSet`s (`SET_WAYS = 16`, indexed via bitwise `& set_mask`). Every `SlabSet` packs `[u64; 16]` hashes contiguously into 2 cache lines (`128B`) probed via AVX2 `_mm256_cmpeq_epi64` on `x86_64` (with portable scalar fallback for non-AVX2/ARM64 targets), paired with 16 `64B` cache-line-aligned `SlotBody` state blocks.
+- **Expired-First & Dirty/Tier-Aware `CLOCK` Eviction**: On a set miss, `find_or_evict_way` reclaims empty ways first, then expired clean ways (`dirty_delta == 0` past the active window), before running a bounded `O(SET_WAYS)` `CLOCK` sweep that prioritizes clean victims over dirty/tier-0 tenant slots.
+- **Bitmask + Round-Robin `O(dirty_sets)` Sync Drain**: `dirty_shard_mask` (`AtomicU64`) skips clean shards lock-free, `dirty_set_words` + `SlabSet.dirty_mask` visit only dirty sets/ways via `trailing_zeros()`, and `sync_shard_cursor` drains dirty shards round-robin.
+- **No `MAX_ENTRIES` Lockout or OOM DoS**: Bounded pre-allocation up front (`64..=MAX_ALLOWED_ENTRIES`), never growing dynamically on traffic floods.
+- **Single-Read Ingress & Monotonic Coarse Timing**: Request serving reads `L7Request::ingress_time_nanos` once per request (`RateLimitArena::now_ms_from_ingress`), avoiding redundant clock reads across hierarchical tiers and keeping millisecond granularity for `TokenBucket` / `SlidingWindow`. Background reconciliation and zero-timestamp fallbacks use `CLOCK_MONOTONIC_COARSE` on Linux (and `Instant::now()` on non-Linux targets), with per-bucket monotonic clamping against cross-core ingress skew.
 
 ## 4. Soft Overdraft & Cluster Reconciliation (`algorithm.rs`)
 

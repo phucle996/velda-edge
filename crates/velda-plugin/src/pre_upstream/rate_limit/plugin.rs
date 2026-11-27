@@ -135,19 +135,14 @@ impl PreUpstreamPlugin for RateLimitPlugin {
         }
 
         let digests = self.extractor.extract(req);
+        let now_ms = self.arena.now_ms_from_ingress(req.ingress_time_nanos);
         let mut min_remaining = self.config.burst_capacity;
 
         for item in digests.as_slice() {
-            let dec = self.arena.evaluate_key(item.hash, item.tier);
+            let dec = self.arena.evaluate_key(item.hash, item.tier, now_ms);
             if !dec.allowed {
-                let mut num_buf = [0u8; 24];
-                let nlen = velda_core::lut::decimal::fast_write_u64_slice(
-                    &mut num_buf,
-                    dec.retry_after_secs.max(1),
-                );
-                let retry_val = HeaderValue::from_bytes(&num_buf[..nlen])
-                    .unwrap_or_else(|_| HeaderValue::from_static("1"));
-                req.headers.insert_bypass(HDR_RETRY_AFTER.name, retry_val);
+                req.headers
+                    .insert_bypass_u64(HDR_RETRY_AFTER.name, dec.retry_after_secs.max(1));
                 req.headers
                     .insert_bypass(HDR_REMAINING.name, HeaderValue::from_static("0"));
                 req.headers
@@ -161,11 +156,10 @@ impl PreUpstreamPlugin for RateLimitPlugin {
 
         req.headers
             .insert_prehashed(&HDR_LIMIT, self.limit_header_val.clone());
-        let mut rem_buf = [0u8; 24];
-        let rlen = velda_core::lut::decimal::fast_write_u64_slice(&mut rem_buf, min_remaining);
-        if let Ok(rem_val) = HeaderValue::from_bytes(&rem_buf[..rlen]) {
-            req.headers.insert_prehashed(&HDR_REMAINING, rem_val);
-        }
+        req.headers.insert_prehashed(
+            &HDR_REMAINING,
+            velda_core::buffer::header::resolve_u64_header_value(min_remaining),
+        );
         Action::Continue
     }
 
@@ -446,5 +440,54 @@ mod tests {
         let _ = tx.send(true);
         let _ = bg_handle.await;
         srv.abort();
+    }
+
+    #[test]
+    fn test_ingress_time_nanos_drives_rollover_and_clamps_backward_skew() {
+        let cfg = RateLimitConfig {
+            algorithm: RateLimitAlgorithm::FixedWindow,
+            rate_per_second: 2,
+            burst_capacity: 2,
+            overdraft_percent: 0,
+            key_strategy: KeyStrategy::Hierarchical,
+            key_headers: vec!["x-tenant-id".into(), "x-api-key".into()],
+            ..RateLimitConfig::default()
+        };
+        let plugin = RateLimitPlugin::with_config("rate_limit", cfg);
+        let mut upstream = 0;
+        let t0_ns = 1_750_000_000_000_000_000u64;
+
+        for _ in 0..2 {
+            let mut req = make_req(&[("x-tenant-id", "t1"), ("x-api-key", "k1")], "/");
+            req.ingress_time_nanos = t0_ns;
+            assert!(matches!(
+                plugin.on_upstream_request(&mut req, &mut upstream),
+                Action::Continue
+            ));
+        }
+
+        // Same ingress epoch exhausted -> 429
+        let mut blocked = make_req(&[("x-tenant-id", "t1"), ("x-api-key", "k1")], "/");
+        blocked.ingress_time_nanos = t0_ns;
+        assert!(matches!(
+            plugin.on_upstream_request(&mut blocked, &mut upstream),
+            Action::Reject(RejectReason::TooManyRequests)
+        ));
+
+        // Backward skewed ingress timestamp (-5s) must NOT reset bucket backwards
+        let mut skewed = make_req(&[("x-tenant-id", "t1"), ("x-api-key", "k1")], "/");
+        skewed.ingress_time_nanos = t0_ns - 5_000_000_000;
+        assert!(matches!(
+            plugin.on_upstream_request(&mut skewed, &mut upstream),
+            Action::Reject(RejectReason::TooManyRequests)
+        ));
+
+        // Advancing ingress_time_nanos by +1s rolls into fresh epoch cleanly without sleeping
+        let mut next_epoch = make_req(&[("x-tenant-id", "t1"), ("x-api-key", "k1")], "/");
+        next_epoch.ingress_time_nanos = t0_ns + 1_000_000_000;
+        assert!(matches!(
+            plugin.on_upstream_request(&mut next_epoch, &mut upstream),
+            Action::Continue
+        ));
     }
 }

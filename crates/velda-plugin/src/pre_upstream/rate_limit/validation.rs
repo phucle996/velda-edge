@@ -143,6 +143,9 @@ fn default_max_entries() -> usize {
     65_536
 }
 
+/// Hard upper bound on `max_entries` per `rate_limit` instance to prevent accidental OOM reloads.
+pub const MAX_ALLOWED_ENTRIES: usize = 4_194_304;
+
 fn default_pbww() -> u32 {
     20
 }
@@ -194,9 +197,9 @@ pub fn validate_rate_limit_config(raw: &serde_json::Value) -> Result<RateLimitCo
             cfg.sync_interval_ms
         )));
     }
-    if cfg.max_entries < 64 {
+    if cfg.max_entries < 64 || cfg.max_entries > MAX_ALLOWED_ENTRIES {
         return Err(PluginError::Config(format!(
-            "rate_limit 'max_entries' ({}) must be >= 64",
+            "rate_limit 'max_entries' ({}) must be in 64..={MAX_ALLOWED_ENTRIES}",
             cfg.max_entries
         )));
     }
@@ -277,5 +280,10 @@ mod tests {
         let parsed_etp = validate_rate_limit_config(&valid_etp).unwrap();
         assert_eq!(parsed_etp.etp_id.as_deref(), Some("pg-rl-sot"));
         assert_eq!(parsed_etp.pbww, 20);
+
+        let too_large = serde_json::json!({
+            "max_entries": MAX_ALLOWED_ENTRIES + 1
+        });
+        assert!(validate_rate_limit_config(&too_large).is_err());
     }
 }

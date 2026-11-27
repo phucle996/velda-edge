@@ -53,7 +53,7 @@ pub async fn run_sot_sync_loop(
             ddl_ready = ensure_table(&etp, io_timeout).await.is_ok();
         }
 
-        let deltas = arena.collect_dirty_deltas(64);
+        let deltas = arena.collect_dirty_deltas(512);
         if deltas.is_empty() {
             continue;
         }

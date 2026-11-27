@@ -331,6 +331,8 @@ fn build_connect_ping_frame(config: &NatsEtpConfig) -> Vec<u8> {
     let mut payload = serde_json::Map::new();
     payload.insert("verbose".to_string(), serde_json::Value::Bool(false));
     payload.insert("pedantic".to_string(), serde_json::Value::Bool(false));
+    payload.insert("headers".to_string(), serde_json::Value::Bool(true));
+    payload.insert("no_responders".to_string(), serde_json::Value::Bool(true));
     payload.insert("protocol".to_string(), serde_json::Value::Number(1.into()));
     payload.insert(
         "lang".to_string(),

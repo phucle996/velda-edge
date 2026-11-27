@@ -3,7 +3,7 @@
 //! ```text
 //!   Shadow Tick / Shutdown Signal
 //!         │
-//!         ├─► 1. Drain up to 256 DirtyKeyDelta entries from RateLimitArena
+//!         ├─► 1. Drain up to 2048 DirtyKeyDelta entries from RateLimitArena
 //!         ├─► 2. Push & read cluster totals via providers::dragonfly::client
 //!         │     ├─ Ok  ──► set SOT_HEALTH_OK, reconcile_cluster_totals()
 //!         │     └─ Err ──► requeue_failed_deltas(), update health per FallbackBehavior
@@ -53,7 +53,7 @@ pub async fn run_sot_sync_loop(
             break;
         }
 
-        let deltas = arena.collect_dirty_deltas(256);
+        let deltas = arena.collect_dirty_deltas(2048);
         if deltas.is_empty() {
             continue;
         }

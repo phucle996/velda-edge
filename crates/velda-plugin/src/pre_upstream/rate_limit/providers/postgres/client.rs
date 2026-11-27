@@ -14,7 +14,7 @@ use velda_core::lut::decimal::fast_write_u64_slice;
 use velda_etp::EtpError;
 use velda_etp::postgres::PostgresEtp;
 
-use super::wire::{append_bind_execute_sync, read_until_ready};
+use super::wire::{PgReader, append_bind_execute, append_sync};
 use crate::pre_upstream::rate_limit::arena::{DirtyKeyDelta, ReconciledClusterTotal};
 use crate::wire_baked::{BakedWire, build_pg_parse_sync, pg_parse_sync_len};
 
@@ -53,24 +53,28 @@ pub async fn push_and_read_totals(
     let now_len = fast_write_u64_slice(&mut now_buf, now_unix);
     let prefix_b = key_prefix.as_bytes();
 
+    let mut out = Vec::with_capacity(deltas.len());
+    let mut reader = PgReader::new();
     let mut last_err = EtpError::Timeout {
         id: etp.config.id.clone(),
         timeout_ms: u64::try_from(io_timeout.as_millis()).unwrap_or(u64::MAX),
     };
 
     for attempt in 0..2 {
-        let res: Result<Result<Vec<ReconciledClusterTotal>, EtpError>, _> =
-            tokio::time::timeout(io_timeout, async {
-                let mut out = Vec::with_capacity(deltas.len());
-                let mut wire = Vec::with_capacity(512);
-                let mut key_buf = Vec::with_capacity(prefix_b.len() + 48);
-                let mut d_buf = [0u8; 24];
+        let pending = &deltas[out.len()..];
+        let res: Result<Result<(), EtpError>, _> = tokio::time::timeout(io_timeout, async {
+            let mut wire = Vec::with_capacity(128 * 96);
+            let mut key_buf = Vec::with_capacity(prefix_b.len() + 48);
+            let mut d_buf = [0u8; 24];
 
-                lease.write_all(&PG_UPSERT_PARSE_SYNC_WIRE).await?;
-                lease.flush().await?;
-                let _ = read_until_ready(&mut lease).await?;
+            lease.write_all(&PG_UPSERT_PARSE_SYNC_WIRE).await?;
+            lease.flush().await?;
+            let _ = reader.read_pipelined_until_ready(&mut lease).await?;
 
-                for d in deltas {
+            // Pipeline up to 128 Bind+Execute operations per single Sync round-trip.
+            for chunk in pending.chunks(128) {
+                wire.clear();
+                for d in chunk {
                     {
                         let mut kw = BakedWire::cleared(&mut key_buf, prefix_b.len() + 48);
                         kw.push_chunk(prefix_b);
@@ -81,9 +85,7 @@ pub async fn push_and_read_totals(
                         kw.push_u64(d.window_epoch);
                     }
                     let d_len = fast_write_u64_slice(&mut d_buf, d.delta);
-
-                    wire.clear();
-                    append_bind_execute_sync(
+                    append_bind_execute(
                         &mut wire,
                         &[
                             &key_buf,
@@ -92,9 +94,14 @@ pub async fn push_and_read_totals(
                             &now_buf[..now_len],
                         ],
                     );
-                    lease.write_all(&wire).await?;
-                    lease.flush().await?;
-                    let total = read_until_ready(&mut lease).await?.unwrap_or(d.delta);
+                }
+                append_sync(&mut wire);
+                lease.write_all(&wire).await?;
+                lease.flush().await?;
+
+                let totals = reader.read_pipelined_until_ready(&mut lease).await?;
+                for (i, d) in chunk.iter().enumerate() {
+                    let total = totals.get(i).copied().flatten().unwrap_or(d.delta);
                     out.push(ReconciledClusterTotal {
                         key_hash: d.key_hash,
                         tier: d.tier,
@@ -103,14 +110,16 @@ pub async fn push_and_read_totals(
                         cluster_total: total,
                     });
                 }
-                Ok(out)
-            })
-            .await;
+            }
+            Ok(())
+        })
+        .await;
 
         match res {
-            Ok(Ok(totals)) => return Ok(totals),
+            Ok(Ok(())) => return Ok(out),
             Ok(Err(err)) => {
                 last_err = err;
+                reader.clear();
                 if attempt == 0 && lease.reconnect().await.is_ok() {
                     continue;
                 }
@@ -118,6 +127,7 @@ pub async fn push_and_read_totals(
                 return Err(last_err);
             }
             Err(_) => {
+                reader.clear();
                 lease.recreate_in_background();
                 return Err(last_err);
             }

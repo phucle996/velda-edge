@@ -54,10 +54,16 @@ pub fn evaluate_bucket_consume(
 ) -> (RateDecision, u64) {
     let hard_cap = burst_capacity.max(1);
     let eff_cap = effective_capacity_with_grace(hard_cap, overdraft_percent);
+    // Clamp monotonically against slight cross-core ingress timestamp skew.
+    let now_ms = now_ms.max(bucket.last_ms);
 
     match algo {
         RateLimitAlgorithm::TokenBucket => {
             let rate = rate_per_second.max(1);
+            let epoch = now_ms / 1000;
+            if bucket.epoch_sec < epoch {
+                bucket.epoch_sec = epoch;
+            }
             let elapsed_ms = now_ms.saturating_sub(bucket.last_ms);
             if elapsed_ms > 0 {
                 let refill_milli = elapsed_ms.saturating_mul(rate);
@@ -110,7 +116,7 @@ pub fn evaluate_bucket_consume(
         }
         RateLimitAlgorithm::FixedWindow => {
             let epoch = now_ms / 1000;
-            if bucket.epoch_sec != epoch {
+            if bucket.epoch_sec < epoch {
                 bucket.epoch_sec = epoch;
                 bucket.used_milli = 0;
                 bucket.prev_window_count = 0;

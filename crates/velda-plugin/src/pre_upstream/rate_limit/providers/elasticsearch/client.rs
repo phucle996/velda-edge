@@ -108,6 +108,7 @@ pub async fn push_and_read_totals(
 
     let mut lease = etp.acquire().await?;
     let mut resp_buf = Vec::with_capacity(4096);
+    let mut bulk_done = false;
     let mut last_err = EtpError::Timeout {
         id: etp.config.id.clone(),
         timeout_ms: u64::try_from(io_timeout.as_millis()).unwrap_or(u64::MAX),
@@ -116,15 +117,18 @@ pub async fn push_and_read_totals(
     for attempt in 0..2 {
         let res: Result<Result<Vec<ReconciledClusterTotal>, EtpError>, _> =
             tokio::time::timeout(io_timeout, async {
-                lease.write_all(&bulk_head).await?;
-                lease.write_all(&bulk_body).await?;
-                lease.flush().await?;
-                let (st1, b1) = read_http1_response(&mut lease, &mut resp_buf).await?;
-                if !(200..300).contains(&st1) {
-                    return Err(EtpError::Io(Error::other(format!(
-                        "Elasticsearch _bulk HTTP {st1}: {}",
-                        String::from_utf8_lossy(&b1)
-                    ))));
+                if !bulk_done {
+                    lease.write_all(&bulk_head).await?;
+                    lease.write_all(&bulk_body).await?;
+                    lease.flush().await?;
+                    let (st1, b1) = read_http1_response(&mut lease, &mut resp_buf).await?;
+                    if !(200..300).contains(&st1) {
+                        return Err(EtpError::Io(Error::other(format!(
+                            "Elasticsearch _bulk HTTP {st1}: {}",
+                            String::from_utf8_lossy(&b1)
+                        ))));
+                    }
+                    bulk_done = true;
                 }
 
                 lease.write_all(&mget_head).await?;
@@ -168,13 +172,26 @@ pub async fn push_and_read_totals(
                     continue;
                 }
                 lease.recreate_in_background();
-                return Err(last_err);
+                break;
             }
             Err(_) => {
                 lease.recreate_in_background();
-                return Err(last_err);
+                break;
             }
         }
+    }
+
+    if bulk_done {
+        return Ok(deltas
+            .iter()
+            .map(|d| ReconciledClusterTotal {
+                key_hash: d.key_hash,
+                tier: d.tier,
+                pushed_delta: d.delta,
+                window_epoch: d.window_epoch,
+                cluster_total: d.delta,
+            })
+            .collect());
     }
 
     Err(last_err)

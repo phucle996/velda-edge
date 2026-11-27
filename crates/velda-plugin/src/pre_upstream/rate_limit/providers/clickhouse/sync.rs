@@ -4,7 +4,7 @@
 //!   Shadow Init: ensure_table() (best-effort CREATE TABLE IF NOT EXISTS)
 //!         │
 //!         ▼ Tick / Shutdown Signal:
-//!     1. Drain up to 128 DirtyKeyDelta entries
+//!     1. Drain up to 512 DirtyKeyDelta entries
 //!     2. SummingMergeTree INSERT + SELECT sum(delta) via providers::clickhouse::client
 //!     3. Reconcile cluster totals and maintain health flag
 //! ```
@@ -53,7 +53,7 @@ pub async fn run_sot_sync_loop(
             ddl_ready = ensure_table(&etp, io_timeout).await.is_ok();
         }
 
-        let deltas = arena.collect_dirty_deltas(128);
+        let deltas = arena.collect_dirty_deltas(512);
         if deltas.is_empty() {
             continue;
         }

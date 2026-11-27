@@ -51,7 +51,7 @@ pub async fn run_sot_sync_loop(
             break;
         }
 
-        let deltas = arena.collect_dirty_deltas(128);
+        let deltas = arena.collect_dirty_deltas(512);
         if deltas.is_empty() {
             continue;
         }

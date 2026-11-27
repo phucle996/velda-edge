@@ -61,27 +61,29 @@ pub async fn push_and_read_totals(
     let mut req_buf = Vec::with_capacity(768);
     let mut resp_buf = Vec::with_capacity(4096);
 
+    let mut out = Vec::with_capacity(deltas.len());
     let mut last_err = EtpError::Timeout {
         id: etp.config.id.clone(),
         timeout_ms: u64::try_from(io_timeout.as_millis()).unwrap_or(u64::MAX),
     };
 
     for attempt in 0..2 {
-        let res: Result<Result<Vec<ReconciledClusterTotal>, EtpError>, _> =
-            tokio::time::timeout(io_timeout, async {
-                let mut out = Vec::with_capacity(deltas.len());
-                for d in deltas {
-                    {
-                        let mut uw = BakedWire::cleared(&mut uri_buf, uri_prefix.len() + 48);
-                        uw.push_chunk(&uri_prefix);
-                        uw.push_u64(u64::from(d.tier));
-                        uw.push_byte(b'_');
-                        uw.push_hex16(d.key_hash);
-                        uw.push_byte(b'_');
-                        uw.push_u64(d.window_epoch);
-                        uw.push_chunk(b".json");
-                    }
+        let pending = &deltas[out.len()..];
+        let res: Result<Result<(), EtpError>, _> = tokio::time::timeout(io_timeout, async {
+            for d in pending {
+                {
+                    let mut uw = BakedWire::cleared(&mut uri_buf, uri_prefix.len() + 48);
+                    uw.push_chunk(&uri_prefix);
+                    uw.push_u64(u64::from(d.tier));
+                    uw.push_byte(b'_');
+                    uw.push_hex16(d.key_hash);
+                    uw.push_byte(b'_');
+                    uw.push_u64(d.window_epoch);
+                    uw.push_chunk(b".json");
+                }
 
+                let mut written_total = None;
+                for _cas_round in 0..3 {
                     signer.write_signed_request(
                         b"GET",
                         &uri_buf,
@@ -133,39 +135,52 @@ pub async fn push_and_read_totals(
                     lease.flush().await?;
                     let (put_st, _, put_resp) =
                         read_http1_response(&mut lease, &mut resp_buf).await?;
-                    if !(200..300).contains(&put_st) && put_st != 412 {
-                        return Err(EtpError::Io(Error::other(format!(
-                            "S3 PUT {} returned HTTP {put_st}: {}",
-                            String::from_utf8_lossy(&uri_buf),
-                            String::from_utf8_lossy(&put_resp)
-                        ))));
+                    if (200..300).contains(&put_st) {
+                        written_total = Some(total);
+                        break;
                     }
-
-                    out.push(ReconciledClusterTotal {
-                        key_hash: d.key_hash,
-                        tier: d.tier,
-                        pushed_delta: d.delta,
-                        window_epoch: d.window_epoch,
-                        cluster_total: total,
-                    });
+                    if put_st == 412 {
+                        continue;
+                    }
+                    return Err(EtpError::Io(Error::other(format!(
+                        "S3 PUT {} returned HTTP {put_st}: {}",
+                        String::from_utf8_lossy(&uri_buf),
+                        String::from_utf8_lossy(&put_resp)
+                    ))));
                 }
-                Ok(out)
-            })
-            .await;
+
+                let Some(total) = written_total else {
+                    return Err(EtpError::Io(Error::other(format!(
+                        "S3 CAS conflict (412) persisted after retries for {}",
+                        String::from_utf8_lossy(&uri_buf)
+                    ))));
+                };
+
+                out.push(ReconciledClusterTotal {
+                    key_hash: d.key_hash,
+                    tier: d.tier,
+                    pushed_delta: d.delta,
+                    window_epoch: d.window_epoch,
+                    cluster_total: total,
+                });
+            }
+            Ok(())
+        })
+        .await;
 
         match res {
-            Ok(Ok(totals)) => return Ok(totals),
+            Ok(Ok(())) => return Ok(out),
             Ok(Err(err)) => {
                 last_err = err;
                 if attempt == 0 && lease.reconnect().await.is_ok() {
                     continue;
                 }
                 lease.recreate_in_background();
-                return Err(last_err);
+                break;
             }
             Err(_) => {
                 lease.recreate_in_background();
-                return Err(last_err);
+                break;
             }
         }
     }

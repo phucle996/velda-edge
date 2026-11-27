@@ -1,31 +1,23 @@
-//! MySQL Prepared Statement + CTE atomic upsert & readback (`client.rs`).
+//! MySQL multi-row `INSERT ON DUPLICATE KEY UPDATE` & `SELECT IN` batch client (`client.rs`).
 //!
 //! ```text
 //!   push_and_read_totals(&etp, key_prefix, deltas)
-//!     COM_STMT_PREPARE(upsert CTE with ?) -> loop DirtyKeyDelta: COM_STMT_EXECUTE(params) -> COM_STMT_CLOSE
-//!     COM_STMT_PREPARE(SELECT cnt WHERE k=?) -> loop DirtyKeyDelta: COM_STMT_EXECUTE(key) -> COM_STMT_CLOSE
+//!     1. COM_QUERY: multi-row INSERT ... VALUES (...), (...) ON DUPLICATE KEY UPDATE
+//!     2. COM_QUERY: SELECT k, CAST(cnt AS UNSIGNED) FROM ... WHERE k IN (...) -> 2 RTT total
 //! ```
 
-use std::fmt::Write as _;
+use std::collections::HashMap;
 use std::sync::Arc;
 use std::time::Duration;
 
 use velda_etp::EtpError;
 use velda_etp::mysql::MysqlEtp;
 
-use super::wire::{MysqlParam, stmt_close, stmt_execute, stmt_prepare};
+use super::wire::{append_mysql_escaped_str, execute_com_query, execute_com_query_kv_rows};
 use crate::pre_upstream::rate_limit::arena::{DirtyKeyDelta, ReconciledClusterTotal};
+use crate::wire_baked::BakedWire;
 
-const MY_UPSERT_CTE_SQL: &str = "\
-INSERT INTO velda.velda_rate_limit (k, cnt, exp) \
-SELECT k, d, exp_ts FROM (SELECT ? AS k, ? AS d, ? AS exp_ts) AS delta_in \
-ON DUPLICATE KEY UPDATE \
-  cnt = IF(exp < ?, VALUES(cnt), cnt + VALUES(cnt)), \
-  exp = VALUES(exp)";
-
-const MY_SELECT_SQL: &str = "SELECT CAST(cnt AS SIGNED) FROM velda.velda_rate_limit WHERE k = ?";
-
-/// Atomically upserts per-key counters into `velda.velda_rate_limit` via prepared statements
+/// Atomically upserts per-key counters into `velda.velda_rate_limit` in 2 batch RTTs
 /// and reads back cluster totals.
 pub async fn push_and_read_totals(
     etp: &Arc<MysqlEtp>,
@@ -38,9 +30,61 @@ pub async fn push_and_read_totals(
     }
 
     let now_unix = velda_core::clock::coarse_sec();
-    let exp_i64 = i64::try_from(now_unix + 60).unwrap_or(i64::MAX);
-    let now_i64 = i64::try_from(now_unix).unwrap_or(i64::MAX);
+    let exp_u64 = now_unix + 60;
+    let prefix_b = key_prefix.as_bytes();
+
+    let mut upsert_sql = Vec::with_capacity(256 + deltas.len() * (prefix_b.len() + 72));
+    let mut select_sql = Vec::with_capacity(96 + deltas.len() * (prefix_b.len() + 48));
+    let mut key_buf = Vec::with_capacity(prefix_b.len() + 48);
+    let mut key_map: HashMap<String, usize> = HashMap::with_capacity(deltas.len());
+
+    {
+        upsert_sql.extend_from_slice(b"INSERT INTO velda.velda_rate_limit (k, cnt, exp) VALUES ");
+        select_sql.extend_from_slice(
+            b"SELECT k, CAST(cnt AS UNSIGNED) FROM velda.velda_rate_limit WHERE k IN (",
+        );
+
+        for (idx, d) in deltas.iter().enumerate() {
+            {
+                let mut kw = BakedWire::cleared(&mut key_buf, prefix_b.len() + 48);
+                kw.push_chunk(prefix_b);
+                kw.push_u64(u64::from(d.tier));
+                kw.push_byte(b':');
+                kw.push_hex16(d.key_hash);
+                kw.push_byte(b':');
+                kw.push_u64(d.window_epoch);
+            }
+            if idx > 0 {
+                upsert_sql.push(b',');
+                select_sql.push(b',');
+            }
+            upsert_sql.push(b'(');
+            append_mysql_escaped_str(&mut upsert_sql, &key_buf);
+            {
+                let mut uw = BakedWire::new(&mut upsert_sql);
+                uw.push_byte(b',');
+                uw.push_u64(d.delta);
+                uw.push_byte(b',');
+                uw.push_u64(exp_u64);
+                uw.push_byte(b')');
+            }
+            append_mysql_escaped_str(&mut select_sql, &key_buf);
+            key_map.insert(String::from_utf8_lossy(&key_buf).into_owned(), idx);
+        }
+
+        upsert_sql.extend_from_slice(b" ON DUPLICATE KEY UPDATE cnt = IF(exp < ");
+        {
+            let mut uw = BakedWire::new(&mut upsert_sql);
+            uw.push_u64(now_unix);
+            uw.push_chunk(b", VALUES(cnt), cnt + VALUES(cnt)), exp = VALUES(exp)");
+        }
+        select_sql.push(b')');
+    }
+
+    let upsert_str = std::str::from_utf8(&upsert_sql).unwrap_or("");
+    let select_str = std::str::from_utf8(&select_sql).unwrap_or("");
     let mut lease = etp.acquire().await?;
+    let mut inserted = false;
 
     let mut last_err = EtpError::Timeout {
         id: etp.config.id.clone(),
@@ -50,51 +94,28 @@ pub async fn push_and_read_totals(
     for attempt in 0..2 {
         let res: Result<Result<Vec<ReconciledClusterTotal>, EtpError>, _> =
             tokio::time::timeout(io_timeout, async {
-                let mut keys: Vec<String> = Vec::with_capacity(deltas.len());
-                for d in deltas {
-                    let mut k = String::with_capacity(64);
-                    let _ = write!(
-                        k,
-                        "{key_prefix}{}:{:016x}:{}",
-                        d.tier, d.key_hash, d.window_epoch
-                    );
-                    keys.push(k);
+                if !inserted {
+                    execute_com_query(&mut lease, upsert_str).await?;
+                    inserted = true;
                 }
-
-                let upsert_stmt = stmt_prepare(&mut lease, MY_UPSERT_CTE_SQL).await?;
-                for (k, d) in keys.iter().zip(deltas.iter()) {
-                    let delta_i64 = i64::try_from(d.delta).unwrap_or(i64::MAX);
-                    stmt_execute(
-                        &mut lease,
-                        &upsert_stmt,
-                        &[
-                            MysqlParam::Str(k),
-                            MysqlParam::I64(delta_i64),
-                            MysqlParam::I64(exp_i64),
-                            MysqlParam::I64(now_i64),
-                        ],
-                    )
-                    .await?;
+                let rows = execute_com_query_kv_rows(&mut lease, select_str).await?;
+                let mut totals: Vec<u64> = deltas.iter().map(|d| d.delta).collect();
+                for (k, val) in rows {
+                    if let Some(&idx) = key_map.get(&k) {
+                        totals[idx] = val;
+                    }
                 }
-                stmt_close(&mut lease, upsert_stmt.stmt_id).await?;
-
-                let select_stmt = stmt_prepare(&mut lease, MY_SELECT_SQL).await?;
-                let mut out = Vec::with_capacity(deltas.len());
-                for (k, d) in keys.iter().zip(deltas.iter()) {
-                    let total = stmt_execute(&mut lease, &select_stmt, &[MysqlParam::Str(k)])
-                        .await?
-                        .and_then(|v| u64::try_from(v).ok())
-                        .unwrap_or(d.delta);
-                    out.push(ReconciledClusterTotal {
+                Ok(deltas
+                    .iter()
+                    .enumerate()
+                    .map(|(idx, d)| ReconciledClusterTotal {
                         key_hash: d.key_hash,
                         tier: d.tier,
                         pushed_delta: d.delta,
                         window_epoch: d.window_epoch,
-                        cluster_total: total,
-                    });
-                }
-                stmt_close(&mut lease, select_stmt.stmt_id).await?;
-                Ok(out)
+                        cluster_total: totals[idx],
+                    })
+                    .collect())
             })
             .await;
 
@@ -106,13 +127,26 @@ pub async fn push_and_read_totals(
                     continue;
                 }
                 lease.recreate_in_background();
-                return Err(last_err);
+                break;
             }
             Err(_) => {
                 lease.recreate_in_background();
-                return Err(last_err);
+                break;
             }
         }
+    }
+
+    if inserted {
+        return Ok(deltas
+            .iter()
+            .map(|d| ReconciledClusterTotal {
+                key_hash: d.key_hash,
+                tier: d.tier,
+                pushed_delta: d.delta,
+                window_epoch: d.window_epoch,
+                cluster_total: d.delta,
+            })
+            .collect());
     }
 
     Err(last_err)
@@ -138,8 +172,18 @@ mod tests {
         let _ = s.write_all(&p).await;
     }
 
+    fn push_lenenc_str(buf: &mut Vec<u8>, s: &[u8]) {
+        if s.len() < 251 {
+            buf.push(s.len() as u8);
+        } else {
+            buf.push(0xFC);
+            buf.extend_from_slice(&(s.len() as u16).to_le_bytes());
+        }
+        buf.extend_from_slice(s);
+    }
+
     #[tokio::test]
-    async fn test_rate_limit_mysql_prepared_statement_and_schema_ddl() {
+    async fn test_rate_limit_mysql_batch_com_query_and_schema_ddl() {
         let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
         let port = listener.local_addr().unwrap().port();
 
@@ -165,7 +209,6 @@ mod tests {
                     let _ = s.read(&mut rbuf).await;
                     send_pkt(&mut s, 2, &[0x00, 0x00, 0x00, 0x02, 0x00, 0x00, 0x00]).await;
 
-                    let mut active_stmt = 0u32;
                     let mut hdr = [0u8; 4];
                     while s.read_exact(&mut hdr).await.is_ok() {
                         let len = (hdr[0] as usize)
@@ -175,54 +218,26 @@ mod tests {
                         if len > 0 {
                             let _ = s.read_exact(&mut body).await;
                         }
-                        match body[0] {
-                            0x03 => {
+                        if body.first() == Some(&0x03) {
+                            let sql = String::from_utf8_lossy(&body[1..]);
+                            if sql.starts_with("SELECT") {
+                                assert!(sql.contains("t\\'k\\\\0:0000000000000005:2"));
+                                send_pkt(&mut s, 1, &[2]).await;
+                                send_pkt(&mut s, 2, b"def").await;
+                                send_pkt(&mut s, 3, b"def").await;
+                                send_pkt(&mut s, 4, &[0xFE]).await;
+                                let mut row1 = Vec::new();
+                                push_lenenc_str(&mut row1, b"t'k\\0:0000000000000005:2");
+                                push_lenenc_str(&mut row1, b"91");
+                                send_pkt(&mut s, 5, &row1).await;
+                                let mut row2 = Vec::new();
+                                push_lenenc_str(&mut row2, b"t'k\\1:0000000000000006:2");
+                                push_lenenc_str(&mut row2, b"44");
+                                send_pkt(&mut s, 6, &row2).await;
+                                send_pkt(&mut s, 7, &[0xFE]).await;
+                            } else {
                                 send_pkt(&mut s, 1, &[0x00]).await;
                             }
-                            0x16 => {
-                                let sql = String::from_utf8_lossy(&body[1..]);
-                                if sql.starts_with("SELECT") {
-                                    active_stmt = 2;
-                                    let mut ok = vec![0x00];
-                                    ok.extend_from_slice(&2u32.to_le_bytes());
-                                    ok.extend_from_slice(&1u16.to_le_bytes());
-                                    ok.extend_from_slice(&1u16.to_le_bytes());
-                                    send_pkt(&mut s, 1, &ok).await;
-                                    send_pkt(&mut s, 2, &[0x01]).await;
-                                    send_pkt(&mut s, 3, &[0xFE]).await;
-                                    send_pkt(&mut s, 4, &[0x01]).await;
-                                    send_pkt(&mut s, 5, &[0xFE]).await;
-                                } else {
-                                    active_stmt = 1;
-                                    let mut ok = vec![0x00];
-                                    ok.extend_from_slice(&1u32.to_le_bytes());
-                                    ok.extend_from_slice(&0u16.to_le_bytes());
-                                    ok.extend_from_slice(&4u16.to_le_bytes());
-                                    send_pkt(&mut s, 1, &ok).await;
-                                    for seq in 2..=5 {
-                                        send_pkt(&mut s, seq, &[0x01]).await;
-                                    }
-                                    send_pkt(&mut s, 6, &[0xFE]).await;
-                                }
-                            }
-                            0x17 => {
-                                if active_stmt == 1 {
-                                    send_pkt(&mut s, 1, &[0x00]).await;
-                                } else {
-                                    send_pkt(&mut s, 1, &[1]).await;
-                                    let mut col = vec![0; 6];
-                                    col.push(0x0c);
-                                    col.extend_from_slice(&[0u8; 6]);
-                                    col.push(0x08);
-                                    send_pkt(&mut s, 2, &col).await;
-                                    send_pkt(&mut s, 3, &[0xFE]).await;
-                                    let mut row = vec![0x00, 0x00];
-                                    row.extend_from_slice(&91i64.to_le_bytes());
-                                    send_pkt(&mut s, 4, &row).await;
-                                    send_pkt(&mut s, 5, &[0xFE]).await;
-                                }
-                            }
-                            _ => {}
                         }
                     }
                 });
@@ -246,17 +261,27 @@ mod tests {
         let out = push_and_read_totals(
             &my,
             "t'k\\",
-            &[DirtyKeyDelta {
-                key_hash: 5,
-                tier: 0,
-                delta: 4,
-                window_epoch: 2,
-            }],
+            &[
+                DirtyKeyDelta {
+                    key_hash: 5,
+                    tier: 0,
+                    delta: 4,
+                    window_epoch: 2,
+                },
+                DirtyKeyDelta {
+                    key_hash: 6,
+                    tier: 1,
+                    delta: 7,
+                    window_epoch: 2,
+                },
+            ],
             Duration::from_secs(1),
         )
         .await
         .unwrap();
+        assert_eq!(out.len(), 2);
         assert_eq!(out[0].cluster_total, 91);
+        assert_eq!(out[1].cluster_total, 44);
         srv.abort();
     }
 }
