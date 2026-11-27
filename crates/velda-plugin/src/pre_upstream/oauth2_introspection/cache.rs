@@ -26,9 +26,8 @@
 //!        └── Unexpired hit ──► Swap/promote entry back into Hot L3 (`cold -> hot`)
 //! ```
 
-use std::cell::UnsafeCell;
-use std::sync::Arc;
-use std::sync::atomic::{AtomicPtr, AtomicU8, Ordering};
+use std::sync::atomic::{AtomicPtr, Ordering};
+use std::sync::{Arc, Mutex, MutexGuard};
 
 use http::header::HeaderValue;
 use ring::digest::{Context as DigestContext, SHA256};
@@ -123,6 +122,8 @@ struct BucketGroup {
     expiries: [u64; GROUP_WIDTH],
     reval_at: [u64; GROUP_WIDTH],
     headers: [Option<SharedProjectedHeaders>; GROUP_WIDTH],
+    /// CLOCK reference bitmap (`1 << idx` set on hit/insert; cleared on sweep).
+    ref_mask: u64,
     clock_hand: u8,
 }
 
@@ -135,11 +136,12 @@ impl BucketGroup {
             expiries: [0u64; GROUP_WIDTH],
             reval_at: [0u64; GROUP_WIDTH],
             headers: std::array::from_fn(|_| None),
+            ref_mask: 0,
             clock_hand: 0,
         }
     }
 
-    /// Selects a slot in O(1): existing matching `fp`, SIMD `0x00` empty, expired, or clock victim.
+    /// Selects a slot in O(1): existing matching `fp`, SIMD `0x00` empty, expired, or 2-pass CLOCK victim.
     #[inline]
     fn select_slot(&mut self, fp: u128, tag7: u8, now_epoch: u64) -> usize {
         let mut hit_mask = match_tag7_mask64(&self.tags, tag7);
@@ -156,6 +158,7 @@ impl BucketGroup {
             return empty_mask.trailing_zeros() as usize;
         }
 
+        // Pass 1: Always reclaim already-expired slots before evicting any live entry.
         let start = self.clock_hand as usize;
         for offset in 0..GROUP_WIDTH {
             let idx = (start + offset) & (GROUP_WIDTH - 1);
@@ -163,6 +166,17 @@ impl BucketGroup {
                 self.clock_hand = ((idx + 1) & (GROUP_WIDTH - 1)) as u8;
                 return idx;
             }
+        }
+
+        // Pass 2: True CLOCK second-chance scan over `ref_mask`.
+        for offset in 0..GROUP_WIDTH {
+            let idx = (start + offset) & (GROUP_WIDTH - 1);
+            let bit = 1u64 << idx;
+            if (self.ref_mask & bit) == 0 {
+                self.clock_hand = ((idx + 1) & (GROUP_WIDTH - 1)) as u8;
+                return idx;
+            }
+            self.ref_mask &= !bit;
         }
 
         let victim = start & (GROUP_WIDTH - 1);
@@ -176,41 +190,34 @@ struct LaneBuckets {
     cold: Option<Box<[BucketGroup]>>,
 }
 
+#[inline(never)]
+#[cold]
+fn alloc_bucket_groups(count: usize) -> Box<[BucketGroup]> {
+    let mut vec = Vec::with_capacity(count);
+    for _ in 0..count {
+        vec.push(BucketGroup::new());
+    }
+    vec.into_boxed_slice()
+}
+
 /// Cache-line isolated per-core Two-Tier bucket container (`align(64)`).
+/// Uses a futex-backed `std::sync::Mutex` so Frontline workers never spin against a preempted
+/// `SCHED_IDLE` Shadow worker, and pre-allocates tier buffers outside the lock.
 #[repr(C, align(64))]
 struct CoreCacheLane {
-    lock: AtomicU8,
+    hot_base: AtomicPtr<BucketGroup>,
     hot_groups_per_core: u16,
     cold_groups_per_core: u16,
-    hot_base: AtomicPtr<BucketGroup>,
-    buckets: UnsafeCell<LaneBuckets>,
-}
-
-// Safety: Exclusive mutable access to `buckets` is enforced by acquiring `lock` (`0 -> 1`).
-unsafe impl Send for CoreCacheLane {}
-unsafe impl Sync for CoreCacheLane {}
-
-struct LaneGuard<'a> {
-    lock: &'a AtomicU8,
-    buckets: &'a mut LaneBuckets,
-    cold_groups_per_core: u16,
-}
-
-impl Drop for LaneGuard<'_> {
-    #[inline(always)]
-    fn drop(&mut self) {
-        self.lock.store(0, Ordering::Release);
-    }
+    buckets: Mutex<LaneBuckets>,
 }
 
 impl CoreCacheLane {
     fn new(hot_groups_per_core: u16, cold_groups_per_core: u16) -> Self {
         Self {
-            lock: AtomicU8::new(0),
+            hot_base: AtomicPtr::new(std::ptr::null_mut()),
             hot_groups_per_core,
             cold_groups_per_core,
-            hot_base: AtomicPtr::new(std::ptr::null_mut()),
-            buckets: UnsafeCell::new(LaneBuckets {
+            buckets: Mutex::new(LaneBuckets {
                 hot: None,
                 cold: None,
             }),
@@ -218,56 +225,33 @@ impl CoreCacheLane {
     }
 
     #[inline(always)]
-    fn acquire_and_init_hot(&self) -> LaneGuard<'_> {
-        while self
-            .lock
-            .compare_exchange_weak(0, 1, Ordering::Acquire, Ordering::Relaxed)
-            .is_err()
-        {
-            std::hint::spin_loop();
-        }
-        // Safety: `lock == 1` enforces exclusive access to `self.buckets`.
-        let buckets = unsafe { &mut *self.buckets.get() };
-        if buckets.hot.is_none() {
-            let n = self.hot_groups_per_core as usize;
-            let mut vec = Vec::with_capacity(n);
-            for _ in 0..n {
-                vec.push(BucketGroup::new());
-            }
-            let boxed = vec.into_boxed_slice();
+    fn acquire_and_init_hot(&self) -> MutexGuard<'_, LaneBuckets> {
+        let mut prealloc = if self.hot_base.load(Ordering::Acquire).is_null() {
+            Some(alloc_bucket_groups(self.hot_groups_per_core as usize))
+        } else {
+            None
+        };
+        let mut guard = self.buckets.lock().unwrap_or_else(|p| p.into_inner());
+        if guard.hot.is_none() {
+            let boxed = prealloc
+                .take()
+                .unwrap_or_else(|| alloc_bucket_groups(self.hot_groups_per_core as usize));
             self.hot_base
                 .store(boxed.as_ptr() as *mut BucketGroup, Ordering::Release);
-            buckets.hot = Some(boxed);
+            guard.hot = Some(boxed);
         }
-        LaneGuard {
-            lock: &self.lock,
-            buckets,
-            cold_groups_per_core: self.cold_groups_per_core,
-        }
+        guard
     }
 
     #[inline(always)]
-    fn acquire_if_init(&self) -> Option<LaneGuard<'_>> {
+    fn acquire_if_init(&self) -> Option<MutexGuard<'_, LaneBuckets>> {
         if self.hot_base.load(Ordering::Relaxed).is_null() {
             return None;
         }
-        while self
-            .lock
-            .compare_exchange_weak(0, 1, Ordering::Acquire, Ordering::Relaxed)
-            .is_err()
-        {
-            std::hint::spin_loop();
-        }
-        // Safety: `lock == 1` enforces exclusive access to `self.buckets`.
-        let buckets = unsafe { &mut *self.buckets.get() };
-        if buckets.hot.is_some() {
-            Some(LaneGuard {
-                lock: &self.lock,
-                buckets,
-                cold_groups_per_core: self.cold_groups_per_core,
-            })
+        let guard = self.buckets.lock().unwrap_or_else(|p| p.into_inner());
+        if guard.hot.is_some() {
+            Some(guard)
         } else {
-            self.lock.store(0, Ordering::Release);
             None
         }
     }
@@ -282,53 +266,78 @@ struct DisplacedSlot {
     headers: Option<SharedProjectedHeaders>,
 }
 
-#[cold]
-fn ensure_cold_groups(
-    cold_opt: &mut Option<Box<[BucketGroup]>>,
-    cold_groups_per_core: u16,
-) -> Option<&mut Box<[BucketGroup]>> {
-    if cold_groups_per_core == 0 {
-        return None;
-    }
-    Some(cold_opt.get_or_insert_with(|| {
-        let n = cold_groups_per_core as usize;
-        let mut vec = Vec::with_capacity(n);
-        for _ in 0..n {
-            vec.push(BucketGroup::new());
-        }
-        vec.into_boxed_slice()
-    }))
+enum DemoteOutcome {
+    Done(Option<SharedProjectedHeaders>),
+    NeedColdAlloc(DisplacedSlot),
 }
 
 #[inline]
-fn demote_victim_if_valid(
-    cold_opt: &mut Option<Box<[BucketGroup]>>,
-    cold_groups_per_core: u16,
+fn write_cold_slot(
+    cold_groups: &mut [BucketGroup],
     cold_group_mask: u16,
     victim: DisplacedSlot,
     now_epoch: u64,
 ) -> Option<SharedProjectedHeaders> {
-    // Only demote unexpired positive/forbidden entries so 401 unauthorized sprays
-    // never flush legitimate sessions out of Cold DRAM.
-    let eligible = victim.tag != 0
-        && victim.exp > now_epoch
-        && (victim.flag & FLAG_UNAUTHORIZED) == 0
-        && (victim.flag & (FLAG_VALID_PASS | FLAG_FORBIDDEN_SCOPE)) != 0;
-    if !eligible {
-        return victim.headers;
-    }
-    let Some(cold_groups) = ensure_cold_groups(cold_opt, cold_groups_per_core) else {
+    let cidx = ((victim.fp >> 20) as usize) & (cold_group_mask as usize);
+    let Some(cgroup) = cold_groups.get_mut(cidx) else {
         return victim.headers;
     };
-    let cidx = ((victim.fp >> 20) as usize) & (cold_group_mask as usize);
-    let cgroup = &mut cold_groups[cidx];
     let cslot = cgroup.select_slot(victim.fp, victim.tag & TAG_HASH_MASK, now_epoch);
     cgroup.tags.0[cslot] = victim.tag;
     cgroup.flags[cslot] = victim.flag & !FLAG_REVALIDATING;
     cgroup.keys[cslot] = victim.fp;
     cgroup.expiries[cslot] = victim.exp;
     cgroup.reval_at[cslot] = victim.reval_at;
+    // Preserve second-chance clean on cold demotion so previously hit entries aren't blindly mixed
+    // with one-shot entries only if re-accessed in Cold DRAM.
+    cgroup.ref_mask &= !(1u64 << cslot);
     std::mem::replace(&mut cgroup.headers[cslot], victim.headers)
+}
+
+#[inline]
+fn try_demote_victim_if_valid(
+    cold_opt: &mut Option<Box<[BucketGroup]>>,
+    cold_groups_per_core: u16,
+    cold_group_mask: u16,
+    victim: DisplacedSlot,
+    now_epoch: u64,
+) -> DemoteOutcome {
+    // Only demote unexpired positive/forbidden entries so 401 unauthorized sprays
+    // never flush legitimate sessions out of Cold DRAM.
+    let eligible = victim.tag != 0
+        && victim.exp > now_epoch
+        && (victim.flag & FLAG_UNAUTHORIZED) == 0
+        && (victim.flag & (FLAG_VALID_PASS | FLAG_FORBIDDEN_SCOPE)) != 0;
+    if !eligible || cold_groups_per_core == 0 {
+        return DemoteOutcome::Done(victim.headers);
+    }
+    let Some(cold_groups) = cold_opt.as_mut() else {
+        return DemoteOutcome::NeedColdAlloc(victim);
+    };
+    DemoteOutcome::Done(write_cold_slot(
+        cold_groups,
+        cold_group_mask,
+        victim,
+        now_epoch,
+    ))
+}
+
+#[cold]
+#[inline(never)]
+fn finish_deferred_cold_demote(
+    lane: &CoreCacheLane,
+    cold_group_mask: u16,
+    victim: DisplacedSlot,
+    now_epoch: u64,
+) -> Option<SharedProjectedHeaders> {
+    // Allocate Cold DRAM buffer outside the lane lock to avoid holding the mutex across mmap/memset.
+    let mut prealloc = Some(alloc_bucket_groups(lane.cold_groups_per_core as usize));
+    let mut guard = lane.buckets.lock().unwrap_or_else(|p| p.into_inner());
+    let cold_groups = guard.cold.get_or_insert_with(|| prealloc.take().unwrap());
+    let dropped = write_cold_slot(cold_groups, cold_group_mask, victim, now_epoch);
+    drop(guard);
+    drop(prealloc);
+    dropped
 }
 
 #[cfg(target_os = "linux")]
@@ -400,6 +409,7 @@ pub struct IntrospectionCache {
 
 const _: () = assert!(std::mem::size_of::<IntrospectionCache>() == 64);
 const _: () = assert!(std::mem::align_of::<IntrospectionCache>() == 64);
+const _: () = assert!(std::mem::size_of::<BucketGroup>() == 3264);
 const _: () = assert!(std::mem::align_of::<BucketGroup>() == 64);
 const _: () = assert!(std::mem::offset_of!(BucketGroup, tags) == 0);
 const _: () = assert!(std::mem::align_of::<CoreCacheLane>() == 64);
@@ -597,7 +607,9 @@ impl IntrospectionCache {
         };
 
         let lane_idx = self.current_lane_idx();
-        let lane = &lanes[lane_idx];
+        let Some(lane) = lanes.get(lane_idx) else {
+            return CacheLookup::Miss;
+        };
         let hot_idx = self.hot_group_index(fp);
         let tag7 = Self::tag7_from_fp(fp);
 
@@ -608,14 +620,18 @@ impl IntrospectionCache {
             prefetch_bucket_l3(target_ptr);
         }
 
-        let Some(guard) = lane.acquire_if_init() else {
+        let Some(mut guard) = lane.acquire_if_init() else {
             return CacheLookup::Miss;
         };
-        let Some(hot_groups) = guard.buckets.hot.as_mut() else {
+        let cold_groups_cap = lane.cold_groups_per_core;
+        let LaneBuckets { hot, cold } = &mut *guard;
+        let Some(hot_groups) = hot.as_mut() else {
             return CacheLookup::Miss;
         };
 
-        let group = &mut hot_groups[hot_idx];
+        let Some(group) = hot_groups.get_mut(hot_idx) else {
+            return CacheLookup::Miss;
+        };
         let mut mask = match_tag7_mask64(&group.tags, tag7);
         while mask != 0 {
             let idx = mask.trailing_zeros() as usize;
@@ -628,11 +644,13 @@ impl IntrospectionCache {
                     group.keys[idx] = 0;
                     group.expiries[idx] = 0;
                     group.reval_at[idx] = 0;
+                    group.ref_mask &= !(1u64 << idx);
                     drop(guard);
                     drop(old_hdrs);
                     return CacheLookup::Miss;
                 }
 
+                group.ref_mask |= 1u64 << idx;
                 let flag = group.flags[idx];
                 if (flag & FLAG_UNAUTHORIZED) != 0 {
                     return CacheLookup::Unauthorized;
@@ -658,12 +676,11 @@ impl IntrospectionCache {
         }
 
         // Tier 1 miss -> probe lazy Tier 2 Cold DRAM on this lane and promote back into Hot L3.
-        let cold_groups_cap = guard.cold_groups_per_core;
         if cold_groups_cap > 0
-            && let Some(cold_groups) = guard.buckets.cold.as_mut()
+            && let Some(cold_groups) = cold.as_mut()
+            && let Some(cgroup) =
+                cold_groups.get_mut(((fp >> 20) as usize) & (self.cold_group_mask as usize))
         {
-            let cidx = ((fp >> 20) as usize) & (self.cold_group_mask as usize);
-            let cgroup = &mut cold_groups[cidx];
             let mut cmask = match_tag7_mask64(&cgroup.tags, tag7);
             while cmask != 0 {
                 let cslot = cmask.trailing_zeros() as usize;
@@ -677,6 +694,7 @@ impl IntrospectionCache {
                     cgroup.keys[cslot] = 0;
                     cgroup.expiries[cslot] = 0;
                     cgroup.reval_at[cslot] = 0;
+                    cgroup.ref_mask &= !(1u64 << cslot);
 
                     if cexp <= now_epoch {
                         drop(guard);
@@ -685,7 +703,9 @@ impl IntrospectionCache {
                     }
 
                     // Promote back into Hot L3 while demoting any displaced live victim back to Cold.
-                    let hgroup = &mut hot_groups[hot_idx];
+                    let Some(hgroup) = hot_groups.get_mut(hot_idx) else {
+                        return CacheLookup::Miss;
+                    };
                     let hslot = hgroup.select_slot(fp, tag7, now_epoch);
                     let victim = DisplacedSlot {
                         tag: hgroup.tags.0[hslot],
@@ -700,6 +720,7 @@ impl IntrospectionCache {
                     hgroup.keys[hslot] = fp;
                     hgroup.expiries[hslot] = cexp;
                     hgroup.reval_at[hslot] = 0;
+                    hgroup.ref_mask |= 1u64 << hslot;
                     hgroup.headers[hslot] = chdrs.clone();
 
                     let stale_window = self.stale_refresh_secs as u64;
@@ -716,13 +737,26 @@ impl IntrospectionCache {
                     };
 
                     let dropped = if victim.fp != fp {
-                        demote_victim_if_valid(
-                            &mut guard.buckets.cold,
+                        match try_demote_victim_if_valid(
+                            cold,
                             cold_groups_cap,
                             self.cold_group_mask,
                             victim,
                             now_epoch,
-                        )
+                        ) {
+                            DemoteOutcome::Done(h) => h,
+                            DemoteOutcome::NeedColdAlloc(deferred) => {
+                                drop(guard);
+                                let h = finish_deferred_cold_demote(
+                                    lane,
+                                    self.cold_group_mask,
+                                    deferred,
+                                    now_epoch,
+                                );
+                                drop(h);
+                                return res;
+                            }
+                        }
                     } else {
                         victim.headers
                     };
@@ -744,15 +778,20 @@ impl IntrospectionCache {
         let Some(lanes) = self.lanes.as_deref() else {
             return false;
         };
-        let Some(guard) = lanes[self.current_lane_idx()].acquire_if_init() else {
+        let Some(lane) = lanes.get(self.current_lane_idx()) else {
             return false;
         };
-        let Some(hot_groups) = guard.buckets.hot.as_mut() else {
+        let Some(mut guard) = lane.acquire_if_init() else {
+            return false;
+        };
+        let Some(hot_groups) = guard.hot.as_mut() else {
             return false;
         };
         let hot_idx = self.hot_group_index(fp);
         let tag7 = Self::tag7_from_fp(fp);
-        let group = &mut hot_groups[hot_idx];
+        let Some(group) = hot_groups.get_mut(hot_idx) else {
+            return false;
+        };
         let stale_window = self.stale_refresh_secs as u64;
 
         let mut mask = match_tag7_mask64(&group.tags, tag7);
@@ -785,15 +824,20 @@ impl IntrospectionCache {
         let Some(lanes) = self.lanes.as_deref() else {
             return;
         };
-        let Some(guard) = lanes[lane_idx & (self.lane_mask as usize)].acquire_if_init() else {
+        let Some(lane) = lanes.get(lane_idx & (self.lane_mask as usize)) else {
             return;
         };
-        let Some(hot_groups) = guard.buckets.hot.as_mut() else {
+        let Some(mut guard) = lane.acquire_if_init() else {
+            return;
+        };
+        let Some(hot_groups) = guard.hot.as_mut() else {
             return;
         };
         let hot_idx = self.hot_group_index(fp);
         let tag7 = Self::tag7_from_fp(fp);
-        let group = &mut hot_groups[hot_idx];
+        let Some(group) = hot_groups.get_mut(hot_idx) else {
+            return;
+        };
 
         let mut mask = match_tag7_mask64(&group.tags, tag7);
         while mask != 0 {
@@ -908,18 +952,24 @@ impl IntrospectionCache {
         let Some(lanes) = self.lanes.as_deref() else {
             return;
         };
-        let lane = &lanes[lane_idx & (self.lane_mask as usize)];
+        let Some(lane) = lanes.get(lane_idx & (self.lane_mask as usize)) else {
+            return;
+        };
         let hot_idx = self.hot_group_index(fp);
         let tag7 = Self::tag7_from_fp(fp);
 
-        let guard = lane.acquire_and_init_hot();
-        let cold_groups_cap = guard.cold_groups_per_core;
-        let Some(hot_groups) = guard.buckets.hot.as_mut() else {
+        let mut guard = lane.acquire_and_init_hot();
+        let cold_groups_cap = lane.cold_groups_per_core;
+        let LaneBuckets { hot, cold } = &mut *guard;
+        let Some(hot_groups) = hot.as_mut() else {
             return;
         };
 
-        let group = &mut hot_groups[hot_idx];
+        let Some(group) = hot_groups.get_mut(hot_idx) else {
+            return;
+        };
         let slot = group.select_slot(fp, tag7, now_epoch);
+        let is_refresh = group.tags.0[slot] != 0 && group.keys[slot] == fp;
         let victim = DisplacedSlot {
             tag: group.tags.0[slot],
             flag: group.flags[slot],
@@ -934,20 +984,68 @@ impl IntrospectionCache {
         group.keys[slot] = fp;
         group.expiries[slot] = expires_at;
         group.reval_at[slot] = 0;
+        // Scan-resistant CLOCK: new cold inserts start unreferenced (bit = 0) so a 1-shot token
+        // flood cannot strip the second-chance bit off actively hit hot sessions.
+        if is_refresh {
+            group.ref_mask |= 1u64 << slot;
+        } else {
+            group.ref_mask &= !(1u64 << slot);
+        }
         group.headers[slot] = headers;
 
-        let dropped = if victim.fp != fp {
-            demote_victim_if_valid(
-                &mut guard.buckets.cold,
+        // Enforce strict disjointness `(fp in Hot) XOR (fp in Cold)` so a newer store (e.g. 401
+        // revocation or shadow refresh) never leaves an older Allow copy in Cold DRAM that could
+        // resurrect once the Hot slot expires.
+        let mut stale_cold_hdrs = None;
+        if cold_groups_cap > 0
+            && let Some(cold_groups) = cold.as_mut()
+            && let Some(cgroup) =
+                cold_groups.get_mut(((fp >> 20) as usize) & (self.cold_group_mask as usize))
+        {
+            let mut cmask = match_tag7_mask64(&cgroup.tags, tag7);
+            while cmask != 0 {
+                let cslot = cmask.trailing_zeros() as usize;
+                if cgroup.keys[cslot] == fp {
+                    stale_cold_hdrs = cgroup.headers[cslot].take();
+                    cgroup.tags.0[cslot] = 0;
+                    cgroup.flags[cslot] = 0;
+                    cgroup.keys[cslot] = 0;
+                    cgroup.expiries[cslot] = 0;
+                    cgroup.reval_at[cslot] = 0;
+                    cgroup.ref_mask &= !(1u64 << cslot);
+                    break;
+                }
+                cmask &= cmask - 1;
+            }
+        }
+
+        let dropped = if victim.tag != 0 && victim.fp != fp {
+            match try_demote_victim_if_valid(
+                cold,
                 cold_groups_cap,
                 self.cold_group_mask,
                 victim,
                 now_epoch,
-            )
+            ) {
+                DemoteOutcome::Done(h) => h,
+                DemoteOutcome::NeedColdAlloc(deferred) => {
+                    drop(guard);
+                    drop(stale_cold_hdrs);
+                    let h = finish_deferred_cold_demote(
+                        lane,
+                        self.cold_group_mask,
+                        deferred,
+                        now_epoch,
+                    );
+                    drop(h);
+                    return;
+                }
+            }
         } else {
             victim.headers
         };
         drop(guard);
+        drop(stale_cold_hdrs);
         drop(dropped);
     }
 
@@ -958,7 +1056,7 @@ impl IntrospectionCache {
         };
         lanes[lane_idx & (self.lane_mask as usize)]
             .acquire_if_init()
-            .is_some_and(|g| g.buckets.cold.is_some())
+            .is_some_and(|g| g.cold.is_some())
     }
 }
 
@@ -1355,5 +1453,55 @@ mod tests {
             match_tag7_mask64_swar(&tags.0, 0x22)
         );
         assert_eq!(empty_slot_mask64(&tags), empty_slot_mask64_swar(&tags.0));
+    }
+
+    #[test]
+    fn test_clock_second_chance_preserves_hot_token_against_fifo_churn() {
+        set_current_worker_lane(0);
+        // Disable Cold DRAM so Hot L3 eviction stays observable directly.
+        let cache = IntrospectionCache::with_tier_sizes(1, 1, 0, 300, 30);
+        let now = 1_000_000;
+
+        let hot_fp = cache.token_to_u128("pinned_hot_session");
+        cache.store_positive(hot_fp, true, None, Some(now + 600), now);
+
+        // Insert 63 cold tokens to fill the single 64-way group, keeping `hot_fp` repeatedly referenced.
+        let mut cold_fps = Vec::new();
+        for i in 0..70u64 {
+            assert!(matches!(cache.lookup(hot_fp, now + 1), CacheLookup::Hit(_)));
+            let cfp = cache.token_to_u128(&format!("churn_{i}"));
+            cache.store_positive(cfp, true, None, Some(now + 600), now);
+            cold_fps.push(cfp);
+        }
+
+        // True CLOCK must preserve the actively referenced `hot_fp` across a full 64-slot sweep.
+        assert!(matches!(cache.lookup(hot_fp, now + 2), CacheLookup::Hit(_)));
+    }
+
+    #[test]
+    fn test_negative_revocation_purges_stale_cold_dram_copy() {
+        set_current_worker_lane(0);
+        let cache = IntrospectionCache::with_tier_sizes(1, 1, 2, 300, 10);
+        let now = 1_000_000;
+
+        let tok_fp = cache.token_to_u128("session_to_revoke");
+        cache.store_positive(tok_fp, true, None, Some(now + 300), now);
+
+        // Push `tok_fp` out of Hot L3 into Cold DRAM using 64 other valid tokens.
+        for i in 0..64u64 {
+            let other_fp = cache.token_to_u128(&format!("other_valid_{i}"));
+            cache.store_positive(other_fp, true, None, Some(now + 300), now);
+        }
+        assert!(cache.is_cold_allocated_on_lane(0));
+
+        // Revoke `tok_fp` via store_negative (10s TTL) while older Allow copy lived in Cold DRAM.
+        cache.store_negative(tok_fp, now + 5);
+        assert!(matches!(
+            cache.lookup(tok_fp, now + 6),
+            CacheLookup::Unauthorized
+        ));
+
+        // After the 10s negative cache expires at now+20, Cold DRAM must NOT resurrect the revoked Allow.
+        assert!(matches!(cache.lookup(tok_fp, now + 20), CacheLookup::Miss));
     }
 }

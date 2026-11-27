@@ -12,8 +12,11 @@
 //!     • `response.rs` -> Provider JSON decode, claim/scope eval, and direct cache commit
 //! ```
 
+use std::fmt::Write as _;
+use std::sync::OnceLock;
 use std::time::Duration;
 
+use base64::prelude::*;
 use velda_core::HeaderKey;
 use velda_etp::{EtpBackend, EtpInstance};
 
@@ -50,6 +53,13 @@ impl AuthMethod {
     }
 }
 
+/// Pre-encoded client credentials baked once when wiring ETP credentials at boot/sync.
+#[derive(Debug, Clone, Default)]
+pub struct PrebakedClientAuth {
+    pub basic_header_line: Option<Box<str>>,
+    pub post_creds_suffix: Option<Box<str>>,
+}
+
 /// Immutable runtime parameters supplied by `Oauth2IntrospectionPlugin`.
 #[derive(Debug, Clone)]
 pub struct IntrospectionCallParams {
@@ -59,6 +69,25 @@ pub struct IntrospectionCallParams {
     pub auth_method: AuthMethod,
     pub token_type_hint: Option<Box<str>>,
     pub request_timeout: Duration,
+    pub prebaked_auth: OnceLock<PrebakedClientAuth>,
+}
+
+impl IntrospectionCallParams {
+    /// Returns the pre-baked `"Authorization: Basic <b64>\r\n"` header line when initialized.
+    #[inline(always)]
+    pub fn prebaked_basic_header(&self) -> Option<&str> {
+        self.prebaked_auth
+            .get()
+            .and_then(|a| a.basic_header_line.as_deref())
+    }
+
+    /// Returns the pre-baked `"&client_id=...&client_secret=..."` form suffix when initialized.
+    #[inline(always)]
+    pub fn prebaked_post_suffix(&self) -> Option<&str> {
+        self.prebaked_auth
+            .get()
+            .and_then(|a| a.post_creds_suffix.as_deref())
+    }
 }
 
 /// Self-contained provider invocation context allowing each provider adapter to fetch,
@@ -177,7 +206,36 @@ pub fn validate_attached_etp(
             etp.id
         )));
     }
+    if let (Some(cid), Some(csec)) = (eff_cid, eff_csec) {
+        let mut baked = PrebakedClientAuth::default();
+        match params.auth_method {
+            AuthMethod::Basic => {
+                let b64 = BASE64_STANDARD.encode(format!("{cid}:{csec}").as_bytes());
+                baked.basic_header_line = Some(format!("Authorization: Basic {b64}\r\n").into());
+            }
+            AuthMethod::Post => {
+                let mut enc = String::with_capacity(28 + cid.len() * 2 + csec.len() * 2);
+                enc.push_str("&client_id=");
+                append_url_encoded(&mut enc, cid);
+                enc.push_str("&client_secret=");
+                append_url_encoded(&mut enc, csec);
+                baked.post_creds_suffix = Some(enc.into());
+            }
+            AuthMethod::None => {}
+        }
+        let _ = params.prebaked_auth.set(baked);
+    }
     Ok(())
+}
+
+fn append_url_encoded(out: &mut String, input: &str) {
+    for b in input.bytes() {
+        if b.is_ascii_alphanumeric() || matches!(b, b'-' | b'_' | b'.' | b'~') {
+            out.push(b as char);
+        } else {
+            let _ = write!(out, "%{b:02X}");
+        }
+    }
 }
 
 /// Dispatches a cold-miss introspection call to the target provider (fetches, parses, and caches).

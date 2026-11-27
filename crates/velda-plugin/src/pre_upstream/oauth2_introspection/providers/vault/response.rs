@@ -23,6 +23,38 @@ use super::super::IntrospectionCall;
 use super::client::request_raw;
 
 #[derive(Deserialize)]
+struct VaultStandardOidcPayload {
+    active: bool,
+    #[serde(default)]
+    exp: Option<serde_json::Value>,
+    #[serde(default)]
+    nbf: Option<serde_json::Value>,
+    #[serde(default)]
+    sub: Option<String>,
+    #[serde(default)]
+    client_id: Option<String>,
+    #[serde(default)]
+    scope: Option<String>,
+}
+
+#[derive(Deserialize)]
+struct VaultStandardLookupData {
+    #[serde(default)]
+    entity_id: Option<String>,
+    #[serde(default)]
+    display_name: Option<String>,
+    #[serde(default)]
+    policies: Option<Vec<String>>,
+    #[serde(default)]
+    ttl: Option<u64>,
+}
+
+#[derive(Deserialize)]
+struct VaultStandardLookupEnvelope {
+    data: Option<VaultStandardLookupData>,
+}
+
+#[derive(Deserialize)]
 struct VaultOidcPayload {
     active: bool,
     #[serde(default)]
@@ -64,7 +96,12 @@ pub async fn execute(vault: &VaultEtp, call: &IntrospectionCall<'_>) -> (Option<
         return (None, ColdOutcome::Unavailable);
     }
 
-    let Some(norm) = decode_vault_response(&raw.payload, raw.is_oidc_introspect, now) else {
+    let Some(norm) = decode_vault_response(
+        &raw.payload,
+        raw.is_oidc_introspect,
+        call.claims_to_headers,
+        now,
+    ) else {
         return (None, ColdOutcome::Unavailable);
     };
 
@@ -93,7 +130,12 @@ pub async fn revalidate(vault: &VaultEtp, call: &IntrospectionCall<'_>) {
         return;
     }
 
-    let Some(norm) = decode_vault_response(&raw.payload, raw.is_oidc_introspect, now) else {
+    let Some(norm) = decode_vault_response(
+        &raw.payload,
+        raw.is_oidc_introspect,
+        call.claims_to_headers,
+        now,
+    ) else {
         call.cache
             .finish_revalidation_on_lane(call.target_lane, call.fp);
         return;
@@ -107,9 +149,26 @@ pub async fn revalidate(vault: &VaultEtp, call: &IntrospectionCall<'_>) {
 fn decode_vault_response(
     payload: &[u8],
     is_oidc_introspect: bool,
+    claims_to_headers: &[(Box<str>, HeaderKey)],
     now_sec: u64,
 ) -> Option<NormalizedVaultClaims> {
+    let needs_extra = claims_to_headers
+        .iter()
+        .any(|(c, _)| !matches!(c.as_ref(), "sub" | "client_id" | "scope"));
+
     if is_oidc_introspect {
+        if !needs_extra {
+            let p = serde_json::from_slice::<VaultStandardOidcPayload>(payload).ok()?;
+            return Some(NormalizedVaultClaims {
+                active: p.active,
+                exp: p.exp,
+                nbf: p.nbf,
+                sub: p.sub,
+                client_id: p.client_id,
+                scope: p.scope,
+                raw_claims: FxHashMap::default(),
+            });
+        }
         let p = serde_json::from_slice::<VaultOidcPayload>(payload).ok()?;
         return Some(NormalizedVaultClaims {
             active: p.active,
@@ -119,6 +178,33 @@ fn decode_vault_response(
             client_id: p.client_id,
             scope: p.scope,
             raw_claims: p.raw_claims,
+        });
+    }
+
+    if !needs_extra {
+        let env = serde_json::from_slice::<VaultStandardLookupEnvelope>(payload).ok()?;
+        let data = env.data?;
+        let sub = data
+            .entity_id
+            .filter(|s| !s.is_empty())
+            .or(data.display_name);
+        let scope = data
+            .policies
+            .filter(|arr| !arr.is_empty())
+            .map(|arr| arr.join(" "))
+            .filter(|s| !s.is_empty());
+        let exp = data
+            .ttl
+            .filter(|&ttl| ttl > 0)
+            .map(|ttl| serde_json::Value::from(now_sec.saturating_add(ttl)));
+        return Some(NormalizedVaultClaims {
+            active: true,
+            exp,
+            nbf: None,
+            sub,
+            client_id: None,
+            scope,
+            raw_claims: FxHashMap::default(),
         });
     }
 

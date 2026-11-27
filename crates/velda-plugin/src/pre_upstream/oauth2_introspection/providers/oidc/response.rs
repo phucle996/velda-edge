@@ -23,6 +23,21 @@ use super::super::IntrospectionCall;
 use super::client::request_raw;
 
 #[derive(Deserialize)]
+struct OidcStandardPayload {
+    active: bool,
+    #[serde(default)]
+    exp: Option<serde_json::Value>,
+    #[serde(default)]
+    nbf: Option<serde_json::Value>,
+    #[serde(default)]
+    sub: Option<String>,
+    #[serde(default)]
+    client_id: Option<String>,
+    #[serde(default)]
+    scope: Option<String>,
+}
+
+#[derive(Deserialize)]
 struct OidcResponsePayload {
     active: bool,
     #[serde(default)]
@@ -39,6 +54,28 @@ struct OidcResponsePayload {
     raw_claims: FxHashMap<String, serde_json::Value>,
 }
 
+fn decode_response(
+    payload: &[u8],
+    claims_to_headers: &[(Box<str>, HeaderKey)],
+) -> Option<OidcResponsePayload> {
+    let needs_extra = claims_to_headers
+        .iter()
+        .any(|(c, _)| !matches!(c.as_ref(), "sub" | "client_id" | "scope"));
+    if !needs_extra {
+        let s = serde_json::from_slice::<OidcStandardPayload>(payload).ok()?;
+        return Some(OidcResponsePayload {
+            active: s.active,
+            exp: s.exp,
+            nbf: s.nbf,
+            sub: s.sub,
+            client_id: s.client_id,
+            scope: s.scope,
+            raw_claims: FxHashMap::default(),
+        });
+    }
+    serde_json::from_slice::<OidcResponsePayload>(payload).ok()
+}
+
 /// Fetches, decodes, evaluates, and directly caches a generic OIDC introspection decision.
 pub async fn execute(oidc: &OidcEtp, call: &IntrospectionCall<'_>) -> (Option<u64>, ColdOutcome) {
     let Ok((_path, status, payload)) = request_raw(oidc, call.params, call.token).await else {
@@ -47,7 +84,7 @@ pub async fn execute(oidc: &OidcEtp, call: &IntrospectionCall<'_>) -> (Option<u6
     if !(200..300).contains(&status) {
         return (None, ColdOutcome::Unavailable);
     }
-    let Ok(parsed) = serde_json::from_slice::<OidcResponsePayload>(&payload) else {
+    let Some(parsed) = decode_response(&payload, call.claims_to_headers) else {
         return (None, ColdOutcome::Unavailable);
     };
 
@@ -70,7 +107,7 @@ pub async fn revalidate(oidc: &OidcEtp, call: &IntrospectionCall<'_>) {
             .finish_revalidation_on_lane(call.target_lane, call.fp);
         return;
     }
-    let Ok(parsed) = serde_json::from_slice::<OidcResponsePayload>(&payload) else {
+    let Some(parsed) = decode_response(&payload, call.claims_to_headers) else {
         call.cache
             .finish_revalidation_on_lane(call.target_lane, call.fp);
         return;

@@ -58,13 +58,15 @@ pub async fn request_raw(
             body.push_str("&token_type_hint=");
             body.push_str(hint);
         }
-        if params.auth_method == AuthMethod::Post
-            && let (Some(cid), Some(csec)) = (eff_cid, eff_csec)
-        {
-            body.push_str("&client_id=");
-            body.push_str(&url_encode(cid));
-            body.push_str("&client_secret=");
-            body.push_str(&url_encode(csec));
+        if params.auth_method == AuthMethod::Post {
+            if let Some(suffix) = params.prebaked_post_suffix() {
+                body.push_str(suffix);
+            } else if let (Some(cid), Some(csec)) = (eff_cid, eff_csec) {
+                body.push_str("&client_id=");
+                body.push_str(&url_encode(cid));
+                body.push_str("&client_secret=");
+                body.push_str(&url_encode(csec));
+            }
         }
 
         let mut r = format!(
@@ -72,11 +74,13 @@ pub async fn request_raw(
             auth0.config.host_header,
             body.len()
         );
-        if params.auth_method == AuthMethod::Basic
-            && let (Some(cid), Some(csec)) = (eff_cid, eff_csec)
-        {
-            let b64 = BASE64_STANDARD.encode(format!("{cid}:{csec}").as_bytes());
-            let _ = write!(r, "Authorization: Basic {b64}\r\n");
+        if params.auth_method == AuthMethod::Basic {
+            if let Some(line) = params.prebaked_basic_header() {
+                r.push_str(line);
+            } else if let (Some(cid), Some(csec)) = (eff_cid, eff_csec) {
+                let b64 = BASE64_STANDARD.encode(format!("{cid}:{csec}").as_bytes());
+                let _ = write!(r, "Authorization: Basic {b64}\r\n");
+            }
         }
         for (k, v) in &auth0.config.custom_headers {
             let _ = write!(r, "{k}: {v}\r\n");

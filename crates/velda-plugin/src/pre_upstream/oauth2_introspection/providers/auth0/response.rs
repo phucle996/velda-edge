@@ -22,6 +22,22 @@ use super::super::IntrospectionCall;
 use super::client::request_raw;
 
 #[derive(Deserialize)]
+struct Auth0StandardPayload {
+    #[serde(default)]
+    active: Option<bool>,
+    #[serde(default)]
+    exp: Option<serde_json::Value>,
+    #[serde(default)]
+    nbf: Option<serde_json::Value>,
+    #[serde(default)]
+    sub: Option<String>,
+    #[serde(default)]
+    client_id: Option<String>,
+    #[serde(default)]
+    scope: Option<String>,
+}
+
+#[derive(Deserialize)]
 struct Auth0ResponsePayload {
     #[serde(default)]
     active: Option<bool>,
@@ -39,6 +55,28 @@ struct Auth0ResponsePayload {
     raw_claims: FxHashMap<String, serde_json::Value>,
 }
 
+fn decode_response(
+    payload: &[u8],
+    claims_to_headers: &[(Box<str>, HeaderKey)],
+) -> Option<Auth0ResponsePayload> {
+    let needs_extra = claims_to_headers
+        .iter()
+        .any(|(c, _)| !matches!(c.as_ref(), "sub" | "client_id" | "scope"));
+    if !needs_extra {
+        let s = serde_json::from_slice::<Auth0StandardPayload>(payload).ok()?;
+        return Some(Auth0ResponsePayload {
+            active: s.active,
+            exp: s.exp,
+            nbf: s.nbf,
+            sub: s.sub,
+            client_id: s.client_id,
+            scope: s.scope,
+            raw_claims: FxHashMap::default(),
+        });
+    }
+    serde_json::from_slice::<Auth0ResponsePayload>(payload).ok()
+}
+
 /// Fetches, decodes, evaluates, and directly caches an Auth0 `/userinfo` or introspection decision.
 pub async fn execute(auth0: &Auth0Etp, call: &IntrospectionCall<'_>) -> (Option<u64>, ColdOutcome) {
     let Ok((status, payload, used_rfc7662)) = request_raw(auth0, call.params, call.token).await
@@ -54,7 +92,7 @@ pub async fn execute(auth0: &Auth0Etp, call: &IntrospectionCall<'_>) -> (Option<
     if !(200..300).contains(&status) {
         return (None, ColdOutcome::Unavailable);
     }
-    let Ok(parsed) = serde_json::from_slice::<Auth0ResponsePayload>(&payload) else {
+    let Some(parsed) = decode_response(&payload, call.claims_to_headers) else {
         return (None, ColdOutcome::Unavailable);
     };
 
@@ -93,7 +131,7 @@ pub async fn revalidate(auth0: &Auth0Etp, call: &IntrospectionCall<'_>) {
             .finish_revalidation_on_lane(call.target_lane, call.fp);
         return;
     }
-    let Ok(parsed) = serde_json::from_slice::<Auth0ResponsePayload>(&payload) else {
+    let Some(parsed) = decode_response(&payload, call.claims_to_headers) else {
         call.cache
             .finish_revalidation_on_lane(call.target_lane, call.fp);
         return;

@@ -122,6 +122,7 @@ impl Oauth2IntrospectionPlugin {
                 Some(config.token_type_hint.clone().into_boxed_str())
             },
             request_timeout: Duration::from_millis(config.request_timeout_ms),
+            prebaked_auth: OnceLock::new(),
         });
 
         let cache = Arc::new(IntrospectionCache::new(
@@ -211,15 +212,17 @@ impl Oauth2IntrospectionPlugin {
                 let Ok(s) = val.to_str() else {
                     continue;
                 };
-                let trimmed = s.trim();
+                let trimmed = s.trim_ascii();
                 if trimmed.is_empty() {
                     continue;
                 }
-                if trimmed.len() > 7
-                    && trimmed.is_char_boundary(7)
-                    && trimmed[..7].eq_ignore_ascii_case("bearer ")
+                if trimmed
+                    .as_bytes()
+                    .get(..7)
+                    .is_some_and(|p| p.eq_ignore_ascii_case(b"bearer "))
+                    && let Some(rest) = trimmed.get(7..)
                 {
-                    let token = trimmed[7..].trim();
+                    let token = rest.trim_ascii();
                     if !token.is_empty() {
                         return Some((token, Some(key)));
                     }
@@ -236,10 +239,10 @@ impl Oauth2IntrospectionPlugin {
                 };
                 for target_cookie in &self.token_cookies {
                     for pair in cookie_str.split(';') {
-                        if let Some((k, v)) = pair.trim().split_once('=')
-                            && k.trim() == target_cookie.as_ref()
+                        if let Some((k, v)) = pair.trim_ascii().split_once('=')
+                            && k.trim_ascii() == target_cookie.as_ref()
                         {
-                            let token = v.trim();
+                            let token = v.trim_ascii();
                             if !token.is_empty() {
                                 return Some((token, None));
                             }
@@ -257,7 +260,7 @@ impl Oauth2IntrospectionPlugin {
                     if let Some((k, v)) = pair.split_once('=')
                         && k == target_param.as_ref()
                     {
-                        let token = v.trim();
+                        let token = v.trim_ascii();
                         if !token.is_empty() {
                             return Some((token, None));
                         }
@@ -279,7 +282,7 @@ impl Oauth2IntrospectionPlugin {
         if self.hide_credentials
             && let Some(key) = matched_header
         {
-            req.headers.remove(key.name.as_str());
+            req.headers.remove(&key.name);
         }
         if let Some(pairs) = headers {
             req.headers.reserve(pairs.len());
