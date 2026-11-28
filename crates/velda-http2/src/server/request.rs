@@ -129,6 +129,8 @@ pub struct Http2ServerRequestHead {
     pub priority: Http2Priority,
     pub request_id: u128,
     pub ingress_time_nanos: u64,
+    /// Packed 40-bit non-colliding HTTP/2 wire framing traits (`SETTINGS`, `WINDOW_UPDATE`, pseudo-header order).
+    pub wire_traits: u64,
 }
 
 impl Http2ServerRequestHead {
@@ -148,6 +150,7 @@ impl Http2ServerRequestHead {
             priority,
             request_id: 0,
             ingress_time_nanos: 0,
+            wire_traits: 0,
         }
     }
 }

@@ -17,6 +17,45 @@
 //! ```
 
 use sha2::{Digest, Sha256};
+use velda_core::bitfield::{
+    TLS_ALPN_H1, TLS_ALPN_H2, TLS_ALPN_H3, TLS_ALPN_NONE, TLS_ALPN_OTHER, TLS_ALPN_SHIFT,
+    TLS_CIPHER_BUCKET_SHIFT, TLS_EXT_BUCKET_SHIFT, TLS_FLAG_HAS_ALPS, TLS_FLAG_HAS_CERT_COMPRESS,
+    TLS_FLAG_HAS_GREASE, TLS_FLAG_HAS_PSK, TLS_FLAG_HAS_SESSION_TICKET, TLS_FLAG_HAS_SNI,
+    TLS_VER_12, TLS_VER_13, TLS_VER_LEGACY, TLS_VER_NONE,
+};
+
+#[inline(always)]
+const fn tls_cipher_bucket(count: usize) -> u16 {
+    if count <= 3 {
+        0
+    } else if count <= 7 {
+        1
+    } else if count <= 15 {
+        2
+    } else {
+        3
+    }
+}
+
+#[inline(always)]
+const fn tls_ext_bucket(count: usize) -> u16 {
+    if count <= 5 {
+        0
+    } else if count <= 10 {
+        1
+    } else if count <= 15 {
+        2
+    } else {
+        3
+    }
+}
+
+/// Single-pass ClientHello extraction result carrying both JA4 and compact 16-bit `tls_traits`.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct ClientHelloSignals {
+    pub ja4: u64,
+    pub tls_traits: u16,
+}
 
 const HEX_LOWER: &[u8; 16] = b"0123456789abcdef";
 
@@ -91,28 +130,48 @@ fn write_sha256_prefix12(dst: &mut [u8], digest: &[u8]) {
     }
 }
 
+/// Maximum TLS handshake buffer allowed when reassembling multi-record TCP ClientHellos.
+const MAX_MULTI_RECORD_HANDSHAKE_BYTES: usize = 32 * 1024;
+
+/// Returns the total byte length (`4 + hs_len`) of a TLS `ClientHello` handshake message
+/// starting at `handshake[0] == 0x01`, if at least the 4-byte handshake header is present.
+#[inline]
+pub(crate) fn tls_client_hello_handshake_len(handshake: &[u8]) -> Option<usize> {
+    if handshake.len() < 4 || handshake[0] != 0x01 {
+        return None;
+    }
+    let hs_len =
+        ((handshake[1] as usize) << 16) | ((handshake[2] as usize) << 8) | (handshake[3] as usize);
+    4usize.checked_add(hs_len)
+}
+
 /// Computes the canonical 36-byte JA4 fingerprint string from a TLS `ClientHello` record.
 ///
 /// Returns `None` if `record` is not a valid/complete TLS `ClientHello` handshake record.
 /// Executes with zero heap allocations using fixed stack buffers.
 pub fn compute_ja4_string(record: &[u8], is_quic: bool) -> Option<[u8; 36]> {
-    let mut off = 0usize;
+    extract_client_hello_raw(record, is_quic).map(|(bytes, _)| bytes)
+}
 
-    // 1. TLS Record Header (when TCP TLS) or raw Handshake message (when QUIC).
-    let hello_end = if !is_quic {
-        if record.len() < 5 || record[0] != 0x16 {
-            return None;
-        }
-        let rec_len = u16::from_be_bytes([record[3], record[4]]) as usize;
-        off = 5;
-        let end = off.checked_add(rec_len)?;
-        if end > record.len() {
-            return None;
-        }
-        end
-    } else {
-        record.len()
-    };
+fn extract_client_hello_raw(record: &[u8], is_quic: bool) -> Option<([u8; 36], u16)> {
+    if is_quic {
+        return compute_ja4_from_handshake(record, true);
+    }
+
+    if record.len() < 5 || record[0] != 0x16 {
+        return None;
+    }
+    let rec_len = u16::from_be_bytes([record[3], record[4]]) as usize;
+    let end = 5usize.checked_add(rec_len)?;
+    if end > record.len() {
+        return None;
+    }
+    compute_ja4_from_handshake(&record[5..end], false)
+}
+
+fn compute_ja4_from_handshake(record: &[u8], is_quic: bool) -> Option<([u8; 36], u16)> {
+    let mut off = 0usize;
+    let hello_end = record.len();
 
     // 2. Handshake Header: MsgType = 0x01 (ClientHello) + 3-byte length
     if off >= hello_end || record[off] != 0x01 {
@@ -151,9 +210,12 @@ pub fn compute_ja4_string(record: &[u8], is_quic: bool) -> Option<[u8; 36]> {
     let cs_end = off + cs_bytes;
     let mut ciphers = [0u16; MAX_ITEMS];
     let mut cipher_count = 0usize;
+    let mut has_grease = false;
     while off < cs_end {
         let cs = read_u16(record, &mut off)?;
-        if !is_grease(cs) && cipher_count < MAX_ITEMS {
+        if is_grease(cs) {
+            has_grease = true;
+        } else if cipher_count < MAX_ITEMS {
             ciphers[cipher_count] = cs;
             cipher_count += 1;
         }
@@ -180,6 +242,11 @@ pub fn compute_ja4_string(record: &[u8], is_quic: bool) -> Option<[u8; 36]> {
     let mut max_supported_ver: Option<u16> = None;
     let mut has_sni_domain = false;
     let mut alpn_pair = *b"00";
+    let mut alpn_code = TLS_ALPN_NONE;
+    let mut has_psk = false;
+    let mut has_cert_compress = false;
+    let mut has_alps = false;
+    let mut has_session_ticket = false;
 
     if off + 2 <= hs_end {
         let exts_bytes = read_u16(record, &mut off)? as usize;
@@ -196,7 +263,9 @@ pub fn compute_ja4_string(record: &[u8], is_quic: bool) -> Option<[u8; 36]> {
                 return None;
             }
 
-            if !is_grease(ext_id) {
+            if is_grease(ext_id) {
+                has_grease = true;
+            } else {
                 total_ext_count += 1;
 
                 // ja4_c excludes SNI (0x0000) and ALPN (0x0010)
@@ -216,7 +285,7 @@ pub fn compute_ja4_string(record: &[u8], is_quic: bool) -> Option<[u8; 36]> {
                             }
                         }
                     }
-                    // ALPN (0x0010): extract first protocol's first and last byte
+                    // ALPN (0x0010): extract first protocol's first and last byte + 3-bit token code
                     0x0010 => {
                         let mut p = off;
                         if p + 2 <= ext_end {
@@ -225,8 +294,15 @@ pub fn compute_ja4_string(record: &[u8], is_quic: bool) -> Option<[u8; 36]> {
                                 let proto_len = record[p] as usize;
                                 p += 1;
                                 if proto_len > 0 && p + proto_len <= ext_end {
-                                    let first = record[p];
-                                    let last = record[p + proto_len - 1];
+                                    let proto_bytes = &record[p..p + proto_len];
+                                    alpn_code = match proto_bytes {
+                                        b"http/1.1" => TLS_ALPN_H1,
+                                        b"h2" => TLS_ALPN_H2,
+                                        b"h3" => TLS_ALPN_H3,
+                                        _ => TLS_ALPN_OTHER,
+                                    };
+                                    let first = proto_bytes[0];
+                                    let last = proto_bytes[proto_len - 1];
                                     if first.is_ascii_alphanumeric() && last.is_ascii_alphanumeric()
                                     {
                                         alpn_pair = [first, last];
@@ -240,6 +316,22 @@ pub fn compute_ja4_string(record: &[u8], is_quic: bool) -> Option<[u8; 36]> {
                             }
                         }
                     }
+                    // session_ticket (0x0023)
+                    0x0023 => {
+                        has_session_ticket = true;
+                    }
+                    // compress_certificate (0x001b)
+                    0x001b => {
+                        has_cert_compress = true;
+                    }
+                    // pre_shared_key (0x0029)
+                    0x0029 => {
+                        has_psk = true;
+                    }
+                    // ALPS application_settings (0x4469 / 0x44cd)
+                    0x4469 | 0x44cd => {
+                        has_alps = true;
+                    }
                     // supported_versions (0x002b): highest non-GREASE version
                     0x002b => {
                         let mut p = off;
@@ -249,8 +341,9 @@ pub fn compute_ja4_string(record: &[u8], is_quic: bool) -> Option<[u8; 36]> {
                             if p + vlen <= ext_end && vlen.is_multiple_of(2) {
                                 while p < off + 1 + vlen {
                                     let v = read_u16(record, &mut p)?;
-                                    if !is_grease(v) && max_supported_ver.is_none_or(|cur| v > cur)
-                                    {
+                                    if is_grease(v) {
+                                        has_grease = true;
+                                    } else if max_supported_ver.is_none_or(|cur| v > cur) {
                                         max_supported_ver = Some(v);
                                     }
                                 }
@@ -282,10 +375,39 @@ pub fn compute_ja4_string(record: &[u8], is_quic: bool) -> Option<[u8; 36]> {
         }
     }
 
-    // 8. Assemble ja4_a (10 bytes)
+    // 8. Assemble ja4_a (10 bytes) & 16-bit tls_traits
+    let effective_ver = max_supported_ver.unwrap_or(client_version);
+    let mut tls_traits = match effective_ver {
+        0x0304 => TLS_VER_13,
+        0x0303 => TLS_VER_12,
+        0x0300..=0x0302 => TLS_VER_LEGACY,
+        _ => TLS_VER_NONE,
+    };
+    tls_traits |= alpn_code << TLS_ALPN_SHIFT;
+    if has_sni_domain {
+        tls_traits |= TLS_FLAG_HAS_SNI;
+    }
+    if has_grease {
+        tls_traits |= TLS_FLAG_HAS_GREASE;
+    }
+    if has_psk {
+        tls_traits |= TLS_FLAG_HAS_PSK;
+    }
+    if has_cert_compress {
+        tls_traits |= TLS_FLAG_HAS_CERT_COMPRESS;
+    }
+    if has_alps {
+        tls_traits |= TLS_FLAG_HAS_ALPS;
+    }
+    if has_session_ticket {
+        tls_traits |= TLS_FLAG_HAS_SESSION_TICKET;
+    }
+    tls_traits |= tls_cipher_bucket(cipher_count) << TLS_CIPHER_BUCKET_SHIFT;
+    tls_traits |= tls_ext_bucket(total_ext_count) << TLS_EXT_BUCKET_SHIFT;
+
     let mut out = [0u8; 36];
     out[0] = if is_quic { b'q' } else { b't' };
-    let ver = map_tls_version(max_supported_ver.unwrap_or(client_version));
+    let ver = map_tls_version(effective_ver);
     out[1] = ver[0];
     out[2] = ver[1];
     out[3] = if has_sni_domain { b'd' } else { b'i' };
@@ -337,7 +459,19 @@ pub fn compute_ja4_string(record: &[u8], is_quic: bool) -> Option<[u8; 36]> {
         write_sha256_prefix12(&mut out[24..36], &digest);
     }
 
-    Some(out)
+    Some((out, tls_traits))
+}
+
+/// Computes both the 64-bit JA4 ID and 16-bit `tls_traits` from a single TLS `ClientHello` payload.
+#[inline]
+pub fn compute_client_hello_signals(record: &[u8], is_quic: bool) -> ClientHelloSignals {
+    match extract_client_hello_raw(record, is_quic) {
+        Some((bytes, tls_traits)) => ClientHelloSignals {
+            ja4: velda_core::ja4_fingerprint_id_bytes(&bytes),
+            tls_traits,
+        },
+        None => ClientHelloSignals::default(),
+    }
 }
 
 /// Computes the compact 64-bit JA4 fingerprint ID from a TLS `ClientHello` record.
@@ -345,10 +479,103 @@ pub fn compute_ja4_string(record: &[u8], is_quic: bool) -> Option<[u8; 36]> {
 /// Returns `0` if `record` is incomplete or not a valid TLS `ClientHello`.
 #[inline]
 pub fn compute_ja4_u64(record: &[u8], is_quic: bool) -> u64 {
-    match compute_ja4_string(record, is_quic) {
-        Some(bytes) => velda_core::ja4_fingerprint_id_bytes(&bytes),
-        None => 0,
+    compute_client_hello_signals(record, is_quic).ja4
+}
+
+/// Computes both the 64-bit JA4 fingerprint ID and 16-bit `tls_traits` from one or more
+/// TLS Plaintext (`0x16`) records captured during TCP handshake acceptance.
+pub fn compute_client_hello_signals_from_tls_records(records: &[u8]) -> ClientHelloSignals {
+    if records.len() < 5 || records[0] != 0x16 {
+        return ClientHelloSignals::default();
     }
+    let first_len = u16::from_be_bytes([records[3], records[4]]) as usize;
+    let Some(first_end) = 5usize.checked_add(first_len) else {
+        return ClientHelloSignals::default();
+    };
+    if first_end <= records.len()
+        && let Some(hs_total) = tls_client_hello_handshake_len(&records[5..first_end])
+        && hs_total <= first_len
+    {
+        return match compute_ja4_from_handshake(&records[5..first_end], false) {
+            Some((bytes, tls_traits)) => ClientHelloSignals {
+                ja4: velda_core::ja4_fingerprint_id_bytes(&bytes),
+                tls_traits,
+            },
+            None => ClientHelloSignals::default(),
+        };
+    }
+
+    // Multi-record handshake reassembly (RFC 8446 Section 5.1)
+    let mut off = 0usize;
+    let mut stack_buf = [0u8; 4096];
+    let mut stack_len = 0usize;
+    let mut heap_buf: Option<Vec<u8>> = None;
+    let mut target_hs_len: Option<usize> = None;
+
+    while off + 5 <= records.len() {
+        if records[off] != 0x16 {
+            return ClientHelloSignals::default();
+        }
+        let rlen = u16::from_be_bytes([records[off + 3], records[off + 4]]) as usize;
+        let payload_start = off + 5;
+        let Some(payload_end) = payload_start.checked_add(rlen) else {
+            return ClientHelloSignals::default();
+        };
+        if payload_end > records.len() {
+            return ClientHelloSignals::default();
+        }
+        let frag = &records[payload_start..payload_end];
+        if let Some(ref mut vec) = heap_buf {
+            if vec.len() + frag.len() > MAX_MULTI_RECORD_HANDSHAKE_BYTES {
+                return ClientHelloSignals::default();
+            }
+            vec.extend_from_slice(frag);
+        } else if stack_len + frag.len() <= stack_buf.len() {
+            stack_buf[stack_len..stack_len + frag.len()].copy_from_slice(frag);
+            stack_len += frag.len();
+        } else {
+            if stack_len + frag.len() > MAX_MULTI_RECORD_HANDSHAKE_BYTES {
+                return ClientHelloSignals::default();
+            }
+            let mut vec = Vec::with_capacity((stack_len + frag.len()).max(8192));
+            vec.extend_from_slice(&stack_buf[..stack_len]);
+            vec.extend_from_slice(frag);
+            heap_buf = Some(vec);
+        }
+
+        let assembled = match heap_buf {
+            Some(ref vec) => vec.as_slice(),
+            None => &stack_buf[..stack_len],
+        };
+        if target_hs_len.is_none() {
+            target_hs_len = tls_client_hello_handshake_len(assembled);
+            if target_hs_len.is_some_and(|l| l > MAX_MULTI_RECORD_HANDSHAKE_BYTES) {
+                return ClientHelloSignals::default();
+            }
+        }
+        if let Some(expected) = target_hs_len
+            && assembled.len() >= expected
+        {
+            return match compute_ja4_from_handshake(&assembled[..expected], false) {
+                Some((bytes, tls_traits)) => ClientHelloSignals {
+                    ja4: velda_core::ja4_fingerprint_id_bytes(&bytes),
+                    tls_traits,
+                },
+                None => ClientHelloSignals::default(),
+            };
+        }
+
+        off = payload_end;
+    }
+
+    ClientHelloSignals::default()
+}
+
+/// Computes the compact 64-bit JA4 fingerprint ID from one or more TLS Plaintext (`0x16`)
+/// records captured during TCP handshake acceptance.
+#[inline]
+pub fn compute_ja4_from_tls_records(records: &[u8]) -> u64 {
+    compute_client_hello_signals_from_tls_records(records).ja4
 }
 
 #[cfg(test)]
@@ -451,5 +678,28 @@ mod tests {
         assert_eq!(compute_ja4_u64(b"GET / HTTP/1.1\r\n", false), 0);
         let rec = build_sample_client_hello();
         assert_eq!(compute_ja4_u64(&rec[..10], false), 0);
+        assert_eq!(compute_ja4_from_tls_records(&rec[..10]), 0);
+    }
+
+    #[test]
+    fn test_ja4_multi_tls_record_fragmentation_parity() {
+        let single_rec = build_sample_client_hello();
+        let expected_id = compute_ja4_u64(&single_rec, false);
+        assert_ne!(expected_id, 0);
+        assert_eq!(compute_ja4_from_tls_records(&single_rec), expected_id);
+
+        // Split the inner handshake message across 3 separate TLS Plaintext 0x16 records
+        let hs = &single_rec[5..];
+        let mut multi = Vec::new();
+        for chunk in hs.chunks(hs.len().div_ceil(3)) {
+            multi.push(0x16);
+            multi.extend_from_slice(&0x0301u16.to_be_bytes());
+            multi.extend_from_slice(&(chunk.len() as u16).to_be_bytes());
+            multi.extend_from_slice(chunk);
+        }
+
+        assert_eq!(compute_ja4_from_tls_records(&multi), expected_id);
+        // Single-record helper rejects un-reassembled split fragments, proving multi-record handler works
+        assert_eq!(compute_ja4_u64(&multi, false), 0);
     }
 }

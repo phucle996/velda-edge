@@ -53,7 +53,7 @@ async fn bench_mtls_vs_standard_handshake() {
         let s_engine = standard_engine.clone();
 
         let srv_task = tokio::spawn(async move {
-            let mut s = s_engine.accept(server_io).await.unwrap();
+            let mut s = s_engine.accept(server_io).await.unwrap().stream;
             let mut buf = [0u8; 4];
             s.read_exact(&mut buf).await.unwrap();
             s.write_all(b"pong").await.unwrap();
@@ -89,7 +89,7 @@ async fn bench_mtls_vs_standard_handshake() {
         let s_engine = mtls_engine.clone();
 
         let srv_task = tokio::spawn(async move {
-            let mut s = s_engine.accept(server_io).await.unwrap();
+            let mut s = s_engine.accept(server_io).await.unwrap().stream;
             let mut buf = [0u8; 4];
             s.read_exact(&mut buf).await.unwrap();
             s.write_all(b"pong").await.unwrap();
@@ -158,7 +158,7 @@ async fn bench_upstream_egress_handshake() {
         let b_srv = backend_server.clone();
 
         let srv_task = tokio::spawn(async move {
-            let mut stream = b_srv.accept(backend_io).await.unwrap();
+            let mut stream = b_srv.accept(backend_io).await.unwrap().stream;
             let mut buf = [0u8; 4];
             stream.read_exact(&mut buf).await.unwrap();
             stream.write_all(b"pong").await.unwrap();

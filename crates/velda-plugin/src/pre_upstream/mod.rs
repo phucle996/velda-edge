@@ -16,6 +16,7 @@ use crate::capability::{Direction, PluginCapability, SupportedProtocols};
 
 pub mod api_key_auth;
 pub mod api_metering;
+pub mod bot_detection;
 pub mod canary;
 pub mod csrf;
 pub mod grpc_fault_injection;
@@ -36,6 +37,10 @@ pub use api_key_auth::{ApiKeyAuthConfig, ApiKeyAuthPlugin, ApiKeyEntryConfig};
 pub use api_metering::{
     AccountState, ApiMeteringConfig, ApiMeteringPlugin, ExhaustedAction, MICRO_CREDITS_PER_UNIT,
     MeteringDecision, QuotaAlgorithm, QuotaWindowConfig, ShardedMeteringState, TierConfig,
+};
+pub use bot_detection::{
+    BotDetectionConfig, BotDetectionMode, BotDetectionPlugin, BotDetectionPreset,
+    BotDetectionThresholds, BotEscalationConfig, BotRuleConfig, BotRuleWhen,
 };
 pub use canary::{CanaryConfig, CanaryPlugin, HeaderRule, RuleOperator};
 pub use csrf::{CsrfConfig, CsrfPlugin};
@@ -223,6 +228,7 @@ pub fn owns_id(id: &str) -> bool {
             | "oauth2_introspection"
             | "api_metering"
             | "ja4_filter"
+            | "bot_detection"
     )
 }
 
@@ -255,6 +261,7 @@ pub fn instantiate(
         "oauth2_introspection" => Ok(Arc::new(Oauth2IntrospectionPlugin::from_config(config)?)),
         "api_metering" => Ok(Arc::new(ApiMeteringPlugin::from_config(config)?)),
         "ja4_filter" => Ok(Arc::new(Ja4FilterPlugin::from_config(config)?)),
+        "bot_detection" => Ok(Arc::new(BotDetectionPlugin::from_config(config)?)),
         other => Err(crate::error::PluginError::Config(format!(
             "Unsupported pre_upstream plugin '{other}' for plugin '{}'",
             config.id

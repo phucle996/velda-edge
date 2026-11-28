@@ -382,6 +382,7 @@ fn dispatch_server_events(
                 let uri = decoded.uri.unwrap_or_else(|| http::Uri::from_static("/"));
                 let mut head =
                     Http2ServerRequestHead::new(method, uri, decoded.headers, Some(stream_id));
+                head.wire_traits = decoded.wire_traits;
                 let mut req_id_hdr = None;
                 if let Some((req_id, ingress_nanos, hdr)) = meta_map.remove(&stream_id) {
                     head.request_id = req_id;

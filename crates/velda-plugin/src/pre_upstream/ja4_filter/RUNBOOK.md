@@ -28,7 +28,7 @@ Each entry in `deny` accepts either format:
 
 ## 3. Scenario-Based Configuration Recipes
 
-### Recipe A: Protect Web Login While Keeping APIs Open
+### Recipe A: Two-Tier Bot Defense on Login While Keeping APIs Open
 - `plugins.json`:
   ```json
   {
@@ -41,7 +41,7 @@ Each entry in `deny` accepts either format:
     }
   }
   ```
-- `routes.json`: Attach `"plugins": ["ja4_filter"]` to `/login` and `/checkout`, and omit it from `/api/webhook` (so partner Python/Go clients are unaffected).
+- `routes.json`: Attach `"plugins": ["ja4_filter", "bot_detection"]` to `/login` and `/checkout` (placing `ja4_filter` first so known scanners drop immediately before `bot_detection` evaluates deeper signals), and omit both from `/api/webhook`.
 
 ---
 
@@ -59,5 +59,5 @@ Each entry in `deny` accepts either format:
 | Symptom | Root Cause | Resolution |
 | :--- | :--- | :--- |
 | **Legitimate client blocked with 403** | Client's TLS library (e.g., corporate proxy or custom SDK) shares a JA4 fingerprint in `deny`. | Remove that JA4 entry from `deny`, or detach `ja4_filter` from the API route used by that SDK. |
-| **Plaintext HTTP traffic not blocked** | Plaintext listeners (`http-in`) have `RequestState.ja4 == 0`, which intentionally bypasses `ja4_filter`. | Pair with `https_redirect` in `pre_route` to force clients onto HTTPS listeners. |
+| **Plaintext HTTP traffic not blocked** | Plaintext listeners (`is_tls == false`) intentionally bypass `ja4_filter`. | Pair with `https_redirect` in `pre_route` to force clients onto HTTPS listeners (`is_tls == true`, where missing JA4 is fail-closed). |
 | **Config validation fails on startup** | Empty `deny: []`, `0x0`, or malformed JA4 string (not 36 chars with `_` at offsets 10 and 23). | Fix the malformed entry in `plugins.json` and re-run `velda-sync`. |

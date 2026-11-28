@@ -60,7 +60,7 @@ async fn test_tls_session_resumption_and_tickets() {
         let srv = server_engine.clone();
 
         let srv_task = tokio::spawn(async move {
-            let mut srv_stream = srv.accept(server_io).await.unwrap();
+            let mut srv_stream = srv.accept(server_io).await.unwrap().stream;
             let mut buf = [0u8; 4];
             srv_stream.read_exact(&mut buf).await.unwrap();
             assert_eq!(&buf, b"req1");
@@ -84,7 +84,7 @@ async fn test_tls_session_resumption_and_tickets() {
         let srv = server_engine.clone();
 
         let srv_task = tokio::spawn(async move {
-            let mut srv_stream = srv.accept(server_io).await.unwrap();
+            let mut srv_stream = srv.accept(server_io).await.unwrap().stream;
             let mut buf = [0u8; 4];
             srv_stream.read_exact(&mut buf).await.unwrap();
             assert_eq!(&buf, b"req2");

@@ -55,7 +55,11 @@ async fn test_tls_engine_end_to_end() {
     let (edge_io, backend_io) = duplex(65536);
 
     let backend_task = tokio::spawn(async move {
-        let mut stream = backend_server_engine.accept(backend_io).await.unwrap();
+        let mut stream = backend_server_engine
+            .accept(backend_io)
+            .await
+            .unwrap()
+            .stream;
         let mut buf = [0u8; 4];
         stream.read_exact(&mut buf).await.unwrap();
         assert_eq!(&buf, b"req1");
@@ -100,10 +104,12 @@ async fn test_stateless_execution_accept_and_connect() {
     let (client_io, server_io) = duplex(65536);
 
     let server_task = tokio::spawn(async move {
-        // Direct stateless execution: accept(stream, &config)
-        let mut server_stream = velda_tls::server::accept(server_io, &arc_server_config)
+        // Direct server engine execution from compiled ServerConfig
+        let mut server_stream = velda_tls::TlsServerEngine::from_config(arc_server_config)
+            .accept(server_io)
             .await
-            .unwrap();
+            .unwrap()
+            .stream;
         let mut buf = [0u8; 4];
         server_stream.read_exact(&mut buf).await.unwrap();
         assert_eq!(&buf, b"ping");

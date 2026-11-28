@@ -101,6 +101,7 @@ To allow protocol-independent short-circuiting without leaking internal headers:
 | :--- | :---: | :---: | :--- |
 | [`api_key_auth`](src/pre_upstream/api_key_auth/) | HTTP | `0` | Constant-time API key verification and consumer metadata injection. |
 | [`api_metering`](src/pre_upstream/api_metering/) | All L7 | `0` / `1..=100` | Tiered micro-credit billing & optional distributed Redis delta sync. |
+| [`bot_detection`](src/pre_upstream/bot_detection/) | HTTP | `0` | Cross-layer 0..=100 anomaly scoring + strict 64B L1 448-bit / L2 `(ip, ja4)` progressive delay tarpit (paired after `ja4_filter`). |
 | [`canary`](src/pre_upstream/canary/) | HTTP / gRPC | `0` | Deterministic hash/header/weight-based canary upstream rerouting. |
 | [`csrf`](src/pre_upstream/csrf/) | HTTP | `0` | Double-submit cookie / origin-verified CSRF token enforcement. |
 | [`grpc_fault_injection`](src/pre_upstream/grpc_fault_injection/) | gRPC | `0` | Deterministic gRPC status abort & latency fault injection. |

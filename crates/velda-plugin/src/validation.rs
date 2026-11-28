@@ -63,6 +63,7 @@ pub fn canonical_protocol_family_for_id(id: &str) -> Option<&'static str> {
         "request_termination" => Some("http"),
         "url_rewrite" => Some("http"),
         "openai_token_quota" => Some("http"),
+        "bot_detection" => Some("http"),
         _ => None,
     }
 }
@@ -248,6 +249,13 @@ pub fn validate_plugin_config(plugin: &mut PluginConfig) -> Result<(), PluginErr
         "ja4_filter" => {
             plugin.config =
                 crate::pre_upstream::ja4_filter::validation::validate_ja4_filter_config(
+                    &plugin.id,
+                    &plugin.config,
+                )?;
+        }
+        "bot_detection" => {
+            plugin.config =
+                crate::pre_upstream::bot_detection::validation::validate_bot_detection_config(
                     &plugin.id,
                     &plugin.config,
                 )?;
@@ -545,5 +553,14 @@ mod tests {
         // Different zones remain independent.
         let distinct_zones = cache_pair("api_a", vec!["x-tenant-id"], "api_b", vec![]);
         assert!(validate_plugin_dependencies(&distinct_zones).is_ok());
+    }
+
+    #[test]
+    fn test_bot_detection_restricted_to_http_while_ja4_allows_http_and_grpc() {
+        assert_eq!(
+            canonical_protocol_family_for_id("bot_detection"),
+            Some("http")
+        );
+        assert_eq!(canonical_protocol_family_for_id("ja4_filter"), None);
     }
 }

@@ -176,6 +176,10 @@ pub struct DecodedH2Headers {
     pub uri: Option<Uri>,
     pub status: Option<StatusCode>,
     pub headers: HeaderWorkspace,
+    /// Lossless 5-bit pseudo-header order code (from [`velda_core::bitfield::encode_pseudo_order`]).
+    pub pseudo_order: u8,
+    /// Full 40-bit L7 wire traits stamped by `H2Connection`.
+    pub wire_traits: u64,
 }
 
 impl Default for DecodedH2Headers {
@@ -186,6 +190,8 @@ impl Default for DecodedH2Headers {
             uri: None,
             status: None,
             headers: HeaderWorkspace::empty(DEFAULT_HEADER_CAPACITY),
+            pseudo_order: 0,
+            wire_traits: 0,
         }
     }
 }
@@ -409,6 +415,8 @@ impl HpackDecoder {
         let mut allow_table_size_update = true;
         let mut header_list_bytes = 0usize;
         let mut pseudo_mask = 0u8;
+        let mut pseudo_seq = [0u8; 4];
+        let mut pseudo_seq_len = 0usize;
         let mut raw_path: Option<String> = None;
         let mut raw_authority: Option<String> = None;
         let mut raw_scheme: Option<String> = None;
@@ -442,6 +450,8 @@ impl HpackDecoder {
                     has_forwarding,
                     &mut saw_regular_header,
                     &mut pseudo_mask,
+                    &mut pseudo_seq,
+                    &mut pseudo_seq_len,
                     &mut rem_slots,
                     &mut decoded,
                     &mut xff_chain,
@@ -488,6 +498,8 @@ impl HpackDecoder {
                     has_forwarding,
                     &mut saw_regular_header,
                     &mut pseudo_mask,
+                    &mut pseudo_seq,
+                    &mut pseudo_seq_len,
                     &mut rem_slots,
                     &mut decoded,
                     &mut xff_chain,
@@ -552,6 +564,8 @@ impl HpackDecoder {
                     has_forwarding,
                     &mut saw_regular_header,
                     &mut pseudo_mask,
+                    &mut pseudo_seq,
+                    &mut pseudo_seq_len,
                     &mut rem_slots,
                     &mut decoded,
                     &mut xff_chain,
@@ -561,6 +575,10 @@ impl HpackDecoder {
                 )?;
             }
         }
+
+        decoded.pseudo_order = velda_core::bitfield::encode_pseudo_order(
+            &pseudo_seq[..pseudo_seq_len.min(pseudo_seq.len())],
+        );
 
         // Assemble URI from pseudo-headers (same rule as HTTP/3 & HTTP/2)
         if let Some(path) = raw_path {
@@ -774,6 +792,8 @@ fn apply_resolved_header(
     has_forwarding: bool,
     saw_regular_header: &mut bool,
     pseudo_mask: &mut u8,
+    pseudo_seq: &mut [u8; 4],
+    pseudo_seq_len: &mut usize,
     rem_slots: &mut usize,
     decoded: &mut DecodedH2Headers,
     xff_chain: &mut Vec<u8>,
@@ -797,6 +817,10 @@ fn apply_resolved_header(
                     });
                 }
                 *pseudo_mask |= 0x01;
+                if *pseudo_seq_len < 4 {
+                    pseudo_seq[*pseudo_seq_len] = velda_core::bitfield::PSEUDO_METHOD;
+                    *pseudo_seq_len += 1;
+                }
                 decoded.method =
                     Some(
                         Method::from_bytes(&resolved.val_bytes).map_err(|_| HpackError {
@@ -813,6 +837,10 @@ fn apply_resolved_header(
                     });
                 }
                 *pseudo_mask |= 0x02;
+                if *pseudo_seq_len < 4 {
+                    pseudo_seq[*pseudo_seq_len] = velda_core::bitfield::PSEUDO_PATH;
+                    *pseudo_seq_len += 1;
+                }
                 let s = std::str::from_utf8(&resolved.val_bytes).map_err(|_| HpackError {
                     code: H2ErrorCode::PROTOCOL_ERROR,
                     msg: "non-UTF8 :path pseudo-header",
@@ -827,6 +855,10 @@ fn apply_resolved_header(
                     });
                 }
                 *pseudo_mask |= 0x04;
+                if *pseudo_seq_len < 4 {
+                    pseudo_seq[*pseudo_seq_len] = velda_core::bitfield::PSEUDO_SCHEME;
+                    *pseudo_seq_len += 1;
+                }
                 let s = std::str::from_utf8(&resolved.val_bytes).map_err(|_| HpackError {
                     code: H2ErrorCode::PROTOCOL_ERROR,
                     msg: "non-UTF8 :scheme pseudo-header",
@@ -841,6 +873,10 @@ fn apply_resolved_header(
                     });
                 }
                 *pseudo_mask |= 0x08;
+                if *pseudo_seq_len < 4 {
+                    pseudo_seq[*pseudo_seq_len] = velda_core::bitfield::PSEUDO_AUTHORITY;
+                    *pseudo_seq_len += 1;
+                }
                 let s = std::str::from_utf8(&resolved.val_bytes).map_err(|_| HpackError {
                     code: H2ErrorCode::PROTOCOL_ERROR,
                     msg: "non-UTF8 :authority pseudo-header",

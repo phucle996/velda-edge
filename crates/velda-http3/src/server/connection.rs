@@ -84,6 +84,7 @@ pub const DEFAULT_PENDING_STREAM_TIMEOUT: std::time::Duration = std::time::Durat
 pub struct Http3Engine {
     endpoint: Endpoint,
     connections: HashMap<ConnectionHandle, Connection>,
+    connection_signals: HashMap<ConnectionHandle, (u64, u16, u64, bool)>,
     control_streams: HashSet<ConnectionHandle>,
     streams: HashMap<(ConnectionHandle, StreamId), StreamSlot>,
     pending_writes: HashMap<(ConnectionHandle, StreamId), PendingStreamWrite>,
@@ -121,6 +122,7 @@ impl Http3Engine {
         Self {
             endpoint,
             connections: HashMap::new(),
+            connection_signals: HashMap::new(),
             control_streams: HashSet::new(),
             streams: HashMap::new(),
             pending_writes: HashMap::new(),
@@ -227,6 +229,19 @@ impl Http3Engine {
         if let Some(handle) = active_handle {
             let mut is_lost = false;
             if let Some(conn) = self.connections.get_mut(&handle) {
+                let (conn_ja4, conn_tls_traits, mut conn_wire_traits, mut h3_settings_done) =
+                    match self.connection_signals.get(&handle).copied() {
+                        Some((j, t, w, done)) if j != 0 => (j, t, w, done),
+                        _ => {
+                            let (j, t) = velda_tls::extract_quic_signals(conn);
+                            let w = velda_core::bitfield::WIRE_PROTO_H3
+                                << velda_core::bitfield::WIRE_PROTO_SHIFT;
+                            if j != 0 {
+                                self.connection_signals.insert(handle, (j, t, w, false));
+                            }
+                            (j, t, w, false)
+                        }
+                    };
                 // RFC 9114 Section 6.2.1: As soon as the QUIC handshake completes, open the
                 // server unidirectional Control Stream and transmit the mandatory SETTINGS frame.
                 if !conn.is_handshaking()
@@ -275,6 +290,7 @@ impl Http3Engine {
                 }
 
                 // Drain connection events
+                let ready_start = ready_requests.len();
                 while let Some(event) = conn.poll() {
                     match event {
                         Event::Stream(StreamEvent::Opened { dir }) => {
@@ -295,7 +311,29 @@ impl Http3Engine {
                         Event::Stream(StreamEvent::Readable { id }) => {
                             if id.dir() == Dir::Uni {
                                 if let Ok(mut chunks) = conn.recv_stream(id).read(true) {
-                                    while let Some(_chunk) = chunks.next(65535).ok().flatten() {}
+                                    let mut stack_buf = [0u8; 512];
+                                    let mut stack_len = 0usize;
+                                    while let Some(chunk) = chunks.next(65535).ok().flatten() {
+                                        if !h3_settings_done && stack_len < stack_buf.len() {
+                                            let take = (stack_buf.len() - stack_len)
+                                                .min(chunk.bytes.len());
+                                            stack_buf[stack_len..stack_len + take]
+                                                .copy_from_slice(&chunk.bytes[..take]);
+                                            stack_len += take;
+                                        }
+                                    }
+                                    if !h3_settings_done
+                                        && stack_len > 0
+                                        && let Some(h3_wire) =
+                                            try_parse_h3_control_settings(&stack_buf[..stack_len])
+                                    {
+                                        conn_wire_traits = h3_wire;
+                                        h3_settings_done = true;
+                                        self.connection_signals.insert(
+                                            handle,
+                                            (conn_ja4, conn_tls_traits, conn_wire_traits, true),
+                                        );
+                                    }
                                 }
                             } else {
                                 Self::process_readable_stream(
@@ -348,6 +386,16 @@ impl Http3Engine {
                         }
                         _ => {}
                     }
+                }
+                for req_ev in &mut ready_requests[ready_start..] {
+                    req_ev.request.state.is_tls = true;
+                    req_ev.request.state.ja4 = conn_ja4;
+                    req_ev.request.state.tls_traits = conn_tls_traits;
+                    let req_wire = req_ev.request.state.wire_traits();
+                    req_ev
+                        .request
+                        .state
+                        .set_wire_traits(conn_wire_traits | req_wire);
                 }
 
                 // Immediately pump any pending writes for this active connection when credit arrives
@@ -404,6 +452,7 @@ impl Http3Engine {
                 if self.connections.remove(&handle).is_some() {
                     self.closed_delta = self.closed_delta.saturating_add(1);
                 }
+                self.connection_signals.remove(&handle);
                 self.control_streams.remove(&handle);
                 self.streams.retain(|(h, _), _| *h != handle);
                 self.pending_writes.retain(|(h, _), write| {
@@ -494,6 +543,7 @@ impl Http3Engine {
                                 );
                                 req.ingress_time_nanos = ingress_nanos;
                                 req.state.ingress_time_nanos = ingress_nanos;
+                                req.state.set_wire_traits(decoded.pseudo_order as u64);
                                 slot.request = Some(req);
                             }
                             Err(e) => {
@@ -669,6 +719,7 @@ impl Http3Engine {
             if self.connections.remove(&handle).is_some() {
                 self.closed_delta = self.closed_delta.saturating_add(1);
             }
+            self.connection_signals.remove(&handle);
             self.control_streams.remove(&handle);
             self.streams.retain(|(h, _), _| *h != handle);
             self.pending_writes.retain(|(h, _), write| {
@@ -889,4 +940,75 @@ impl Http3Engine {
         }
         earliest
     }
+}
+
+/// Parses an HTTP/3 client unidirectional Control Stream (`0x00`) `SETTINGS` frame directly
+/// from a stack slice with zero heap allocations.
+fn try_parse_h3_control_settings(raw: &[u8]) -> Option<u64> {
+    use velda_core::bitfield::*;
+
+    let (stype, consumed) = crate::proto::frame::decode_varint_slice(raw)?;
+    if stype != stream_type::CONTROL {
+        return None;
+    }
+    let rest = raw.get(consumed..)?;
+    let (ftype, ft_len) = crate::proto::frame::decode_varint_slice(rest)?;
+    if ftype != 0x04 {
+        return None;
+    }
+    let after_type = rest.get(ft_len..)?;
+    let (flen, fl_len) = crate::proto::frame::decode_varint_slice(after_type)?;
+    let payload_len = usize::try_from(flen).ok()?;
+    let mut payload = after_type.get(fl_len..fl_len.checked_add(payload_len)?)?;
+
+    let mut traits: u64 = WIRE_PROTO_H3 << WIRE_PROTO_SHIFT;
+    let mut odd = false;
+    while !payload.is_empty() {
+        let (id, id_len) = crate::proto::frame::decode_varint_slice(payload)?;
+        payload = payload.get(id_len..)?;
+        let (val, val_len) = crate::proto::frame::decode_varint_slice(payload)?;
+        payload = payload.get(val_len..)?;
+
+        match id {
+            settings_id::QPACK_MAX_TABLE_CAPACITY => {
+                let cls = match val {
+                    0 => 1,
+                    4096 => 2,
+                    16384 => 4,
+                    65536 => 3,
+                    _ => {
+                        odd = true;
+                        5
+                    }
+                };
+                traits = (traits & !WIRE_HDR_TABLE_MASK) | ((cls as u64) << WIRE_HDR_TABLE_SHIFT);
+            }
+            settings_id::MAX_FIELD_SECTION_SIZE => {
+                if val < 1024 {
+                    odd = true;
+                }
+            }
+            settings_id::QPACK_BLOCKED_STREAMS => {
+                let cls = match val {
+                    0 => 4,
+                    1..=100 => 1,
+                    101..=1000 => 2,
+                    _ => 3,
+                };
+                traits =
+                    (traits & !WIRE_MAX_STREAMS_MASK) | ((cls as u64) << WIRE_MAX_STREAMS_SHIFT);
+            }
+            0x08 | 0x33 => {}
+            _ => {
+                // HTTP/3 GREASE setting identifiers satisfy `(id - 0x21) % 0x1f == 0`.
+                if id < 0x21 || !(id - 0x21).is_multiple_of(0x1f) {
+                    odd = true;
+                }
+            }
+        }
+    }
+    if odd {
+        traits |= WIRE_FLAG_ODD_SETTINGS;
+    }
+    Some(traits)
 }

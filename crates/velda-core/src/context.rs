@@ -103,6 +103,9 @@ pub struct RequestState {
     /// Compact 64-bit JA4 TLS ClientHello fingerprint (`0` if non-TLS / unavailable).
     pub ja4: u64,
 
+    /// Lower 32 bits of the 40-bit non-colliding L7 wire framing traits (`wire_traits`).
+    pub wire_traits_lo: u32,
+
     /// Client IP address encoded as RFC 4291 `u128` integer (`0` if unset).
     pub client_ip: u128,
 
@@ -112,8 +115,14 @@ pub struct RequestState {
     /// Upstream selected for the request (`UNASSIGNED_UPSTREAM_ID` if unassigned).
     pub upstream_id: u16,
 
+    /// Non-colliding 16-bit TLS ClientHello structural traits bitfield (`tls_traits`).
+    pub tls_traits: u16,
+
     /// Canonical HTTP method for the request.
     pub method: HttpMethod,
+
+    /// Whether the request arrived over a TLS-encrypted downstream listener.
+    pub is_tls: bool,
 
     /// Whether routing has completed.
     pub routed: bool,
@@ -123,9 +132,12 @@ pub struct RequestState {
 
     /// Whether a response has been received from the upstream.
     pub upstream_completed: bool,
+
+    /// High 8 bits of the 40-bit non-colliding L7 wire framing traits (`wire_traits`).
+    pub wire_traits_hi: u8,
 }
 
-const _: () = assert!(std::mem::size_of::<RequestState>() <= 64);
+const _: () = assert!(std::mem::size_of::<RequestState>() == 64);
 
 impl Default for RequestState {
     #[inline]
@@ -143,20 +155,59 @@ impl RequestState {
             request_id,
             ingress_time_nanos,
             ja4: 0,
+            wire_traits_lo: 0,
             client_ip: 0,
             route_id: UNMATCHED_ROUTE_ID,
             upstream_id: UNASSIGNED_UPSTREAM_ID,
+            tls_traits: 0,
             method: HttpMethod::Unknown,
+            is_tls: false,
             routed: false,
             upstream_started: false,
             upstream_completed: false,
+            wire_traits_hi: 0,
         }
+    }
+
+    /// Returns the packed 40-bit L7 wire framing traits integer (`wire_traits_lo | (wire_traits_hi << 32)`).
+    #[inline(always)]
+    pub const fn wire_traits(&self) -> u64 {
+        (self.wire_traits_lo as u64) | ((self.wire_traits_hi as u64) << 32)
+    }
+
+    /// Stores a packed 40-bit L7 wire framing traits integer.
+    #[inline(always)]
+    pub fn set_wire_traits(&mut self, wire_traits: u64) {
+        self.wire_traits_lo = wire_traits as u32;
+        self.wire_traits_hi = ((wire_traits >> 32) & 0xFF) as u8;
+    }
+
+    /// Builder-style setter for `tls_traits`.
+    #[inline(always)]
+    pub const fn with_tls_traits(mut self, tls_traits: u16) -> Self {
+        self.tls_traits = tls_traits;
+        self
+    }
+
+    /// Builder-style setter for packed 40-bit `wire_traits`.
+    #[inline(always)]
+    pub const fn with_wire_traits(mut self, wire_traits: u64) -> Self {
+        self.wire_traits_lo = wire_traits as u32;
+        self.wire_traits_hi = ((wire_traits >> 32) & 0xFF) as u8;
+        self
     }
 
     /// Attaches an explicit ingress timestamp in nanoseconds.
     #[inline(always)]
     pub fn with_ingress_time(mut self, ingress_time_nanos: u64) -> Self {
         self.ingress_time_nanos = ingress_time_nanos;
+        self
+    }
+
+    /// Marks whether the request arrived over an encrypted TLS listener.
+    #[inline(always)]
+    pub const fn with_tls(mut self, is_tls: bool) -> Self {
+        self.is_tls = is_tls;
         self
     }
 

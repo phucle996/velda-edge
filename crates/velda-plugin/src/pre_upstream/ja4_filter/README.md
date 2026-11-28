@@ -5,16 +5,19 @@
 |                        JA4 FILTER IN VELDA EDGE PIPELINE                          |
 +-----------------------------------------------------------------------------------+
 |                                                                                   |
-|  ClientHello ──► [velda-tls] Zero-Alloc JA4 Parser ──► u64 ID                     |
+|  TCP ClientHello  ──► [velda-tls] LazyConfigAcceptor (1-pass + multi-record 0x16) |
+|  QUIC ClientHello ──► [velda-tls] VeldaQuicSession::read_handshake                |
 |                                                         │                         |
-|  [velda-edge] DownstreamMeta::peek_tcp_ja4() ───────────┴──► RequestState.ja4     |
-|                                                                   │               |
+|                                                         ▼                         |
+|                                              RequestState.{is_tls, ja4}           |
+|                                                         │                         |
 |  L7 Pipeline: decode -> pre_route -> route -> [pre_upstream: ja4_filter]          |
 |                                                    │                              |
-|                              ┌─────────────────────┴─────────────────────┐        |
-|                              ▼                                           ▼        |
-|                      ja4 ∈ denied_ids                           ja4 ∉ denied_ids  |
-|                Action::Reject(Forbidden / 403)                  Action::Continue  |
+|                       ┌────────────────────────────┼────────────────────┐         |
+|                       ▼                            ▼                    ▼         |
+|                !is_tls (plain)          is_tls && (ja4==0        is_tls && clean  |
+|                Action::Continue          || ja4 ∈ denied)       Action::Continue  |
+|                                          Action::Reject (403)   (-> bot_detection)|
 +-----------------------------------------------------------------------------------+
 ```
 
@@ -31,10 +34,11 @@ Unlike HTTP `User-Agent` checks (which any script can spoof in one header line),
 - **Supported Protocols**: HTTP/1.1, HTTP/2, HTTP/3, and gRPC (`SupportedProtocols::ALL_HTTP | SupportedProtocols::GRPC`).
 - **Capability**: `AccessLevel::None` for both Headers and Payload (zero-copy direct streaming remains fully active).
 
-## 3. Requirements & Prerequisites
+## 3. Requirements, Fail-Closed Semantics & Pipeline Pairing
 
-- TLS connections terminated by `velda-edge` (`http1`, `http2`, `grpc` TCP listeners) automatically populate `RequestState.ja4` via `TcpStream::peek` + `velda_tls::compute_ja4_u64`.
-- Plaintext HTTP connections have `RequestState.ja4 == 0` (sentinel) and pass through (`Action::Continue`) without matching any rule.
+- **Unified TCP + QUIC Extraction**: TLS TCP listeners (`http1`, `http2`, unified HTTP, `grpc-tcp`) capture the complete `ClientHello` inside `TlsServerEngine::accept`, while QUIC/UDP listeners (`http3`, `grpc-udp`) extract it inside `VeldaQuicSession::read_handshake` (`velda_tls::extract_quic_signals`).
+- **Fail-Closed on TLS vs Plaintext Bypass**: Plaintext listeners (`req.state.is_tls == false`) pass through (`Action::Continue`). Any request on a TLS listener (`is_tls == true`) with `ja4 == 0` is strictly rejected (`403 Forbidden`) with no fallback/fail-open bypass.
+- **Recommended Pairing (`ja4_filter` -> `bot_detection`)**: Run `ja4_filter` **before** [`bot_detection`](../bot_detection/) (`"plugins": ["ja4_filter", "bot_detection"]`). `ja4_filter` eliminates known bot signatures at ~60 instructions before `bot_detection` inspects headers or applies progressive tarpit delays against JA4-spoofing bots.
 
 ## 4. Quick Start Configuration
 

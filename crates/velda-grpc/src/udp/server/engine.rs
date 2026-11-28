@@ -55,6 +55,7 @@ struct StreamSlot {
 pub struct GrpcUdpEngine {
     endpoint: Endpoint,
     connections: HashMap<ConnectionHandle, Connection>,
+    connection_signals: HashMap<ConnectionHandle, (u64, u16)>,
     control_streams: HashSet<ConnectionHandle>,
     streams: HashMap<(ConnectionHandle, StreamId), StreamSlot>,
     config: GrpcConfig,
@@ -78,6 +79,7 @@ impl GrpcUdpEngine {
         Self {
             endpoint,
             connections: HashMap::new(),
+            connection_signals: HashMap::new(),
             control_streams: HashSet::new(),
             streams: HashMap::new(),
             config,
@@ -165,6 +167,17 @@ impl GrpcUdpEngine {
         if let Some(handle) = active_handle {
             let mut is_lost = false;
             if let Some(conn) = self.connections.get_mut(&handle) {
+                let (conn_ja4, conn_tls_traits) =
+                    match self.connection_signals.get(&handle).copied() {
+                        Some((j, t)) if j != 0 => (j, t),
+                        _ => {
+                            let (j, t) = velda_tls::extract_quic_signals(conn);
+                            if j != 0 {
+                                self.connection_signals.insert(handle, (j, t));
+                            }
+                            (j, t)
+                        }
+                    };
                 // Send SETTINGS on control stream once handshake completes
                 if !conn.is_handshaking()
                     && !self.control_streams.contains(&handle)
@@ -203,6 +216,7 @@ impl GrpcUdpEngine {
                 }
 
                 // Drain connection stream events
+                let ready_start = ready_requests.len();
                 while let Some(event) = conn.poll() {
                     match event {
                         Event::Stream(StreamEvent::Opened { dir }) => {
@@ -246,6 +260,17 @@ impl GrpcUdpEngine {
                         _ => {}
                     }
                 }
+                for req_ev in &mut ready_requests[ready_start..] {
+                    req_ev.request.state.is_tls = true;
+                    req_ev.request.state.ja4 = conn_ja4;
+                    req_ev.request.state.tls_traits = conn_tls_traits;
+                    let pseudo = req_ev.request.state.wire_traits();
+                    req_ev.request.state.set_wire_traits(
+                        (velda_core::bitfield::WIRE_PROTO_H3
+                            << velda_core::bitfield::WIRE_PROTO_SHIFT)
+                            | pseudo,
+                    );
+                }
 
                 // Drain outgoing transmits generated during event processing
                 self.transmit_buf.clear();
@@ -269,6 +294,7 @@ impl GrpcUdpEngine {
 
             if is_lost {
                 self.connections.remove(&handle);
+                self.connection_signals.remove(&handle);
                 self.control_streams.remove(&handle);
                 self.streams.retain(|(h, _), _| *h != handle);
             }
@@ -315,6 +341,7 @@ impl GrpcUdpEngine {
 
         for handle in closed_handles {
             self.connections.remove(&handle);
+            self.connection_signals.remove(&handle);
             self.control_streams.remove(&handle);
             self.streams.retain(|(h, _), _| *h != handle);
         }
@@ -383,13 +410,14 @@ impl GrpcUdpEngine {
                             },
                         ) {
                             Ok(decoded) => {
-                                let req = L7Request::new(
+                                let mut req = L7Request::new(
                                     decoded.method.unwrap_or(http::Method::POST),
                                     decoded.uri.unwrap_or_else(|| http::Uri::from_static("/")),
                                     http::Version::HTTP_3,
                                     decoded.headers,
                                     Body::Empty,
                                 );
+                                req.state.set_wire_traits(decoded.pseudo_order as u64);
                                 slot.request = Some(req);
                             }
                             Err(e) => {

@@ -55,11 +55,12 @@ pub async fn handle_grpc_tcp(
             return;
         };
 
-        let ja4 =
-            DownstreamMeta::peek_tcp_ja4(&connection.stream, tls_server.params().handshake_timeout)
-                .await;
-        match tls_server.accept_with_timeout(connection).await {
-            Ok(tls_stream) => {
+        match tls_server.accept(connection).await {
+            Ok(velda_tls::AcceptedTlsStream {
+                stream: tls_stream,
+                ja4,
+                tls_traits,
+            }) => {
                 // gRPC protocol specification: gRPC over TCP/TLS is strictly framed atop HTTP/2 binary framing.
                 // Clients MUST successfully negotiate ALPN "h2".
                 let alpn = TlsServerEngine::extract_alpn(&tls_stream);
@@ -91,7 +92,7 @@ pub async fn handle_grpc_tcp(
 
                 let meta =
                     DownstreamMeta::new(listener_id, peer, local_addr, true, None, &rt.buffer_pool)
-                        .with_ja4(ja4);
+                        .with_tls_signals(ja4, tls_traits);
                 run_grpc_tcp_loop(tls_stream, meta, config, sampling, runtime).await;
             }
             Err(e) => {
@@ -333,7 +334,10 @@ async fn dispatch_grpc_tcp_request_stream(
             &server_stream.head.method,
         ));
     req_state.client_ip = meta.peer_ip;
+    req_state.is_tls = meta.is_tls;
     req_state.ja4 = meta.ja4;
+    req_state.tls_traits = meta.tls_traits;
+    req_state.set_wire_traits(server_stream.head.wire_traits);
     req_state.set_route(route.id);
     req_state.set_upstream(target_upstream);
 

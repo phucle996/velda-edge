@@ -107,6 +107,7 @@ pub struct DownstreamMeta {
     pub local_port_be: u16,
     pub is_tls: bool,
     pub ja4: u64,
+    pub tls_traits: u16,
     pub client_ip_header: http::HeaderValue,
     pub listener_port_header: http::HeaderValue,
     pub alt_svc_header: Option<http::HeaderValue>,
@@ -142,6 +143,7 @@ impl DownstreamMeta {
             local_port_be,
             is_tls,
             ja4: 0,
+            tls_traits: 0,
             client_ip_header,
             listener_port_header,
             alt_svc_header,
@@ -149,22 +151,12 @@ impl DownstreamMeta {
         }
     }
 
-    /// Attaches a 64-bit JA4 TLS fingerprint ID extracted from ClientHello.
+    /// Attaches 64-bit JA4 fingerprint and 16-bit structural `tls_traits` extracted from ClientHello.
     #[inline(always)]
-    pub fn with_ja4(mut self, ja4: u64) -> Self {
+    pub fn with_tls_signals(mut self, ja4: u64, tls_traits: u16) -> Self {
         self.ja4 = ja4;
+        self.tls_traits = tls_traits;
         self
-    }
-
-    /// Peeks the initial TLS ClientHello record from the kernel TCP receive buffer
-    /// without consuming bytes, returning a compact 64-bit JA4 fingerprint ID (`0` on fallback).
-    #[inline]
-    pub async fn peek_tcp_ja4(stream: &tokio::net::TcpStream, timeout: std::time::Duration) -> u64 {
-        let mut buf = [0u8; 2048];
-        match tokio::time::timeout(timeout, stream.peek(&mut buf)).await {
-            Ok(Ok(n)) if n > 0 => velda_tls::compute_ja4_u64(&buf[..n], false),
-            _ => 0,
-        }
     }
 
     /// Injects downstream connection-level headers (e.g. Alt-Svc) into response headers if not already present.
@@ -460,11 +452,12 @@ async fn handle_http_auto_stream(
         return;
     };
 
-    let ja4 =
-        DownstreamMeta::peek_tcp_ja4(&connection.stream, tls_server.params().handshake_timeout)
-            .await;
-    match tls_server.accept_with_timeout(connection).await {
-        Ok(tls_stream) => {
+    match tls_server.accept(connection).await {
+        Ok(velda_tls::AcceptedTlsStream {
+            stream: tls_stream,
+            ja4,
+            tls_traits,
+        }) => {
             velda_observability::global_metrics()
                 .global()
                 .tls_handshake_success();
@@ -485,7 +478,7 @@ async fn handle_http_auto_stream(
                 config.alt_svc,
                 &rt.buffer_pool,
             )
-            .with_ja4(ja4);
+            .with_tls_signals(ja4, tls_traits);
 
             // ALPN demuxing strictly within the HTTP protocol family.
             // When ALPN is omitted by the client, default to HTTP/1.1 as per RFC 7301.

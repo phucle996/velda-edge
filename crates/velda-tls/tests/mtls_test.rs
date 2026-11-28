@@ -89,7 +89,7 @@ async fn test_downstream_mtls_authentication_flows() {
 
         let s_engine = server_engine.clone();
         let server_task = tokio::spawn(async move {
-            let mut stream = s_engine.accept(server_io).await.unwrap();
+            let mut stream = s_engine.accept(server_io).await.unwrap().stream;
             let info = TlsServerEngine::extract_handshake_info(&stream);
             assert!(info.peer_certs.is_some(), "mTLS peer certs must be present");
             assert!(!info.peer_certs.unwrap().is_empty());
@@ -146,7 +146,7 @@ async fn test_upstream_mtls_with_tls_client_engine() {
 
         let b_engine = backend_server_engine.clone();
         let backend_task = tokio::spawn(async move {
-            let mut stream = b_engine.accept(backend_io).await.unwrap();
+            let mut stream = b_engine.accept(backend_io).await.unwrap().stream;
             let info = TlsServerEngine::extract_handshake_info(&stream);
             assert!(
                 info.peer_certs.is_some(),
@@ -239,7 +239,7 @@ async fn test_downstream_mixed_standard_and_mtls_domains() {
 
         let s_engine = server_engine.clone();
         let server_task = tokio::spawn(async move {
-            let mut stream = s_engine.accept(server_io).await.unwrap();
+            let mut stream = s_engine.accept(server_io).await.unwrap().stream;
             let mut buf = [0u8; 4];
             stream.read_exact(&mut buf).await.unwrap();
             assert_eq!(&buf, b"ping");
@@ -286,7 +286,7 @@ async fn test_downstream_mixed_standard_and_mtls_domains() {
 
         let s_engine = server_engine.clone();
         let server_task = tokio::spawn(async move {
-            let mut stream = s_engine.accept(server_io).await.unwrap();
+            let mut stream = s_engine.accept(server_io).await.unwrap().stream;
             let info = TlsServerEngine::extract_handshake_info(&stream);
             assert!(info.peer_certs.is_some());
             let mut buf = [0u8; 4];

@@ -424,6 +424,8 @@ pub struct DecodedHeaders {
     pub uri: Option<Uri>,
     pub status: Option<StatusCode>,
     pub headers: HeaderWorkspace,
+    /// Lossless 5-bit pseudo-header order code.
+    pub pseudo_order: u8,
 }
 
 impl Default for DecodedHeaders {
@@ -434,6 +436,7 @@ impl Default for DecodedHeaders {
             uri: None,
             status: None,
             headers: HeaderWorkspace::empty(DEFAULT_HEADER_CAPACITY),
+            pseudo_order: 0,
         }
     }
 }
@@ -518,6 +521,8 @@ fn decode_qpack_internal(
     let mut raw_path: Option<String> = None;
     let mut raw_authority: Option<String> = None;
     let mut raw_scheme: Option<String> = None;
+    let mut pseudo_seq = [0u8; 4];
+    let mut pseudo_seq_len = 0usize;
 
     // 2. Process field lines
     while !slice.is_empty() {
@@ -540,6 +545,8 @@ fn decode_qpack_internal(
                     true,
                     is_ingress,
                     has_forwarding,
+                    &mut pseudo_seq,
+                    &mut pseudo_seq_len,
                     &mut rem_slots,
                     &mut decoded,
                     &mut raw_path,
@@ -569,6 +576,8 @@ fn decode_qpack_internal(
                     false,
                     is_ingress,
                     has_forwarding,
+                    &mut pseudo_seq,
+                    &mut pseudo_seq_len,
                     &mut rem_slots,
                     &mut decoded,
                     &mut raw_path,
@@ -593,6 +602,8 @@ fn decode_qpack_internal(
                 false,
                 is_ingress,
                 has_forwarding,
+                &mut pseudo_seq,
+                &mut pseudo_seq_len,
                 &mut rem_slots,
                 &mut decoded,
                 &mut raw_path,
@@ -604,6 +615,10 @@ fn decode_qpack_internal(
             break;
         }
     }
+
+    decoded.pseudo_order = velda_core::bitfield::encode_pseudo_order(
+        &pseudo_seq[..pseudo_seq_len.min(pseudo_seq.len())],
+    );
 
     if let Some(path) = raw_path {
         let uri_str = if let (Some(scheme), Some(auth)) = (raw_scheme, raw_authority) {
@@ -702,6 +717,8 @@ fn apply_header_pair_bytes(
     is_static_val: bool,
     is_ingress: bool,
     has_forwarding: bool,
+    pseudo_seq: &mut [u8; 4],
+    pseudo_seq_len: &mut usize,
     rem_slots: &mut usize,
     decoded: &mut DecodedHeaders,
     raw_path: &mut Option<String>,
@@ -711,16 +728,28 @@ fn apply_header_pair_bytes(
     if name.starts_with(b":") {
         match name {
             b":method" => {
+                if *pseudo_seq_len < 4 {
+                    pseudo_seq[*pseudo_seq_len] = velda_core::bitfield::PSEUDO_METHOD;
+                    *pseudo_seq_len += 1;
+                }
                 if let Ok(m) = Method::from_bytes(val) {
                     decoded.method = Some(m);
                 }
             }
             b":path" => {
+                if *pseudo_seq_len < 4 {
+                    pseudo_seq[*pseudo_seq_len] = velda_core::bitfield::PSEUDO_PATH;
+                    *pseudo_seq_len += 1;
+                }
                 if let Ok(s) = std::str::from_utf8(val) {
                     *raw_path = Some(s.to_owned());
                 }
             }
             b":authority" => {
+                if *pseudo_seq_len < 4 {
+                    pseudo_seq[*pseudo_seq_len] = velda_core::bitfield::PSEUDO_AUTHORITY;
+                    *pseudo_seq_len += 1;
+                }
                 if let Ok(s) = std::str::from_utf8(val) {
                     *raw_authority = Some(s.to_owned());
                 }
@@ -737,6 +766,10 @@ fn apply_header_pair_bytes(
                 }
             }
             b":scheme" => {
+                if *pseudo_seq_len < 4 {
+                    pseudo_seq[*pseudo_seq_len] = velda_core::bitfield::PSEUDO_SCHEME;
+                    *pseudo_seq_len += 1;
+                }
                 if let Ok(s) = std::str::from_utf8(val) {
                     *raw_scheme = Some(s.to_owned());
                 }

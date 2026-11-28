@@ -1,0 +1,149 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1400 475" width="100%" role="img" aria-label="JA4 Filter KVM Benchmark Throughput under tc netem">
+  <defs>
+    <linearGradient id="veldaBlue" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0%" stop-color="#3b82f6"/>
+      <stop offset="100%" stop-color="#1d4ed8"/>
+    </linearGradient>
+    <linearGradient id="veldaCyan" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0%" stop-color="#06b6d4"/>
+      <stop offset="100%" stop-color="#0369a1"/>
+    </linearGradient>
+    <linearGradient id="veldaEmerald" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0%" stop-color="#10b981"/>
+      <stop offset="100%" stop-color="#047857"/>
+    </linearGradient>
+    <linearGradient id="compSlate" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0%" stop-color="#273c5a"/>
+      <stop offset="100%" stop-color="#172438"/>
+    </linearGradient>
+  </defs>
+
+  <rect x="1" y="1" width="1398" height="473" rx="12" fill="#161922" stroke="#2d3343" stroke-width="1.5"/>
+
+  <text x="700" y="36" text-anchor="middle" fill="#f1f5f9" font-family="ui-sans-serif, system-ui, -apple-system, Segoe UI, Roboto, sans-serif" font-size="20" font-weight="700">
+    JA4 TLS Fingerprint Filter Throughput Under Isolated KVM tc netem
+  </text>
+  <text x="700" y="58" text-anchor="middle" fill="#94a3b8" font-family="ui-sans-serif, system-ui, -apple-system, Segoe UI, Roboto, sans-serif" font-size="13">
+    Client 6ms±1.5ms (0.02% loss)  |  Backend 1.5ms±0.3ms  |  HTTPS Port 8443 (ECDSA P-256)  |  JA03 4,096 rules retains 47.7k RPS
+  </text>
+
+  <text x="36" y="255" text-anchor="middle" transform="rotate(-90 36 255)" fill="#cbd5e1" font-family="ui-sans-serif, system-ui, sans-serif" font-size="13" font-weight="600">
+    Requests / sec
+  </text>
+
+  <!-- Section Divider & Headers -->
+  <line x1="825" y1="78" x2="825" y2="449" stroke="#334155" stroke-width="1.2" stroke-dasharray="5 5"/>
+  <text x="455" y="90" text-anchor="middle" fill="#60a5fa" font-family="ui-sans-serif, system-ui, sans-serif" font-size="13" font-weight="600">
+    JA01 &amp; JA04: HTTPS Keep-Alive Steady-State &amp; 403 Bot Flood (/ping, c = 512)
+  </text>
+  <text x="1105" y="90" text-anchor="middle" fill="#34d399" font-family="ui-sans-serif, system-ui, sans-serif" font-size="13" font-weight="600">
+    JA03 Rule Scale (c=512) &amp; JA02 12KB Payload (c = 256)
+  </text>
+
+  <!-- Y-Axis Gridlines (0 to 80k -> y = 390 down to 120; 10k = 33.75px) -->
+  <g stroke="#262c3d" stroke-width="1" stroke-dasharray="3 4">
+    <line x1="95" y1="322.5" x2="1370" y2="322.5"/>
+    <line x1="95" y1="255.0" x2="1370" y2="255.0"/>
+    <line x1="95" y1="187.5" x2="1370" y2="187.5"/>
+    <line x1="95" y1="120.0" x2="1370" y2="120.0"/>
+  </g>
+  <line x1="95" y1="390" x2="1370" y2="390" stroke="#475569" stroke-width="1.5"/>
+
+  <g fill="#94a3b8" font-family="ui-monospace, SFMono-Regular, Menlo, monospace" font-size="11.5" text-anchor="end">
+    <text x="86" y="394">0</text>
+    <text x="86" y="326.5">20k</text>
+    <text x="86" y="259">40k</text>
+    <text x="86" y="191.5">60k</text>
+    <text x="86" y="124">80k</text>
+  </g>
+
+  <!-- Left Panel Bars (8 bars at x centers: 135, 223, 311, 399, 487, 575, 663, 751; w=48 -> x = c-24) -->
+  <g>
+    <rect x="111" y="136.7" width="48" height="253.3" rx="4" fill="url(#veldaEmerald)"/>
+    <text x="135" y="129.7" text-anchor="middle" fill="#6ee7b7" font-family="ui-monospace, monospace" font-size="11.5" font-weight="700">75,059</text>
+    <text x="135" y="410" text-anchor="middle" fill="#e2e8f0" font-family="ui-sans-serif, sans-serif" font-size="11" font-weight="600">
+      <tspan x="135" dy="0">Velda JA4</tspan><tspan x="135" dy="14" fill="#34d399">403 Flood</tspan>
+    </text>
+
+    <rect x="199" y="228.5" width="48" height="161.5" rx="4" fill="url(#veldaBlue)"/>
+    <text x="223" y="221.5" text-anchor="middle" fill="#93c5fd" font-family="ui-monospace, monospace" font-size="11.5" font-weight="700">47,853</text>
+    <text x="223" y="410" text-anchor="middle" fill="#e2e8f0" font-family="ui-sans-serif, sans-serif" font-size="11" font-weight="600">
+      <tspan x="223" dy="0">Velda JA4</tspan><tspan x="223" dy="14" fill="#60a5fa">Allow (16)</tspan>
+    </text>
+
+    <rect x="287" y="225.4" width="48" height="164.6" rx="4" fill="url(#veldaCyan)"/>
+    <text x="311" y="218.4" text-anchor="middle" fill="#67e8f9" font-family="ui-monospace, monospace" font-size="11.5" font-weight="700">48,776</text>
+    <text x="311" y="410" text-anchor="middle" fill="#e2e8f0" font-family="ui-sans-serif, sans-serif" font-size="11">
+      <tspan x="311" dy="0">Velda</tspan><tspan x="311" dy="14" fill="#94a3b8">TLS Base</tspan>
+    </text>
+
+    <rect x="375" y="230.8" width="48" height="159.2" rx="4" fill="url(#compSlate)" stroke="#38bdf8" stroke-opacity="0.35"/>
+    <text x="399" y="223.8" text-anchor="middle" fill="#cbd5e1" font-family="ui-monospace, monospace" font-size="11.5">47,179</text>
+    <text x="399" y="410" text-anchor="middle" fill="#94a3b8" font-family="ui-sans-serif, sans-serif" font-size="11">
+      <tspan x="399" dy="0">HAProxy</tspan><tspan x="399" dy="14">2.8 FP</tspan>
+    </text>
+
+    <rect x="463" y="232.1" width="48" height="157.9" rx="4" fill="url(#compSlate)"/>
+    <text x="487" y="225.1" text-anchor="middle" fill="#cbd5e1" font-family="ui-monospace, monospace" font-size="11.5">46,786</text>
+    <text x="487" y="410" text-anchor="middle" fill="#94a3b8" font-family="ui-sans-serif, sans-serif" font-size="11">
+      <tspan x="487" dy="0">Nginx</tspan><tspan x="487" dy="14">1.24 TLS</tspan>
+    </text>
+
+    <rect x="551" y="272.9" width="48" height="117.1" rx="4" fill="url(#compSlate)"/>
+    <text x="575" y="265.9" text-anchor="middle" fill="#cbd5e1" font-family="ui-monospace, monospace" font-size="11.5">34,695</text>
+    <text x="575" y="410" text-anchor="middle" fill="#94a3b8" font-family="ui-sans-serif, sans-serif" font-size="11">
+      <tspan x="575" dy="0">APISIX</tspan><tspan x="575" dy="14">3.11 Lua</tspan>
+    </text>
+
+    <rect x="639" y="288.9" width="48" height="101.1" rx="4" fill="url(#compSlate)"/>
+    <text x="663" y="281.9" text-anchor="middle" fill="#cbd5e1" font-family="ui-monospace, monospace" font-size="11.5">29,956</text>
+    <text x="663" y="410" text-anchor="middle" fill="#94a3b8" font-family="ui-sans-serif, sans-serif" font-size="11">
+      <tspan x="663" dy="0">Kong</tspan><tspan x="663" dy="14">3.9 TLS</tspan>
+    </text>
+
+    <rect x="727" y="304.1" width="48" height="85.9" rx="4" fill="url(#compSlate)"/>
+    <text x="751" y="297.1" text-anchor="middle" fill="#cbd5e1" font-family="ui-monospace, monospace" font-size="11.5">25,446</text>
+    <text x="751" y="410" text-anchor="middle" fill="#94a3b8" font-family="ui-sans-serif, sans-serif" font-size="11">
+      <tspan x="751" dy="0">Envoy</tspan><tspan x="751" dy="14">1.32 TLS</tspan>
+    </text>
+  </g>
+
+  <!-- Right Panel Bars (6 bars at x centers: 880, 968, 1056, 1144, 1232, 1320; w=48 -> x = c-24) -->
+  <g>
+    <rect x="856" y="228.9" width="48" height="161.1" rx="4" fill="url(#veldaCyan)"/>
+    <text x="880" y="221.9" text-anchor="middle" fill="#67e8f9" font-family="ui-monospace, monospace" font-size="11.5" font-weight="700">47,738</text>
+    <text x="880" y="410" text-anchor="middle" fill="#e2e8f0" font-family="ui-sans-serif, sans-serif" font-size="11" font-weight="600">
+      <tspan x="880" dy="0">Velda JA4</tspan><tspan x="880" dy="14" fill="#22d3ee">4,096 Rules</tspan>
+    </text>
+
+    <rect x="944" y="301.0" width="48" height="89.0" rx="4" fill="url(#veldaBlue)"/>
+    <text x="968" y="294.0" text-anchor="middle" fill="#93c5fd" font-family="ui-monospace, monospace" font-size="11.5" font-weight="700">26,363</text>
+    <text x="968" y="410" text-anchor="middle" fill="#e2e8f0" font-family="ui-sans-serif, sans-serif" font-size="11" font-weight="600">
+      <tspan x="968" dy="0">Velda JA4</tspan><tspan x="968" dy="14" fill="#60a5fa">12KB (c256)</tspan>
+    </text>
+
+    <rect x="1032" y="316.2" width="48" height="73.8" rx="4" fill="url(#compSlate)"/>
+    <text x="1056" y="309.2" text-anchor="middle" fill="#cbd5e1" font-family="ui-monospace, monospace" font-size="11.5">21,863</text>
+    <text x="1056" y="410" text-anchor="middle" fill="#94a3b8" font-family="ui-sans-serif, sans-serif" font-size="11">
+      <tspan x="1056" dy="0">HAProxy</tspan><tspan x="1056" dy="14">12KB (c256)</tspan>
+    </text>
+
+    <rect x="1120" y="324.4" width="48" height="65.6" rx="4" fill="url(#compSlate)"/>
+    <text x="1144" y="317.4" text-anchor="middle" fill="#cbd5e1" font-family="ui-monospace, monospace" font-size="11.5">19,428</text>
+    <text x="1144" y="410" text-anchor="middle" fill="#94a3b8" font-family="ui-sans-serif, sans-serif" font-size="11">
+      <tspan x="1144" dy="0">APISIX</tspan><tspan x="1144" dy="14">12KB (c256)</tspan>
+    </text>
+
+    <rect x="1208" y="329.4" width="48" height="60.6" rx="4" fill="url(#compSlate)"/>
+    <text x="1232" y="322.4" text-anchor="middle" fill="#cbd5e1" font-family="ui-monospace, monospace" font-size="11.5">17,946</text>
+    <text x="1232" y="410" text-anchor="middle" fill="#94a3b8" font-family="ui-sans-serif, sans-serif" font-size="11">
+      <tspan x="1232" dy="0">Kong</tspan><tspan x="1232" dy="14">12KB (c256)</tspan>
+    </text>
+
+    <rect x="1296" y="336.1" width="48" height="53.9" rx="4" fill="url(#compSlate)"/>
+    <text x="1320" y="329.1" text-anchor="middle" fill="#cbd5e1" font-family="ui-monospace, monospace" font-size="11.5">15,966</text>
+    <text x="1320" y="410" text-anchor="middle" fill="#94a3b8" font-family="ui-sans-serif, sans-serif" font-size="11">
+      <tspan x="1320" dy="0">Envoy</tspan><tspan x="1320" dy="14">12KB (c256)</tspan>
+    </text>
+  </g>
+</svg>

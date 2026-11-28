@@ -115,7 +115,7 @@ async fn bench_metadata_extraction() {
     let (client_io, server_io) = duplex(65536);
     let srv = server_engine.clone();
 
-    let srv_task = tokio::spawn(async move { srv.accept(server_io).await.unwrap() });
+    let srv_task = tokio::spawn(async move { srv.accept(server_io).await.unwrap().stream });
 
     let server_name = ServerName::try_from("api.example.com".to_string()).unwrap();
     let _client_stream = client.connect(server_name, client_io).await.unwrap();
@@ -163,7 +163,7 @@ async fn bench_handshake_and_resumption() {
         let (client_io, server_io) = duplex(65536);
         let srv = server_engine.clone();
         let srv_task = tokio::spawn(async move {
-            let mut s = srv.accept(server_io).await.unwrap();
+            let mut s = srv.accept(server_io).await.unwrap().stream;
             let mut buf = [0u8; 4];
             s.read_exact(&mut buf).await.unwrap();
             s.write_all(b"pong").await.unwrap();
@@ -196,7 +196,7 @@ async fn bench_handshake_and_resumption() {
         let (client_io, server_io) = duplex(65536);
         let srv = server_engine.clone();
         let srv_task = tokio::spawn(async move {
-            let mut s = srv.accept(server_io).await.unwrap();
+            let mut s = srv.accept(server_io).await.unwrap().stream;
             let mut buf = [0u8; 4];
             s.read_exact(&mut buf).await.unwrap();
             s.write_all(b"pong").await.unwrap();
@@ -217,7 +217,7 @@ async fn bench_handshake_and_resumption() {
         let (client_io, server_io) = duplex(65536);
         let srv = server_engine.clone();
         let srv_task = tokio::spawn(async move {
-            let mut s = srv.accept(server_io).await.unwrap();
+            let mut s = srv.accept(server_io).await.unwrap().stream;
             let mut buf = [0u8; 4];
             s.read_exact(&mut buf).await.unwrap();
             s.write_all(b"pong").await.unwrap();

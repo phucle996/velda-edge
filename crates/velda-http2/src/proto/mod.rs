@@ -197,6 +197,9 @@ pub struct H2Connection {
     pending_headers: Option<PendingHeaderAssembly>,
     local_goaway_sent: bool,
     peer_goaway_last_stream_id: Option<u32>,
+    conn_wire_traits: u64,
+    peer_settings_captured: bool,
+    peer_conn_win_captured: bool,
 }
 
 impl H2Connection {
@@ -236,6 +239,10 @@ impl H2Connection {
             pending_headers: None,
             local_goaway_sent: false,
             peer_goaway_last_stream_id: None,
+            conn_wire_traits: velda_core::bitfield::WIRE_PROTO_H2
+                << velda_core::bitfield::WIRE_PROTO_SHIFT,
+            peer_settings_captured: false,
+            peer_conn_win_captured: false,
         };
 
         if role == H2Role::Client {
@@ -777,6 +784,15 @@ impl H2Connection {
                     .on_control_frame()
                     .map_err(|(c, m)| self.fail_connection(c, m))?;
                 if !ack {
+                    if !self.peer_settings_captured {
+                        self.peer_settings_captured = true;
+                        self.conn_wire_traits = (self.conn_wire_traits
+                            & velda_core::bitfield::WIRE_FLAG_H2_PRIORITY_USED)
+                            | encode_h2_settings_traits(&entries)
+                            | (self.conn_wire_traits
+                                & (velda_core::bitfield::WIRE_CONN_WIN_MASK
+                                    | velda_core::bitfield::WIRE_FLAG_ODD_SETTINGS));
+                    }
                     self.apply_peer_settings(&entries)?;
                     write_settings_ack(&mut self.outbound_buf);
                 }
@@ -802,6 +818,7 @@ impl H2Connection {
                 });
             }
             H2Frame::Priority { .. } => {
+                self.conn_wire_traits |= velda_core::bitfield::WIRE_FLAG_H2_PRIORITY_USED;
                 self.control_flood_guard
                     .on_control_frame()
                     .map_err(|(c, m)| self.fail_connection(c, m))?;
@@ -826,6 +843,10 @@ impl H2Connection {
                     .on_control_frame()
                     .map_err(|(c, m)| self.fail_connection(c, m))?;
                 if stream_id == 0 {
+                    if !self.peer_conn_win_captured {
+                        self.peer_conn_win_captured = true;
+                        self.conn_wire_traits |= encode_h2_conn_window_update(increment);
+                    }
                     if let Err(code) = self.conn_flow.apply_peer_window_update(increment) {
                         return Err(
                             self.fail_connection(code, "connection send window exceeded 2^31 - 1")
@@ -1110,6 +1131,8 @@ impl H2Connection {
                     self.rapid_reset_guard.on_clean_stream_complete();
                 }
             }
+            let mut decoded = decoded;
+            decoded.wire_traits = self.conn_wire_traits | (decoded.pseudo_order as u64);
             events.push(H2Event::RequestHeaders {
                 stream_id,
                 decoded,
@@ -1209,6 +1232,164 @@ impl H2Connection {
             );
         }
         H2ProtocolError { code, msg }
+    }
+}
+
+/// Maps an HTTP/2 `SETTINGS` ID into a 3-bit slot code (`1..=7`), returning `0` for unknown IDs.
+#[inline(always)]
+const fn map_h2_setting_id(id: u16) -> u8 {
+    match id {
+        1..=6 => id as u8,
+        9 => 7, // NO_RFC7540_PRIORITIES
+        _ => 0,
+    }
+}
+
+/// Encodes peer's initial HTTP/2 `SETTINGS` frame parameters (preserving wire ID order)
+/// into the protocol-neutral 40-bit `wire_traits` integer layout.
+fn encode_h2_settings_traits(entries: &[SettingPair]) -> u64 {
+    use velda_core::bitfield::*;
+
+    let mut traits: u64 = WIRE_PROTO_H2 << WIRE_PROTO_SHIFT;
+    let mut seq_ids = [0u8; 3];
+    let mut seq_len = 0usize;
+    let mut std_count = 0usize;
+    let mut odd = false;
+
+    for pair in entries {
+        let mapped = map_h2_setting_id(pair.id);
+        if mapped != 0 {
+            if seq_len < 3 {
+                seq_ids[seq_len] = mapped;
+                seq_len += 1;
+            }
+            std_count += 1;
+        } else {
+            odd = true;
+        }
+
+        match pair.id {
+            setting_id::HEADER_TABLE_SIZE => {
+                let cls = match pair.value {
+                    0 => 1,
+                    4096 => 2,
+                    65536 => 3,
+                    16384 => 4,
+                    _ => {
+                        odd = true;
+                        5
+                    }
+                };
+                traits = (traits & !WIRE_HDR_TABLE_MASK) | ((cls as u64) << WIRE_HDR_TABLE_SHIFT);
+            }
+            setting_id::ENABLE_PUSH => {
+                let cls = match pair.value {
+                    0 => 1,
+                    1 => 2,
+                    _ => {
+                        odd = true;
+                        3
+                    }
+                };
+                traits =
+                    (traits & !WIRE_ENABLE_PUSH_MASK) | ((cls as u64) << WIRE_ENABLE_PUSH_SHIFT);
+            }
+            setting_id::MAX_CONCURRENT_STREAMS => {
+                let cls = match pair.value {
+                    0 => 4,
+                    1..=100 => 1,
+                    101..=1000 => 2,
+                    _ => 3,
+                };
+                traits =
+                    (traits & !WIRE_MAX_STREAMS_MASK) | ((cls as u64) << WIRE_MAX_STREAMS_SHIFT);
+            }
+            setting_id::INITIAL_WINDOW_SIZE => {
+                let cls = match pair.value {
+                    65_535 => 1,
+                    131_072 => 2,
+                    1_048_576 => 3,
+                    2_097_152 => 4,
+                    4_194_304 => 5,
+                    6_291_456 => 6,
+                    16_777_216 | 33_554_432 => 7,
+                    _ => {
+                        odd = true;
+                        8
+                    }
+                };
+                traits = (traits & !WIRE_INIT_WIN_MASK) | ((cls as u64) << WIRE_INIT_WIN_SHIFT);
+            }
+            setting_id::MAX_FRAME_SIZE => {
+                let cls = match pair.value {
+                    16_384 => 1,
+                    32_768 | 65_536 | 131_072 | 1_048_576 | 16_777_215 => 2,
+                    _ => {
+                        odd = true;
+                        3
+                    }
+                };
+                traits = (traits & !WIRE_MAX_FRAME_MASK) | ((cls as u64) << WIRE_MAX_FRAME_SHIFT);
+            }
+            setting_id::MAX_HEADER_LIST_SIZE => {
+                if pair.value < 1024 {
+                    odd = true;
+                }
+            }
+            setting_id::NO_RFC7540_PRIORITIES => {
+                if pair.value == 1 {
+                    traits |= WIRE_FLAG_NO_RFC7540_PRIORITIES;
+                } else {
+                    odd = true;
+                }
+            }
+            _ => {}
+        }
+    }
+
+    let count_bucket = match std_count {
+        0..=1 => 0u64,
+        2..=3 => 1,
+        4 => 2,
+        _ => 3,
+    };
+    let seq_word = (seq_ids[0] as u64)
+        | ((seq_ids[1] as u64) << 3)
+        | ((seq_ids[2] as u64) << 6)
+        | (count_bucket << 9);
+    traits |= (seq_word << WIRE_SETTINGS_SEQ_SHIFT) & WIRE_SETTINGS_SEQ_MASK;
+    if odd {
+        traits |= WIRE_FLAG_ODD_SETTINGS;
+    }
+    traits
+}
+
+/// Quantizes initial connection-level HTTP/2 `WINDOW_UPDATE` (`stream_id == 0`) into `WIRE_CONN_WIN_MASK`.
+#[inline]
+const fn encode_h2_conn_window_update(increment: u32) -> u64 {
+    use velda_core::bitfield::*;
+
+    match increment {
+        0 => 0,
+        1..=65_534 => (5u64 << WIRE_CONN_WIN_SHIFT) | WIRE_FLAG_ODD_SETTINGS,
+        65_535..=1_048_576 => 1u64 << WIRE_CONN_WIN_SHIFT,
+        1_048_577..=11_999_999 => {
+            if increment.is_power_of_two() || increment.is_multiple_of(65_536) {
+                1u64 << WIRE_CONN_WIN_SHIFT
+            } else {
+                (5u64 << WIRE_CONN_WIN_SHIFT) | WIRE_FLAG_ODD_SETTINGS
+            }
+        }
+        12_000_000..=13_000_000 => 2u64 << WIRE_CONN_WIN_SHIFT,
+        13_000_001..=14_999_999 => (5u64 << WIRE_CONN_WIN_SHIFT) | WIRE_FLAG_ODD_SETTINGS,
+        15_000_000..=16_777_216 => 3u64 << WIRE_CONN_WIN_SHIFT,
+        16_777_217..=u32::MAX => {
+            if increment == 1_073_676_289 || increment >= 33_554_432 {
+                4u64 << WIRE_CONN_WIN_SHIFT
+            } else {
+                (5u64 << WIRE_CONN_WIN_SHIFT) | WIRE_FLAG_ODD_SETTINGS
+            }
+        }
     }
 }
 

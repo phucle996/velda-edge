@@ -30,7 +30,7 @@ async fn test_tls_handshake_and_alpn_negotiation() {
     let server_task = {
         let server_engine = server_engine.clone();
         tokio::spawn(async move {
-            let mut tls_stream = server_engine.accept(server_io).await.unwrap();
+            let mut tls_stream = server_engine.accept(server_io).await.unwrap().stream;
             let info = TlsServerEngine::extract_handshake_info(&tls_stream);
             assert_eq!(info.alpn.as_deref(), Some("h2"));
             assert_eq!(info.sni.as_deref(), Some("api.example.com"));
@@ -115,7 +115,7 @@ async fn test_downstream_handshake_timeout() {
         let (_client_io, server_io) = duplex(1024);
 
         let res = server_engine
-            .accept_with_explicit_timeout(server_io, std::time::Duration::from_millis(50))
+            .accept_with_timeout(server_io, std::time::Duration::from_millis(50))
             .await;
 
         assert!(res.is_err());
@@ -133,7 +133,7 @@ async fn test_downstream_handshake_timeout() {
 
         let srv_task = tokio::spawn(async move {
             let res = s_engine
-                .accept_with_explicit_timeout(server_io, std::time::Duration::from_millis(500))
+                .accept_with_timeout(server_io, std::time::Duration::from_millis(500))
                 .await;
             assert!(res.is_ok(), "Handshake within timeout must succeed");
         });
@@ -272,7 +272,7 @@ async fn test_multi_domain_sni_alpn_isolation() {
         let (client_io, server_io) = duplex(65536);
         let s_engine = server_engine.clone();
         let server_task = tokio::spawn(async move {
-            let tls_stream = s_engine.accept(server_io).await.unwrap();
+            let tls_stream = s_engine.accept(server_io).await.unwrap().stream;
             let info = TlsServerEngine::extract_handshake_info(&tls_stream);
             assert_eq!(info.sni.as_deref(), Some("api.example.com"));
             assert_eq!(
@@ -299,7 +299,7 @@ async fn test_multi_domain_sni_alpn_isolation() {
         let (client_io, server_io) = duplex(65536);
         let s_engine = server_engine.clone();
         let server_task = tokio::spawn(async move {
-            let tls_stream = s_engine.accept(server_io).await.unwrap();
+            let tls_stream = s_engine.accept(server_io).await.unwrap().stream;
             let info = TlsServerEngine::extract_handshake_info(&tls_stream);
             assert_eq!(info.sni.as_deref(), Some("legacy.example.com"));
             assert_eq!(
@@ -320,4 +320,112 @@ async fn test_multi_domain_sni_alpn_isolation() {
 
         let _server_tls = server_task.await.unwrap();
     }
+}
+
+struct TrickleIo<IO> {
+    inner: IO,
+    max_write_chunk: usize,
+}
+
+impl<IO: tokio::io::AsyncRead + Unpin> tokio::io::AsyncRead for TrickleIo<IO> {
+    fn poll_read(
+        self: std::pin::Pin<&mut Self>,
+        cx: &mut std::task::Context<'_>,
+        buf: &mut tokio::io::ReadBuf<'_>,
+    ) -> std::task::Poll<std::io::Result<()>> {
+        std::pin::Pin::new(&mut self.get_mut().inner).poll_read(cx, buf)
+    }
+}
+
+impl<IO: tokio::io::AsyncWrite + Unpin> tokio::io::AsyncWrite for TrickleIo<IO> {
+    fn poll_write(
+        self: std::pin::Pin<&mut Self>,
+        cx: &mut std::task::Context<'_>,
+        buf: &[u8],
+    ) -> std::task::Poll<std::io::Result<usize>> {
+        let this = self.get_mut();
+        let chunk = buf.len().min(this.max_write_chunk);
+        match std::pin::Pin::new(&mut this.inner).poll_write(cx, &buf[..chunk]) {
+            std::task::Poll::Ready(Ok(n)) if chunk < buf.len() => {
+                // Force async yield between fragmented TCP chunks
+                cx.waker().wake_by_ref();
+                std::task::Poll::Ready(Ok(n))
+            }
+            other => other,
+        }
+    }
+
+    fn poll_flush(
+        self: std::pin::Pin<&mut Self>,
+        cx: &mut std::task::Context<'_>,
+    ) -> std::task::Poll<std::io::Result<()>> {
+        std::pin::Pin::new(&mut self.get_mut().inner).poll_flush(cx)
+    }
+
+    fn poll_shutdown(
+        self: std::pin::Pin<&mut Self>,
+        cx: &mut std::task::Context<'_>,
+    ) -> std::task::Poll<std::io::Result<()>> {
+        std::pin::Pin::new(&mut self.get_mut().inner).poll_shutdown(cx)
+    }
+}
+
+#[tokio::test]
+async fn test_accept_with_ja4_handles_tiny_tcp_fragments() {
+    let (cert_pem, key_pem) = make_test_cert(vec!["frag.example.com".into()]);
+    let server_config = ServerTlsConfig {
+        sni: vec!["frag.example.com".into()],
+        versions: vec!["tls1.3".into()],
+        alpn: vec!["http/1.1".into()],
+        cert_pem: cert_pem.clone(),
+        key_pem,
+        client_ca_pem: None,
+    };
+
+    let server_engine = TlsServerEngine::new(&[server_config]).unwrap();
+    let connector = make_client_connector(&cert_pem, Some(vec!["http/1.1"]));
+    let server_name = ServerName::try_from("frag.example.com".to_string()).unwrap();
+
+    // 1. Baseline single-write ClientHello JA4
+    let baseline_ja4 = {
+        let (client_io, server_io) = duplex(65536);
+        let se = server_engine.clone();
+        let srv = tokio::spawn(async move {
+            let acc = se.accept(server_io).await.unwrap();
+            acc.ja4
+        });
+        let _c = connector
+            .connect(server_name.clone(), client_io)
+            .await
+            .unwrap();
+        srv.await.unwrap()
+    };
+    assert_ne!(baseline_ja4, 0);
+
+    // 2. Heavily fragmented ClientHello dripped 10 bytes per TCP segment
+    let (client_io, server_io) = duplex(65536);
+    let se = server_engine.clone();
+    let srv = tokio::spawn(async move {
+        let mut acc = se.accept(server_io).await.unwrap();
+        let mut buf = [0u8; 4];
+        acc.stream.read_exact(&mut buf).await.unwrap();
+        assert_eq!(&buf, b"ping");
+        acc.stream.write_all(b"pong").await.unwrap();
+        acc.stream.flush().await.unwrap();
+        acc.ja4
+    });
+
+    let trickle = TrickleIo {
+        inner: client_io,
+        max_write_chunk: 10,
+    };
+    let mut client_tls = connector.connect(server_name, trickle).await.unwrap();
+    client_tls.write_all(b"ping").await.unwrap();
+    client_tls.flush().await.unwrap();
+    let mut resp = [0u8; 4];
+    client_tls.read_exact(&mut resp).await.unwrap();
+    assert_eq!(&resp, b"pong");
+
+    let frag_ja4 = srv.await.unwrap();
+    assert_eq!(frag_ja4, baseline_ja4);
 }

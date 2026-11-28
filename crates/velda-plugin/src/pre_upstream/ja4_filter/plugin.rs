@@ -6,11 +6,13 @@
 //! ├─────────────────────────────────────────────────────────────────────────────────────────┤
 //! │  Routed L7Request                                                                       │
 //! │    │                                                                                    │
-//! │    ▼ Read req.state.ja4 (u64 inside 64B L1d RequestState cache line)                    │
-//! │    ├── ja4 == 0 (plaintext / unavailable) ───────────────► Action::Continue             │
-//! │    └── ja4 != 0 ──► Scan/BSearch denied_ids: Box<[u64]>                                 │
-//! │                       ├── Match    ──────────────────────► Action::Reject(Forbidden)    │
-//! │                       └── No Match ──────────────────────► Action::Continue             │
+//! │    ▼ Read req.state.{is_tls, ja4} inside 64B L1d RequestState cache line                │
+//! │    ├── !is_tls (plaintext listener) ─────────────────────► Action::Continue             │
+//! │    └── is_tls == true                                                                   │
+//! │          ├── ja4 == 0 (fail-closed) ─────────────────────► Action::Reject(Forbidden)    │
+//! │          └── Scan/BSearch denied_ids: Box<[u64]>                                        │
+//! │                ├── Match    ─────────────────────────────► Action::Reject(Forbidden)    │
+//! │                └── No Match ─────────────────────────────► Action::Continue             │
 //! └─────────────────────────────────────────────────────────────────────────────────────────┘
 //! ```
 
@@ -89,8 +91,11 @@ impl PreUpstreamPlugin for Ja4FilterPlugin {
 
     #[inline]
     fn on_upstream_request(&self, req: &mut L7Request, _targets: &mut u32) -> Action {
+        if !req.state.is_tls {
+            return Action::Continue;
+        }
         let ja4 = req.state.ja4;
-        if ja4 != 0 && self.is_denied(ja4) {
+        if ja4 == 0 || self.is_denied(ja4) {
             return Action::Reject(RejectReason::Forbidden);
         }
         Action::Continue
@@ -114,7 +119,7 @@ mod tests {
     use serde_json::json;
     use velda_core::{Body, HeaderWorkspace, ja4_fingerprint_id};
 
-    fn make_req(ja4: u64) -> L7Request {
+    fn make_req(is_tls: bool, ja4: u64) -> L7Request {
         let mut req = L7Request::new(
             Method::GET,
             Uri::from_static("/login"),
@@ -122,6 +127,7 @@ mod tests {
             HeaderWorkspace::empty(0),
             Body::Empty,
         );
+        req.state.is_tls = is_tls;
         req.state.ja4 = ja4;
         req
     }
@@ -142,32 +148,42 @@ mod tests {
         let plugin = Ja4FilterPlugin::from_config(&cfg).unwrap();
         let mut target = 0u32;
 
-        // Matching canonical JA4 string -> Reject
-        let mut req1 = make_req(fp_id);
+        // Matching canonical JA4 string on TLS -> Reject
+        let mut req1 = make_req(true, fp_id);
         assert!(matches!(
             plugin.on_upstream_request(&mut req1, &mut target),
             Action::Reject(RejectReason::Forbidden)
         ));
 
-        // Matching hex ID -> Reject
-        let mut req2 = make_req(hex_id);
+        // Matching hex ID on TLS -> Reject
+        let mut req2 = make_req(true, hex_id);
         assert!(matches!(
             plugin.on_upstream_request(&mut req2, &mut target),
             Action::Reject(RejectReason::Forbidden)
         ));
 
-        // Non-matching JA4 -> Continue
-        let mut req3 = make_req(ja4_fingerprint_id("t13d1516h2_000000000000_000000000000"));
+        // Non-matching JA4 on TLS -> Continue
+        let mut req3 = make_req(
+            true,
+            ja4_fingerprint_id("t13d1516h2_000000000000_000000000000"),
+        );
         assert!(matches!(
             plugin.on_upstream_request(&mut req3, &mut target),
             Action::Continue
         ));
 
-        // Sentinel 0 (plaintext / non-TLS) -> Continue
-        let mut req0 = make_req(0);
+        // Plaintext (is_tls=false, ja4=0) -> Continue
+        let mut req_plain = make_req(false, 0);
         assert!(matches!(
-            plugin.on_upstream_request(&mut req0, &mut target),
+            plugin.on_upstream_request(&mut req_plain, &mut target),
             Action::Continue
+        ));
+
+        // TLS listener missing JA4 (is_tls=true, ja4=0) -> Fail-closed Reject
+        let mut req_tls_missing = make_req(true, 0);
+        assert!(matches!(
+            plugin.on_upstream_request(&mut req_tls_missing, &mut target),
+            Action::Reject(RejectReason::Forbidden)
         ));
     }
 
@@ -180,13 +196,13 @@ mod tests {
         let plugin = Ja4FilterPlugin::new("ja4-large", ids);
         let mut target = 0u32;
 
-        let mut req_hit = make_req(32_007);
+        let mut req_hit = make_req(true, 32_007);
         assert!(matches!(
             plugin.on_upstream_request(&mut req_hit, &mut target),
             Action::Reject(RejectReason::Forbidden)
         ));
 
-        let mut req_miss = make_req(32_008);
+        let mut req_miss = make_req(true, 32_008);
         assert!(matches!(
             plugin.on_upstream_request(&mut req_miss, &mut target),
             Action::Continue

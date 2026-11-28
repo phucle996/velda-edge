@@ -121,9 +121,7 @@ async fn bench_slowloris_timeout_defense() {
         let (_client_io, server_io) = duplex(1024);
         let srv = server_engine.clone();
 
-        let res = srv
-            .accept_with_explicit_timeout(server_io, timeout_duration)
-            .await;
+        let res = srv.accept_with_timeout(server_io, timeout_duration).await;
         if let Err(e) = res
             && e.to_string().contains("timed out")
         {

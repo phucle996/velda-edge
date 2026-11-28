@@ -74,11 +74,12 @@ pub async fn handle_http1_stream(
             return;
         };
 
-        let ja4 =
-            DownstreamMeta::peek_tcp_ja4(&connection.stream, tls_server.params().handshake_timeout)
-                .await;
-        match tls_server.accept_with_timeout(connection).await {
-            Ok(tls_stream) => {
+        match tls_server.accept(connection).await {
+            Ok(velda_tls::AcceptedTlsStream {
+                stream: tls_stream,
+                ja4,
+                tls_traits,
+            }) => {
                 // RFC 9112 Section 2: Dedicated HTTP/1.1 over TLS listener strictly requires ALPN "http/1.1".
                 let alpn = TlsServerEngine::extract_alpn(&tls_stream);
 
@@ -110,7 +111,7 @@ pub async fn handle_http1_stream(
                     alt_svc,
                     &rt.buffer_pool,
                 )
-                .with_ja4(ja4);
+                .with_tls_signals(ja4, tls_traits);
                 run_http1_loop(tls_stream, meta, streaming, config, sampling, runtime).await;
             }
             Err(e) => {
@@ -443,7 +444,12 @@ pub async fn run_http1_loop<IO>(
             .with_ingress_time(ingress_nanos)
             .with_method(log_method);
         req_state.client_ip = meta.peer_ip;
+        req_state.is_tls = meta.is_tls;
         req_state.ja4 = meta.ja4;
+        req_state.tls_traits = meta.tls_traits;
+        req_state.set_wire_traits(
+            velda_core::bitfield::WIRE_PROTO_H1 << velda_core::bitfield::WIRE_PROTO_SHIFT,
+        );
         req_state.set_route(route.id);
         req_state.set_upstream(target_upstream);
 

@@ -27,7 +27,7 @@ async fn run_concurrent_handshakes(
         let (client_io, server_io) = duplex(65536);
         let srv = srv_arc.clone();
         let srv_task = tokio::spawn(async move {
-            let mut s = srv.accept(server_io).await.unwrap();
+            let mut s = srv.accept(server_io).await.unwrap().stream;
             let mut buf = [0u8; 4];
             s.read_exact(&mut buf).await.unwrap();
             s.write_all(b"pong").await.unwrap();
@@ -51,7 +51,7 @@ async fn run_concurrent_handshakes(
                 let (client_io, server_io) = duplex(65536);
                 let srv_clone = srv.clone();
                 let srv_task = tokio::spawn(async move {
-                    let mut s = srv_clone.accept(server_io).await.unwrap();
+                    let mut s = srv_clone.accept(server_io).await.unwrap().stream;
                     let mut buf = [0u8; 4];
                     s.read_exact(&mut buf).await.unwrap();
                     s.write_all(b"pong").await.unwrap();
