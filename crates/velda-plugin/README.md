@@ -104,11 +104,10 @@ To allow protocol-independent short-circuiting without leaking internal headers:
 | [`bot_detection`](src/pre_upstream/bot_detection/) | HTTP | `0` | Cross-layer 0..=100 anomaly scoring + strict 64B L1 448-bit / L2 `(ip, ja4)` progressive delay tarpit (paired after `ja4_filter`). |
 | [`canary`](src/pre_upstream/canary/) | HTTP / gRPC | `0` | Deterministic hash/header/weight-based canary upstream rerouting. |
 | [`csrf`](src/pre_upstream/csrf/) | HTTP | `0` | Double-submit cookie / origin-verified CSRF token enforcement. |
-| [`grpc_fault_injection`](src/pre_upstream/grpc_fault_injection/) | gRPC | `0` | Deterministic gRPC status abort & latency fault injection. |
+| [`fault_injection`](src/pre_upstream/fault_injection/) | HTTP / gRPC | `0` | Scoped latency injection and protocol-blind `InternalStatus` abort across all L7 protocols. |
 | [`header_mutation`](src/pre_upstream/header_mutation/) | All L7 | `0` | Explicit static header remove, overwrite, and append directly on `HeaderWorkspace`. |
 | [`hmac_auth`](src/pre_upstream/hmac_auth/) | HTTP | `0` | HMAC-SHA256 request signature and replay-window verification. |
 | [`http_cache_lookup`](src/pre_upstream/http_cache_lookup/) | HTTP | `0` | Lock-free shared-memory HTTP response cache lookup (short-circuits on HIT). |
-| [`http_fault_injection`](src/pre_upstream/http_fault_injection/) | HTTP | `0` | Scoped HTTP status abort & non-blocking delay fault injection. |
 | [`ja4_filter`](src/pre_upstream/ja4_filter/) | TLS L7 | `0` | TLS JA4 client fingerprint filtering directly against `req.state.ja4`. |
 | [`jwt_auth`](src/pre_upstream/jwt_auth/) | HTTP | `0` / `5` | Zero-alloc JWT verification (HS/RS/ES/EdDSA) with `internal` static keys or `external` ETP background rotation (`JwksStore`). |
 | [`oauth2_introspection`](src/pre_upstream/oauth2_introspection/) | HTTP | `0` | RFC 7662 token introspection cache with core-local shadow revalidation (`try_dispatch_shadow`). |

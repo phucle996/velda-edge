@@ -23,7 +23,7 @@ use std::str::FromStr;
 
 use http::header::{HeaderName, HeaderValue};
 use velda_core::clock::coarse_sec;
-use velda_core::{Action, L7Request, RejectReason};
+use velda_core::{Action, InternalStatus, L7Request};
 
 use crate::capability::{AccessLevel, PluginCapability, SupportedProtocols};
 use crate::config::PluginConfig;
@@ -102,7 +102,7 @@ impl ApiKeyAuthPlugin {
             http::header::WWW_AUTHENTICATE,
             HeaderValue::from_static("ApiKey realm=\"velda-edge\""),
         );
-        Action::Reject(RejectReason::Unauthorized)
+        Action::Status(InternalStatus::Unauthorized)
     }
 
     #[inline(always)]
@@ -282,21 +282,21 @@ mod tests {
         let mut req_missing = make_req(None);
         assert!(matches!(
             plugin.on_upstream_request(&mut req_missing, &mut target),
-            Action::Reject(RejectReason::Unauthorized)
+            Action::Status(InternalStatus::Unauthorized)
         ));
 
         // Wrong key (rejected without polluting CoreCacheArena)
         let mut req_bad = make_req(Some("sk-wrong-key-12345"));
         assert!(matches!(
             plugin.on_upstream_request(&mut req_bad, &mut target),
-            Action::Reject(RejectReason::Unauthorized)
+            Action::Status(InternalStatus::Unauthorized)
         ));
 
         // Expired key (expires_at = 1000 < coarse_sec())
         let mut req_exp = make_req(Some("sk-expired-key-1"));
         assert!(matches!(
             plugin.on_upstream_request(&mut req_exp, &mut target),
-            Action::Reject(RejectReason::Unauthorized)
+            Action::Status(InternalStatus::Unauthorized)
         ));
     }
 }

@@ -17,13 +17,13 @@
 //!  |                         /                 \                             |
 //!  |                       YES                  NO                           |
 //!  |                       /                     \                           |
-//!  |     Action::Reject(RejectReason::WafBlocked)   Action::Continue         |
+//!  |     Action::Status(InternalStatus::WafBlocked)   Action::Continue         |
 //!  |     (Wire: HTTP 403 Forbidden generic,                                  |
 //!  |      Internal Telemetry: waf_blocked)                                   |
 //!  +─────────────────────────────────────────────────────────────────────────+
 //! ```
 
-use velda_core::{Action, L7Request, RejectReason};
+use velda_core::{Action, InternalStatus, L7Request};
 
 use super::config::{MAX_BODY_SCAN_BYTES, WafLiteConfig};
 use super::scanner::WafMatcher;
@@ -91,12 +91,12 @@ impl PreRoutePlugin for WafLitePlugin {
 
         // 1. Inspect URI Path and Query String
         if self.matcher.check_bytes(req.uri.path().as_bytes(), false) {
-            return Action::Reject(RejectReason::WafBlocked);
+            return Action::Status(InternalStatus::WafBlocked);
         }
         if let Some(query) = req.uri.query()
             && self.matcher.check_bytes(query.as_bytes(), true)
         {
-            return Action::Reject(RejectReason::WafBlocked);
+            return Action::Status(InternalStatus::WafBlocked);
         }
 
         // 2. Inspect leading Payload bytes up to MAX_BODY_SCAN_BYTES (32 KB)
@@ -104,7 +104,7 @@ impl PreRoutePlugin for WafLitePlugin {
             let body_slice = req.body.as_slice();
             let cap = body_slice.len().min(MAX_BODY_SCAN_BYTES);
             if self.matcher.check_bytes(&body_slice[..cap], false) {
-                return Action::Reject(RejectReason::WafBlocked);
+                return Action::Status(InternalStatus::WafBlocked);
             }
         }
 
@@ -147,7 +147,7 @@ mod tests {
         let plugin = default_plugin(vec!["../", "/etc/passwd"]);
         let mut req = make_req("/static/../../etc/passwd", Body::Empty);
         let action = plugin.on_request(&mut req);
-        assert!(matches!(action, Action::Reject(RejectReason::WafBlocked)));
+        assert!(matches!(action, Action::Status(InternalStatus::WafBlocked)));
     }
 
     #[test]
@@ -155,7 +155,7 @@ mod tests {
         let plugin = default_plugin(vec!["../"]);
         let mut req = make_req("/assets/%252e%252e%252fconfig.json", Body::Empty);
         let action = plugin.on_request(&mut req);
-        assert!(matches!(action, Action::Reject(RejectReason::WafBlocked)));
+        assert!(matches!(action, Action::Status(InternalStatus::WafBlocked)));
     }
 
     #[test]
@@ -163,7 +163,7 @@ mod tests {
         let plugin = default_plugin(vec!["union select"]);
         let mut req = make_req("/items?id=1+UNION%2F*evasion*%2FSELECT+1,2", Body::Empty);
         let action = plugin.on_request(&mut req);
-        assert!(matches!(action, Action::Reject(RejectReason::WafBlocked)));
+        assert!(matches!(action, Action::Status(InternalStatus::WafBlocked)));
     }
 
     #[test]
@@ -171,7 +171,7 @@ mod tests {
         let plugin = default_plugin(vec!["<script"]);
         let mut req = make_req("/search?q=%3Cscript%3Ealert(1)%3C/script%3E", Body::Empty);
         let action = plugin.on_request(&mut req);
-        assert!(matches!(action, Action::Reject(RejectReason::WafBlocked)));
+        assert!(matches!(action, Action::Status(InternalStatus::WafBlocked)));
     }
 
     #[test]
@@ -180,7 +180,7 @@ mod tests {
         let payload = br#"{"username": "admin' or '1'='1", "password": "123"}"#;
         let mut req = make_req("/api/login", Body::from_bytes(&payload[..]));
         let action = plugin.on_request(&mut req);
-        assert!(matches!(action, Action::Reject(RejectReason::WafBlocked)));
+        assert!(matches!(action, Action::Status(InternalStatus::WafBlocked)));
     }
 
     #[test]

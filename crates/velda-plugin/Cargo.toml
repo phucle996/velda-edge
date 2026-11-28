@@ -8,7 +8,6 @@ license.workspace = true
 velda-core = { path = "../velda-core" }
 velda-discovery = { path = "../velda-discovery" }
 velda-etp = { path = "../velda-etp" }
-velda-grpc = { path = "../velda-grpc" }
 velda-observability = { path = "../velda-observability" }
 velda-router = { path = "../velda-router" }
 velda-sock = { path = "../velda-sock" }

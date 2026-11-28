@@ -209,7 +209,7 @@ impl PreRoutePlugin for IpFilterPlugin {
 mod tests {
     use super::*;
     use http::{HeaderValue, Method, Uri, Version};
-    use velda_core::{Body, RejectReason};
+    use velda_core::{Body, InternalStatus};
 
     fn make_request_with_ip(ip: &str) -> L7Request {
         let mut req = L7Request::new(
@@ -245,7 +245,7 @@ mod tests {
         let mut req3 = make_request_with_ip("172.16.0.1");
         assert!(matches!(
             plugin.on_request(&mut req3),
-            Action::Reject(RejectReason::IpBlocked)
+            Action::Status(InternalStatus::IpBlocked)
         ));
     }
 
@@ -277,7 +277,7 @@ mod tests {
         let mut req1 = make_request_with_ip("203.0.113.5");
         assert!(matches!(
             plugin.on_request(&mut req1),
-            Action::Reject(RejectReason::IpBlocked)
+            Action::Status(InternalStatus::IpBlocked)
         ));
 
         let mut req2 = make_request_with_ip("8.8.8.8");
@@ -297,7 +297,7 @@ mod tests {
         let mut req = make_request_with_ip("::ffff:203.0.113.5");
         assert!(matches!(
             plugin.on_request(&mut req),
-            Action::Reject(RejectReason::IpBlocked)
+            Action::Status(InternalStatus::IpBlocked)
         ));
     }
 
@@ -314,7 +314,7 @@ mod tests {
         let mut req = make_request_with_ip("invalid_ip_format");
         assert!(matches!(
             plugin.on_request(&mut req),
-            Action::Reject(RejectReason::IpBlocked)
+            Action::Status(InternalStatus::IpBlocked)
         ));
     }
 
@@ -367,14 +367,14 @@ mod tests {
         let mut spoofed_external = make_request_with_ip("10.1.2.3, 203.0.113.5");
         assert!(matches!(
             plugin.on_request(&mut spoofed_external),
-            Action::Reject(RejectReason::IpBlocked)
+            Action::Status(InternalStatus::IpBlocked)
         ));
 
         // Attacker at denied subnet 10.99.1.5 spoofs X-Forwarded-For: 10.1.2.3
         let mut spoofed_denied_hop = make_request_with_ip("10.1.2.3, 10.99.1.5");
         assert!(matches!(
             plugin.on_request(&mut spoofed_denied_hop),
-            Action::Reject(RejectReason::IpBlocked)
+            Action::Status(InternalStatus::IpBlocked)
         ));
     }
 
@@ -399,14 +399,14 @@ mod tests {
         let mut smuggled_exception = make_request_with_ip("203.0.113.10, 203.0.113.5");
         assert!(matches!(
             plugin.on_request(&mut smuggled_exception),
-            Action::Reject(RejectReason::IpBlocked)
+            Action::Status(InternalStatus::IpBlocked)
         ));
 
         // Blacklisted attacker (203.0.113.5) behind a benign public IP (8.8.8.8)
         let mut hidden_second_hop = make_request_with_ip("8.8.8.8, 203.0.113.5");
         assert!(matches!(
             plugin.on_request(&mut hidden_second_hop),
-            Action::Reject(RejectReason::IpBlocked)
+            Action::Status(InternalStatus::IpBlocked)
         ));
     }
 
@@ -429,7 +429,7 @@ mod tests {
             .insert("x-real-ip", HeaderValue::from_static("10.0.0.1"));
         assert!(matches!(
             plugin.on_request(&mut req),
-            Action::Reject(RejectReason::IpBlocked)
+            Action::Status(InternalStatus::IpBlocked)
         ));
     }
 
@@ -461,7 +461,7 @@ mod tests {
             .append("x-real-ip", HeaderValue::from_static("203.0.113.5"));
         assert!(matches!(
             plugin_real_ip.on_request(&mut req_dup),
-            Action::Reject(RejectReason::IpBlocked)
+            Action::Status(InternalStatus::IpBlocked)
         ));
 
         // Comma-separated list inside single-value X-Real-IP must be rejected
@@ -478,7 +478,7 @@ mod tests {
         );
         assert!(matches!(
             plugin_real_ip.on_request(&mut req_comma),
-            Action::Reject(RejectReason::IpBlocked)
+            Action::Status(InternalStatus::IpBlocked)
         ));
     }
 
@@ -498,7 +498,7 @@ mod tests {
             assert!(
                 matches!(
                     plugin.on_request(&mut req),
-                    Action::Reject(RejectReason::IpBlocked)
+                    Action::Status(InternalStatus::IpBlocked)
                 ),
                 "Octal / leading-zero IPv4 payload '{octal_payload}' must be rejected"
             );
@@ -533,7 +533,7 @@ mod tests {
             assert!(
                 matches!(
                     plugin.on_request(&mut req),
-                    Action::Reject(RejectReason::IpBlocked)
+                    Action::Status(InternalStatus::IpBlocked)
                 ),
                 "Port smuggling payload '{bad_port_payload}' must be rejected"
             );
@@ -572,7 +572,7 @@ mod tests {
             assert!(
                 matches!(
                     plugin.on_request(&mut req),
-                    Action::Reject(RejectReason::IpBlocked)
+                    Action::Status(InternalStatus::IpBlocked)
                 ),
                 "IPv6-tunneled IPv4 payload '{tunneled_payload}' must be canonicalized and blocked"
             );
@@ -596,7 +596,7 @@ mod tests {
         let mut req_flood = make_request_with_ip(&flood_17);
         assert!(matches!(
             plugin.on_request(&mut req_flood),
-            Action::Reject(RejectReason::IpBlocked)
+            Action::Status(InternalStatus::IpBlocked)
         ));
 
         // Trailing comma or empty hop ("10.0.0.1, ") or trailing garbage ("10.0.0.1, garbage")
@@ -610,7 +610,7 @@ mod tests {
             assert!(
                 matches!(
                     plugin.on_request(&mut req),
-                    Action::Reject(RejectReason::IpBlocked)
+                    Action::Status(InternalStatus::IpBlocked)
                 ),
                 "Malformed XFF chain '{malformed_chain}' must be rejected"
             );

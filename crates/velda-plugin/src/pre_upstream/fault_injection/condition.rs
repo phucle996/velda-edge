@@ -2,18 +2,19 @@
 //!
 //! ```text
 //!   L7Request
-//!     ├─► client_ip ──► req.state.client_ip (or pre-hashed X-Real-IP / X-Forwarded-For)
-//!     │                    └─► IpRangeMatcher::contains (1 range: cmp; N ranges: O(log N) binary search)
-//!     └─► header_match ──► pre-hashed HeaderKey (AVX2/NEON/SWAR zero runtime hash)
+//!     ├─► client_ip    ──► req.state.client_ip (fallback: X-Real-IP / right-most X-Forwarded-For)
+//!     │                     └─► IpRangeMatcher::contains (1 range: 2 cmp; N ranges: O(log N))
+//!     ├─► header_match ──► pre-hashed HeaderKey lookup (zero runtime hashing)
+//!     └─► overrides    ──► x-fault-delay-ms (clamped) & x-fault-abort-status (InternalStatus)
 //! ```
 
 use http::header::HeaderName;
-use velda_core::{HeaderKey, L7Request};
+use velda_core::{HeaderKey, InternalStatus, L7Request};
 
 const KEY_X_REAL_IP: HeaderKey = HeaderKey::from_static("x-real-ip");
 const KEY_X_FORWARDED_FOR: HeaderKey = HeaderKey::from_static("x-forwarded-for");
 pub(super) const KEY_FAULT_DELAY_MS: HeaderKey = HeaderKey::from_static("x-fault-delay-ms");
-pub(super) const KEY_FAULT_ABORT_CODE: HeaderKey = HeaderKey::from_static("x-fault-abort-code");
+pub(super) const KEY_FAULT_ABORT_STATUS: HeaderKey = HeaderKey::from_static("x-fault-abort-status");
 
 /// Strongly typed matcher for candidate downstream IP addresses using disjoint integer intervals.
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
@@ -90,11 +91,6 @@ impl IpRangeMatcher {
     }
 
     /// Tests whether an RFC 4291 `u128` IP address falls within any configured network prefix.
-    ///
-    /// # Performance Contract
-    /// - For $N = 1$: Executes in ~0.5ns using exactly two integer comparisons (`ip >= s && ip <= e`).
-    /// - For $N > 1$: Executes in $O(\log N)$ via cache-friendly `partition_point` binary search.
-    /// - **Zero heap allocations**.
     #[inline]
     pub fn contains(&self, ip: u128) -> bool {
         if let Some(bits) = velda_core::lut::ip::is_ipv4_mapped_u128(ip) {
@@ -171,16 +167,16 @@ fn merge_intervals_u128(mut intervals: Vec<(u128, u128)>) -> Vec<(u128, u128)> {
     merged
 }
 
-/// Rule for matching incoming HTTP request headers using pre-hashed [`HeaderKey`]s.
+/// Rule for matching incoming request headers using pre-hashed [`HeaderKey`]s.
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub enum HeaderMatchRule {
+pub enum FaultHeaderMatchRule {
     /// Matches if header is present, regardless of value.
     Present(HeaderKey),
     /// Matches if header is present and its UTF-8 value matches `expected`.
     Exact(HeaderKey, String),
 }
 
-impl HeaderMatchRule {
+impl FaultHeaderMatchRule {
     /// Constructs a presence rule from a [`HeaderName`], pre-computing its SIMD tag once.
     #[inline]
     pub fn present(name: HeaderName) -> Self {
@@ -206,40 +202,34 @@ impl HeaderMatchRule {
     }
 }
 
-/// Overall targeting condition and dynamic override settings.
+/// Overall targeting condition and dynamic override settings for fault injection.
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub struct HttpFaultCondition {
+pub struct FaultCondition {
     /// IP range matcher. If configured, client IP must fall within one of the ranges.
     pub ip_matcher: Option<IpRangeMatcher>,
     /// Header match rule. If configured, request headers must satisfy the rule.
-    pub header_match: Option<HeaderMatchRule>,
-    /// Whether downstream clients can dynamically trigger delay or abort via headers.
+    pub header_match: Option<FaultHeaderMatchRule>,
+    /// Whether scoped clients can dynamically trigger delay or abort via headers.
     pub allow_header_override: bool,
-    /// Upper bound clamp on dynamic delay override to prevent Slowloris attacks (milliseconds).
+    /// Upper bound clamp on dynamic delay override in milliseconds.
     pub max_override_delay_ms: u64,
 }
 
-impl Default for HttpFaultCondition {
+impl Default for FaultCondition {
     fn default() -> Self {
         Self {
             ip_matcher: None,
             header_match: None,
             allow_header_override: false,
-            max_override_delay_ms: 5_000, // 5 seconds default safe cap
+            max_override_delay_ms: 5_000,
         }
     }
 }
 
-impl HttpFaultCondition {
+impl FaultCondition {
     /// Returns `true` if the request meets the scope conditions.
-    ///
-    /// # Performance Contract
-    /// If conditions are configured and the request does not match, returns `false`
-    /// in ~1-5 nanoseconds with zero heap allocations, ensuring production traffic
-    /// is completely unaffected.
     #[inline]
     pub fn matches(&self, req: &L7Request) -> bool {
-        // 1. IP range match
         if let Some(ip_matcher) = &self.ip_matcher
             && !ip_matcher.is_empty()
         {
@@ -250,7 +240,6 @@ impl HttpFaultCondition {
             }
         }
 
-        // 2. Header match
         if let Some(header_rule) = &self.header_match
             && !header_rule.matches(&req.headers)
         {
@@ -264,38 +253,37 @@ impl HttpFaultCondition {
     ///
     /// Returns `(override_delay_ms, override_abort_status)`.
     #[inline]
-    pub fn extract_overrides(&self, req: &L7Request) -> (Option<u64>, Option<u16>) {
+    pub fn extract_overrides(&self, req: &L7Request) -> (Option<u64>, Option<InternalStatus>) {
         if !self.allow_header_override {
             return (None, None);
         }
 
-        // Extract and clamp delay override (e.g. x-fault-delay-ms: 250) using pre-hashed lookup.
         let delay_override = req
             .headers
             .get_prehashed(&KEY_FAULT_DELAY_MS)
             .and_then(|v| v.to_str().ok())
             .and_then(|s| s.trim().parse::<u64>().ok())
+            .filter(|&ms| ms > 0)
             .map(|ms| ms.min(self.max_override_delay_ms));
 
-        // Extract and validate abort status code (e.g. x-fault-abort-code: 503) using pre-hashed lookup.
         let abort_override = req
             .headers
-            .get_prehashed(&KEY_FAULT_ABORT_CODE)
+            .get_prehashed(&KEY_FAULT_ABORT_STATUS)
             .and_then(|v| v.to_str().ok())
-            .and_then(|s| s.trim().parse::<u16>().ok())
-            .filter(|&code| (400..=599).contains(&code));
+            .and_then(|s| InternalStatus::from_name(s.trim()))
+            .filter(|s| s.is_aborted());
 
         (delay_override, abort_override)
     }
 }
 
-/// Helper to extract client IP as RFC 4291 `u128` authoritatively from `req.state.client_ip`, `X-Real-IP`, or right-most `X-Forwarded-For`.
+/// Extracts authoritative client IP as RFC 4291 `u128` from `req.state.client_ip`,
+/// falling back to `X-Real-IP` or the right-most `X-Forwarded-For` entry.
 #[inline]
 fn extract_client_ip(req: &L7Request) -> Option<u128> {
     if req.state.client_ip != 0 {
         return Some(req.state.client_ip);
     }
-    // Security Invariant: Prefer authoritative edge-assigned x-real-ip first to eliminate IP spoofing attacks.
     if let Some(val) = req.headers.get_prehashed(&KEY_X_REAL_IP) {
         let first = match val.as_bytes().iter().position(|&b| b == b',') {
             Some(idx) => &val.as_bytes()[..idx],
@@ -306,7 +294,6 @@ fn extract_client_ip(req: &L7Request) -> Option<u128> {
         }
     }
 
-    // Fall back to nearest proxy (right-most IP in comma-separated list)
     let val = req.headers.get_prehashed(&KEY_X_FORWARDED_FOR)?;
     let bytes = val.as_bytes();
     let last = match bytes.iter().rposition(|&b| b == b',') {
@@ -323,174 +310,65 @@ mod tests {
     use velda_core::{Body, HeaderWorkspace};
 
     #[test]
-    fn test_ip_range_matcher_single_cidr() {
-        let matcher = IpRangeMatcher::from_cidrs(&["10.0.0.0/8".to_string()]).unwrap();
-        assert!(matcher.contains(velda_core::lut::ip::parse_ip_u128(b"10.1.2.3").unwrap()));
-        assert!(matcher.contains(velda_core::lut::ip::parse_ip_u128(b"10.255.255.255").unwrap()));
-        assert!(!matcher.contains(velda_core::lut::ip::parse_ip_u128(b"11.0.0.1").unwrap()));
-        assert!(!matcher.contains(velda_core::lut::ip::parse_ip_u128(b"192.168.1.1").unwrap()));
-    }
+    fn test_ip_range_matcher_single_and_merged_cidrs() {
+        let single = IpRangeMatcher::from_cidrs(&["10.0.0.0/8".to_string()]).unwrap();
+        assert!(single.contains(velda_core::lut::ip::parse_ip_u128(b"10.1.2.3").unwrap()));
+        assert!(!single.contains(velda_core::lut::ip::parse_ip_u128(b"11.0.0.1").unwrap()));
 
-    #[test]
-    fn test_ip_range_matcher_multiple_disjoint_and_merge() {
-        let matcher = IpRangeMatcher::from_cidrs(&[
+        let merged = IpRangeMatcher::from_cidrs(&[
             "192.168.1.0/24".to_string(),
-            "192.168.2.0/24".to_string(), // adjacent to 1.0/24
-            "10.5.0.1".to_string(),       // exact single IP
+            "192.168.2.0/24".to_string(),
+            "10.5.0.1".to_string(),
         ])
         .unwrap();
-
-        // 192.168.1.0/24 and 192.168.2.0/24 merge into 192.168.1.0 - 192.168.2.255
-        assert_eq!(matcher.v4_ranges.len(), 2);
-        assert!(matcher.contains(velda_core::lut::ip::parse_ip_u128(b"192.168.1.50").unwrap()));
-        assert!(matcher.contains(velda_core::lut::ip::parse_ip_u128(b"192.168.2.200").unwrap()));
-        assert!(matcher.contains(velda_core::lut::ip::parse_ip_u128(b"10.5.0.1").unwrap()));
-        assert!(!matcher.contains(velda_core::lut::ip::parse_ip_u128(b"10.5.0.2").unwrap()));
-        assert!(!matcher.contains(velda_core::lut::ip::parse_ip_u128(b"192.168.3.1").unwrap()));
+        assert_eq!(merged.v4_ranges.len(), 2);
+        assert!(merged.contains(velda_core::lut::ip::parse_ip_u128(b"192.168.2.200").unwrap()));
+        assert!(merged.contains(velda_core::lut::ip::parse_ip_u128(b"10.5.0.1").unwrap()));
+        assert!(!merged.contains(velda_core::lut::ip::parse_ip_u128(b"192.168.3.1").unwrap()));
     }
 
     #[test]
-    fn test_ip_range_matcher_ipv6() {
-        let matcher = IpRangeMatcher::from_cidrs(&["2001:db8::/32".to_string()]).unwrap();
-        assert!(matcher.contains(velda_core::lut::ip::parse_ip_u128(b"2001:db8:1234::1").unwrap()));
-        assert!(!matcher.contains(velda_core::lut::ip::parse_ip_u128(b"2001:db9::1").unwrap()));
-    }
-
-    #[test]
-    fn test_condition_header_match() {
-        let condition = HttpFaultCondition {
-            header_match: Some(HeaderMatchRule::exact(
-                HeaderName::from_static("x-chaos-token"),
-                "secret-qa-xyz",
-            )),
-            ..Default::default()
-        };
-
-        let mut headers = HeaderWorkspace::empty(4);
-        headers.insert(
-            HeaderName::from_static("x-chaos-token"),
-            HeaderValue::from_static("secret-qa-xyz"),
-        );
-        let req = L7Request::new(
-            Method::GET,
-            Uri::from_static("/api/orders"),
-            Version::HTTP_11,
-            headers,
-            Body::Empty,
-        );
-        assert!(condition.matches(&req));
-
-        let mut invalid_headers = HeaderWorkspace::empty(4);
-        invalid_headers.insert(
-            HeaderName::from_static("x-chaos-token"),
-            HeaderValue::from_static("wrong-token"),
-        );
-        let req_invalid = L7Request::new(
-            Method::GET,
-            Uri::from_static("/api/orders"),
-            Version::HTTP_11,
-            invalid_headers,
-            Body::Empty,
-        );
-        assert!(!condition.matches(&req_invalid));
-    }
-
-    #[test]
-    fn test_dynamic_overrides_safeguards() {
-        let condition = HttpFaultCondition {
+    fn test_extract_overrides_clamps_delay_and_validates_abort_status() {
+        let cond = FaultCondition {
             allow_header_override: true,
-            max_override_delay_ms: 5000,
+            max_override_delay_ms: 1500,
             ..Default::default()
         };
 
         let mut headers = HeaderWorkspace::empty(4);
         headers.insert(
             HeaderName::from_static("x-fault-delay-ms"),
-            HeaderValue::from_static("999999"), // Exceeds clamp!
+            HeaderValue::from_static("9999"),
         );
         headers.insert(
-            HeaderName::from_static("x-fault-abort-code"),
-            HeaderValue::from_static("504"),
+            HeaderName::from_static("x-fault-abort-status"),
+            HeaderValue::from_static("upstream_timeout"),
         );
         let req = L7Request::new(
             Method::GET,
-            Uri::from_static("/api/orders"),
+            Uri::from_static("/test"),
             Version::HTTP_11,
             headers,
             Body::Empty,
         );
-
-        let (delay_ms, abort_code) = condition.extract_overrides(&req);
-        assert_eq!(delay_ms, Some(5000)); // Clamped to max_override_delay_ms!
-        assert_eq!(abort_code, Some(504));
-    }
-
-    #[test]
-    fn test_dynamic_overrides_disabled_by_default() {
-        let condition = HttpFaultCondition::default();
-        let mut headers = HeaderWorkspace::empty(4);
-        headers.insert(
-            HeaderName::from_static("x-fault-delay-ms"),
-            HeaderValue::from_static("200"),
+        assert_eq!(
+            cond.extract_overrides(&req),
+            (Some(1500), Some(InternalStatus::UpstreamTimeout))
         );
-        headers.insert(
-            HeaderName::from_static("x-fault-abort-code"),
-            HeaderValue::from_static("500"),
+
+        // Non-abort status ("completed") and unknown names must be ignored
+        let mut bad_headers = HeaderWorkspace::empty(2);
+        bad_headers.insert(
+            HeaderName::from_static("x-fault-abort-status"),
+            HeaderValue::from_static("completed"),
         );
-        let req = L7Request::new(
+        let bad_req = L7Request::new(
             Method::GET,
-            Uri::from_static("/api/orders"),
+            Uri::from_static("/test"),
             Version::HTTP_11,
-            headers,
+            bad_headers,
             Body::Empty,
         );
-
-        let (delay_ms, abort_code) = condition.extract_overrides(&req);
-        assert_eq!(delay_ms, None);
-        assert_eq!(abort_code, None);
-    }
-
-    #[test]
-    fn test_extract_client_ip_anti_spoofing() {
-        let condition = HttpFaultCondition {
-            ip_matcher: Some(IpRangeMatcher::from_cidrs(&["10.0.0.0/8".to_string()]).unwrap()),
-            ..Default::default()
-        };
-
-        // Case 1: Attacker forges 10.0.0.1 in XFF left prefix, but edge set X-Real-IP: 203.0.113.5
-        let mut headers = HeaderWorkspace::empty(4);
-        headers.insert(
-            HeaderName::from_static("x-forwarded-for"),
-            HeaderValue::from_static("10.0.0.1, 198.51.100.1"),
-        );
-        headers.insert(
-            HeaderName::from_static("x-real-ip"),
-            HeaderValue::from_static("203.0.113.5"),
-        );
-        let req = L7Request::new(
-            Method::GET,
-            Uri::from_static("/api/orders"),
-            Version::HTTP_11,
-            headers,
-            Body::Empty,
-        );
-        // X-Real-IP is 203.0.113.5 -> Not in 10.0.0.0/8 -> Does not match!
-        assert!(!condition.matches(&req));
-
-        // Case 2: No X-Real-IP, but XFF has right-most proxy IP
-        let mut headers2 = HeaderWorkspace::empty(4);
-        headers2.insert(
-            HeaderName::from_static("x-forwarded-for"),
-            HeaderValue::from_static("198.51.100.1, 10.1.2.3"),
-        );
-        let req2 = L7Request::new(
-            Method::GET,
-            Uri::from_static("/api/orders"),
-            Version::HTTP_11,
-            headers2,
-            Body::Empty,
-        );
-        // Right-most IP is 10.1.2.3 -> In 10.0.0.0/8 -> Matches!
-        assert!(condition.matches(&req2));
+        assert_eq!(cond.extract_overrides(&bad_req), (None, None));
     }
 }

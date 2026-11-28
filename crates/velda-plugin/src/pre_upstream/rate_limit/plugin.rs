@@ -20,7 +20,7 @@
 use std::sync::{Arc, OnceLock};
 
 use http::header::HeaderValue;
-use velda_core::{Action, HeaderKey, L7Request, RejectReason};
+use velda_core::{Action, HeaderKey, InternalStatus, L7Request};
 use velda_etp::EtpInstance;
 
 use crate::BackgroundTaskFuture;
@@ -129,7 +129,7 @@ impl PreUpstreamPlugin for RateLimitPlugin {
                     .insert_bypass(HDR_REMAINING.name, HeaderValue::from_static("0"));
                 req.headers
                     .insert_bypass(HDR_LIMIT.name, self.limit_header_val.clone());
-                return Action::Reject(RejectReason::TooManyRequests);
+                return Action::Status(InternalStatus::RateLimited);
             }
             _ => {}
         }
@@ -147,7 +147,7 @@ impl PreUpstreamPlugin for RateLimitPlugin {
                     .insert_bypass(HDR_REMAINING.name, HeaderValue::from_static("0"));
                 req.headers
                     .insert_bypass(HDR_LIMIT.name, self.limit_header_val.clone());
-                return Action::Reject(RejectReason::TooManyRequests);
+                return Action::Status(InternalStatus::RateLimited);
             }
             if dec.remaining < min_remaining {
                 min_remaining = dec.remaining;
@@ -298,7 +298,7 @@ mod tests {
         let mut upstream = 0;
         assert!(matches!(
             plugin.on_upstream_request(&mut flood_req, &mut upstream),
-            Action::Reject(RejectReason::TooManyRequests)
+            Action::Status(InternalStatus::RateLimited)
         ));
 
         // Different tenant "beta" is completely isolated and unaffected!
@@ -336,7 +336,7 @@ mod tests {
         let mut blocked = make_req(&[("x-forwarded-for", "203.0.113.5")], "/");
         assert!(matches!(
             plugin.on_upstream_request(&mut blocked, &mut upstream),
-            Action::Reject(RejectReason::TooManyRequests)
+            Action::Status(InternalStatus::RateLimited)
         ));
     }
 
@@ -432,7 +432,7 @@ mod tests {
         assert!(
             matches!(
                 plugin.on_upstream_request(&mut req2, &mut upstream),
-                Action::Reject(RejectReason::TooManyRequests)
+                Action::Status(InternalStatus::RateLimited)
             ),
             "peer cluster_total=50 from Redis SoT must block subsequent local requests"
         );
@@ -471,7 +471,7 @@ mod tests {
         blocked.ingress_time_nanos = t0_ns;
         assert!(matches!(
             plugin.on_upstream_request(&mut blocked, &mut upstream),
-            Action::Reject(RejectReason::TooManyRequests)
+            Action::Status(InternalStatus::RateLimited)
         ));
 
         // Backward skewed ingress timestamp (-5s) must NOT reset bucket backwards
@@ -479,7 +479,7 @@ mod tests {
         skewed.ingress_time_nanos = t0_ns - 5_000_000_000;
         assert!(matches!(
             plugin.on_upstream_request(&mut skewed, &mut upstream),
-            Action::Reject(RejectReason::TooManyRequests)
+            Action::Status(InternalStatus::RateLimited)
         ));
 
         // Advancing ingress_time_nanos by +1s rolls into fresh epoch cleanly without sleeping

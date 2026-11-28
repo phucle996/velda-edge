@@ -479,7 +479,6 @@ mod tests {
         let vary_vals: Vec<_> = resp
             .headers
             .get_all(VARY)
-            .iter()
             .map(|v| v.to_str().unwrap())
             .collect();
         assert_eq!(vary_vals, vec!["Accept-Encoding", "Origin"]);

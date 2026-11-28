@@ -6,7 +6,7 @@
 
 use crate::config::PluginConfig;
 use http::header::HeaderName;
-use velda_core::{Action, L7Request, RejectReason};
+use velda_core::{Action, InternalStatus, L7Request};
 
 use crate::capability::{AccessLevel, PluginCapability, SupportedProtocols};
 use crate::error::PluginError;
@@ -95,14 +95,14 @@ impl PreRoutePlugin for ResourceLimitPlugin {
             + req.uri.authority().map_or(0, |a| a.as_str().len());
 
         if uri_len > self.limits.max_uri_length {
-            return Action::Reject(RejectReason::UriTooLong);
+            return Action::Status(InternalStatus::UriTooLong);
         }
 
         // 2. Inspect Header Count
         // Prevents header bombing and guarantees bounded execution time in subsequent loop
         let header_count = req.headers.len();
         if header_count > self.limits.max_headers_count {
-            return Action::Reject(RejectReason::HeaderFieldsTooLarge);
+            return Action::Status(InternalStatus::HeaderFieldsTooLarge);
         }
 
         // 3. Branch-Minimized Single-Pass Inspection of Headers:
@@ -138,7 +138,7 @@ impl PreRoutePlugin for ResourceLimitPlugin {
         if (max_single_header_seen > self.limits.max_single_header_bytes)
             | (total_header_bytes > self.limits.max_header_bytes)
         {
-            return Action::Reject(RejectReason::HeaderFieldsTooLarge);
+            return Action::Status(InternalStatus::HeaderFieldsTooLarge);
         }
 
         Action::Continue
@@ -199,7 +199,7 @@ mod tests {
             HeaderWorkspace::empty(4),
         );
         let action = plugin.on_request(&mut req);
-        assert!(matches!(action, Action::Reject(RejectReason::UriTooLong)));
+        assert!(matches!(action, Action::Status(InternalStatus::UriTooLong)));
     }
 
     #[test]
@@ -216,7 +216,7 @@ mod tests {
             HeaderWorkspace::empty(4),
         );
         let action = plugin.on_request(&mut req);
-        assert!(matches!(action, Action::Reject(RejectReason::UriTooLong)));
+        assert!(matches!(action, Action::Status(InternalStatus::UriTooLong)));
     }
 
     #[test]
@@ -236,7 +236,7 @@ mod tests {
         let action = plugin.on_request(&mut req);
         assert!(matches!(
             action,
-            Action::Reject(RejectReason::HeaderFieldsTooLarge)
+            Action::Status(InternalStatus::HeaderFieldsTooLarge)
         ));
     }
 
@@ -258,7 +258,7 @@ mod tests {
         let action = plugin.on_request(&mut req);
         assert!(matches!(
             action,
-            Action::Reject(RejectReason::HeaderFieldsTooLarge)
+            Action::Status(InternalStatus::HeaderFieldsTooLarge)
         ));
     }
 
@@ -281,7 +281,7 @@ mod tests {
         let action = plugin.on_request(&mut req);
         assert!(matches!(
             action,
-            Action::Reject(RejectReason::HeaderFieldsTooLarge)
+            Action::Status(InternalStatus::HeaderFieldsTooLarge)
         ));
     }
 
@@ -306,7 +306,7 @@ mod tests {
         let action = plugin.on_request(&mut req);
         assert!(matches!(
             action,
-            Action::Reject(RejectReason::HeaderFieldsTooLarge)
+            Action::Status(InternalStatus::HeaderFieldsTooLarge)
         ));
     }
 
@@ -329,7 +329,7 @@ mod tests {
         let action = plugin.on_request(&mut req);
         assert!(matches!(
             action,
-            Action::Reject(RejectReason::HeaderFieldsTooLarge)
+            Action::Status(InternalStatus::HeaderFieldsTooLarge)
         ));
     }
 

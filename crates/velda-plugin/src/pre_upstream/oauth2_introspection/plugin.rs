@@ -34,7 +34,7 @@ use std::sync::{Arc, OnceLock};
 use std::time::Duration;
 
 use http::header::{HeaderName, HeaderValue};
-use velda_core::{Action, HeaderKey, L7Request, RejectReason};
+use velda_core::{Action, HeaderKey, InternalStatus, L7Request};
 use velda_etp::{EtpBackend, EtpInstance};
 
 use super::cache::{CacheLookupKind, ColdOutcome, IntrospectionCache, MAX_OAUTH2_TOKEN_BYTES};
@@ -182,7 +182,7 @@ impl Oauth2IntrospectionPlugin {
     fn reject_missing_token(req: &mut L7Request) -> Action {
         req.headers
             .insert_bypass(http::header::WWW_AUTHENTICATE, WWW_AUTH_MISSING);
-        Action::Reject(RejectReason::Unauthorized)
+        Action::Status(InternalStatus::Unauthorized)
     }
 
     #[cold]
@@ -190,7 +190,7 @@ impl Oauth2IntrospectionPlugin {
     fn reject_invalid_token(req: &mut L7Request) -> Action {
         req.headers
             .insert_bypass(http::header::WWW_AUTHENTICATE, WWW_AUTH_INVALID);
-        Action::Reject(RejectReason::Unauthorized)
+        Action::Status(InternalStatus::Unauthorized)
     }
 
     #[cold]
@@ -198,7 +198,7 @@ impl Oauth2IntrospectionPlugin {
     fn reject_insufficient_scope(req: &mut L7Request) -> Action {
         req.headers
             .insert_bypass(http::header::WWW_AUTHENTICATE, WWW_AUTH_SCOPE);
-        Action::Reject(RejectReason::Forbidden)
+        Action::Status(InternalStatus::Forbidden)
     }
 
     /// Extracts token slice from pre-hashed headers, split HTTP/2 cookies, or URI query params.
@@ -355,7 +355,7 @@ impl PreUpstreamPlugin for Oauth2IntrospectionPlugin {
         if self.fail_open {
             Action::Continue
         } else {
-            Action::Reject(RejectReason::BadGateway)
+            Action::Status(InternalStatus::UpstreamError)
         }
     }
 
@@ -436,7 +436,7 @@ impl PreUpstreamPlugin for Oauth2IntrospectionPlugin {
                 return if self.fail_open {
                     Action::Continue
                 } else {
-                    Action::Reject(RejectReason::BadGateway)
+                    Action::Status(InternalStatus::UpstreamError)
                 };
             };
 
@@ -463,7 +463,7 @@ impl PreUpstreamPlugin for Oauth2IntrospectionPlugin {
                     if self.fail_open {
                         Action::Continue
                     } else {
-                        Action::Reject(RejectReason::BadGateway)
+                        Action::Status(InternalStatus::UpstreamError)
                     }
                 }
             }
@@ -890,11 +890,11 @@ mod tests {
             plugin
                 .on_upstream_request_async(&mut make_req(), &mut up)
                 .await,
-            Action::Reject(RejectReason::Unauthorized)
+            Action::Status(InternalStatus::Unauthorized)
         ));
         assert!(matches!(
             plugin.try_on_upstream_request(&mut make_req(), &mut up),
-            Some(Action::Reject(RejectReason::Unauthorized))
+            Some(Action::Status(InternalStatus::Unauthorized))
         ));
         assert_eq!(calls.load(AtomicOrdering::SeqCst), 2);
     }
@@ -947,7 +947,7 @@ mod tests {
         let mut req1 = make_req();
         assert!(matches!(
             plugin.on_upstream_request_async(&mut req1, &mut up).await,
-            Action::Reject(RejectReason::Forbidden)
+            Action::Status(InternalStatus::Forbidden)
         ));
         assert_eq!(
             req1.headers.get("www-authenticate").unwrap(),
@@ -955,7 +955,7 @@ mod tests {
         );
         assert!(matches!(
             plugin.try_on_upstream_request(&mut make_req(), &mut up),
-            Some(Action::Reject(RejectReason::Forbidden))
+            Some(Action::Status(InternalStatus::Forbidden))
         ));
         assert_eq!(calls.load(AtomicOrdering::SeqCst), 1);
 
@@ -975,7 +975,7 @@ mod tests {
             fail_closed
                 .on_upstream_request_async(&mut make_req(), &mut up)
                 .await,
-            Action::Reject(RejectReason::BadGateway)
+            Action::Status(InternalStatus::UpstreamError)
         ));
 
         let mut open_cfg = dead_cfg;
@@ -1062,7 +1062,7 @@ mod tests {
             auth0_plugin
                 .on_upstream_request_async(&mut req_bad, &mut up)
                 .await,
-            Action::Reject(RejectReason::Unauthorized)
+            Action::Status(InternalStatus::Unauthorized)
         ));
 
         // Vault lookup using ETP token

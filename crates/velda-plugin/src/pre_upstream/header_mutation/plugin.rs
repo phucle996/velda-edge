@@ -347,11 +347,11 @@ mod tests {
         assert!(matches!(action, Action::Continue));
         assert!(!req.headers.contains_key("x-sensitive"));
 
-        let gw: Vec<_> = req.headers.get_all("x-custom-gateway").iter().collect();
+        let gw: Vec<_> = req.headers.get_all("x-custom-gateway").collect();
         assert_eq!(gw.len(), 1);
         assert_eq!(gw[0], "velda-v2");
 
-        let hops: Vec<_> = req.headers.get_all("x-hop").iter().collect();
+        let hops: Vec<_> = req.headers.get_all("x-hop").collect();
         assert_eq!(hops.len(), 2);
         assert_eq!(hops[0], "edge-1");
         assert_eq!(hops[1], "edge-2");

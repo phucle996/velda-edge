@@ -17,7 +17,7 @@
 
 use http::header::{COOKIE, HOST, ORIGIN, REFERER};
 use http::{HeaderName, Method};
-use velda_core::{Action, L7Request, RejectReason};
+use velda_core::{Action, InternalStatus, L7Request};
 
 use super::validation::{CsrfConfig, validate_csrf_config};
 use crate::capability::{AccessLevel, PluginCapability, SupportedProtocols};
@@ -301,7 +301,7 @@ impl PreUpstreamPlugin for CsrfPlugin {
         // Gate 2 & 3: Modern Cross-Origin Protection (Sec-Fetch-Site fast path; cold legacy fallback)
         if let Some(site_val) = req.headers.get(&SEC_FETCH_SITE) {
             let Ok(site) = site_val.to_str() else {
-                return Action::Reject(RejectReason::Forbidden);
+                return Action::Status(InternalStatus::Forbidden);
             };
             let site_trimmed = site.trim();
             let allowed_fetch = if site_trimmed.eq_ignore_ascii_case("same-origin")
@@ -317,17 +317,17 @@ impl PreUpstreamPlugin for CsrfPlugin {
             };
 
             if !allowed_fetch {
-                return Action::Reject(RejectReason::Forbidden);
+                return Action::Status(InternalStatus::Forbidden);
             }
         } else if self.config.enforce_origin && !self.verify_legacy_origin_fallback(req) {
-            return Action::Reject(RejectReason::Forbidden);
+            return Action::Status(InternalStatus::Forbidden);
         }
 
         // Gate 4: Optional Legacy Double-Submit Cookie Check (out-of-line for clean modern L1i)
         if let Some(ds) = &self.double_submit
             && !Self::verify_double_submit(ds, req)
         {
-            return Action::Reject(RejectReason::Forbidden);
+            return Action::Status(InternalStatus::Forbidden);
         }
 
         Action::Continue
@@ -407,7 +407,7 @@ mod tests {
             let mut r = build_req(Method::POST, "/api/pay", h);
             assert!(matches!(
                 plugin.on_upstream_request(&mut r, &mut target),
-                Action::Reject(RejectReason::Forbidden)
+                Action::Status(InternalStatus::Forbidden)
             ));
         }
 
@@ -481,7 +481,7 @@ mod tests {
         let mut r_spoof = build_req(Method::POST, "/submit", h_spoof);
         assert!(matches!(
             plugin.on_upstream_request(&mut r_spoof, &mut target),
-            Action::Reject(RejectReason::Forbidden)
+            Action::Status(InternalStatus::Forbidden)
         ));
 
         // Missing all provenance + Cookie present -> rejected
@@ -490,7 +490,7 @@ mod tests {
         let mut r_cookie_only = build_req(Method::POST, "/submit", h_cookie_only);
         assert!(matches!(
             plugin.on_upstream_request(&mut r_cookie_only, &mut target),
-            Action::Reject(RejectReason::Forbidden)
+            Action::Status(InternalStatus::Forbidden)
         ));
 
         // Non-browser Bearer API client (no cookies, no fetch metadata, no origin) -> allowed
@@ -541,7 +541,7 @@ mod tests {
         let mut r_bad = build_req(Method::POST, "/legacy/action", h_bad);
         assert!(matches!(
             plugin.on_upstream_request(&mut r_bad, &mut target),
-            Action::Reject(RejectReason::Forbidden)
+            Action::Status(InternalStatus::Forbidden)
         ));
     }
 }

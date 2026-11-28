@@ -11,14 +11,14 @@
 //!       ├─► 2. Query pass : Keep (AC fast-check -> SIMD '&' scan -> key filter + append) | Drop | Replace
 //!       ├─► 3. Zero-alloc : (!path_changed && !query_changed) -> Action::Continue
 //!       └─► 4. Single alloc: BytesMut(exact_len) + simd_copy_nonoverlapping -> PathAndQuery -> Uri
-//!                           (invalid PathAndQuery or missing leading '/' -> RejectReason::BadRequest)
+//!                           (invalid PathAndQuery or missing leading '/' -> InternalStatus::BadRequest)
 //! ```
 
 use aho_corasick::{AhoCorasick, AhoCorasickKind, Anchored, Input, MatchKind, StartKind};
 use bytes::{BufMut, BytesMut};
 use http::Uri;
 use http::uri::PathAndQuery;
-use velda_core::{Action, L7Request, RejectReason};
+use velda_core::{Action, InternalStatus, L7Request};
 
 use super::config::{QueryRewriteMode, UrlRewriteConfig};
 use super::validation::{validate_config_fields, validate_url_rewrite_config};
@@ -470,10 +470,10 @@ impl PreUpstreamPlugin for UrlRewritePlugin {
         }
 
         let Ok(pq) = PathAndQuery::from_maybe_shared(buf.freeze()) else {
-            return Action::Reject(RejectReason::BadRequest);
+            return Action::Status(InternalStatus::BadRequest);
         };
         if !pq.path().starts_with('/') {
-            return Action::Reject(RejectReason::BadRequest);
+            return Action::Status(InternalStatus::BadRequest);
         }
 
         let mut parts = req.uri.clone().into_parts();
@@ -483,7 +483,7 @@ impl PreUpstreamPlugin for UrlRewritePlugin {
                 req.uri = updated_uri;
                 Action::Continue
             }
-            Err(_) => Action::Reject(RejectReason::BadRequest),
+            Err(_) => Action::Status(InternalStatus::BadRequest),
         }
     }
 
@@ -597,7 +597,7 @@ mod tests {
         let mut r2 = req_with("/api/v1");
         assert!(matches!(
             plugin.on_upstream_request(&mut r2, &mut t),
-            Action::Reject(RejectReason::BadRequest)
+            Action::Status(InternalStatus::BadRequest)
         ));
     }
 

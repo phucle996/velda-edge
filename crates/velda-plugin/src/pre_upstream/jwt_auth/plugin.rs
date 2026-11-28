@@ -26,7 +26,7 @@ use std::time::Duration;
 
 use http::header::{HeaderName, HeaderValue};
 use tokio::sync::{Notify, watch};
-use velda_core::{Action, HeaderKey, L7Request, RejectReason};
+use velda_core::{Action, HeaderKey, InternalStatus, L7Request};
 use velda_etp::{EtpBackend, EtpInstance};
 
 use super::cache::{CacheHitKind, JwtCache, is_plausible_jwt_shape};
@@ -366,14 +366,14 @@ impl JwtAuthPlugin {
     fn reject_missing_token(req: &mut L7Request) -> Action {
         req.headers
             .insert_bypass(http::header::WWW_AUTHENTICATE, WWW_AUTH_MISSING);
-        Action::Reject(RejectReason::Unauthorized)
+        Action::Status(InternalStatus::Unauthorized)
     }
 
     #[inline(always)]
     fn reject_invalid_token(req: &mut L7Request) -> Action {
         req.headers
             .insert_bypass(http::header::WWW_AUTHENTICATE, WWW_AUTH_INVALID);
-        Action::Reject(RejectReason::Unauthorized)
+        Action::Status(InternalStatus::Unauthorized)
     }
 }
 
@@ -520,7 +520,7 @@ impl PreUpstreamPlugin for JwtAuthPlugin {
                 }) {
                 CacheHitKind::Positive => return Action::Continue,
                 CacheHitKind::Unauthorized => return Self::reject_invalid_token(req),
-                CacheHitKind::Forbidden => return Action::Reject(RejectReason::Forbidden),
+                CacheHitKind::Forbidden => return Action::Status(InternalStatus::Forbidden),
                 CacheHitKind::Miss => {}
             }
             fp
@@ -578,7 +578,7 @@ impl PreUpstreamPlugin for JwtAuthPlugin {
                         &table_guard,
                     );
                 }
-                Action::Reject(RejectReason::Forbidden)
+                Action::Status(InternalStatus::Forbidden)
             }
             Err(JwtVerifyError::NoActiveKeys) => {
                 tracing::debug!(plugin_id = %self.id, "JWT rejected: JwksStore empty");
@@ -698,7 +698,7 @@ mod tests {
         let mut up = 0;
         assert!(matches!(
             plugin.on_upstream_request(&mut req_missing, &mut up),
-            Action::Reject(RejectReason::Unauthorized)
+            Action::Status(InternalStatus::Unauthorized)
         ));
 
         let token = create_hs_token(
@@ -961,12 +961,12 @@ mod tests {
         let mut req1 = mk_req(&tok_v2, 1_700_000_000);
         assert!(matches!(
             plugin.on_upstream_request(&mut req1, &mut up),
-            Action::Reject(RejectReason::Unauthorized)
+            Action::Status(InternalStatus::Unauthorized)
         ));
         let mut req2 = mk_req(&tok_v2, 1_700_000_000);
         assert!(matches!(
             plugin.on_upstream_request(&mut req2, &mut up),
-            Action::Reject(RejectReason::Unauthorized)
+            Action::Status(InternalStatus::Unauthorized)
         ));
 
         // Shadow wakes immediately without waiting 300s and loads v2 (fetch #2)

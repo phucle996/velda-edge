@@ -6,11 +6,11 @@
 //! ├─────────────────────────────────────────────────────────────────────────────────────────┤
 //! │  L7Request                                                                              │
 //! │    ├── 1. Single-pass feature extract + fused SoA scan -> risk score (0..=100)          │
-//! │    ├── 2. If `block_score` reached (enforce) -> Action::Reject(Forbidden)               │
+//! │    ├── 2. If `block_score` reached (enforce) -> Action::Status(Forbidden)               │
 //! │    ├── 3. If `escalation` enabled:                                                      │
 //! │    │       ├── Clean + L1 448-bit Bitfilter == 0 -> Action::Continue (1 cache line, 0 L2)│
 //! │    │       └── Suspicious or L1 == 1 -> L2 exact (client_ip, ja4) strike (0..=15)       │
-//! │    │             ├── strike >= strike_block_threshold -> Action::Reject(Forbidden)      │
+//! │    │             ├── strike >= strike_block_threshold -> Action::Status(Forbidden)      │
 //! │    │             └── else -> Action::Delay((base << strike.min(4)).min(max_delay_ms))   │
 //! │    └── 4. Else -> Action::Delay(linear score delay) or Action::Continue                 │
 //! └─────────────────────────────────────────────────────────────────────────────────────────┘
@@ -22,7 +22,7 @@ use std::time::Duration;
 use http::Version;
 use velda_core::bitfield::*;
 use velda_core::lut::{HttpMethod, classify_user_agent};
-use velda_core::{Action, L7Request, RejectReason};
+use velda_core::{Action, InternalStatus, L7Request};
 
 use crate::capability::{AccessLevel, PluginCapability, SupportedProtocols};
 use crate::config::PluginConfig;
@@ -227,7 +227,7 @@ impl BotDetectionPlugin {
         if let Some(block) = self.block_score
             && score >= block
         {
-            return Action::Reject(RejectReason::Forbidden);
+            return Action::Status(InternalStatus::BotBlocked);
         }
 
         let suspicious = self.delay_score.is_some_and(|ds| score >= ds);
@@ -246,7 +246,7 @@ impl BotDetectionPlugin {
             if let Some(sb) = self.strike_block_threshold
                 && strike >= sb
             {
-                return Action::Reject(RejectReason::Forbidden);
+                return Action::Status(InternalStatus::BotBlocked);
             }
             let effective_ms = if suspicious {
                 base_delay
@@ -541,7 +541,7 @@ mod tests {
         ));
         assert!(matches!(
             plugin.evaluate_at_tick(&bot_req, 1009),
-            Action::Reject(RejectReason::Forbidden)
+            Action::Status(InternalStatus::BotBlocked)
         ));
         // After window expires (tick 1400 >> +300 ticks = 30s), strikes decay away -> fresh strike 0 (100ms).
         assert!(matches!(

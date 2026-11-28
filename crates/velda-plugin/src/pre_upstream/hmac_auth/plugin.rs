@@ -23,7 +23,7 @@ use std::str::FromStr;
 
 use http::header::{HeaderName, HeaderValue};
 use ring::hmac;
-use velda_core::{Action, HeaderKey, L7Request, RejectReason};
+use velda_core::{Action, HeaderKey, InternalStatus, L7Request};
 
 use super::canonical::{
     CanonicalRequest, SignedHeadersSpec, compute_sha256, constant_time_eq, decode_client_signature,
@@ -180,7 +180,7 @@ impl HmacAuthPlugin {
         const WWW_AUTH_HMAC: HeaderValue = HeaderValue::from_static("HMAC realm=\"velda-edge\"");
         req.headers
             .insert_bypass(http::header::WWW_AUTHENTICATE, WWW_AUTH_HMAC);
-        Action::Reject(RejectReason::Unauthorized)
+        Action::Status(InternalStatus::Unauthorized)
     }
 
     /// Deserializes and constructs an instance directly from a [`PluginConfig`].
@@ -504,7 +504,10 @@ mod tests {
         assert_eq!(req.headers.get("x-consumer-id").unwrap(), "test-consumer");
 
         let replay = plugin.on_upstream_request(&mut req, &mut target);
-        assert!(matches!(replay, Action::Reject(RejectReason::Unauthorized)));
+        assert!(matches!(
+            replay,
+            Action::Status(InternalStatus::Unauthorized)
+        ));
     }
 
     #[test]
@@ -526,7 +529,7 @@ mod tests {
 
         assert!(matches!(
             plugin.on_upstream_request(&mut forged_req, &mut target),
-            Action::Reject(RejectReason::Unauthorized)
+            Action::Status(InternalStatus::Unauthorized)
         ));
 
         let mut valid_req = make_signed_req(
@@ -558,7 +561,10 @@ mod tests {
         req.body = Body::Bytes(bytes::Bytes::from_static(b"{\"amount\":999999}"));
         let mut target = 1;
         let action = plugin.on_upstream_request(&mut req, &mut target);
-        assert!(matches!(action, Action::Reject(RejectReason::Unauthorized)));
+        assert!(matches!(
+            action,
+            Action::Status(InternalStatus::Unauthorized)
+        ));
     }
 
     #[test]
@@ -581,7 +587,10 @@ mod tests {
         req.body = Body::Bytes(bytes::Bytes::from_static(b"{\"amount\":9999999}"));
         let mut target = 1;
         let action = plugin.on_upstream_request(&mut req, &mut target);
-        assert!(matches!(action, Action::Reject(RejectReason::Unauthorized)));
+        assert!(matches!(
+            action,
+            Action::Status(InternalStatus::Unauthorized)
+        ));
     }
 
     #[test]

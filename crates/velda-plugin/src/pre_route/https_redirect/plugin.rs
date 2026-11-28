@@ -17,7 +17,7 @@
 
 use http::header::{CONTENT_LENGTH, HOST, LOCATION};
 use http::{HeaderName, HeaderValue, StatusCode};
-use velda_core::{Action, Body, HeaderWorkspace, L7Request, L7Response, RejectReason};
+use velda_core::{Action, Body, HeaderWorkspace, InternalStatus, L7Request, L7Response};
 
 use crate::capability::{AccessLevel, PluginCapability, SupportedProtocols};
 use crate::config::PluginConfig;
@@ -123,20 +123,20 @@ impl HttpsRedirectPlugin {
             Some(auth) => auth.as_str(),
             None => match req.headers.get(&HOST).and_then(|v| v.to_str().ok()) {
                 Some(h) => h,
-                None => return Action::Reject(RejectReason::BadRequest),
+                None => return Action::Status(InternalStatus::BadRequest),
             },
         };
 
         let Some(hostname) = strip_port(raw_host) else {
-            return Action::Reject(RejectReason::BadRequest);
+            return Action::Status(InternalStatus::BadRequest);
         };
         if has_unsafe_header_bytes(hostname) {
-            return Action::Reject(RejectReason::BadRequest);
+            return Action::Status(InternalStatus::BadRequest);
         }
 
         let pq = req.uri.path_and_query().map(|p| p.as_str()).unwrap_or("/");
         if has_unsafe_header_bytes(pq) {
-            return Action::Reject(RejectReason::BadRequest);
+            return Action::Status(InternalStatus::BadRequest);
         }
 
         let port_str = self.port_suffix.as_deref().unwrap_or("");
@@ -158,7 +158,7 @@ impl HttpsRedirectPlugin {
 
             match HeaderValue::from_bytes(&buf[..pos]) {
                 Ok(v) => v,
-                Err(_) => return Action::Reject(RejectReason::BadRequest),
+                Err(_) => return Action::Status(InternalStatus::BadRequest),
             }
         } else {
             let mut loc = String::with_capacity(total_len);
@@ -168,7 +168,7 @@ impl HttpsRedirectPlugin {
             loc.push_str(pq);
             match HeaderValue::from_str(&loc) {
                 Ok(v) => v,
-                Err(_) => return Action::Reject(RejectReason::BadRequest),
+                Err(_) => return Action::Status(InternalStatus::BadRequest),
             }
         };
 
@@ -305,7 +305,7 @@ mod tests {
         let mut req = make_req("/health", None, Some("http"));
         assert!(matches!(
             plugin.on_request(&mut req),
-            Action::Reject(RejectReason::BadRequest)
+            Action::Status(InternalStatus::BadRequest)
         ));
 
         let bad_cfg = PluginConfig {

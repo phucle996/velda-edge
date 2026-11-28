@@ -32,7 +32,7 @@
 //! ```
 
 use http::header::HeaderName;
-use velda_core::{Action, L7Request, RejectReason};
+use velda_core::{Action, InternalStatus, L7Request};
 
 use super::config::{ClientIpSource, IpFilterMode, extract_embedded_ipv4};
 use super::engine::IpFilterEngine;
@@ -311,9 +311,9 @@ pub fn evaluate_stream(
 
     match status {
         StreamStatus::Continue => Action::Continue,
-        StreamStatus::Reject => Action::Reject(RejectReason::IpBlocked),
+        StreamStatus::Reject => Action::Status(InternalStatus::IpBlocked),
         StreamStatus::HeaderMissing => match mode {
-            IpFilterMode::AllowList => Action::Reject(RejectReason::IpBlocked),
+            IpFilterMode::AllowList => Action::Status(InternalStatus::IpBlocked),
             IpFilterMode::DenyList => Action::Continue,
         },
     }

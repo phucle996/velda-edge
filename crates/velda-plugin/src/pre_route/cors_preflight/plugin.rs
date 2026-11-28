@@ -23,7 +23,7 @@ use http::header::{
     ACCESS_CONTROL_REQUEST_METHOD, CONTENT_LENGTH, ORIGIN, VARY,
 };
 use http::{HeaderValue, Method, StatusCode, Version};
-use velda_core::{Action, Body, HeaderWorkspace, L7Request, L7Response, RejectReason};
+use velda_core::{Action, Body, HeaderWorkspace, InternalStatus, L7Request, L7Response};
 
 use crate::capability::{AccessLevel, Direction, PluginCapability, SupportedProtocols};
 use crate::error::PluginError;
@@ -218,7 +218,7 @@ impl CorsPreflightPlugin {
         // 4. Validate requested HTTP method via bitmask ($O(1)$ single-instruction check)
         let req_mask = MethodMask::parse_token(req_method_str);
         if (self.allowed_methods_mask & req_mask) == 0 {
-            return Action::Reject(RejectReason::Forbidden);
+            return Action::Status(InternalStatus::Forbidden);
         }
 
         // 5. Validate Origin against allowed patterns
@@ -226,7 +226,7 @@ impl CorsPreflightPlugin {
             self.allow_all_origins || self.allowed_origins.iter().any(|p| p.matches(origin_str));
 
         if !is_allowed {
-            return Action::Reject(RejectReason::Forbidden);
+            return Action::Status(InternalStatus::Forbidden);
         }
 
         // 6. Zero-Branch Response Assembly via Pre-Baked Header Template
@@ -379,8 +379,8 @@ mod tests {
         let mut req = build_request(Method::OPTIONS, "/api/v1/orders", headers);
         let action = plugin.on_request(&mut req);
         assert!(
-            matches!(action, Action::Reject(RejectReason::Forbidden)),
-            "Expected Action::Reject(Forbidden), got {:?}",
+            matches!(action, Action::Status(InternalStatus::Forbidden)),
+            "Expected Action::Status(Forbidden), got {:?}",
             action
         );
     }
@@ -405,8 +405,8 @@ mod tests {
         let mut req = build_request(Method::OPTIONS, "/api/v1/orders", headers);
         let action = plugin.on_request(&mut req);
         assert!(
-            matches!(action, Action::Reject(RejectReason::Forbidden)),
-            "Expected Action::Reject(Forbidden), got {:?}",
+            matches!(action, Action::Status(InternalStatus::Forbidden)),
+            "Expected Action::Status(Forbidden), got {:?}",
             action
         );
     }

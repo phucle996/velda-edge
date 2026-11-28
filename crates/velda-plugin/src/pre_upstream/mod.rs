@@ -19,11 +19,10 @@ pub mod api_metering;
 pub mod bot_detection;
 pub mod canary;
 pub mod csrf;
-pub mod grpc_fault_injection;
+pub mod fault_injection;
 pub mod header_mutation;
 pub mod hmac_auth;
 pub mod http_cache_lookup;
-pub mod http_fault_injection;
 pub mod ja4_filter;
 pub mod jwt_auth;
 pub mod oauth2_introspection;
@@ -44,14 +43,13 @@ pub use bot_detection::{
 };
 pub use canary::{CanaryConfig, CanaryPlugin, HeaderRule, RuleOperator};
 pub use csrf::{CsrfConfig, CsrfPlugin};
-pub use grpc_fault_injection::{GrpcAbortConfig, GrpcDelayConfig, GrpcFaultInjectionPlugin};
+pub use fault_injection::{
+    FaultAbortConfig, FaultCondition, FaultDelayConfig, FaultHeaderMatchRule, FaultInjectionPlugin,
+    IpRangeMatcher,
+};
 pub use header_mutation::{HeaderMutationConfig, HeaderMutationPlugin};
 pub use hmac_auth::{HmacAuthConfig, HmacAuthPlugin, HmacCredentialConfig};
 pub use http_cache_lookup::{HttpCacheLookupConfig, HttpCacheLookupPlugin};
-pub use http_fault_injection::{
-    HeaderMatchRule, HttpAbortConfig, HttpDelayConfig, HttpFaultCondition,
-    HttpFaultInjectionPlugin, IpRangeMatcher,
-};
 pub use ja4_filter::{Ja4FilterConfig, Ja4FilterPlugin};
 pub use jwt_auth::{JwtAlgorithm, JwtAuthPlugin, TokenSource};
 pub use oauth2_introspection::{
@@ -219,11 +217,9 @@ pub fn owns_id(id: &str) -> bool {
             | "request_mirror"
             | "url_rewrite"
             | "http_cache_lookup"
-            | "http_fault_injection"
-            | "grpc_fault_injection"
+            | "fault_injection"
             | "request_termination"
             | "csrf"
-            | "csrf_protection"
             | "hmac_auth"
             | "oauth2_introspection"
             | "api_metering"
@@ -253,10 +249,9 @@ pub fn instantiate(
         )?)),
         "url_rewrite" => Ok(Arc::new(UrlRewritePlugin::from_config(config)?)),
         "http_cache_lookup" => Ok(Arc::new(HttpCacheLookupPlugin::from_config(config)?)),
-        "http_fault_injection" => Ok(Arc::new(HttpFaultInjectionPlugin::from_config(config)?)),
-        "grpc_fault_injection" => Ok(Arc::new(GrpcFaultInjectionPlugin::from_config(config)?)),
+        "fault_injection" => Ok(Arc::new(FaultInjectionPlugin::from_config(config)?)),
         "request_termination" => Ok(Arc::new(RequestTerminationPlugin::from_config(config)?)),
-        "csrf" | "csrf_protection" => Ok(Arc::new(CsrfPlugin::from_config(config)?)),
+        "csrf" => Ok(Arc::new(CsrfPlugin::from_config(config)?)),
         "hmac_auth" => Ok(Arc::new(HmacAuthPlugin::from_config(config)?)),
         "oauth2_introspection" => Ok(Arc::new(Oauth2IntrospectionPlugin::from_config(config)?)),
         "api_metering" => Ok(Arc::new(ApiMeteringPlugin::from_config(config)?)),
@@ -274,7 +269,7 @@ mod tests {
     use super::*;
     use http::header::HeaderName;
     use http::{HeaderValue, Method, StatusCode, Uri, Version};
-    use velda_core::{Body, HeaderWorkspace, RejectReason};
+    use velda_core::{Body, HeaderWorkspace, InternalStatus};
 
     #[test]
     fn test_pre_upstream_header_mutation() {
@@ -344,13 +339,13 @@ mod tests {
         let action2 = run_pre_upstream_plugins(&chain, &mut req2, &mut target2);
         assert_eq!(target2, TARGETS_CANCELLED);
         match action2 {
-            Action::Reject(reason) => {
-                assert_eq!(reason, RejectReason::TooManyRequests);
+            Action::Status(reason) => {
+                assert_eq!(reason, InternalStatus::RateLimited);
                 assert_eq!(req2.headers.get("retry-after").unwrap(), "1");
                 assert_eq!(req2.headers.get("x-ratelimit-remaining").unwrap(), "0");
                 assert!(req2.headers.bypass_headers().count() >= 2);
             }
-            _ => panic!("Expected Action::Reject(TooManyRequests)"),
+            _ => panic!("Expected Action::Status(TooManyRequests)"),
         }
     }
 
@@ -508,7 +503,7 @@ mod tests {
         let mut t2 = target_init(0);
         assert!(matches!(
             run_pre_upstream_plugins(&reject_chain, &mut req2, &mut t2),
-            Action::Reject(RejectReason::TooManyRequests)
+            Action::Status(InternalStatus::RateLimited)
         ));
         assert_eq!(t2, TARGETS_CANCELLED);
         assert_eq!(target_primary(t2), None);

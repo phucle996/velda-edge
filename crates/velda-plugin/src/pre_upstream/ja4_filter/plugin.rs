@@ -9,14 +9,14 @@
 //! │    ▼ Read req.state.{is_tls, ja4} inside 64B L1d RequestState cache line                │
 //! │    ├── !is_tls (plaintext listener) ─────────────────────► Action::Continue             │
 //! │    └── is_tls == true                                                                   │
-//! │          ├── ja4 == 0 (fail-closed) ─────────────────────► Action::Reject(Forbidden)    │
+//! │          ├── ja4 == 0 (fail-closed) ─────────────────────► Action::Status(Forbidden)    │
 //! │          └── Scan/BSearch denied_ids: Box<[u64]>                                        │
-//! │                ├── Match    ─────────────────────────────► Action::Reject(Forbidden)    │
+//! │                ├── Match    ─────────────────────────────► Action::Status(Forbidden)    │
 //! │                └── No Match ─────────────────────────────► Action::Continue             │
 //! └─────────────────────────────────────────────────────────────────────────────────────────┘
 //! ```
 
-use velda_core::{Action, L7Request, RejectReason};
+use velda_core::{Action, InternalStatus, L7Request};
 
 use crate::capability::{AccessLevel, PluginCapability, SupportedProtocols};
 use crate::config::PluginConfig;
@@ -96,7 +96,7 @@ impl PreUpstreamPlugin for Ja4FilterPlugin {
         }
         let ja4 = req.state.ja4;
         if ja4 == 0 || self.is_denied(ja4) {
-            return Action::Reject(RejectReason::Forbidden);
+            return Action::Status(InternalStatus::IpBlocked);
         }
         Action::Continue
     }
@@ -152,14 +152,14 @@ mod tests {
         let mut req1 = make_req(true, fp_id);
         assert!(matches!(
             plugin.on_upstream_request(&mut req1, &mut target),
-            Action::Reject(RejectReason::Forbidden)
+            Action::Status(InternalStatus::IpBlocked)
         ));
 
         // Matching hex ID on TLS -> Reject
         let mut req2 = make_req(true, hex_id);
         assert!(matches!(
             plugin.on_upstream_request(&mut req2, &mut target),
-            Action::Reject(RejectReason::Forbidden)
+            Action::Status(InternalStatus::IpBlocked)
         ));
 
         // Non-matching JA4 on TLS -> Continue
@@ -183,7 +183,7 @@ mod tests {
         let mut req_tls_missing = make_req(true, 0);
         assert!(matches!(
             plugin.on_upstream_request(&mut req_tls_missing, &mut target),
-            Action::Reject(RejectReason::Forbidden)
+            Action::Status(InternalStatus::IpBlocked)
         ));
     }
 
@@ -199,7 +199,7 @@ mod tests {
         let mut req_hit = make_req(true, 32_007);
         assert!(matches!(
             plugin.on_upstream_request(&mut req_hit, &mut target),
-            Action::Reject(RejectReason::Forbidden)
+            Action::Status(InternalStatus::IpBlocked)
         ));
 
         let mut req_miss = make_req(true, 32_008);

@@ -25,7 +25,7 @@
 //! ```
 
 use velda_core::lut::HttpMethod;
-use velda_core::{Action, L7Request, RejectReason};
+use velda_core::{Action, InternalStatus, L7Request};
 
 use super::config::MethodFilterConfig;
 use crate::capability::{AccessLevel, PluginCapability, SupportedProtocols};
@@ -141,7 +141,7 @@ impl PreRoutePlugin for MethodFilterPlugin {
             }
         }
 
-        Action::Reject(RejectReason::MethodNotAllowed)
+        Action::Status(InternalStatus::MethodNotAllowed)
     }
 
     fn capability(&self) -> PluginCapability {
@@ -193,15 +193,15 @@ mod tests {
 
         assert!(matches!(
             plugin.on_request(&mut make_req(Method::DELETE)),
-            Action::Reject(RejectReason::MethodNotAllowed)
+            Action::Status(InternalStatus::MethodNotAllowed)
         ));
         assert!(matches!(
             plugin.on_request(&mut make_req(Method::TRACE)),
-            Action::Reject(RejectReason::MethodNotAllowed)
+            Action::Status(InternalStatus::MethodNotAllowed)
         ));
         assert!(matches!(
             plugin.on_request(&mut make_req(Method::CONNECT)),
-            Action::Reject(RejectReason::MethodNotAllowed)
+            Action::Status(InternalStatus::MethodNotAllowed)
         ));
     }
 
@@ -211,7 +211,7 @@ mod tests {
         let propfind = Method::from_bytes(b"PROPFIND").unwrap();
         assert!(matches!(
             plugin.on_request(&mut make_req(propfind)),
-            Action::Reject(RejectReason::MethodNotAllowed)
+            Action::Status(InternalStatus::MethodNotAllowed)
         ));
     }
 
@@ -231,7 +231,7 @@ mod tests {
         ));
         assert!(matches!(
             plugin.on_request(&mut make_req(mkcol)),
-            Action::Reject(RejectReason::MethodNotAllowed)
+            Action::Status(InternalStatus::MethodNotAllowed)
         ));
     }
 
@@ -250,7 +250,7 @@ mod tests {
         ));
         assert!(matches!(
             plugin.on_request(&mut make_req(Method::POST)),
-            Action::Reject(RejectReason::MethodNotAllowed)
+            Action::Status(InternalStatus::MethodNotAllowed)
         ));
     }
 }

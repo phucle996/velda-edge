@@ -17,7 +17,7 @@ use std::time::Instant;
 use bytes::Bytes;
 use http::header::{CONTENT_LENGTH, CONTENT_TYPE, RETRY_AFTER};
 use http::{HeaderName, HeaderValue, StatusCode};
-use velda_core::{Action, L7Request, L7Response, RejectReason};
+use velda_core::{Action, InternalStatus, L7Request, L7Response};
 use velda_etp::EtpInstance;
 
 use super::algorithm::{CompiledDecision, ShardedMeteringState};
@@ -347,7 +347,7 @@ fn handle_exhausted(
             req.headers
                 .insert_bypass(X_METERING_EXHAUSTED.clone(), TRUE_VAL);
 
-            Action::Reject(RejectReason::TooManyRequests)
+            Action::Status(InternalStatus::RateLimited)
         }
         ExhaustedAction::Passthrough => Action::Continue,
     }

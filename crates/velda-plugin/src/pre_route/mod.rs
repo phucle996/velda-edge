@@ -145,10 +145,10 @@ mod tests {
 
         let action = run_pre_route_plugins(&chain, &mut req);
         match action {
-            Action::Reject(reason) => {
-                assert_eq!(reason, velda_core::RejectReason::IpBlocked);
+            Action::Status(reason) => {
+                assert_eq!(reason, velda_core::InternalStatus::IpBlocked);
             }
-            _ => panic!("Expected Action::Reject(IpBlocked)"),
+            _ => panic!("Expected Action::Status(IpBlocked)"),
         }
     }
 }
