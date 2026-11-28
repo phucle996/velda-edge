@@ -346,10 +346,14 @@ pub fn spawn_shadow_worker(
                 // Single unified cooperative event loop
                 loop {
                     tokio::select! {
-                        // Drain core-local unified SPSC observability ring into reference-counted
-                        // rotating pool batches for registered background exporters.
+                        // Drain core-local unified SPSC observability ring into sharded SubPool
+                        // rotating batches (up to 32 batches or empty per 100ms tick).
                         _ = log_flush_interval.tick() => {
-                            velda_observability::global_telemetry_store().flush_lane(worker_id, 512);
+                            velda_observability::global_telemetry_store().flush_lane_budget(
+                                worker_id,
+                                velda_observability::DEFAULT_BATCH_CAPACITY,
+                                32,
+                            );
                         }
 
                         // Autonomous background upstream pre-warming & core-local buffer maintenance on SCHED_IDLE
@@ -461,7 +465,11 @@ pub fn spawn_shadow_worker(
 
                 // Drain any remaining observability records from this core's SPSC ring into
                 // registered background exporter queues before terminating background tasks.
-                velda_observability::global_telemetry_store().flush_lane(worker_id, 4096);
+                velda_observability::global_telemetry_store().flush_lane_budget(
+                    worker_id,
+                    velda_observability::DEFAULT_BATCH_CAPACITY,
+                    16,
+                );
 
                 // Gracefully cancel and flush all active tasks in both sets
                 shadow_tasks.shutdown().await;

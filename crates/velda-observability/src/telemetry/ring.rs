@@ -25,8 +25,9 @@ use std::ptr::NonNull;
 use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
 
 use velda_core::buffer::slab::{ArenaBackingKind, ContiguousArena};
+use velda_core::lut::InternalStatus;
 
-use super::record::TelemetryRecord;
+use super::record::{BATCH_FLAG_HAS_ERRORS, TelemetryBatchSummary, TelemetryRecord};
 
 /// Default per-core SPSC ring capacity (8192 records × 256B = 2 MB = 1 Linux HugePage per core).
 pub const DEFAULT_CORE_RING_CAPACITY: usize = 8192;
@@ -227,6 +228,16 @@ impl SpscTelemetryRing {
     ///
     /// Guarantees 0 heap allocations and 0 deallocations during batch draining.
     pub fn drain_batch_into(&self, target: &mut Vec<TelemetryRecord>, max_records: usize) -> usize {
+        self.drain_batch_into_with_summary(target, max_records).0
+    }
+
+    /// Drains up to `max_records` from this core's SPSC ring using Non-Temporal streaming copy
+    /// and returns `(drained_count, TelemetryBatchSummary)` for cache-line header stamping.
+    pub fn drain_batch_into_with_summary(
+        &self,
+        target: &mut Vec<TelemetryRecord>,
+        max_records: usize,
+    ) -> (usize, TelemetryBatchSummary) {
         let tail = self.consumer.tail.load(Ordering::Relaxed);
         let mut head = self.consumer.cached_head.load(Ordering::Relaxed);
 
@@ -236,7 +247,7 @@ impl SpscTelemetryRing {
             self.consumer.cached_head.store(head, Ordering::Relaxed);
             avail = head.wrapping_sub(tail);
             if avail == 0 {
-                return 0;
+                return (0, TelemetryBatchSummary::default());
             }
         }
 
@@ -248,8 +259,11 @@ impl SpscTelemetryRing {
         let mask = self.geo.mask;
         let base = self.geo.base.as_ptr();
 
-        #[cfg(target_arch = "x86_64")]
-        let has_avx2 = cfg!(target_feature = "avx2");
+        let mut first_ts_ns: u64 = 0;
+        let mut last_ts_ns: u64 = 0;
+        let mut error_count: u32 = 0;
+        let mut payload_bytes: u32 = 0;
+        let mut url_bytes_sum: u32 = 0;
 
         for (i, slot_uninit) in spare[..to_take].iter_mut().enumerate() {
             let idx = tail.wrapping_add(i) & mask;
@@ -275,49 +289,88 @@ impl SpscTelemetryRing {
             debug_assert!((src as usize) & 63 == 0);
             debug_assert!((dst as usize) & 63 == 0);
 
-            #[cfg(target_arch = "x86_64")]
-            unsafe {
+            #[cfg(all(target_arch = "x86_64", target_feature = "avx2"))]
+            let (ts_ns, rx_tx, url_len, status_raw) = unsafe {
                 use core::arch::x86_64::*;
-                if has_avx2 {
-                    let s = src as *const __m256i;
-                    let d = dst as *mut __m256i;
+                let s = src as *const __m256i;
+                let d = dst as *mut __m256i;
 
-                    // 1. Non-Temporal Streaming Loads (VMOVNTDQA): loads 8 x 32-byte chunks directly into registers,
-                    // bypassing L1d cache allocation for the consumed ring buffer slot ("L1 is gold").
-                    let v0 = _mm256_stream_load_si256(s);
-                    let v1 = _mm256_stream_load_si256(s.add(1));
-                    let v2 = _mm256_stream_load_si256(s.add(2));
-                    let v3 = _mm256_stream_load_si256(s.add(3));
-                    let v4 = _mm256_stream_load_si256(s.add(4));
-                    let v5 = _mm256_stream_load_si256(s.add(5));
-                    let v6 = _mm256_stream_load_si256(s.add(6));
-                    let v7 = _mm256_stream_load_si256(s.add(7));
+                // 1. Non-Temporal Streaming Loads (VMOVNTDQA): bypasses L1d cache for consumed slots.
+                let v0 = _mm256_stream_load_si256(s);
+                let v1 = _mm256_stream_load_si256(s.add(1));
+                let v2 = _mm256_stream_load_si256(s.add(2));
+                let v3 = _mm256_stream_load_si256(s.add(3));
+                let v4 = _mm256_stream_load_si256(s.add(4));
+                let v5 = _mm256_stream_load_si256(s.add(5));
+                let v6 = _mm256_stream_load_si256(s.add(6));
+                let v7 = _mm256_stream_load_si256(s.add(7));
 
-                    // 2. Non-Temporal Streaming Stores (VMOVNTDQ): writes destination batch directly to L3 (LLC)
-                    // through Write-Combining buffers, keeping L1d completely untouched ("L1 is gold").
-                    _mm256_stream_si256(d, v0);
-                    _mm256_stream_si256(d.add(1), v1);
-                    _mm256_stream_si256(d.add(2), v2);
-                    _mm256_stream_si256(d.add(3), v3);
-                    _mm256_stream_si256(d.add(4), v4);
-                    _mm256_stream_si256(d.add(5), v5);
-                    _mm256_stream_si256(d.add(6), v6);
-                    _mm256_stream_si256(d.add(7), v7);
-                } else {
-                    // SSE4.1 fallback: 16 x 16-byte chunks using _mm_load_si128 and _mm_stream_si128
-                    let s = src as *const __m128i;
-                    let d = dst as *mut __m128i;
-                    for k in 0..16 {
-                        let v = _mm_load_si128(s.add(k));
-                        _mm_stream_si128(d.add(k), v);
-                    }
+                // Extract summary scalars from already-loaded AVX2 registers (0 extra RAM loads):
+                // v1 (bytes 32..64): [ingress_time_nanos, bytes_rx|bytes_tx, upstream_ip|..., ...|status|_pad]
+                // v2 (bytes 64..96): [ua_major|rpc_flags|ua_fam|ua_os|url_len, ...]
+                let ts_ns = _mm256_extract_epi64::<0>(v1) as u64;
+                let io_w = _mm256_extract_epi64::<1>(v1) as u64;
+                let rx = (io_w & 0xFFFF_FFFF) as u32;
+                let tx = (io_w >> 32) as u32;
+                let tail_w = _mm256_extract_epi64::<3>(v1) as u64;
+                let status_raw = ((tail_w >> 48) & 0xFF) as u8;
+                let cl1_w0 = _mm256_extract_epi64::<0>(v2) as u64;
+                let url_len = ((cl1_w0 >> 48) & 0xFFFF) as u32;
+
+                // 2. Non-Temporal Streaming Stores (VMOVNTDQ): writes destination batch directly to L3/RAM.
+                _mm256_stream_si256(d, v0);
+                _mm256_stream_si256(d.add(1), v1);
+                _mm256_stream_si256(d.add(2), v2);
+                _mm256_stream_si256(d.add(3), v3);
+                _mm256_stream_si256(d.add(4), v4);
+                _mm256_stream_si256(d.add(5), v5);
+                _mm256_stream_si256(d.add(6), v6);
+                _mm256_stream_si256(d.add(7), v7);
+
+                (ts_ns, rx.saturating_add(tx), url_len, status_raw)
+            };
+
+            #[cfg(all(target_arch = "x86_64", not(target_feature = "avx2")))]
+            let (ts_ns, rx_tx, url_len, status_raw) = unsafe {
+                use core::arch::x86_64::*;
+                let rec = &*src;
+                let summary_tuple = (
+                    rec.ingress_time_nanos,
+                    rec.bytes_rx.saturating_add(rec.bytes_tx),
+                    rec.url_len as u32,
+                    rec.internal_status as u8,
+                );
+                let s = src as *const __m128i;
+                let d = dst as *mut __m128i;
+                for k in 0..16 {
+                    let v = _mm_load_si128(s.add(k));
+                    _mm_stream_si128(d.add(k), v);
                 }
-            }
+                summary_tuple
+            };
 
             #[cfg(not(target_arch = "x86_64"))]
-            unsafe {
+            let (ts_ns, rx_tx, url_len, status_raw) = unsafe {
+                let rec = &*src;
+                let summary_tuple = (
+                    rec.ingress_time_nanos,
+                    rec.bytes_rx.saturating_add(rec.bytes_tx),
+                    rec.url_len as u32,
+                    rec.internal_status as u8,
+                );
                 std::ptr::copy_nonoverlapping(src, dst, 1);
+                summary_tuple
+            };
+
+            if i == 0 {
+                first_ts_ns = ts_ns;
             }
+            last_ts_ns = ts_ns;
+            if status_raw != InternalStatus::Completed as u8 {
+                error_count += 1;
+            }
+            payload_bytes = payload_bytes.saturating_add(rx_tx);
+            url_bytes_sum = url_bytes_sum.saturating_add(url_len.min(184));
         }
 
         #[cfg(target_arch = "x86_64")]
@@ -334,14 +387,45 @@ impl SpscTelemetryRing {
         self.consumer
             .tail
             .store(tail.wrapping_add(to_take), Ordering::Release);
-        to_take
+
+        let flags = if error_count > 0 {
+            BATCH_FLAG_HAS_ERRORS
+        } else {
+            0
+        };
+        let summary = TelemetryBatchSummary {
+            first_ts_ns,
+            last_ts_ns,
+            error_count,
+            payload_bytes,
+            url_bytes_sum,
+            flags,
+        };
+        (to_take, summary)
     }
 
-    /// Drains available records into a freshly allocated vector (convenience wrapper around [`Self::drain_batch_into`]).
+    /// Drains available records into a freshly allocated vector (convenience wrapper around [`Self::drain_batch_into_with_summary`]).
     pub fn drain_batch(&self, max_records: usize) -> Vec<TelemetryRecord> {
+        self.drain_batch_with_summary(max_records).0
+    }
+
+    /// Drains available records into a freshly allocated vector along with its [`TelemetryBatchSummary`].
+    pub fn drain_batch_with_summary(
+        &self,
+        max_records: usize,
+    ) -> (Vec<TelemetryRecord>, TelemetryBatchSummary) {
         let mut out = Vec::with_capacity(max_records.min(4096));
-        self.drain_batch_into(&mut out, max_records);
-        out
+        let (_, summary) = self.drain_batch_into_with_summary(&mut out, max_records);
+        (out, summary)
+    }
+
+    /// Consumer-side snapshot of currently buffered records waiting to be drained.
+    #[inline]
+    pub fn pending_count(&self) -> usize {
+        let tail = self.consumer.tail.load(Ordering::Relaxed);
+        let head = self.producer.head.load(Ordering::Acquire);
+        self.consumer.cached_head.store(head, Ordering::Relaxed);
+        head.wrapping_sub(tail)
     }
 
     /// Returns total number of records pushed onto this core's SPSC ring.

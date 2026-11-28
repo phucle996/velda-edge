@@ -14,12 +14,14 @@ mod ring;
 mod store;
 
 pub use pool::{
-    DEFAULT_BATCH_CAPACITY, DEFAULT_POOL_SLOTS, PooledTelemetryBatch, TelemetryBatch,
-    TelemetryBatchPool,
+    AcquiredSlot, DEFAULT_BATCH_CAPACITY, MAX_SUBPOOLS, MIN_BATCH_CAPACITY, MIN_SUBPOOLS,
+    PooledTelemetryBatch, SINGLE_CORE_FLOOR_BATCH_CAPACITY, SUBPOOL_BATCHES, TelemetryBatch,
+    TelemetryBatchPool, TelemetryBatchSlot, compute_telemetry_pool_geometry,
 };
-pub use record::TelemetryRecord;
+pub use record::{BATCH_FLAG_HAS_ERRORS, TelemetryBatchSummary, TelemetryRecord};
 pub use ring::{DEFAULT_CORE_RING_CAPACITY, SpscTelemetryRing};
 pub use store::{
-    TelemetryStore, TelemetrySubscriber, global_telemetry_store, init_global_telemetry_store,
+    BatchThresholdFuture, DEFAULT_BATCH_TRIGGER_THRESHOLD, TelemetryStore, TelemetrySubscriber,
+    global_telemetry_store, init_global_telemetry_store,
 };
 pub use velda_core::lut::ip::{encode_ip_u128, encode_upstream_ip_u32};

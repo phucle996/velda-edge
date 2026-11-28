@@ -227,6 +227,7 @@ async fn run_target_loop(
     loop {
         let is_shutting_down = tokio::select! {
             _ = interval.tick() => false,
+            _ = subscriber.wait_for_batch_threshold() => false,
             _ = shutdown.changed() => *shutdown.borrow(),
         };
 

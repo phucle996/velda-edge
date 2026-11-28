@@ -6,18 +6,15 @@
 //!  │                                                                                        │
 //!  │    Frontline Core 0      Frontline Core 1                Frontline Core N-1            │
 //!  │   ┌─────────────────┐   ┌─────────────────┐             ┌─────────────────┐            │
-//!  │   │ SpscTelemetryRing (0) │   │ SpscTelemetryRing (1) │   ... ...   │ SpscTelemetryRing(N-1)│            │
+//!  │   │SpscRing[0] (2MB)│   │SpscRing[1] (2MB)│   ... ...   │SpscRing[N-1](2M)│            │
 //!  │   └────────┬────────┘   └────────┬────────┘             └────────┬────────┘            │
-//!  │            │                     │                               │                     │
-//!  │            │ flush_lane(0)       │ flush_lane(1)                 │ flush_lane(N-1)     │
-//!  │            ▼                     ▼                               ▼                     │
+//!  │            │ flush_lane_budget   │ flush_lane_budget             │                     │
+//!  │            ▼ (100ms or empty/32) ▼                               ▼                     │
 //!  │  ┌──────────────────────────────────────────────────────────────────────────────────┐  │
-//!  │  │                      Shadow Logistics Worker (SCHED_IDLE)                        │  │
-//!  │  │                                                                                  │  │
-//!  │  │  1. acquire_slot() ──► TelemetryBatchPool (32 Slots × 64KB)                            │  │
-//!  │  │  2. ring.drain_batch_into(&mut slot.records) (VMOVNTDQ / AVX streaming store)    │  │
-//!  │  │  3. slot.leases.store(K)                                                         │  │
-//!  │  │  4. TelemetryBatch::from_pooled(slot_id, slice, pool)                                  │  │
+//!  │  │            Sharded TelemetryBatchPool -> SubPool[0..N-1] (64 slots × AtomicU64) │  │
+//!  │  │  1. acquire_slot_for_lane(c) -> TZCNT(!bitmap[c]) + CAS 0->1 (strict core-local) │  │
+//!  │  │  2. drain_batch_into_with_summary() -> L3/RAM stream + 64B TelemetryBatchSlot   │  │
+//!  │  │  3. leases.store(K, Release) -> Fan-out & wake subscribers if queue >= 32       │  │
 //!  │  └───────────────────────────────────┬──────────────────────────────────────────────┘  │
 //!  │                                      │                                                 │
 //!  │                        Fan-Out to K Active Subscribers                                 │
@@ -25,62 +22,83 @@
 //!  │         ▼                            ▼                            ▼                    │
 //!  │  ┌──────────────┐             ┌──────────────┐             ┌──────────────┐            │
 //!  │  │ Subscriber 1 │             │ Subscriber 2 │             │ Subscriber K │            │
-//!  │  │ (StdLogSink) │             │ (ClickHouse) │             │ (OTLP/Loki)  │            │
-//!  │  │ Queue (256)  │             │ Queue (256)  │             │ Queue (256)  │            │
+//!  │  │ Wakes on:    │             │ Wakes on:    │             │ Wakes on:    │            │
+//!  │  │ >= 32 batches│             │ >= 32 batches│             │ >= 32 batches│            │
+//!  │  │ OR interval  │             │ OR interval  │             │ OR interval  │            │
 //!  │  └──────┬───────┘             └──────┬───────┘             └──────┬───────┘            │
-//!  │         │                            │                            │                    │
-//!  │         │ pop & serialize            │ pop & serialize            │ pop & serialize    │
-//!  │         ▼                            ▼                            ▼                    │
-//!  │    drop(TelemetryBatch)               drop(TelemetryBatch)               drop(TelemetryBatch)            │
-//!  │    leases - 1                   leases - 1                   leases - 1                │
-//!  │         │                            │                            │                    │
 //!  │         └────────────────────────────┼────────────────────────────┘                    │
-//!  │                                      │                                                 │
 //!  │                                      ▼ (last drop -> leases == 0)                      │
 //!  │                       ┌──────────────────────────────┐                                 │
-//!  │                       │ slot.records.clear()         │                                 │
-//!  │                       │ pool.return_slot(slot_id)    │                                 │
+//!  │                       │ records.clear()              │                                 │
+//!  │                       │ sub_pool.bitmap bit 1 -> 0   │                                 │
 //!  │                       └──────────────────────────────┘                                 │
-//!  │                                                                                        │
-//!  │  [ MULTI-BUFFER ROTATION PIPELINE ]                                                    │
-//!  │  Shadow Worker (Producer) ──► Slot N: Draining SPSC ring (AVX stream store)            │
-//!  │  Subscribers (Consumers)  ──► Slot N-1: Reading and serializing payload                │
-//!  │  Recycle (Last Drop)      ──► Slot N-2: Reset len=0 and push back to available stack   │
-//!  │  Free Standby Pool        ──► Slots N+1..N+k: Ready slots for subsequent ticks         │
 //!  └────────────────────────────────────────────────────────────────────────────────────────┘
 //! ```
 //!
 //! # Mechanics
 //! - **Core Isolation**: Frontline request workers push records into core-local SPSC
-//!   rings without cross-core locks.
-//! - **Multi-Buffer Rotation**: Shadow worker drains into a fresh pool slot while previous
-//!   slots remain in-flight with subscribers or undergo zero-copy recycling.
-//! - **Subscriber Fan-Out**: Each active subscriber receives a leased handle to the pooled batch.
-//! - **Memory Recycling**: Once all subscribers finish processing, the slot is cleared and
-//!   returned to `TelemetryBatchPool` without memory reallocation.
+//!   rings (`_mm256_stream_si256` directly to L3/RAM) without cross-core locks.
+//! - **Sharded Bitmask Rotation**: Each core owns a dedicated 64-slot `SubPool` with a
+//!   cache-line-aligned `AtomicU64` bitmap (`1` = full/in-flight, `0` = free). Wait-free
+//!   acquisition touches only the local core's bitmap, isolating core-skew saturation.
+//! - **Dual-Trigger Delivery**: Shadow Workers drain up to 32 batches per tick, and
+//!   subscribers wake immediately when `>= 32` batches queue up (or on periodic timer).
 
 use std::collections::VecDeque;
+use std::future::Future;
+use std::pin::Pin;
 use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex, OnceLock};
+use std::task::{Context, Poll, Waker};
 
 use crate::metrics::{MAX_METRIC_WORKERS, current_worker_lane};
 
-use super::pool::{DEFAULT_BATCH_CAPACITY, DEFAULT_POOL_SLOTS, TelemetryBatch, TelemetryBatchPool};
+use super::pool::{SUBPOOL_BATCHES, TelemetryBatch, TelemetryBatchPool};
 use super::record::TelemetryRecord;
 use super::ring::{DEFAULT_CORE_RING_CAPACITY, SpscTelemetryRing};
+
+/// Queue depth threshold (batches) that wakes waiting background exporters early.
+pub const DEFAULT_BATCH_TRIGGER_THRESHOLD: usize = 32;
+
+struct SubscriberQueueState {
+    queue: VecDeque<TelemetryBatch>,
+    waker: Option<Waker>,
+}
 
 struct SubscriberInner {
     id: u64,
     max_batches: usize,
-    queue: Mutex<VecDeque<TelemetryBatch>>,
+    trigger_batches: usize,
+    state: Mutex<SubscriberQueueState>,
     pub dropped_batches: AtomicU64,
 }
 
-/// RAII handle held by an active background log exporter plugin.
+/// Future resolved as soon as a [`TelemetrySubscriber`] accumulates at least `threshold` batches.
+pub struct BatchThresholdFuture<'a> {
+    inner: &'a SubscriberInner,
+    threshold: usize,
+}
+
+impl Future for BatchThresholdFuture<'_> {
+    type Output = ();
+
+    fn poll(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Self::Output> {
+        let mut state = self.inner.state.lock().unwrap();
+        if state.queue.len() >= self.threshold {
+            state.waker = None;
+            Poll::Ready(())
+        } else {
+            state.waker = Some(cx.waker().clone());
+            Poll::Pending
+        }
+    }
+}
+
+/// RAII handle held by an active background log or trace exporter plugin.
 ///
 /// Dropping a received [`TelemetryBatch`] automatically recycles its contiguous memory
-/// pages back into the pool without calling the OS allocator (`__rust_dealloc == 0`).
-/// Dropping `TelemetrySubscriber` itself unregisters the exporter from [`TelemetryStore`].
+/// pages back into its owning [`super::pool::SubPool`] bitmap (`1 -> 0`) without calling
+/// the OS allocator (`__rust_dealloc == 0`). Dropping `TelemetrySubscriber` unregisters it.
 pub struct TelemetrySubscriber {
     inner: Arc<SubscriberInner>,
     store: Arc<TelemetryStore>,
@@ -89,20 +107,50 @@ pub struct TelemetrySubscriber {
 impl TelemetrySubscriber {
     /// Pops the next batch of [`TelemetryRecord`]s if available.
     pub fn try_recv_batch(&self) -> Option<TelemetryBatch> {
-        self.inner.queue.lock().unwrap().pop_front()
+        self.inner.state.lock().unwrap().queue.pop_front()
     }
 
     /// Drains up to `max_batches` currently queued batches for bulk export.
     pub fn drain_batches(&self, max_batches: usize) -> Vec<TelemetryBatch> {
-        let mut guard = self.inner.queue.lock().unwrap();
-        let take = guard.len().min(max_batches);
+        let mut guard = self.inner.state.lock().unwrap();
+        let take = guard.queue.len().min(max_batches);
         let mut out = Vec::with_capacity(take);
         for _ in 0..take {
-            if let Some(b) = guard.pop_front() {
+            if let Some(b) = guard.queue.pop_front() {
                 out.push(b);
             }
         }
         out
+    }
+
+    /// Current number of batches waiting in this subscriber's queue.
+    #[inline]
+    pub fn queued_batches(&self) -> usize {
+        self.inner.state.lock().unwrap().queue.len()
+    }
+
+    /// Configured batch-count trigger threshold (`min(32, max_batches)`).
+    #[inline]
+    pub fn trigger_threshold(&self) -> usize {
+        self.inner.trigger_batches
+    }
+
+    /// Returns a future that resolves once at least `trigger_threshold()` batches are queued.
+    #[inline]
+    pub fn wait_for_batch_threshold(&self) -> BatchThresholdFuture<'_> {
+        BatchThresholdFuture {
+            inner: &self.inner,
+            threshold: self.inner.trigger_batches,
+        }
+    }
+
+    /// Returns a future that resolves once at least `threshold` batches (clamped to queue cap) queue up.
+    #[inline]
+    pub fn wait_for_batches(&self, threshold: usize) -> BatchThresholdFuture<'_> {
+        BatchThresholdFuture {
+            inner: &self.inner,
+            threshold: threshold.clamp(1, self.inner.max_batches),
+        }
     }
 
     /// Number of queued batches evicted from the front due to subscriber backpressure.
@@ -141,13 +189,21 @@ impl Default for TelemetryStore {
 
 impl TelemetryStore {
     pub fn new() -> Self {
-        let detected_cores = velda_core::hardware::global_hardware_topology()
-            .cpu
-            .available_cores;
-        Self::with_cores_and_capacity(detected_cores, DEFAULT_CORE_RING_CAPACITY)
+        let topo = velda_core::hardware::global_hardware_topology();
+        Self::with_hardware(
+            topo.cpu.available_cores,
+            DEFAULT_CORE_RING_CAPACITY,
+            topo.memory.total_bytes,
+        )
     }
 
+    /// Creates a store for explicit core count and per-core ring capacity.
     pub fn with_cores_and_capacity(cores: usize, ring_capacity: usize) -> Self {
+        Self::with_hardware(cores, ring_capacity, 0)
+    }
+
+    /// Creates a store sized continuously from `(cores, memory_bytes)` hardware profile.
+    pub fn with_hardware(cores: usize, ring_capacity: usize, memory_bytes: usize) -> Self {
         // Power-of-two shards let hot-path emit() index via 1-cycle bitmask instead of integer div.
         let active_cores = cores.clamp(1, MAX_METRIC_WORKERS).next_power_of_two();
         let shard_mask = active_cores - 1;
@@ -163,7 +219,7 @@ impl TelemetryStore {
             subscribers: Mutex::new(Vec::new()),
             active_subscriber_count: AtomicUsize::new(0),
             next_subscriber_id: AtomicU64::new(1),
-            batch_pool: TelemetryBatchPool::new(DEFAULT_POOL_SLOTS, DEFAULT_BATCH_CAPACITY),
+            batch_pool: TelemetryBatchPool::for_hardware(active_cores, memory_bytes),
         }
     }
 
@@ -181,11 +237,6 @@ impl TelemetryStore {
     }
 
     /// Emits a 256-byte [`TelemetryRecord`] on cold error / early-rejection paths.
-    ///
-    /// Marked `#[cold]` and `#[inline(never)]` so that early error handlers (400, 404, 431,
-    /// 502, 503, 504, client disconnects) do not duplicate 8 `vmovntdq` non-temporal stores
-    /// and vector shuffles into frontline serving loops, preserving the 32 KB L1 Instruction
-    /// Cache for hot request execution.
     #[cold]
     #[inline(never)]
     pub fn emit_cold(&self, record: &TelemetryRecord) -> bool {
@@ -202,16 +253,22 @@ impl TelemetryStore {
 
     /// Registers a new background exporter subscriber (log shipper or trace exporter).
     ///
-    /// Caps queue depth at half of `batch_pool` slots so a slow TCP/HTTP exporter drops its
-    /// oldest unconsumed leases before it can pin the entire rotating pool.
+    /// Caps per-subscriber queue depth at half of total rotating pool capacity (minimum
+    /// `SUBPOOL_BATCHES / 2 = 32` batches) so a slow or stalled exporter drops its oldest
+    /// unconsumed leases before starving healthy exporters or filling all core subpools.
     pub fn subscribe(self: &Arc<Self>, max_batches: usize) -> TelemetrySubscriber {
         let id = self.next_subscriber_id.fetch_add(1, Ordering::Relaxed);
-        let pool_cap = (self.batch_pool.slots.len() / 2).max(4);
+        let pool_cap = (self.batch_pool.total_slots() / 2).clamp(SUBPOOL_BATCHES / 2, 512);
         let capped = max_batches.clamp(4, pool_cap);
+        let trigger_batches = DEFAULT_BATCH_TRIGGER_THRESHOLD.min(capped);
         let inner = Arc::new(SubscriberInner {
             id,
             max_batches: capped,
-            queue: Mutex::new(VecDeque::with_capacity(capped)),
+            trigger_batches,
+            state: Mutex::new(SubscriberQueueState {
+                queue: VecDeque::with_capacity(capped),
+                waker: None,
+            }),
             dropped_batches: AtomicU64::new(0),
         });
 
@@ -227,11 +284,8 @@ impl TelemetryStore {
         }
     }
 
-    /// Executed by Shadow Worker (`velda-shadow-{lane}`) to drain its core-local SPSC ring
-    /// and fan out zero-allocation [`TelemetryBatch`] buffers to active exporters.
-    ///
-    /// Uses pre-allocated contiguous memory pages from [`TelemetryBatchPool`], recycling memory
-    /// in $\mathcal{O}(1)$ upon drop without returning pages to the OS allocator.
+    /// Drains one batch from core `lane`'s SPSC ring using a subpool slot (or heap fallback)
+    /// and distributes read-only leases across active subscribers.
     pub fn flush_lane(&self, lane: usize, max_batch_size: usize) -> usize {
         let idx = lane & self.shard_mask;
         let ring = unsafe { self.shards.get_unchecked(idx) };
@@ -240,51 +294,91 @@ impl TelemetryStore {
             return ring.discard_all();
         }
 
-        let subs = self.subscribers.lock().unwrap();
-        if subs.is_empty() {
+        let subs_guard = self.subscribers.lock().unwrap();
+        if subs_guard.is_empty() {
             return ring.discard_all();
         }
-        let active_count = subs.len();
+        let subs: Vec<Arc<SubscriberInner>> = subs_guard.iter().cloned().collect();
+        drop(subs_guard);
 
-        let batch = if let Some(slot_id) = self.batch_pool.acquire_slot() {
-            let slot = &self.batch_pool.slots[slot_id];
+        let batch = if let Some(token) = self.batch_pool.acquire_slot_for_lane(idx) {
+            let slot = self.batch_pool.slot(token.subpool_idx, token.slot_bit);
             let records_vec = unsafe { &mut *slot.records.get() };
-            let count = ring.drain_batch_into(records_vec, max_batch_size);
+            let (count, summary) = ring.drain_batch_into_with_summary(records_vec, max_batch_size);
             if count == 0 {
-                self.batch_pool.return_slot(slot_id);
+                self.batch_pool
+                    .release_slot(token.subpool_idx, token.slot_bit);
                 return 0;
             }
+            unsafe {
+                slot.write_summary(summary);
+            }
             slot.leases.store(1, Ordering::Release);
-            TelemetryBatch::from_pooled(
-                slot_id,
-                records_vec.as_slice(),
-                Arc::clone(&self.batch_pool),
-            )
+            TelemetryBatch::from_pooled(token, records_vec.as_slice(), Arc::clone(&self.batch_pool))
         } else {
-            let records = ring.drain_batch(max_batch_size.max(64));
+            let (records, summary) = ring.drain_batch_with_summary(max_batch_size.max(64));
             if records.is_empty() {
                 return 0;
             }
-            TelemetryBatch::from_arc(Arc::from(records))
+            TelemetryBatch::from_arc_with_summary(Arc::from(records), summary)
         };
 
         let count = batch.len();
+        let active_count = subs.len();
+        let mut batch_opt = Some(batch);
+        let mut wakers_to_wake: Vec<Waker> = Vec::new();
 
         for (i, sub) in subs.iter().enumerate() {
-            let mut q = sub.queue.lock().unwrap();
-            if q.len() >= sub.max_batches {
-                q.pop_front();
-                sub.dropped_batches.fetch_add(1, Ordering::Relaxed);
-            }
-            if i + 1 == active_count {
-                q.push_back(batch);
-                break;
+            let item = if i + 1 == active_count {
+                batch_opt.take().unwrap()
             } else {
-                q.push_back(batch.clone());
+                batch_opt.as_ref().unwrap().clone()
+            };
+            let wake = {
+                let mut state = sub.state.lock().unwrap();
+                if state.queue.len() >= sub.max_batches {
+                    state.queue.pop_front();
+                    sub.dropped_batches.fetch_add(1, Ordering::Relaxed);
+                }
+                state.queue.push_back(item);
+                if state.queue.len() >= sub.trigger_batches {
+                    state.waker.take()
+                } else {
+                    None
+                }
+            };
+            if let Some(w) = wake {
+                wakers_to_wake.push(w);
             }
         }
 
+        for w in wakers_to_wake {
+            w.wake();
+        }
+
         count
+    }
+
+    /// Drains up to `max_batches` batches in sequence from `lane` until empty or partial batch.
+    pub fn flush_lane_budget(
+        &self,
+        lane: usize,
+        max_batch_size: usize,
+        max_batches: usize,
+    ) -> usize {
+        let mut total = 0;
+        let batch_target = max_batch_size.min(self.batch_pool.batch_capacity);
+        for _ in 0..max_batches.max(1) {
+            let drained = self.flush_lane(lane, max_batch_size);
+            if drained == 0 {
+                break;
+            }
+            total += drained;
+            if drained < batch_target {
+                break;
+            }
+        }
+        total
     }
 
     /// Flushes all worker core lanes into registered exporter subscribers.
@@ -323,7 +417,7 @@ pub fn global_telemetry_store() -> &'static Arc<TelemetryStore> {
     }
 }
 
-/// Initializes the globally shared access log store at bootstrap.
+/// Initializes the globally shared telemetry store at bootstrap.
 pub fn init_global_telemetry_store(store: Arc<TelemetryStore>) -> Result<(), Arc<TelemetryStore>> {
     GLOBAL_TELEMETRY_STORE.set(store)
 }

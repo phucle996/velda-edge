@@ -109,6 +109,53 @@ const _: () = assert!(std::mem::offset_of!(TelemetryRecord, ua_os) == 69);
 const _: () = assert!(std::mem::offset_of!(TelemetryRecord, url_len) == 70);
 const _: () = assert!(std::mem::offset_of!(TelemetryRecord, url_bytes) == 72);
 
+pub const BATCH_FLAG_HAS_ERRORS: u8 = 1 << 0;
+
+/// Compact per-batch summary stamped into Cache Line header of [`TelemetryBatchSlot`]
+/// during ring draining so background exporters can skip/pre-size payloads in 1 cache line read.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct TelemetryBatchSummary {
+    pub first_ts_ns: u64,
+    pub last_ts_ns: u64,
+    pub error_count: u32,
+    pub payload_bytes: u32,
+    pub url_bytes_sum: u32,
+    pub flags: u8,
+}
+
+impl TelemetryBatchSummary {
+    /// Computes summary fields over an arbitrary slice (used for unpooled fallback/test batches).
+    pub fn from_slice(records: &[TelemetryRecord]) -> Self {
+        let Some(first) = records.first() else {
+            return Self::default();
+        };
+        let mut error_count: u32 = 0;
+        let mut payload_bytes: u32 = 0;
+        let mut url_bytes_sum: u32 = 0;
+        for rec in records {
+            if rec.internal_status != velda_core::lut::InternalStatus::Completed {
+                error_count += 1;
+            }
+            payload_bytes = payload_bytes.saturating_add(rec.bytes_rx.saturating_add(rec.bytes_tx));
+            url_bytes_sum = url_bytes_sum.saturating_add((rec.url_len as u32).min(184));
+        }
+        Self {
+            first_ts_ns: first.ingress_time_nanos,
+            last_ts_ns: records
+                .last()
+                .map_or(first.ingress_time_nanos, |r| r.ingress_time_nanos),
+            error_count,
+            payload_bytes,
+            url_bytes_sum,
+            flags: if error_count > 0 {
+                BATCH_FLAG_HAS_ERRORS
+            } else {
+                0
+            },
+        }
+    }
+}
+
 impl Default for TelemetryRecord {
     #[inline(always)]
     fn default() -> Self {
