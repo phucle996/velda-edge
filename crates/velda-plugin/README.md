@@ -67,7 +67,7 @@ Every plugin across **all four traits** must explicitly implement `fn pbww(&self
 
 | Pattern | Mechanism | Target Plugins |
 | :--- | :--- | :--- |
-| **Long-Running Daemon** | **`pbww() > 0` + `run_background(shutdown)`** | `openai_token_quota`, `api_metering`, `rate_limit`, all 14 `background/*` plugins |
+| **Long-Running Daemon** | **`pbww() > 0` + `run_background(shutdown)`** | `openai_token_quota`, `api_metering`, `rate_limit`, all 5 `background/*` plugins |
 | **Per-Request One-Shot Offload** | **[`try_dispatch_shadow`](src/hook.rs)** (`LOCAL_SHADOW_SENDER`) | `request_mirror`, `oauth2_introspection` (non-blocking core-local fire-and-forget from `velda-worker-{i}` to `velda-shadow-{i}`) |
 
 ---
@@ -130,18 +130,10 @@ To allow protocol-independent short-circuiting without leaking internal headers:
 | Plugin | PBWW | Description |
 | :--- | :---: | :--- |
 | [`acme_cert_rotator`](src/background/acme_cert_rotator/) | `10` | Automated ACME HTTP-01 TLS certificate issuance & SNI hot-swap. |
-| [`clickhouse_log_shipper`](src/background/clickhouse_log_shipper/) | `75` | Native ClickHouse HTTP RowBinary/JSON access log exporter. |
-| [`elasticsearch_log_shipper`](src/background/elasticsearch_log_shipper/) | `60` | Elasticsearch NDJSON bulk access log shipper. |
 | [`health_probe`](src/background/health_probe/) | `1` | Sequential inline `/livez` and `/readyz` Kubernetes probe listener. |
-| [`kafka_log_shipper`](src/background/kafka_log_shipper/) | `75` | Kafka RecordBatch v2 zstd access log producer. |
-| [`loki_log_shipper`](src/background/loki_log_shipper/) | `80` | Grafana Loki multi-stream protobuf/JSON log exporter. |
-| [`otlp_log_shipper`](src/background/otlp_log_shipper/) | `70` | OpenTelemetry access log exporter over HTTP/gRPC. |
-| [`otlp_metrics_exporter`](src/background/otlp_metrics_exporter/) | `40` | OpenTelemetry atomic metrics snapshot exporter. |
-| [`otlp_trace_exporter`](src/background/otlp_trace_exporter/) | `50` | OpenTelemetry distributed span batch exporter. |
-| [`prometheus_exporter`](src/background/prometheus_exporter/) | `30` | Lock-free OpenMetrics `/metrics` endpoint on Shadow Worker. |
-| [`s3_log_shipper`](src/background/s3_log_shipper/) | `65` | SigV4 + zstd batched access log uploader to S3-compatible storage. |
-| [`statsd_exporter`](src/background/statsd_exporter/) | `20` | MTU-chunked StatsD / DogStatsD UDP metrics pusher (`sendmmsg`). |
-| [`std_log_shipper`](src/background/std_log_shipper/) | `15` | Buffered `stdout` / `stderr` / file access log writer. |
+| [`log_exporter`](src/background/log_exporter/) | `80` | Consolidated access log exporter supporting local streams and ETP sinks (ClickHouse, ES, Loki, Kafka, S3, OTLP). |
+| [`metrics_exporter`](src/background/metrics_exporter/) | `40` | Hybrid Prometheus OpenMetrics pull endpoint + ETP push exporter (OTLP HTTP/Proto, HTTP/JSON, gRPC, StatsD, DogStatsD) with `status_mask` bitmask scanning. |
+| [`trace_exporter`](src/background/trace_exporter/) | `50` | Consolidated OpenTelemetry distributed span exporter via `velda-etp` (`OtlpEtp`). |
 
 ---
 
