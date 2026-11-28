@@ -15,7 +15,7 @@ use velda_core::{L7Request, L7Response};
 
 use super::driver::{ClientCommand, run_client_driver};
 use crate::config::GrpcConfig;
-use crate::error::GrpcError;
+use crate::outcome::GrpcOutcome;
 
 /// An active, persistent multiplexed gRPC upstream client connection over UDP / QUIC.
 #[derive(Clone)]
@@ -27,7 +27,7 @@ pub struct GrpcUdpClient {
 
 impl GrpcUdpClient {
     /// Dispatches an owned [`L7Request`] over a new multiplexed bidirectional stream on this connection.
-    pub async fn send_request(&self, req: L7Request) -> Result<L7Response, GrpcError> {
+    pub async fn send_request(&self, req: L7Request) -> Result<L7Response, GrpcOutcome> {
         let (reply_tx, reply_rx) = oneshot::channel();
         self.command_tx
             .send(ClientCommand::SendRequest {
@@ -35,11 +35,11 @@ impl GrpcUdpClient {
                 reply_tx,
             })
             .await
-            .map_err(|_| GrpcError::Protocol("connection closed".into()))?;
+            .map_err(|_| GrpcOutcome::Protocol("connection closed".into()))?;
 
         reply_rx
             .await
-            .map_err(|_| GrpcError::Protocol("connection closed".into()))?
+            .map_err(|_| GrpcOutcome::Protocol("connection closed".into()))?
     }
 
     /// Returns the target physical `(ip: u128, port_be: u16)` of this client connection.
@@ -61,13 +61,13 @@ impl GrpcUdpClient {
 }
 
 /// Builds default QUIC client configuration for gRPC over UDP upstream.
-pub fn default_client_config() -> Result<ClientConfig, GrpcError> {
+pub fn default_client_config() -> Result<ClientConfig, GrpcOutcome> {
     let rustls_client = velda_tls::client::build_insecure_tls13_client_config(vec![
         b"grpc-exp".to_vec(),
         b"h3".to_vec(),
     ]);
     velda_tls::client::build_quic_client_config(rustls_client)
-        .map_err(|e| GrpcError::Internal(format!("QUIC crypto config error: {e}")))
+        .map_err(|e| GrpcOutcome::Internal(format!("QUIC crypto config error: {e}")))
 }
 
 /// Establishes a persistent, multiplexed gRPC client connection over QUIC / UDP to the target backend endpoint
@@ -78,7 +78,7 @@ pub async fn connect(
     server_name: &str,
     config: &GrpcConfig,
     client_cfg: ClientConfig,
-) -> Result<GrpcUdpClient, GrpcError> {
+) -> Result<GrpcUdpClient, GrpcOutcome> {
     let is_v4 = velda_core::lut::ip::is_v4_u128(target_ip);
     let target = if is_v4 {
         std::net::SocketAddr::V4(velda_core::lut::ip::v4itoaddr(target_ip, target_port_be))
@@ -91,7 +91,7 @@ pub async fn connect(
     } else {
         "[::]:0".parse().unwrap()
     };
-    let socket = Arc::new(UdpSocket::bind(bind_addr).await.map_err(GrpcError::Io)?);
+    let socket = Arc::new(UdpSocket::bind(bind_addr).await.map_err(GrpcOutcome::Io)?);
 
     // 2. Build QUIC client endpoint and config
     let endpoint_config = Arc::new(EndpointConfig::default());
@@ -101,7 +101,7 @@ pub async fn connect(
     let (handle, mut conn) = endpoint
         .connect(now, client_cfg, target, server_name)
         .map_err(|e| {
-            GrpcError::Internal(format!("Failed to initiate QUIC connect to {target}: {e}"))
+            GrpcOutcome::Internal(format!("Failed to initiate QUIC connect to {target}: {e}"))
         })?;
 
     let mut transmit_buf = Vec::with_capacity(65535);
@@ -113,7 +113,7 @@ pub async fn connect(
 
     while conn.is_handshaking() {
         if handshake_start.elapsed() > handshake_timeout {
-            return Err(GrpcError::Timeout);
+            return Err(GrpcOutcome::Timeout);
         }
 
         // Drain pending transmits
@@ -129,7 +129,7 @@ pub async fn connect(
 
         tokio::select! {
             res = socket.recv_from(&mut socket_recv_buf) => {
-                let (len, from_addr) = res.map_err(GrpcError::Io)?;
+                let (len, from_addr) = res.map_err(GrpcOutcome::Io)?;
                 let now = Instant::now();
                 let payload = BytesMut::from(&socket_recv_buf[..len]);
                 let mut resp_buf = Vec::new();
@@ -152,7 +152,7 @@ pub async fn connect(
         // Poll connection events during handshake to catch failures early
         while let Some(event) = conn.poll() {
             if let Event::ConnectionLost { reason } = event {
-                return Err(GrpcError::Protocol(format!(
+                return Err(GrpcOutcome::Protocol(format!(
                     "gRPC QUIC connection to {target} failed during handshake: {reason}"
                 )));
             }
@@ -160,7 +160,7 @@ pub async fn connect(
     }
 
     if conn.is_drained() {
-        return Err(GrpcError::Protocol("QUIC connection drained".into()));
+        return Err(GrpcOutcome::Protocol("QUIC connection drained".into()));
     }
 
     // 4. Drain final handshake transmits

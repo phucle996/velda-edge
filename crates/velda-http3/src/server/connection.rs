@@ -27,7 +27,7 @@ use quinn_proto::{
 use velda_core::{Body, L7Request, L7Response};
 
 use crate::config::Http3Config;
-use crate::error::Http3Error;
+use crate::outcome::Http3Outcome;
 use crate::proto::frame::{
     Http3Frame, decode_frame, encode_frame, encode_varint, error_code, settings_id, stream_type,
 };
@@ -746,11 +746,11 @@ impl Http3Engine {
         handle: ConnectionHandle,
         stream_id: StreamId,
         response: &L7Response,
-    ) -> Result<Vec<OutgoingDatagram>, Http3Error> {
+    ) -> Result<Vec<OutgoingDatagram>, Http3Outcome> {
         let conn = self
             .connections
             .get_mut(&handle)
-            .ok_or_else(|| Http3Error::H3("Connection not found".into()))?;
+            .ok_or_else(|| Http3Outcome::H3("Connection not found".into()))?;
 
         let (outgoing, remaining) = crate::server::response::send_response(
             conn,
@@ -767,7 +767,7 @@ impl Http3Engine {
                     .reset(quinn_proto::VarInt::from_u32(
                         crate::proto::frame::error_code::H3_REQUEST_CANCELLED as u32,
                     ));
-                return Err(Http3Error::H3(
+                return Err(Http3Outcome::H3(
                     "HTTP/3 response pending buffer overflow: client throttled or slow reader"
                         .into(),
                 ));
@@ -795,11 +795,11 @@ impl Http3Engine {
         stream_id: StreamId,
         status: StatusCode,
         headers: &velda_core::HeaderWorkspace,
-    ) -> Result<Vec<OutgoingDatagram>, Http3Error> {
+    ) -> Result<Vec<OutgoingDatagram>, Http3Outcome> {
         let conn = self
             .connections
             .get_mut(&handle)
-            .ok_or_else(|| Http3Error::H3("Connection not found".into()))?;
+            .ok_or_else(|| Http3Outcome::H3("Connection not found".into()))?;
 
         crate::server::response::send_response_head(
             conn,
@@ -820,11 +820,11 @@ impl Http3Engine {
         chunk: &Bytes,
         finish: bool,
         permit: Option<tokio::sync::OwnedSemaphorePermit>,
-    ) -> Result<Vec<OutgoingDatagram>, Http3Error> {
+    ) -> Result<Vec<OutgoingDatagram>, Http3Outcome> {
         let conn = self
             .connections
             .get_mut(&handle)
-            .ok_or_else(|| Http3Error::H3("Connection not found".into()))?;
+            .ok_or_else(|| Http3Outcome::H3("Connection not found".into()))?;
 
         // 1. Invariant: If this stream ALREADY has pending bytes that were not yet accepted by Quinn,
         // we cannot write new bytes directly to Quinn because that would write data out of order!
@@ -838,7 +838,7 @@ impl Http3Engine {
                         .reset(quinn_proto::VarInt::from_u32(
                             crate::proto::frame::error_code::H3_REQUEST_CANCELLED as u32,
                         ));
-                    return Err(Http3Error::H3(
+                    return Err(Http3Outcome::H3(
                         "HTTP/3 response pending buffer overflow: client throttled or slow reader"
                             .into(),
                     ));
@@ -877,7 +877,7 @@ impl Http3Engine {
                     .reset(quinn_proto::VarInt::from_u32(
                         crate::proto::frame::error_code::H3_REQUEST_CANCELLED as u32,
                     ));
-                return Err(Http3Error::H3(
+                return Err(Http3Outcome::H3(
                     "HTTP/3 response pending buffer overflow: client throttled or slow reader"
                         .into(),
                 ));

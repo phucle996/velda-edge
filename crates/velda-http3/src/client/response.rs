@@ -12,7 +12,7 @@ pub struct Http3StreamResponse {
     /// Response headers.
     pub headers: HeaderWorkspace,
     /// Progressive response DATA chunk receiver.
-    pub chunk_rx: tokio::sync::mpsc::Receiver<Result<bytes::Bytes, crate::error::Http3Error>>,
+    pub chunk_rx: tokio::sync::mpsc::Receiver<Result<bytes::Bytes, crate::outcome::Http3Outcome>>,
 }
 
 impl Http3StreamResponse {
@@ -21,7 +21,7 @@ impl Http3StreamResponse {
     pub fn new(
         status: StatusCode,
         headers: HeaderWorkspace,
-        chunk_rx: tokio::sync::mpsc::Receiver<Result<bytes::Bytes, crate::error::Http3Error>>,
+        chunk_rx: tokio::sync::mpsc::Receiver<Result<bytes::Bytes, crate::outcome::Http3Outcome>>,
     ) -> Self {
         Self {
             status,
@@ -36,7 +36,9 @@ impl Http3StreamResponse {
     /// Returns `Some(Ok(bytes))` on chunk arrival, `Some(Err(e))` on protocol/stream error,
     /// or `None` on clean end of stream (FIN reached).
     #[inline]
-    pub async fn next_chunk(&mut self) -> Option<Result<bytes::Bytes, crate::error::Http3Error>> {
+    pub async fn next_chunk(
+        &mut self,
+    ) -> Option<Result<bytes::Bytes, crate::outcome::Http3Outcome>> {
         self.chunk_rx.recv().await
     }
 }

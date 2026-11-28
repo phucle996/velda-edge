@@ -10,7 +10,7 @@ use http::StatusCode;
 use http::header::{CONNECTION, CONTENT_LENGTH, CONTENT_TYPE, HeaderValue, TE, UPGRADE};
 use tokio::io::duplex;
 use velda_http2::config::Http2Config;
-use velda_http2::error::Http2Error;
+use velda_http2::outcome::Http2Outcome;
 use velda_http2::server::connection::Http2ServerConnection;
 
 #[tokio::main]
@@ -65,7 +65,7 @@ async fn bench_oversized_payload_rejection() {
     let mut rejections = 0;
     loop {
         match server_conn.accept_h2_request().await {
-            Err(Http2Error::PayloadTooLarge(_)) => {
+            Err(Http2Outcome::PayloadTooLarge(_)) => {
                 rejections += 1;
             }
             Ok(Some(_)) => {}

@@ -91,10 +91,7 @@ mod tests {
             HeaderValue::from_static("b=2; Path=/"),
         );
         let sanitized_multi = sanitize_workspace_headers(&multi);
-        let cookies: Vec<_> = sanitized_multi
-            .get_all(http::header::SET_COOKIE)
-            .iter()
-            .collect();
+        let cookies: Vec<_> = sanitized_multi.get_all(http::header::SET_COOKIE).collect();
         assert_eq!(cookies.len(), 2);
     }
 }

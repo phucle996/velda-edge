@@ -16,8 +16,8 @@ use velda_core::Endpoint;
 use velda_discovery::{Discovery, EndpointSet};
 use velda_lb::{LoadBalancer, RoundRobin, SelectionContext};
 
-use crate::error::{Result, UpstreamError};
 use crate::health::{HealthConfig, HealthTracker};
+use crate::outcome::UpstreamOutcome;
 
 thread_local! {
     static UPSTREAM_LANE_ID: Cell<usize> = const { Cell::new(usize::MAX) };
@@ -269,11 +269,14 @@ impl<LB: LoadBalancer> Upstream<LB> {
     // ------------------------------------------------------------------------
 
     /// Selects a healthy endpoint address using the configured load balancer and selection context.
-    pub fn select_endpoint_with_context(&self, ctx: &SelectionContext<'_>) -> Result<(u128, u16)> {
+    pub fn select_endpoint_with_context(
+        &self,
+        ctx: &SelectionContext<'_>,
+    ) -> std::result::Result<(u128, u16), UpstreamOutcome> {
         let lane_snap = self.current_lane_endpoints();
         let all_eps: &[Endpoint] = &lane_snap.endpoints;
         if all_eps.is_empty() {
-            return Err(UpstreamError::NoEndpointsAvailable(Arc::clone(&self.id)));
+            return Err(UpstreamOutcome::NoEndpointsAvailable(Arc::clone(&self.id)));
         }
 
         let cached_degraded;
@@ -284,7 +287,7 @@ impl<LB: LoadBalancer> Upstream<LB> {
             let current_epoch = self.health.epoch();
             cached_degraded = self.get_or_compile_degraded(all_eps, current_gen, current_epoch);
             if cached_degraded.is_empty() {
-                return Err(UpstreamError::NoEndpointsAvailable(Arc::clone(&self.id)));
+                return Err(UpstreamOutcome::NoEndpointsAvailable(Arc::clone(&self.id)));
             }
             &cached_degraded[..]
         };
@@ -292,22 +295,25 @@ impl<LB: LoadBalancer> Upstream<LB> {
         let selected = self
             .balancer
             .select(usable, ctx)
-            .ok_or_else(|| UpstreamError::NoEndpointsAvailable(Arc::clone(&self.id)))?;
+            .ok_or_else(|| UpstreamOutcome::NoEndpointsAvailable(Arc::clone(&self.id)))?;
 
         Ok((selected.ip, selected.port_be))
     }
 
     /// Selects a healthy endpoint address using the configured load balancer.
     #[inline]
-    pub fn select_endpoint(&self) -> Result<(u128, u16)> {
+    pub fn select_endpoint(&self) -> std::result::Result<(u128, u16), UpstreamOutcome> {
         self.select_endpoint_with_context(&SelectionContext::NONE)
     }
 
     /// Executes a protocol-specific asynchronous operation against a healthy target endpoint.
     ///
     /// Manages healthy candidate selection, health success/failure tracking, and automatic
-    /// failover if the operation encounters a network/connection error.
-    pub async fn execute<F, Fut, T, E>(&self, mut action: F) -> Result<T>
+    /// failover if the operation encounters a network/connection failure.
+    pub async fn execute<F, Fut, T, E>(
+        &self,
+        mut action: F,
+    ) -> std::result::Result<T, UpstreamOutcome>
     where
         F: FnMut((u128, u16)) -> Fut,
         Fut: std::future::Future<Output = std::result::Result<T, E>>,
@@ -316,7 +322,7 @@ impl<LB: LoadBalancer> Upstream<LB> {
         let lane_snap = self.current_lane_endpoints();
         let all_eps: &[Endpoint] = &lane_snap.endpoints;
         if all_eps.is_empty() {
-            return Err(UpstreamError::NoEndpointsAvailable(Arc::clone(&self.id)));
+            return Err(UpstreamOutcome::NoEndpointsAvailable(Arc::clone(&self.id)));
         }
 
         let cached_degraded;
@@ -327,7 +333,7 @@ impl<LB: LoadBalancer> Upstream<LB> {
             let current_epoch = self.health.epoch();
             cached_degraded = self.get_or_compile_degraded(all_eps, current_gen, current_epoch);
             if cached_degraded.is_empty() {
-                return Err(UpstreamError::NoEndpointsAvailable(Arc::clone(&self.id)));
+                return Err(UpstreamOutcome::NoEndpointsAvailable(Arc::clone(&self.id)));
             }
             &cached_degraded[..]
         };
@@ -365,7 +371,7 @@ impl<LB: LoadBalancer> Upstream<LB> {
             }
         }
 
-        Err(UpstreamError::ConnectionFailed {
+        Err(UpstreamOutcome::ConnectionFailed {
             ip: usable[0].ip,
             port_be: usable[0].port_be,
             reason: last_err.unwrap_or_else(|| "all candidate endpoints failed".into()),

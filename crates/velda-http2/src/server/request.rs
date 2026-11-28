@@ -9,7 +9,7 @@ use velda_core::buffer::header::HeaderWorkspace;
 use velda_core::{Body, L7Request};
 
 use super::connection::{ServerBodyEvent, ServerCmd};
-use crate::error::Http2Error;
+use crate::outcome::Http2Outcome;
 
 /// Extensible HTTP Prioritization Scheme (RFC 9218).
 ///
@@ -191,7 +191,7 @@ pub enum StreamTeeEvent {
 #[derive(Debug)]
 pub struct Http2StreamReceiver {
     pub(crate) stream_id: u32,
-    pub(crate) body_rx: mpsc::UnboundedReceiver<Result<ServerBodyEvent, Http2Error>>,
+    pub(crate) body_rx: mpsc::UnboundedReceiver<Result<ServerBodyEvent, Http2Outcome>>,
     pub(crate) cmd_tx: mpsc::UnboundedSender<ServerCmd>,
     pub(crate) max_body_size: usize,
     pub bytes_received: usize,
@@ -233,20 +233,20 @@ impl Http2StreamReceiver {
     }
 
     #[inline(always)]
-    fn record_chunk(&mut self, len: usize) -> Result<(), Http2Error> {
+    fn record_chunk(&mut self, len: usize) -> Result<(), Http2Outcome> {
         self.bytes_received = self.bytes_received.saturating_add(len);
         let _ = self.cmd_tx.send(ServerCmd::ReleaseRecvCapacity {
             stream_id: self.stream_id,
             bytes: len as u32,
         });
         if self.bytes_received > self.max_body_size {
-            return Err(Http2Error::PayloadTooLarge(self.bytes_received));
+            return Err(Http2Outcome::PayloadTooLarge(self.bytes_received));
         }
         Ok(())
     }
 
     /// Asynchronously receives the next `DATA` chunk from the incoming stream.
-    pub async fn recv_chunk(&mut self) -> Result<Option<Bytes>, Http2Error> {
+    pub async fn recv_chunk(&mut self) -> Result<Option<Bytes>, Http2Outcome> {
         if self.eof {
             self.push_tee_end();
             return Ok(None);
@@ -297,7 +297,7 @@ impl Http2StreamReceiver {
     pub async fn recv_coalesced_chunk(
         &mut self,
         max_coalesce_bytes: usize,
-    ) -> Result<Option<Bytes>, Http2Error> {
+    ) -> Result<Option<Bytes>, Http2Outcome> {
         let Some(first) = self.recv_chunk().await? else {
             return Ok(None);
         };
@@ -370,7 +370,7 @@ impl Http2StreamReceiver {
     }
 
     /// Accumulates all remaining chunks into a [`Body`] while enforcing `max_body_size`.
-    pub async fn consume_all(&mut self) -> Result<Body, Http2Error> {
+    pub async fn consume_all(&mut self) -> Result<Body, Http2Outcome> {
         self.consume_all_into_slab(None).await
     }
 
@@ -379,7 +379,7 @@ impl Http2StreamReceiver {
     pub async fn consume_all_into_slab(
         &mut self,
         slab_pool: Option<&std::sync::Arc<velda_core::buffer::slab::PayloadSlabPool>>,
-    ) -> Result<Body, Http2Error> {
+    ) -> Result<Body, Http2Outcome> {
         let Some(first_chunk) = self.recv_chunk().await? else {
             return Ok(Body::Empty);
         };

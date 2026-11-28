@@ -10,7 +10,7 @@ use http::StatusCode;
 use quinn_proto::{Connection, StreamId};
 use velda_core::{Body, HeaderWorkspace, L7Response};
 
-use crate::error::Http3Error;
+use crate::outcome::Http3Outcome;
 use crate::proto::frame::{Http3Frame, encode_frame, encode_varint, encode_varint_slice, frame_id};
 use crate::proto::qpack::encode_qpack_response;
 use crate::server::connection::OutgoingDatagram;
@@ -58,7 +58,7 @@ pub fn send_response(
     response: &L7Response,
     transmit_buf: &mut Vec<u8>,
     now: Instant,
-) -> Result<(Vec<OutgoingDatagram>, Option<Bytes>), Http3Error> {
+) -> Result<(Vec<OutgoingDatagram>, Option<Bytes>), Http3Outcome> {
     // 1. Encode QPACK HEADERS frame with pre-allocated buffer
     let mut header_payload = BytesMut::with_capacity(256);
     encode_qpack_response(response.status, &response.headers, &mut header_payload);
@@ -72,11 +72,11 @@ pub fn send_response(
         match conn.send_stream(stream_id).write(&write_buf[written..]) {
             Ok(n) if n > 0 => written += n,
             Ok(_) => break,
-            Err(e) => return Err(Http3Error::H3(e.to_string())),
+            Err(e) => return Err(Http3Outcome::H3(e.to_string())),
         }
     }
     if written < write_buf.len() {
-        return Err(Http3Error::H3(format!(
+        return Err(Http3Outcome::H3(format!(
             "Failed to write complete response headers: stream flow control window exhausted ({written}/{} bytes written)",
             write_buf.len()
         )));
@@ -103,11 +103,11 @@ pub fn send_response(
             {
                 Ok(n) if n > 0 => hdr_written += n,
                 Ok(_) => break,
-                Err(e) => return Err(Http3Error::H3(e.to_string())),
+                Err(e) => return Err(Http3Outcome::H3(e.to_string())),
             }
         }
         if hdr_written < hdr_len {
-            return Err(Http3Error::H3(
+            return Err(Http3Outcome::H3(
                 "Flow control window exhausted for DATA frame header".into(),
             ));
         }
@@ -118,7 +118,7 @@ pub fn send_response(
                 Ok(n) if n > 0 => body_written += n,
                 Ok(_) => break,
                 Err(quinn_proto::WriteError::Blocked) => break,
-                Err(e) => return Err(Http3Error::H3(e.to_string())),
+                Err(e) => return Err(Http3Outcome::H3(e.to_string())),
             }
         }
         if body_written < b.len() {
@@ -163,7 +163,7 @@ pub fn send_response_head(
     headers: &HeaderWorkspace,
     transmit_buf: &mut Vec<u8>,
     now: Instant,
-) -> Result<Vec<OutgoingDatagram>, Http3Error> {
+) -> Result<Vec<OutgoingDatagram>, Http3Outcome> {
     let mut header_payload = BytesMut::new();
     encode_qpack_response(status, headers, &mut header_payload);
     let header_frame = Http3Frame::Headers(header_payload.freeze());
@@ -176,11 +176,11 @@ pub fn send_response_head(
         match conn.send_stream(stream_id).write(&write_buf[written..]) {
             Ok(n) if n > 0 => written += n,
             Ok(_) => break,
-            Err(e) => return Err(Http3Error::H3(e.to_string())),
+            Err(e) => return Err(Http3Outcome::H3(e.to_string())),
         }
     }
     if written < write_buf.len() {
-        return Err(Http3Error::H3(format!(
+        return Err(Http3Outcome::H3(format!(
             "Failed to write complete response headers: stream flow control window exhausted ({written}/{} bytes written)",
             write_buf.len()
         )));
@@ -230,7 +230,7 @@ pub fn send_data_chunk(
     finish: bool,
     transmit_buf: &mut Vec<u8>,
     now: Instant,
-) -> Result<(Vec<OutgoingDatagram>, Option<Bytes>), Http3Error> {
+) -> Result<(Vec<OutgoingDatagram>, Option<Bytes>), Http3Outcome> {
     let mut remaining_frame: Option<Bytes> = None;
 
     if !chunk.is_empty() {
@@ -247,7 +247,7 @@ pub fn send_data_chunk(
                 Ok(n) if n > 0 => hdr_written += n,
                 Ok(_) => break,
                 Err(quinn_proto::WriteError::Blocked) => break,
-                Err(e) => return Err(Http3Error::H3(e.to_string())),
+                Err(e) => return Err(Http3Outcome::H3(e.to_string())),
             }
         }
 
@@ -263,7 +263,7 @@ pub fn send_data_chunk(
                     Ok(n) if n > 0 => body_written += n,
                     Ok(_) => break,
                     Err(quinn_proto::WriteError::Blocked) => break,
-                    Err(e) => return Err(Http3Error::H3(e.to_string())),
+                    Err(e) => return Err(Http3Outcome::H3(e.to_string())),
                 }
             }
             if body_written < chunk.len() {

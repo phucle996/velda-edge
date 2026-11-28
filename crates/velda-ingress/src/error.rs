@@ -1,7 +1,6 @@
-//! Ingress layer errors and standard conversions.
+//! Ingress layer errors.
 
 use thiserror::Error;
-use velda_core::{Error as CoreError, ErrorKind};
 use velda_sock::{SockError, format_raw_addr};
 use velda_xdp::XdpError;
 
@@ -51,56 +50,6 @@ pub enum IngressError {
     Closed,
 }
 
-/// Backwards compatibility alias for `IngressError`.
-pub type TransportError = IngressError;
-
-impl From<IngressError> for CoreError {
-    fn from(err: IngressError) -> Self {
-        match err {
-            IngressError::Sock(e) => e.into(),
-            IngressError::Xdp(e) => e.into(),
-            IngressError::Io(e) => {
-                CoreError::with_source(ErrorKind::Connection, "ingress I/O error", e)
-            }
-            IngressError::Bind {
-                ip,
-                port_be,
-                source,
-            } => CoreError::with_source(
-                ErrorKind::Connection,
-                format!(
-                    "failed to bind listener on {}",
-                    format_raw_addr(ip, port_be)
-                ),
-                source,
-            ),
-            IngressError::Accept(e) => {
-                CoreError::with_source(ErrorKind::Connection, "failed to accept connection", e)
-            }
-            IngressError::Connect {
-                ip,
-                port_be,
-                source,
-            } => CoreError::with_source(
-                ErrorKind::UpstreamUnavailable,
-                format!(
-                    "failed to connect to target {}",
-                    format_raw_addr(ip, port_be)
-                ),
-                source,
-            ),
-            IngressError::Forward(e) => CoreError::with_source(
-                ErrorKind::Connection,
-                "ingress bidirectional forwarding error",
-                e,
-            ),
-            IngressError::Closed => {
-                CoreError::new(ErrorKind::Connection, "ingress connection closed")
-            }
-        }
-    }
-}
-
 /// Specialized Result type for ingress operations.
 pub type Result<T> = std::result::Result<T, IngressError>;
 
@@ -110,11 +59,9 @@ mod tests {
     use std::io::{Error as IoError, ErrorKind as IoErrorKind};
 
     #[test]
-    fn test_error_conversion_to_core_error() {
+    fn test_ingress_error_display_formatting() {
         let err = IngressError::Closed;
-        let core_err: CoreError = err.into();
-        assert_eq!(core_err.kind(), ErrorKind::Connection);
-        assert_eq!(core_err.message(), "ingress connection closed");
+        assert_eq!(err.to_string(), "connection closed unexpectedly");
 
         let ip = velda_core::lut::ip::v4_to_u128(u32::from_be_bytes([127, 0, 0, 1]));
         let port_be = 9090u16.to_be();
@@ -123,16 +70,13 @@ mod tests {
             port_be,
             source: IoError::new(IoErrorKind::AddrInUse, "address in use"),
         };
-        let core_bind: CoreError = bind_err.into();
-        assert_eq!(core_bind.kind(), ErrorKind::Connection);
-        assert!(core_bind.message().contains("127.0.0.1:9090"));
+        assert!(bind_err.to_string().contains("127.0.0.1:9090"));
 
         let conn_err = IngressError::Connect {
             ip,
             port_be,
             source: IoError::new(IoErrorKind::ConnectionRefused, "refused"),
         };
-        let core_conn: CoreError = conn_err.into();
-        assert_eq!(core_conn.kind(), ErrorKind::UpstreamUnavailable);
+        assert!(conn_err.to_string().contains("127.0.0.1:9090"));
     }
 }

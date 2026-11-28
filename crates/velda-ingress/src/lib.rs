@@ -12,19 +12,9 @@ pub mod error;
 pub mod sock;
 pub mod xdp;
 
-// Backward-compatible module alias for callers expecting `velda_ingress::ingress::*`
-pub mod ingress {
-    pub use crate::binding::*;
-    pub use crate::sock::*;
-    pub use crate::xdp::*;
-}
-
 pub use binding::{IngressBinding, XdpConfig};
-pub use engine::{
-    EngineConfig, EngineHandle, IngressEngine, IngressHandle, ShardContext, TrafficEngine,
-    run_ingress_shard,
-};
-pub use error::{IngressError, Result, TransportError};
+pub use engine::{EngineConfig, IngressEngine, IngressHandle, ShardContext, run_ingress_shard};
+pub use error::{IngressError, Result};
 pub use sock::{TcpBinding, TcpIngress, UdpBinding, UdpIngress};
 pub use xdp::XdpIngress;
 

@@ -1,7 +1,6 @@
 //! Strongly typed error definitions for TLS subsystem.
 
 use thiserror::Error;
-use velda_core::{Error as CoreError, ErrorKind};
 
 /// Specific errors that can occur during TLS configuration, handshake, or execution.
 #[derive(Debug, Error)]
@@ -35,24 +34,4 @@ pub enum TlsError {
 
     #[error("I/O error: {0}")]
     Io(#[from] std::io::Error),
-}
-
-impl From<TlsError> for CoreError {
-    fn from(err: TlsError) -> Self {
-        match err {
-            TlsError::NoSniProvided | TlsError::SniNotFound(_) => {
-                CoreError::new(ErrorKind::Protocol, err.to_string())
-            }
-            TlsError::InvalidCertificate(_)
-            | TlsError::InvalidPrivateKey(_)
-            | TlsError::InvalidCaBundle(_)
-            | TlsError::UnsupportedProtocolVersion(_)
-            | TlsError::UpstreamTargetNotFound(_) => {
-                CoreError::new(ErrorKind::Internal, err.to_string())
-            }
-            TlsError::HandshakeFailed(_) => CoreError::new(ErrorKind::Connection, err.to_string()),
-            TlsError::Rustls(ref r) => CoreError::new(ErrorKind::Protocol, r.to_string()),
-            TlsError::Io(ref io) => CoreError::new(ErrorKind::Connection, io.to_string()),
-        }
-    }
 }

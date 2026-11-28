@@ -6,11 +6,12 @@
 use bytes::{Bytes, BytesMut};
 use http::header::CONTENT_TYPE;
 use http::{HeaderValue, StatusCode};
-use velda_core::{Body, GrpcStatus, HeaderWorkspace};
+use velda_core::{Body, HeaderWorkspace};
 use velda_http2::server::response::{Http2Responder, Http2StreamSender};
 
-use crate::error::GrpcError;
+use crate::GrpcStatus;
 use crate::frame::encode_grpc_frame;
+use crate::outcome::GrpcOutcome;
 use crate::wire::{GrpcWire, X_REQUEST_ID};
 
 /// Downstream gRPC server response head metadata over TCP.
@@ -124,7 +125,7 @@ impl GrpcResponder {
         status: GrpcStatus,
         payload: Option<&[u8]>,
         extra_headers: Option<HeaderWorkspace>,
-    ) -> Result<(), GrpcError> {
+    ) -> Result<(), GrpcOutcome> {
         let mut headers = extra_headers.unwrap_or_else(|| HeaderWorkspace::empty(4));
         headers.insert(CONTENT_TYPE, GrpcWire::CONTENT_TYPE_VALUE);
         if let Some(ref req_id) = self.inner.request_id {
@@ -135,19 +136,28 @@ impl GrpcResponder {
         if is_trailers_only {
             headers.insert(GrpcWire::STATUS_NAME, status.code_header_value());
             self.inner
-                .send_parts(StatusCode::OK, &headers, &Body::Empty)?;
+                .send_parts(StatusCode::OK, &headers, &Body::Empty)
+                .map_err(GrpcOutcome::from_http2)?;
             return Ok(());
         }
 
-        let mut sender = self.inner.send_stream_response(StatusCode::OK, &headers)?;
+        let mut sender = self
+            .inner
+            .send_stream_response(StatusCode::OK, &headers)
+            .map_err(GrpcOutcome::from_http2)?;
 
         if let Some(data) = payload {
             let mut buf = BytesMut::new();
             encode_grpc_frame(data, false, &mut buf);
-            sender.send_chunk(buf.freeze()).await?;
+            sender
+                .send_chunk(buf.freeze())
+                .await
+                .map_err(GrpcOutcome::from_http2)?;
         }
 
-        sender.send_trailers(status.to_trailer_workspace(None))?;
+        sender
+            .send_trailers(status.to_trailer_workspace(None))
+            .map_err(GrpcOutcome::from_http2)?;
         Ok(())
     }
 
@@ -157,7 +167,7 @@ impl GrpcResponder {
         &mut self,
         status: GrpcStatus,
         message: Option<&str>,
-    ) -> Result<(), GrpcError> {
+    ) -> Result<(), GrpcOutcome> {
         let mut headers = HeaderWorkspace::empty(4);
         headers.insert(CONTENT_TYPE, GrpcWire::CONTENT_TYPE_VALUE);
         if let Some(ref req_id) = self.inner.request_id {
@@ -169,7 +179,8 @@ impl GrpcResponder {
         }
 
         self.inner
-            .send_parts(StatusCode::OK, &headers, &Body::Empty)?;
+            .send_parts(StatusCode::OK, &headers, &Body::Empty)
+            .map_err(GrpcOutcome::from_http2)?;
         Ok(())
     }
 
@@ -182,12 +193,17 @@ impl GrpcResponder {
         status: StatusCode,
         headers: &HeaderWorkspace,
         end_of_stream: bool,
-    ) -> Result<Option<Http2StreamSender>, GrpcError> {
+    ) -> Result<Option<Http2StreamSender>, GrpcOutcome> {
         if end_of_stream {
-            self.inner.send_parts(status, headers, &Body::Empty)?;
+            self.inner
+                .send_parts(status, headers, &Body::Empty)
+                .map_err(GrpcOutcome::from_http2)?;
             Ok(None)
         } else {
-            let sender = self.inner.send_stream_response(status, headers)?;
+            let sender = self
+                .inner
+                .send_stream_response(status, headers)
+                .map_err(GrpcOutcome::from_http2)?;
             Ok(Some(sender))
         }
     }

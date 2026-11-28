@@ -7,7 +7,7 @@ use tokio::net::TcpStream;
 use tokio::sync::watch;
 use velda_core::lut::ip::v4_to_u128;
 use velda_ingress::{
-    IngressBinding, TcpBinding, TcpIngress, TrafficEngine, UdpSocket, UdpSocketConfig,
+    IngressBinding, IngressEngine, TcpBinding, TcpIngress, UdpSocket, UdpSocketConfig,
 };
 use velda_sock::{raw_to_socket_addr, socket_addr_to_raw};
 
@@ -32,7 +32,7 @@ async fn test_tcp_ingress_carries_listener_id() {
     let raw = TcpIngress::bind(TcpBinding::new("tcp-ingress", LOOPBACK_IP, 0, false)).unwrap();
     let (raw_ip, raw_port_be) = raw.local_addr();
 
-    let mut engine = TrafficEngine::new();
+    let mut engine = IngressEngine::new();
     engine.add_tcp_ingress(http);
     engine.add_tcp_ingress(https);
     engine.add_tcp_ingress(raw);
@@ -119,7 +119,7 @@ async fn test_tcp_ingress_carries_listener_id() {
 async fn test_multi_port_heterogeneous_bindings() {
     let dummy_ephemeral: SocketAddr = "127.0.0.1:0".parse().unwrap();
 
-    let mut engine = TrafficEngine::new();
+    let mut engine = IngressEngine::new();
 
     for id in ["http-public", "http-internal", "tcp-db-pg", "tcp-redis"] {
         engine
@@ -188,7 +188,7 @@ async fn test_traffic_engine_declarative_reconciliation() {
         l.local_addr().unwrap()
     };
 
-    let mut engine = TrafficEngine::new();
+    let mut engine = IngressEngine::new();
     let handle = engine.handle();
 
     // Initial binding: port 1 only
@@ -292,7 +292,7 @@ async fn test_tcp_udp_dispatch_by_listener_id() {
     assert!(h3_bind.tls_enabled());
     assert!(!tcp_bind.tls_enabled());
 
-    let mut engine = TrafficEngine::new();
+    let mut engine = IngressEngine::new();
     engine.add_binding(tcp_bind).unwrap();
     engine.add_binding(h1_bind).unwrap();
     engine.add_binding(h2_bind).unwrap();
@@ -373,7 +373,7 @@ async fn test_traffic_engine_reconciliation_xdp_fail_fast_preserves_lkg() {
         l.local_addr().unwrap()
     };
 
-    let mut engine = TrafficEngine::new();
+    let mut engine = IngressEngine::new();
     let handle = engine.handle();
 
     // Initial stable binding

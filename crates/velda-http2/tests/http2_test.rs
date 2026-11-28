@@ -6,8 +6,8 @@ use velda_core::Body;
 use velda_core::buffer::header::HeaderWorkspace;
 use velda_http2::client::connector;
 use velda_http2::config::Http2Config;
-use velda_http2::error::Http2Error;
 use velda_http2::headers::sanitize_workspace_headers;
+use velda_http2::outcome::Http2Outcome;
 use velda_http2::server::connection::Http2ServerConnection;
 use velda_http2::strategy::Http2PipeStrategy;
 
@@ -151,7 +151,7 @@ async fn test_http2_payload_limit_enforcement() {
 
     let err = server_conn.accept_h2_request().await.unwrap_err();
     match err {
-        Http2Error::PayloadTooLarge(size) => {
+        Http2Outcome::PayloadTooLarge(size) => {
             assert!(size > 50);
         }
         other => panic!("expected PayloadTooLarge, got: {other:?}"),

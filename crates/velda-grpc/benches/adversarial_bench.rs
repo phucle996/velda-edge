@@ -11,8 +11,8 @@ use http::{Method, Uri};
 use tokio::io::duplex;
 use velda_core::HeaderWorkspace;
 use velda_grpc::config::GrpcConfig;
-use velda_grpc::error::GrpcError;
 use velda_grpc::frame::{decode_grpc_frame, encode_grpc_frame};
+use velda_grpc::outcome::GrpcOutcome;
 use velda_grpc::tcp::client::connector::GrpcUpstreamConnector;
 use velda_grpc::tcp::server::connection::GrpcServerConnection;
 use velda_grpc::wire::GrpcWire;
@@ -51,9 +51,9 @@ async fn bench_oversized_payload_rejection() {
         while let Some(mut stream) = server.accept().await.unwrap() {
             // Early guard rejects on the first chunk with PayloadTooLarge
             let res = stream.read_unary_message(MAX_SIZE).await;
-            assert!(matches!(res, Err(GrpcError::PayloadTooLarge(_))));
+            assert!(matches!(res, Err(GrpcOutcome::PayloadTooLarge(_))));
             let _ = stream.respond.send_trailers_only(
-                velda_core::GrpcStatus::ResourceExhausted,
+                velda_grpc::GrpcStatus::ResourceExhausted,
                 Some("message exceeds limit"),
             );
         }
@@ -114,7 +114,7 @@ fn bench_corrupted_compression_flag_rejection() {
     for _ in 0..ITERS {
         let mut test_buf = BytesMut::from(&frozen[..]);
         let res = decode_grpc_frame(&mut test_buf);
-        assert!(matches!(res, Err(GrpcError::Protocol(_))));
+        assert!(matches!(res, Err(GrpcOutcome::Protocol(_))));
     }
     let elapsed = start.elapsed();
 

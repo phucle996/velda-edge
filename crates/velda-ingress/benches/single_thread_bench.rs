@@ -13,7 +13,7 @@ use std::time::Instant;
 
 use common::CountingAllocator;
 use tokio::net::{TcpListener, TcpStream};
-use velda_ingress::ingress::IngressBinding;
+use velda_ingress::IngressBinding;
 use velda_ingress::udp::datagram::Datagram;
 use velda_ingress::{Connection, next_connection_id};
 

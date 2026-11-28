@@ -10,7 +10,7 @@ use velda_http2::server::connection::Http2ServerConnection;
 use super::responder::GrpcResponder;
 use super::stream::GrpcServerStream;
 use crate::config::GrpcConfig;
-use crate::error::GrpcError;
+use crate::outcome::GrpcOutcome;
 
 /// An active gRPC downstream server connection backed by native HTTP/2 framing.
 pub struct GrpcServerConnection {
@@ -20,12 +20,14 @@ pub struct GrpcServerConnection {
 impl GrpcServerConnection {
     /// Performs HTTP/2 server handshake over the transport stream configuring
     /// limits and stream concurrency from [`GrpcConfig`].
-    pub async fn handshake<IO>(stream: IO, config: &GrpcConfig) -> Result<Self, GrpcError>
+    pub async fn handshake<IO>(stream: IO, config: &GrpcConfig) -> Result<Self, GrpcOutcome>
     where
         IO: AsyncRead + AsyncWrite + Unpin + Send + 'static,
     {
         let h2_cfg = config.to_http2_config();
-        let inner = Http2ServerConnection::handshake(stream, h2_cfg).await?;
+        let inner = Http2ServerConnection::handshake(stream, h2_cfg)
+            .await
+            .map_err(GrpcOutcome::from_http2)?;
         Ok(Self { inner })
     }
 
@@ -35,23 +37,24 @@ impl GrpcServerConnection {
         stream: IO,
         config: &GrpcConfig,
         forwarding: H2ForwardingAddrs,
-    ) -> Result<Self, GrpcError>
+    ) -> Result<Self, GrpcOutcome>
     where
         IO: AsyncRead + AsyncWrite + Unpin + Send + 'static,
     {
         let h2_cfg = config.to_http2_config();
-        let inner =
-            Http2ServerConnection::handshake_with_forwarding(stream, h2_cfg, forwarding).await?;
+        let inner = Http2ServerConnection::handshake_with_forwarding(stream, h2_cfg, forwarding)
+            .await
+            .map_err(GrpcOutcome::from_http2)?;
         Ok(Self { inner })
     }
 
     /// Non-blocking accept returning `Some(...)` if an incoming gRPC request stream is queued.
     #[inline]
-    pub fn try_accept(&mut self) -> Result<Option<GrpcServerStream>, GrpcError> {
+    pub fn try_accept(&mut self) -> Result<Option<GrpcServerStream>, GrpcOutcome> {
         let Some(res) = self.inner.try_accept_streaming_request() else {
             return Ok(None);
         };
-        match res? {
+        match res.map_err(GrpcOutcome::from_http2)? {
             Some((head, receiver, responder)) => Ok(Some(GrpcServerStream {
                 head,
                 receiver,
@@ -62,8 +65,13 @@ impl GrpcServerConnection {
     }
 
     /// Accepts the next incoming gRPC stream from the client without buffering the body.
-    pub async fn accept(&mut self) -> Result<Option<GrpcServerStream>, GrpcError> {
-        let Some((head, receiver, responder)) = self.inner.accept_streaming_request().await? else {
+    pub async fn accept(&mut self) -> Result<Option<GrpcServerStream>, GrpcOutcome> {
+        let Some((head, receiver, responder)) = self
+            .inner
+            .accept_streaming_request()
+            .await
+            .map_err(GrpcOutcome::from_http2)?
+        else {
             return Ok(None);
         };
         Ok(Some(GrpcServerStream {

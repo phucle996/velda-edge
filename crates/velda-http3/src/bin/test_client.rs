@@ -18,14 +18,11 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         ),
         SocketAddr::V6(v6) => (v6.ip().to_bits(), v6.port().to_be()),
     };
-    let client = connect(
-        t_ip,
-        t_port_be,
-        "backend.local",
-        &config,
-        default_client_config()?,
-    )
-    .await?;
+    let client_cfg = default_client_config()
+        .map_err(|e| std::io::Error::other(format!("QUIC client config failure: {e}")))?;
+    let client = connect(t_ip, t_port_be, "backend.local", &config, client_cfg)
+        .await
+        .map_err(|o| std::io::Error::other(o.to_string()))?;
     println!("QUIC handshake completed in {:.2?}", start.elapsed());
 
     let mut req = L7Request::new(
@@ -38,7 +35,10 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     req.headers
         .insert("host", http::HeaderValue::from_static("backend.local"));
 
-    let resp = client.send_request(req).await?;
+    let resp = client
+        .send_request(req)
+        .await
+        .map_err(|o| std::io::Error::other(o.to_string()))?;
     println!("Status: {}", resp.status);
     if let Body::Bytes(b) = resp.body {
         println!("Body: {:?}", String::from_utf8_lossy(&b));

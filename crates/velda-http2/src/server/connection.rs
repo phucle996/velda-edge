@@ -25,7 +25,7 @@ use velda_core::buffer::header::HeaderWorkspace;
 use super::request::{Http2ServerRequest, Http2ServerRequestHead, Http2StreamReceiver};
 use super::response::Http2Responder;
 use crate::config::Http2Config;
-use crate::error::Http2Error;
+use crate::outcome::Http2Outcome;
 use crate::proto::frame::H2ErrorCode;
 use crate::proto::hpack::{H2ForwardingAddrs, H2IngressEnrich};
 use crate::proto::{H2Connection, H2Event, H2Role};
@@ -115,21 +115,21 @@ impl Http2FloodTracker {
 }
 
 struct ActiveServerStream {
-    body_tx: mpsc::UnboundedSender<Result<ServerBodyEvent, Http2Error>>,
+    body_tx: mpsc::UnboundedSender<Result<ServerBodyEvent, Http2Outcome>>,
     queued_send_bytes: Option<Arc<AtomicUsize>>,
     send_notify: Option<Arc<Notify>>,
 }
 
 /// Active HTTP/2 downstream connection handle consuming accepted multiplexed request streams.
 pub struct Http2ServerConnection {
-    accept_rx: mpsc::UnboundedReceiver<Result<Http2StreamingParts, Http2Error>>,
+    accept_rx: mpsc::UnboundedReceiver<Result<Http2StreamingParts, Http2Outcome>>,
     cmd_tx: mpsc::UnboundedSender<ServerCmd>,
     pub config: Http2Config,
 }
 
 impl Http2ServerConnection {
     /// Performs HTTP/2 server setup over `stream` without proxy forwarding header injection.
-    pub async fn handshake<IO>(stream: IO, config: Http2Config) -> Result<Self, Http2Error>
+    pub async fn handshake<IO>(stream: IO, config: Http2Config) -> Result<Self, Http2Outcome>
     where
         IO: AsyncRead + AsyncWrite + Unpin + Send + 'static,
     {
@@ -142,7 +142,7 @@ impl Http2ServerConnection {
         stream: IO,
         config: Http2Config,
         forwarding: H2ForwardingAddrs,
-    ) -> Result<Self, Http2Error>
+    ) -> Result<Self, Http2Outcome>
     where
         IO: AsyncRead + AsyncWrite + Unpin + Send + 'static,
     {
@@ -153,7 +153,7 @@ impl Http2ServerConnection {
         stream: IO,
         config: Http2Config,
         forwarding: Option<H2ForwardingAddrs>,
-    ) -> Result<Self, Http2Error>
+    ) -> Result<Self, Http2Outcome>
     where
         IO: AsyncRead + AsyncWrite + Unpin + Send + 'static,
     {
@@ -162,8 +162,8 @@ impl Http2ServerConnection {
 
         let initial_out = conn.take_outbound();
         if !initial_out.is_empty() {
-            wr.write_all(&initial_out).await?;
-            wr.flush().await?;
+            wr.write_all(&initial_out).await.map_err(Http2Outcome::Io)?;
+            wr.flush().await.map_err(Http2Outcome::Io)?;
         }
 
         let (accept_tx, accept_rx) = mpsc::unbounded_channel();
@@ -201,7 +201,7 @@ impl Http2ServerConnection {
     #[inline]
     pub fn try_accept_streaming_request(
         &mut self,
-    ) -> Option<Result<Option<Http2StreamingParts>, Http2Error>> {
+    ) -> Option<Result<Option<Http2StreamingParts>, Http2Outcome>> {
         match self.accept_rx.try_recv() {
             Ok(Ok(parts)) => Some(Ok(Some(parts))),
             Ok(Err(e)) => Some(Err(e)),
@@ -213,7 +213,7 @@ impl Http2ServerConnection {
     /// Accepts the next multiplexed streaming request head, body receiver, and responder.
     pub async fn accept_streaming_request(
         &mut self,
-    ) -> Result<Option<Http2StreamingParts>, Http2Error> {
+    ) -> Result<Option<Http2StreamingParts>, Http2Outcome> {
         match self.accept_rx.recv().await {
             Some(Ok(parts)) => Ok(Some(parts)),
             Some(Err(e)) => Err(e),
@@ -224,7 +224,7 @@ impl Http2ServerConnection {
     /// Accepts the next multiplexed request and buffers its body up to `config.max_body_size`.
     pub async fn accept_h2_request(
         &mut self,
-    ) -> Result<Option<(Http2ServerRequest, Http2Responder)>, Http2Error> {
+    ) -> Result<Option<(Http2ServerRequest, Http2Responder)>, Http2Outcome> {
         let Some((head, mut receiver, responder)) = self.accept_streaming_request().await? else {
             return Ok(None);
         };
@@ -235,7 +235,7 @@ impl Http2ServerConnection {
     /// Accepts the next multiplexed request and converts it into canonical [`L7Request`].
     pub async fn accept_request(
         &mut self,
-    ) -> Result<Option<(L7Request, Http2Responder)>, Http2Error> {
+    ) -> Result<Option<(L7Request, Http2Responder)>, Http2Outcome> {
         let opt = self.accept_h2_request().await?;
         Ok(opt.map(|(req, responder)| (req.into_l7_request(), responder)))
     }
@@ -246,7 +246,7 @@ async fn run_server_driver<IO>(
     mut conn: H2Connection,
     mut rd: tokio::io::ReadHalf<IO>,
     mut wr: tokio::io::WriteHalf<IO>,
-    accept_tx: mpsc::UnboundedSender<Result<Http2StreamingParts, Http2Error>>,
+    accept_tx: mpsc::UnboundedSender<Result<Http2StreamingParts, Http2Outcome>>,
     mut cmd_rx: mpsc::UnboundedReceiver<ServerCmd>,
     cmd_tx: mpsc::UnboundedSender<ServerCmd>,
     config: Http2Config,
@@ -311,7 +311,7 @@ async fn run_server_driver<IO>(
                                     write_buf.extend_from_slice(&err_out);
                                     let _ = wr.write_all(&write_buf).await;
                                 }
-                                let err = Http2Error::Protocol(proto_err);
+                                let err = Http2Outcome::Protocol(proto_err);
                                 fail_all_server_streams(&mut streams, &err);
                                 let _ = accept_tx.send(Err(err));
                                 return;
@@ -340,7 +340,7 @@ async fn run_server_driver<IO>(
         let _ = wr.write_all(&write_buf).await;
         let _ = wr.flush().await;
     }
-    fail_all_server_streams(&mut streams, &Http2Error::ConnectionClosed);
+    fail_all_server_streams(&mut streams, &Http2Outcome::ConnectionClosed);
 }
 
 #[inline]
@@ -366,7 +366,7 @@ fn dispatch_server_events(
     events: Vec<H2Event>,
     streams: &mut HashMap<u32, ActiveServerStream>,
     meta_map: &mut HashMap<u32, (u128, u64, HeaderValue)>,
-    accept_tx: &mpsc::UnboundedSender<Result<Http2StreamingParts, Http2Error>>,
+    accept_tx: &mpsc::UnboundedSender<Result<Http2StreamingParts, Http2Outcome>>,
     cmd_tx: &mpsc::UnboundedSender<ServerCmd>,
     config: &Http2Config,
 ) {
@@ -456,7 +456,7 @@ fn dispatch_server_events(
                 error_code,
             } => {
                 if let Some(st) = streams.remove(&stream_id) {
-                    let _ = st.body_tx.send(Err(Http2Error::StreamReset(error_code)));
+                    let _ = st.body_tx.send(Err(Http2Outcome::StreamReset(error_code)));
                     if let Some(notify) = st.send_notify {
                         notify.notify_waiters();
                     }
@@ -582,13 +582,13 @@ fn handle_server_cmd(
     }
 }
 
-fn fail_all_server_streams(streams: &mut HashMap<u32, ActiveServerStream>, err: &Http2Error) {
+fn fail_all_server_streams(streams: &mut HashMap<u32, ActiveServerStream>, err: &Http2Outcome) {
     let msg = err.to_string();
     for (_sid, st) in streams.drain() {
         let cloned = match err {
-            Http2Error::StreamReset(c) => Http2Error::StreamReset(*c),
-            Http2Error::Protocol(p) => Http2Error::Protocol(p.clone()),
-            _ => Http2Error::Parse(msg.clone()),
+            Http2Outcome::StreamReset(c) => Http2Outcome::StreamReset(*c),
+            Http2Outcome::Protocol(p) => Http2Outcome::Protocol(p.clone()),
+            _ => Http2Outcome::Parse(msg.clone()),
         };
         let _ = st.body_tx.send(Err(cloned));
         if let Some(n) = st.send_notify {

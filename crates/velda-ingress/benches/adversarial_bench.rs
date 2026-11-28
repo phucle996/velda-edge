@@ -12,8 +12,8 @@ mod common;
 use std::time::{Duration, Instant};
 
 use common::{CountingAllocator, format_duration};
-use velda_ingress::TrafficEngine;
-use velda_ingress::ingress::IngressBinding;
+use velda_ingress::IngressBinding;
+use velda_ingress::IngressEngine;
 use velda_ingress::udp::datagram::Datagram;
 
 #[global_allocator]
@@ -164,7 +164,7 @@ fn bench_rapid_binding_flapping() {
     println!("> Executing 50,000 rapid binding registrations and mutations in tight loop...\n");
 
     let iters = 50_000;
-    let mut engine = TrafficEngine::new();
+    let mut engine = IngressEngine::new();
     let dummy_ip = velda_core::lut::ip::v4_to_u128(u32::from_be_bytes([127, 0, 0, 1]));
 
     let start = Instant::now();

@@ -23,7 +23,7 @@ use tokio::sync::{mpsc, oneshot};
 use velda_core::{Body, HeaderWorkspace, L7Request, L7Response};
 
 use super::response::Http3StreamResponse;
-use crate::error::Http3Error;
+use crate::outcome::Http3Outcome;
 use crate::proto::frame::{
     Http3Frame, decode_frame, encode_frame, encode_varint, error_code, frame_id,
 };
@@ -36,9 +36,9 @@ use crate::proto::qpack::{decode_qpack, encode_qpack_request};
 pub(crate) type OpenStreamReply = Result<
     (
         super::connector::Http3StreamSender,
-        oneshot::Receiver<Result<Http3StreamResponse, Http3Error>>,
+        oneshot::Receiver<Result<Http3StreamResponse, Http3Outcome>>,
     ),
-    Http3Error,
+    Http3Outcome,
 >;
 
 /// Internal commands dispatched from proxy pipelines to the background QUIC connection driver loop.
@@ -51,13 +51,13 @@ pub(crate) enum ClientCommand {
     /// Suited for typical REST/JSON RPC where payload sizes are small and known in advance.
     SendRequest {
         request: L7Request,
-        reply_tx: oneshot::Sender<Result<L7Response, Http3Error>>,
+        reply_tx: oneshot::Sender<Result<L7Response, Http3Outcome>>,
     },
     /// Dispatches an L7 request over a newly opened stream expecting progressive response streaming.
     /// Emits headers immediately and forwards chunks through `mpsc` with flow control (e.g. SSE, large downloads).
     SendStreamRequest {
         request: L7Request,
-        reply_tx: oneshot::Sender<Result<Http3StreamResponse, Http3Error>>,
+        reply_tx: oneshot::Sender<Result<Http3StreamResponse, Http3Outcome>>,
     },
     /// Opens a progressive bidirectional (duplex) stream.
     /// Used for gRPC-Web over H3, chunked uploads, and bidirectional tunneling where request and response stream concurrently.
@@ -82,8 +82,8 @@ pub(crate) enum ClientCommand {
 }
 
 type StreamHeadChannel = (
-    oneshot::Sender<Result<Http3StreamResponse, Http3Error>>,
-    mpsc::Receiver<Result<bytes::Bytes, Http3Error>>,
+    oneshot::Sender<Result<Http3StreamResponse, Http3Outcome>>,
+    mpsc::Receiver<Result<bytes::Bytes, Http3Outcome>>,
 );
 
 /// Response dispatch mechanism tailored to the proxy pipeline strategy:
@@ -91,12 +91,12 @@ type StreamHeadChannel = (
 /// - `Streaming`: Hands off `Http3StreamResponse` headers immediately and feeds incoming chunks into `chunk_tx`.
 enum StreamReply {
     Buffered {
-        reply_tx: oneshot::Sender<Result<L7Response, Http3Error>>,
+        reply_tx: oneshot::Sender<Result<L7Response, Http3Outcome>>,
         data_payload: BytesMut,
     },
     Streaming {
         head_tx: Option<StreamHeadChannel>,
-        chunk_tx: mpsc::Sender<Result<bytes::Bytes, Http3Error>>,
+        chunk_tx: mpsc::Sender<Result<bytes::Bytes, Http3Outcome>>,
     },
 }
 
@@ -167,7 +167,7 @@ fn is_open_command_cancelled(cmd: &ClientCommand) -> bool {
 
 /// Rejects an unassigned open command by notifying the waiting caller channel.
 #[inline]
-fn reject_open_command(cmd: ClientCommand, err: Http3Error) {
+fn reject_open_command(cmd: ClientCommand, err: Http3Outcome) {
     match cmd {
         ClientCommand::SendRequest { reply_tx, .. } => {
             let _ = reply_tx.send(Err(err));
@@ -337,7 +337,7 @@ fn drain_pending_commands(
             let (_, cmd) = pending_commands.pop_front().unwrap();
             reject_open_command(
                 cmd,
-                Http3Error::H3("Pending stream request timed out".into()),
+                Http3Outcome::H3("Pending stream request timed out".into()),
             );
             continue;
         }
@@ -425,7 +425,7 @@ pub(crate) async fn run_client_driver(
                                     // Fast-reject when queue is full (4096) to shed upstream overload and prevent unbounded memory growth
                                     reject_open_command(
                                         c,
-                                        Http3Error::H3("No concurrent bidirectional streams available (queue full)".into()),
+                                        Http3Outcome::H3("No concurrent bidirectional streams available (queue full)".into()),
                                     );
                                 } else {
                                     pending_commands.push_back((Instant::now(), c));
@@ -664,7 +664,7 @@ pub(crate) async fn run_client_driver(
                         if let Some(slot) = streams.remove(&id) {
                             match slot.reply {
                                 StreamReply::Buffered { reply_tx, .. } => {
-                                    let _ = reply_tx.send(Err(Http3Error::H3(format!(
+                                    let _ = reply_tx.send(Err(Http3Outcome::H3(format!(
                                         "Stream reset by peer: {err}"
                                     ))));
                                 }
@@ -673,11 +673,11 @@ pub(crate) async fn run_client_driver(
                                     chunk_tx,
                                 } => {
                                     if let Some((tx, _)) = head_tx.take() {
-                                        let _ = tx.send(Err(Http3Error::H3(format!(
+                                        let _ = tx.send(Err(Http3Outcome::H3(format!(
                                             "Stream reset by peer: {err}"
                                         ))));
                                     } else {
-                                        let _ = chunk_tx.try_send(Err(Http3Error::H3(format!(
+                                        let _ = chunk_tx.try_send(Err(Http3Outcome::H3(format!(
                                             "Stream reset by peer: {err}"
                                         ))));
                                     }
@@ -695,20 +695,21 @@ pub(crate) async fn run_client_driver(
                         if let Some(slot) = streams.remove(&id) {
                             match slot.reply {
                                 StreamReply::Buffered { reply_tx, .. } => {
-                                    let _ = reply_tx
-                                        .send(Err(Http3Error::PayloadTooLarge(max_body_size + 1)));
+                                    let _ = reply_tx.send(Err(Http3Outcome::PayloadTooLarge(
+                                        max_body_size + 1,
+                                    )));
                                 }
                                 StreamReply::Streaming {
                                     mut head_tx,
                                     chunk_tx,
                                 } => {
                                     if let Some((tx, _)) = head_tx.take() {
-                                        let _ = tx.send(Err(Http3Error::PayloadTooLarge(
+                                        let _ = tx.send(Err(Http3Outcome::PayloadTooLarge(
                                             max_body_size + 1,
                                         )));
                                     } else {
                                         let _ = chunk_tx.try_send(Err(
-                                            Http3Error::PayloadTooLarge(max_body_size + 1),
+                                            Http3Outcome::PayloadTooLarge(max_body_size + 1),
                                         ));
                                     }
                                 }
@@ -822,7 +823,7 @@ pub(crate) async fn run_client_driver(
                     if let Some(slot) = streams.remove(&id) {
                         match slot.reply {
                             StreamReply::Buffered { reply_tx, .. } => {
-                                let _ = reply_tx.send(Err(Http3Error::H3(format!(
+                                let _ = reply_tx.send(Err(Http3Outcome::H3(format!(
                                     "Stream reset by peer: {error_code}"
                                 ))));
                             }
@@ -831,11 +832,11 @@ pub(crate) async fn run_client_driver(
                                 chunk_tx,
                             } => {
                                 if let Some((tx, _)) = head_tx.take() {
-                                    let _ = tx.send(Err(Http3Error::H3(format!(
+                                    let _ = tx.send(Err(Http3Outcome::H3(format!(
                                         "Stream reset by peer: {error_code}"
                                     ))));
                                 } else {
-                                    let _ = chunk_tx.try_send(Err(Http3Error::H3(format!(
+                                    let _ = chunk_tx.try_send(Err(Http3Outcome::H3(format!(
                                         "Stream reset by peer: {error_code}"
                                     ))));
                                 }
@@ -847,13 +848,13 @@ pub(crate) async fn run_client_driver(
                     for (_, cmd) in pending_commands.drain(..) {
                         reject_open_command(
                             cmd,
-                            Http3Error::H3(format!("Connection lost: {reason}")),
+                            Http3Outcome::H3(format!("Connection lost: {reason}")),
                         );
                     }
                     for (_, slot) in streams.drain() {
                         match slot.reply {
                             StreamReply::Buffered { reply_tx, .. } => {
-                                let _ = reply_tx.send(Err(Http3Error::H3(format!(
+                                let _ = reply_tx.send(Err(Http3Outcome::H3(format!(
                                     "Connection lost: {reason}"
                                 ))));
                             }
@@ -862,11 +863,11 @@ pub(crate) async fn run_client_driver(
                                 chunk_tx,
                             } => {
                                 if let Some((tx, _)) = head_tx.take() {
-                                    let _ = tx.send(Err(Http3Error::H3(format!(
+                                    let _ = tx.send(Err(Http3Outcome::H3(format!(
                                         "Connection lost: {reason}"
                                     ))));
                                 } else {
-                                    let _ = chunk_tx.try_send(Err(Http3Error::H3(format!(
+                                    let _ = chunk_tx.try_send(Err(Http3Outcome::H3(format!(
                                         "Connection lost: {reason}"
                                     ))));
                                 }
@@ -896,23 +897,23 @@ pub(crate) async fn run_client_driver(
 
     // Notify any remaining pending requests
     for (_, cmd) in pending_commands.drain(..) {
-        reject_open_command(cmd, Http3Error::ConnectionClosed);
+        reject_open_command(cmd, Http3Outcome::ConnectionClosed);
     }
 
     // Notify any remaining in-flight requests
     for (_, slot) in streams.drain() {
         match slot.reply {
             StreamReply::Buffered { reply_tx, .. } => {
-                let _ = reply_tx.send(Err(Http3Error::ConnectionClosed));
+                let _ = reply_tx.send(Err(Http3Outcome::ConnectionClosed));
             }
             StreamReply::Streaming {
                 mut head_tx,
                 chunk_tx,
             } => {
                 if let Some((tx, _)) = head_tx.take() {
-                    let _ = tx.send(Err(Http3Error::ConnectionClosed));
+                    let _ = tx.send(Err(Http3Outcome::ConnectionClosed));
                 } else {
-                    let _ = chunk_tx.try_send(Err(Http3Error::ConnectionClosed));
+                    let _ = chunk_tx.try_send(Err(Http3Outcome::ConnectionClosed));
                 }
             }
         }

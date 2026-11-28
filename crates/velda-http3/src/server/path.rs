@@ -2,11 +2,11 @@
 
 use http::Uri;
 
-use crate::error::Http3Error;
+use crate::outcome::Http3Outcome;
 
 /// Normalizes an HTTP/3 URI path in-place according to RFC 9114 and RFC 3986.
 #[inline]
-pub fn normalize_path(uri: &mut Uri) -> Result<(), Http3Error> {
+pub fn normalize_path(uri: &mut Uri) -> Result<(), Http3Outcome> {
     let path = uri.path();
     if is_clean_path(path.as_bytes()) {
         return Ok(());
@@ -24,10 +24,10 @@ pub fn normalize_path(uri: &mut Uri) -> Result<(), Http3Error> {
         }
         None => normalized.parse::<http::uri::PathAndQuery>(),
     }
-    .map_err(|e| Http3Error::InvalidPath(e.to_string()))?;
+    .map_err(|e| Http3Outcome::InvalidPath(e.to_string()))?;
 
     parts.path_and_query = Some(new_pq);
-    *uri = Uri::from_parts(parts).map_err(|e| Http3Error::InvalidPath(e.to_string()))?;
+    *uri = Uri::from_parts(parts).map_err(|e| Http3Outcome::InvalidPath(e.to_string()))?;
     Ok(())
 }
 
@@ -54,10 +54,10 @@ pub fn is_clean_path(bytes: &[u8]) -> bool {
 
 #[cold]
 #[inline(never)]
-pub fn normalize_path_cold(path: &str) -> Result<String, Http3Error> {
+pub fn normalize_path_cold(path: &str) -> Result<String, Http3Outcome> {
     let bytes = path.as_bytes();
     if bytes.contains(&b'\0') {
-        return Err(Http3Error::InvalidPath(
+        return Err(Http3Outcome::InvalidPath(
             "Prohibited null byte in URI path".into(),
         ));
     }
@@ -80,7 +80,7 @@ pub fn normalize_path_cold(path: &str) -> Result<String, Http3Error> {
                 (Some(v1), Some(v2)) => {
                     let byte = (v1 << 4) | v2;
                     if byte == 0 {
-                        return Err(Http3Error::InvalidPath(
+                        return Err(Http3Outcome::InvalidPath(
                             "Prohibited null byte in URI path".into(),
                         ));
                     }
@@ -113,7 +113,7 @@ pub fn normalize_path_cold(path: &str) -> Result<String, Http3Error> {
             "" | "." => {}
             ".." => {
                 if segments.pop().is_none() {
-                    return Err(Http3Error::InvalidPath(
+                    return Err(Http3Outcome::InvalidPath(
                         "Root breakout attempt in URI path".into(),
                     ));
                 }

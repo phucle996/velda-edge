@@ -5,8 +5,8 @@ use velda_core::HeaderWorkspace;
 use velda_http2::server::request::{Http2ServerRequestHead, Http2StreamReceiver};
 
 use super::responder::GrpcResponder;
-use crate::error::GrpcError;
 use crate::frame::{GrpcFrame, decode_grpc_frame};
+use crate::outcome::GrpcOutcome;
 
 /// Downstream gRPC server request head metadata over TCP.
 #[derive(Debug, Clone)]
@@ -87,7 +87,7 @@ impl GrpcServerStream {
     pub async fn read_server_request(
         &mut self,
         max_body_size: usize,
-    ) -> Result<GrpcServerRequest, GrpcError> {
+    ) -> Result<GrpcServerRequest, GrpcOutcome> {
         let body = match self.read_unary_message(max_body_size).await? {
             Some(payload) => velda_core::Body::Bytes(payload),
             None => velda_core::Body::Empty,
@@ -99,8 +99,13 @@ impl GrpcServerStream {
     pub async fn read_unary_message(
         &mut self,
         max_body_size: usize,
-    ) -> Result<Option<Bytes>, GrpcError> {
-        let Some(first_chunk) = self.receiver.recv_chunk().await? else {
+    ) -> Result<Option<Bytes>, GrpcOutcome> {
+        let Some(first_chunk) = self
+            .receiver
+            .recv_chunk()
+            .await
+            .map_err(GrpcOutcome::from_http2)?
+        else {
             return Ok(None);
         };
         let first_len = first_chunk.len();
@@ -114,12 +119,12 @@ impl GrpcServerStream {
                 first_chunk[4],
             ]) as usize;
             if msg_len > max_body_size {
-                return Err(GrpcError::PayloadTooLarge(msg_len));
+                return Err(GrpcOutcome::PayloadTooLarge(msg_len));
             }
             if GrpcFrame::HEADER_SIZE.checked_add(msg_len) == Some(first_len) {
                 let flag = first_chunk[0];
                 if flag != GrpcFrame::FLAG_UNCOMPRESSED && flag != GrpcFrame::FLAG_COMPRESSED {
-                    return Err(GrpcError::Protocol(format!(
+                    return Err(GrpcOutcome::Protocol(format!(
                         "invalid gRPC compression flag: {flag}; must be 0 or 1 per RFC"
                     )));
                 }
@@ -135,18 +140,23 @@ impl GrpcServerStream {
             return Ok(Some(payload));
         }
 
-        while let Some(chunk) = self.receiver.recv_chunk().await? {
+        while let Some(chunk) = self
+            .receiver
+            .recv_chunk()
+            .await
+            .map_err(GrpcOutcome::from_http2)?
+        {
             buf.extend_from_slice(&chunk);
 
             if buf.len() >= GrpcFrame::HEADER_SIZE {
                 let msg_len = u32::from_be_bytes([buf[1], buf[2], buf[3], buf[4]]) as usize;
                 if msg_len > max_body_size {
-                    return Err(GrpcError::PayloadTooLarge(msg_len));
+                    return Err(GrpcOutcome::PayloadTooLarge(msg_len));
                 }
             }
 
             if buf.len() > max_body_size.saturating_add(GrpcFrame::HEADER_SIZE) {
-                return Err(GrpcError::PayloadTooLarge(buf.len()));
+                return Err(GrpcOutcome::PayloadTooLarge(buf.len()));
             }
 
             if let Some((_compressed, payload)) = decode_grpc_frame(&mut buf)? {
@@ -157,7 +167,7 @@ impl GrpcServerStream {
         if buf.is_empty() {
             Ok(None)
         } else {
-            Err(GrpcError::Io(std::io::Error::new(
+            Err(GrpcOutcome::Io(std::io::Error::new(
                 std::io::ErrorKind::UnexpectedEof,
                 "Incomplete gRPC message frame received",
             )))
@@ -167,12 +177,17 @@ impl GrpcServerStream {
     /// Reads and buffers the complete wire Length-Prefixed Message from downstream stream.
     ///
     /// Preserves the 5-byte LPM frame header for zero-copy forwarding to upstream backends.
-    pub async fn read_raw_message(&mut self, max_body_size: usize) -> Result<Bytes, GrpcError> {
+    pub async fn read_raw_message(&mut self, max_body_size: usize) -> Result<Bytes, GrpcOutcome> {
         if self.receiver.is_end_stream() {
             return Ok(Bytes::new());
         }
 
-        let Some(chunk) = self.receiver.recv_chunk().await? else {
+        let Some(chunk) = self
+            .receiver
+            .recv_chunk()
+            .await
+            .map_err(GrpcOutcome::from_http2)?
+        else {
             return Ok(Bytes::new());
         };
         let len = chunk.len();
@@ -181,12 +196,12 @@ impl GrpcServerStream {
             let declared_len =
                 u32::from_be_bytes([chunk[1], chunk[2], chunk[3], chunk[4]]) as usize;
             if declared_len > max_body_size {
-                return Err(GrpcError::PayloadTooLarge(declared_len));
+                return Err(GrpcOutcome::PayloadTooLarge(declared_len));
             }
         }
 
         if len > max_body_size.saturating_add(GrpcFrame::HEADER_SIZE) {
-            return Err(GrpcError::PayloadTooLarge(len));
+            return Err(GrpcOutcome::PayloadTooLarge(len));
         }
 
         if self.receiver.is_end_stream() {
@@ -196,20 +211,25 @@ impl GrpcServerStream {
             buf.extend_from_slice(&chunk);
             let mut checked_lpm = len >= 5;
 
-            while let Some(chunk) = self.receiver.recv_chunk().await? {
+            while let Some(chunk) = self
+                .receiver
+                .recv_chunk()
+                .await
+                .map_err(GrpcOutcome::from_http2)?
+            {
                 buf.extend_from_slice(&chunk);
 
                 if !checked_lpm && buf.len() >= 5 {
                     let declared_len =
                         u32::from_be_bytes([buf[1], buf[2], buf[3], buf[4]]) as usize;
                     if declared_len > max_body_size {
-                        return Err(GrpcError::PayloadTooLarge(declared_len));
+                        return Err(GrpcOutcome::PayloadTooLarge(declared_len));
                     }
                     checked_lpm = true;
                 }
 
                 if buf.len() > max_body_size.saturating_add(GrpcFrame::HEADER_SIZE) {
-                    return Err(GrpcError::PayloadTooLarge(buf.len()));
+                    return Err(GrpcOutcome::PayloadTooLarge(buf.len()));
                 }
             }
             Ok(buf.freeze())

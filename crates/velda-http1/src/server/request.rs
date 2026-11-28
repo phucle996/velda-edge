@@ -11,7 +11,7 @@ use http::{Method, Uri, Version};
 use velda_core::{Body, HeaderWorkspace};
 
 use crate::config::Http1Config;
-use crate::error::Http1Error;
+use crate::outcome::Http1Outcome;
 use crate::wire::{cold_parse_error, parse_chunked_body};
 
 /// Message body framing mechanism for HTTP/1.1 request payloads.
@@ -100,20 +100,20 @@ pub fn parse_request_head(
     data: &[u8],
     config: &Http1Config,
     enrich: Option<crate::simd::H1IngressEnrich<'_>>,
-) -> Result<Option<(Http1ServerRequestHead, Http1BodyFraming, usize)>, Http1Error> {
+) -> Result<Option<(Http1ServerRequestHead, Http1BodyFraming, usize)>, Http1Outcome> {
     if data.is_empty() {
         return Ok(None);
     }
 
     let Some((crlf_pos, headers_offset)) = crate::simd::find_crlf_line_end(data)? else {
         if data.len() > config.max_header_size {
-            return Err(Http1Error::HeaderTooLarge(data.len()));
+            return Err(Http1Outcome::HeaderTooLarge(data.len()));
         }
         return Ok(None);
     };
 
     if crlf_pos > config.max_header_size {
-        return Err(Http1Error::HeaderTooLarge(crlf_pos));
+        return Err(Http1Outcome::HeaderTooLarge(crlf_pos));
     }
 
     let line = &data[..crlf_pos];
@@ -143,7 +143,7 @@ pub fn parse_request_head(
         b"CONNECT" => Method::CONNECT,
         b"TRACE" => Method::TRACE,
         _ => Method::from_bytes(method_bytes)
-            .map_err(|e| Http1Error::InvalidMethod(e.to_string()))?,
+            .map_err(|e| Http1Outcome::InvalidMethod(e.to_string()))?,
     };
 
     let path_str = crate::simd::validate_request_target_bytes(target_bytes)?;
@@ -164,7 +164,7 @@ pub fn parse_request_head(
         "/favicon.ico" => Uri::from_static("/favicon.ico"),
         s => s
             .parse::<Uri>()
-            .map_err(|e| Http1Error::InvalidUri(e.to_string()))?,
+            .map_err(|e| Http1Outcome::InvalidUri(e.to_string()))?,
     };
 
     let version = match version_bytes {
@@ -226,7 +226,7 @@ pub fn decode_request_head(
     buf: &mut BytesMut,
     config: &Http1Config,
     enrich: Option<crate::simd::H1IngressEnrich<'_>>,
-) -> Result<Option<(Http1ServerRequestHead, Http1BodyFraming)>, Http1Error> {
+) -> Result<Option<(Http1ServerRequestHead, Http1BodyFraming)>, Http1Outcome> {
     if let Some((head, framing, header_len)) = parse_request_head(buf.as_ref(), config, enrich)? {
         buf.advance(header_len);
         Ok(Some((head, framing)))
@@ -240,12 +240,12 @@ pub fn decode_body(
     buf: &mut BytesMut,
     framing: Http1BodyFraming,
     config: &Http1Config,
-) -> Result<Option<Body>, Http1Error> {
+) -> Result<Option<Body>, Http1Outcome> {
     match framing {
         Http1BodyFraming::Empty => Ok(Some(Body::Empty)),
         Http1BodyFraming::ContentLength(body_len) => {
             if body_len > config.max_body_size {
-                return Err(Http1Error::PayloadTooLarge(body_len));
+                return Err(Http1Outcome::PayloadTooLarge(body_len));
             }
             if buf.len() < body_len {
                 return Ok(None);
@@ -259,7 +259,7 @@ pub fn decode_body(
         }
         Http1BodyFraming::Chunked => {
             if buf.len() > config.max_body_size.saturating_add(4096) {
-                return Err(Http1Error::PayloadTooLarge(buf.len()));
+                return Err(Http1Outcome::PayloadTooLarge(buf.len()));
             }
             match parse_chunked_body(buf.as_ref(), config.max_body_size)? {
                 Some((consumed_wire, body)) => {
@@ -276,7 +276,7 @@ pub fn decode_body(
 pub fn decode_request(
     buf: &mut BytesMut,
     config: &Http1Config,
-) -> Result<Option<Http1ServerRequest>, Http1Error> {
+) -> Result<Option<Http1ServerRequest>, Http1Outcome> {
     if buf.is_empty() {
         return Ok(None);
     }
@@ -297,7 +297,7 @@ pub fn decode_request(
         }
         Http1BodyFraming::ContentLength(body_len) => {
             if body_len > config.max_body_size {
-                return Err(Http1Error::PayloadTooLarge(body_len));
+                return Err(Http1Outcome::PayloadTooLarge(body_len));
             }
             let total_len = header_len + body_len;
             if buf.len() < total_len {
@@ -320,7 +320,7 @@ pub fn decode_request(
         Http1BodyFraming::Chunked => {
             let chunked_slice = &buf[header_len..];
             if chunked_slice.len() > config.max_body_size.saturating_add(4096) {
-                return Err(Http1Error::PayloadTooLarge(chunked_slice.len()));
+                return Err(Http1Outcome::PayloadTooLarge(chunked_slice.len()));
             }
             match parse_chunked_body(chunked_slice, config.max_body_size)? {
                 Some((consumed_wire, body)) => {

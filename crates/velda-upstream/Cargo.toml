@@ -9,7 +9,6 @@ velda-core = { path = "../velda-core" }
 velda-discovery = { path = "../velda-discovery" }
 velda-lb = { path = "../velda-lb" }
 tokio = { version = "1.43", features = ["net", "io-util", "sync", "macros", "time", "rt"] }
-thiserror = "2.0"
 tracing = "0.1"
 arc-swap = "1.7"
 serde = { version = "1.0", features = ["derive"] }

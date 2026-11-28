@@ -1,9 +1,9 @@
-//! Downstream HTTP/1.1 Early Error & Rejection Engine (RFC 9112).
+//! Downstream HTTP/1.1 Early Error & InternalStatus Rendering Engine (RFC 9112).
 //!
 //! ```text
-//!   Action::Reject(reason) ──► reject_response(reason, req.headers)
-//!     ├─ headers.retain_bypass_only()         [Keep MSB bypass headers: x-request-id, retry-after]
-//!     └─ stamp RejectStaticMeta               [status, content-len, body + cache-control: no-store]
+//!   Action::Status(status) ──► status_response(status, req.headers)
+//!     ├─ headers.retain_bypass_only()         [Keep MSB bypass headers: x-request-id, retry-after, x-velda-fault]
+//!     └─ stamp HTTP_STATUS_METAS[status]      [HTTP StatusCode, content-len, body + cache-control: no-store]
 //!
 //!   Parse / Connection Error (no L7Request) ──► send_early_error(status)
 //!     └─ status_payload(status) ──► encode_early_error() ──► direct write_buf ASCII serialization
@@ -13,47 +13,289 @@ use bytes::{BufMut, Bytes, BytesMut};
 use http::header::HeaderValue;
 use http::{StatusCode, Version};
 use tokio::io::{AsyncWrite, AsyncWriteExt};
-use velda_core::{Body, HeaderKey, HeaderWorkspace, L7Response, RejectReason};
+use velda_core::{Body, HeaderKey, HeaderWorkspace, InternalStatus, L7Response};
 
-use crate::error::Http1Error;
+use crate::outcome::Http1Outcome;
+
+#[derive(Debug, Clone, Copy)]
+struct HttpStatusMeta {
+    status: StatusCode,
+    content_len_str: &'static str,
+    body: &'static [u8],
+}
+
+const STATUS_499: StatusCode = match StatusCode::from_u16(499) {
+    Ok(s) => s,
+    Err(_) => panic!("Valid status code 499"),
+};
+
+/// Dense O(1) lookup table mapping `InternalStatus as usize` (0..41) to HTTP/1.1 wire metadata.
+static HTTP_STATUS_METAS: [HttpStatusMeta; InternalStatus::COUNT] = [
+    HttpStatusMeta {
+        status: StatusCode::OK,
+        content_len_str: "7",
+        body: b"200 OK\n",
+    },
+    HttpStatusMeta {
+        status: STATUS_499,
+        content_len_str: "26",
+        body: b"499 Client Closed Request\n",
+    },
+    HttpStatusMeta {
+        status: StatusCode::BAD_GATEWAY,
+        content_len_str: "16",
+        body: b"502 Bad Gateway\n",
+    },
+    HttpStatusMeta {
+        status: StatusCode::GATEWAY_TIMEOUT,
+        content_len_str: "20",
+        body: b"504 Gateway Timeout\n",
+    },
+    HttpStatusMeta {
+        status: StatusCode::REQUEST_TIMEOUT,
+        content_len_str: "20",
+        body: b"408 Request Timeout\n",
+    },
+    HttpStatusMeta {
+        status: StatusCode::NOT_FOUND,
+        content_len_str: "14",
+        body: b"404 Not Found\n",
+    },
+    HttpStatusMeta {
+        status: StatusCode::INTERNAL_SERVER_ERROR,
+        content_len_str: "26",
+        body: b"500 Internal Server Error\n",
+    },
+    HttpStatusMeta {
+        status: StatusCode::SERVICE_UNAVAILABLE,
+        content_len_str: "24",
+        body: b"503 Service Unavailable\n",
+    },
+    HttpStatusMeta {
+        status: StatusCode::BAD_REQUEST,
+        content_len_str: "16",
+        body: b"400 Bad Request\n",
+    },
+    HttpStatusMeta {
+        status: StatusCode::UNAUTHORIZED,
+        content_len_str: "17",
+        body: b"401 Unauthorized\n",
+    },
+    HttpStatusMeta {
+        status: StatusCode::FORBIDDEN,
+        content_len_str: "14",
+        body: b"403 Forbidden\n",
+    },
+    HttpStatusMeta {
+        status: StatusCode::METHOD_NOT_ALLOWED,
+        content_len_str: "23",
+        body: b"405 Method Not Allowed\n",
+    },
+    HttpStatusMeta {
+        status: StatusCode::CONFLICT,
+        content_len_str: "13",
+        body: b"409 Conflict\n",
+    },
+    HttpStatusMeta {
+        status: StatusCode::PAYLOAD_TOO_LARGE,
+        content_len_str: "22",
+        body: b"413 Payload Too Large\n",
+    },
+    HttpStatusMeta {
+        status: StatusCode::URI_TOO_LONG,
+        content_len_str: "17",
+        body: b"414 URI Too Long\n",
+    },
+    HttpStatusMeta {
+        status: StatusCode::UNSUPPORTED_MEDIA_TYPE,
+        content_len_str: "27",
+        body: b"415 Unsupported Media Type\n",
+    },
+    HttpStatusMeta {
+        status: StatusCode::REQUEST_HEADER_FIELDS_TOO_LARGE,
+        content_len_str: "36",
+        body: b"431 Request Header Fields Too Large\n",
+    },
+    HttpStatusMeta {
+        status: StatusCode::TOO_MANY_REQUESTS,
+        content_len_str: "22",
+        body: b"429 Too Many Requests\n",
+    },
+    // WafBlocked, IpBlocked, and BotBlocked are wire-indistinguishable from 403 Forbidden.
+    HttpStatusMeta {
+        status: StatusCode::FORBIDDEN,
+        content_len_str: "14",
+        body: b"403 Forbidden\n",
+    },
+    HttpStatusMeta {
+        status: StatusCode::FORBIDDEN,
+        content_len_str: "14",
+        body: b"403 Forbidden\n",
+    },
+    HttpStatusMeta {
+        status: StatusCode::FORBIDDEN,
+        content_len_str: "14",
+        body: b"403 Forbidden\n",
+    },
+    // 21: DownstreamIo
+    HttpStatusMeta {
+        status: StatusCode::BAD_REQUEST,
+        content_len_str: "16",
+        body: b"400 Bad Request\n",
+    },
+    // 22: DownstreamTls
+    HttpStatusMeta {
+        status: StatusCode::BAD_REQUEST,
+        content_len_str: "16",
+        body: b"400 Bad Request\n",
+    },
+    // 23: SmugglingDetected
+    HttpStatusMeta {
+        status: StatusCode::BAD_REQUEST,
+        content_len_str: "16",
+        body: b"400 Bad Request\n",
+    },
+    // 24: StreamingViolation
+    HttpStatusMeta {
+        status: StatusCode::BAD_REQUEST,
+        content_len_str: "16",
+        body: b"400 Bad Request\n",
+    },
+    // 25: FloodDetected
+    HttpStatusMeta {
+        status: StatusCode::TOO_MANY_REQUESTS,
+        content_len_str: "22",
+        body: b"429 Too Many Requests\n",
+    },
+    // 26: NoEndpointsAvailable
+    HttpStatusMeta {
+        status: StatusCode::SERVICE_UNAVAILABLE,
+        content_len_str: "24",
+        body: b"503 Service Unavailable\n",
+    },
+    // 27: PoolExhausted
+    HttpStatusMeta {
+        status: StatusCode::SERVICE_UNAVAILABLE,
+        content_len_str: "24",
+        body: b"503 Service Unavailable\n",
+    },
+    // 28: PoolAcquisitionTimeout
+    HttpStatusMeta {
+        status: StatusCode::SERVICE_UNAVAILABLE,
+        content_len_str: "24",
+        body: b"503 Service Unavailable\n",
+    },
+    // 29: UpstreamDnsFailed
+    HttpStatusMeta {
+        status: StatusCode::BAD_GATEWAY,
+        content_len_str: "16",
+        body: b"502 Bad Gateway\n",
+    },
+    // 30: UpstreamConnectFailed
+    HttpStatusMeta {
+        status: StatusCode::BAD_GATEWAY,
+        content_len_str: "16",
+        body: b"502 Bad Gateway\n",
+    },
+    // 31: UpstreamConnectTimeout
+    HttpStatusMeta {
+        status: StatusCode::GATEWAY_TIMEOUT,
+        content_len_str: "20",
+        body: b"504 Gateway Timeout\n",
+    },
+    // 32: UpstreamTlsFailed
+    HttpStatusMeta {
+        status: StatusCode::BAD_GATEWAY,
+        content_len_str: "16",
+        body: b"502 Bad Gateway\n",
+    },
+    // 33: UpstreamStale
+    HttpStatusMeta {
+        status: StatusCode::BAD_GATEWAY,
+        content_len_str: "16",
+        body: b"502 Bad Gateway\n",
+    },
+    // 34: UpstreamRefused
+    HttpStatusMeta {
+        status: StatusCode::BAD_GATEWAY,
+        content_len_str: "16",
+        body: b"502 Bad Gateway\n",
+    },
+    // 35: UpstreamIo
+    HttpStatusMeta {
+        status: StatusCode::BAD_GATEWAY,
+        content_len_str: "16",
+        body: b"502 Bad Gateway\n",
+    },
+    // 36: UpstreamProtocolError
+    HttpStatusMeta {
+        status: StatusCode::BAD_GATEWAY,
+        content_len_str: "16",
+        body: b"502 Bad Gateway\n",
+    },
+    // 37: InvalidRuntimeConfig
+    HttpStatusMeta {
+        status: StatusCode::INTERNAL_SERVER_ERROR,
+        content_len_str: "26",
+        body: b"500 Internal Server Error\n",
+    },
+    // 38: PoolKeep
+    HttpStatusMeta {
+        status: StatusCode::OK,
+        content_len_str: "7",
+        body: b"200 OK\n",
+    },
+    // 39: PoolStreamCanceled
+    HttpStatusMeta {
+        status: STATUS_499,
+        content_len_str: "26",
+        body: b"499 Client Closed Request\n",
+    },
+    // 40: PoolEvict
+    HttpStatusMeta {
+        status: StatusCode::SERVICE_UNAVAILABLE,
+        content_len_str: "24",
+        body: b"503 Service Unavailable\n",
+    },
+];
 
 #[inline]
 const fn status_payload(status: StatusCode) -> (&'static str, &'static [u8]) {
-    let reason = match status {
-        StatusCode::BAD_REQUEST => RejectReason::BadRequest,
-        StatusCode::UNAUTHORIZED => RejectReason::Unauthorized,
-        StatusCode::FORBIDDEN => RejectReason::Forbidden,
-        StatusCode::NOT_FOUND => RejectReason::NotFound,
-        StatusCode::METHOD_NOT_ALLOWED => RejectReason::MethodNotAllowed,
-        StatusCode::REQUEST_TIMEOUT => RejectReason::RequestTimeout,
-        StatusCode::CONFLICT => RejectReason::Conflict,
-        StatusCode::PAYLOAD_TOO_LARGE => RejectReason::PayloadTooLarge,
-        StatusCode::URI_TOO_LONG => RejectReason::UriTooLong,
-        StatusCode::UNSUPPORTED_MEDIA_TYPE => RejectReason::UnsupportedMediaType,
+    let internal = match status {
+        StatusCode::BAD_REQUEST => InternalStatus::BadRequest,
+        StatusCode::UNAUTHORIZED => InternalStatus::Unauthorized,
+        StatusCode::FORBIDDEN => InternalStatus::Forbidden,
+        StatusCode::NOT_FOUND => InternalStatus::RouteNotFound,
+        StatusCode::METHOD_NOT_ALLOWED => InternalStatus::MethodNotAllowed,
+        StatusCode::REQUEST_TIMEOUT => InternalStatus::RequestTimeout,
+        StatusCode::CONFLICT => InternalStatus::Conflict,
+        StatusCode::PAYLOAD_TOO_LARGE => InternalStatus::PayloadTooLarge,
+        StatusCode::URI_TOO_LONG => InternalStatus::UriTooLong,
+        StatusCode::UNSUPPORTED_MEDIA_TYPE => InternalStatus::UnsupportedMediaType,
         StatusCode::TOO_EARLY => return ("14", b"425 Too Early\n"),
-        StatusCode::TOO_MANY_REQUESTS => RejectReason::TooManyRequests,
-        StatusCode::REQUEST_HEADER_FIELDS_TOO_LARGE => RejectReason::HeaderFieldsTooLarge,
-        s if s.as_u16() == 499 => RejectReason::ClientClosedRequest,
-        StatusCode::BAD_GATEWAY => RejectReason::BadGateway,
-        StatusCode::SERVICE_UNAVAILABLE => RejectReason::ServiceUnavailable,
-        StatusCode::GATEWAY_TIMEOUT => RejectReason::GatewayTimeout,
-        _ => RejectReason::InternalError,
+        StatusCode::TOO_MANY_REQUESTS => InternalStatus::RateLimited,
+        StatusCode::REQUEST_HEADER_FIELDS_TOO_LARGE => InternalStatus::HeaderFieldsTooLarge,
+        s if s.as_u16() == 499 => InternalStatus::ClientCanceled,
+        StatusCode::BAD_GATEWAY => InternalStatus::UpstreamError,
+        StatusCode::SERVICE_UNAVAILABLE => InternalStatus::ServiceUnavailable,
+        StatusCode::GATEWAY_TIMEOUT => InternalStatus::UpstreamTimeout,
+        _ => InternalStatus::InternalError,
     };
-    let meta = velda_core::lut::get_reject_meta(reason);
+    let meta = &HTTP_STATUS_METAS[internal as usize];
     (meta.content_len_str, meta.body)
 }
 
-/// Builds an HTTP/1.1 rejection [`L7Response`] in-place from a request [`HeaderWorkspace`],
-/// preserving bypass headers (`x-request-id`, `x-ratelimit-*`, `retry-after`) while stamping
-/// canonical HTTP/1.1 error headers and static body bytes from [`velda_core::lut::RejectStaticMeta`].
+/// Maps an [`InternalStatus`] into an HTTP/1.1 [`L7Response`] in-place from a request
+/// [`HeaderWorkspace`], preserving Bit 1 bypass headers (`x-request-id`, `x-ratelimit-*`,
+/// `retry-after`, `www-authenticate`, etc.) while stamping canonical HTTP/1.1 wire headers.
 #[cold]
-pub fn reject_response(reason: RejectReason, mut headers: HeaderWorkspace) -> L7Response {
+pub fn status_response(internal: InternalStatus, mut headers: HeaderWorkspace) -> L7Response {
     const KEY_CACHE_CTRL: HeaderKey = HeaderKey::from_static("cache-control");
     const KEY_CONTENT_TYPE: HeaderKey = HeaderKey::from_static("content-type");
     const KEY_CONTENT_LEN: HeaderKey = HeaderKey::from_static("content-length");
     const KEY_RETRY_AFTER: HeaderKey = HeaderKey::from_static("retry-after");
 
-    let meta = velda_core::lut::get_reject_meta(reason);
+    let meta = &HTTP_STATUS_METAS[internal as usize];
     headers.retain_bypass_only();
     headers.insert_prehashed(&KEY_CACHE_CTRL, HeaderValue::from_static("no-store"));
     headers.insert_prehashed(
@@ -124,14 +366,17 @@ pub async fn send_early_error<W>(
     request_id: Option<&HeaderValue>,
     alt_svc: Option<&HeaderValue>,
     close: bool,
-) -> Result<(), Http1Error>
+) -> Result<(), Http1Outcome>
 where
     W: AsyncWrite + Unpin,
 {
     write_buf.clear();
     encode_early_error(status, write_buf, request_id, alt_svc, close);
-    stream.write_all(write_buf).await?;
-    stream.flush().await?;
+    stream
+        .write_all(write_buf)
+        .await
+        .map_err(Http1Outcome::Io)?;
+    stream.flush().await.map_err(Http1Outcome::Io)?;
     write_buf.clear();
     Ok(())
 }
@@ -212,7 +457,7 @@ mod tests {
     }
 
     #[test]
-    fn test_reject_response_retains_bypass_and_stamps_http1_fields() {
+    fn test_status_response_retains_bypass_and_stamps_http1_fields() {
         let mut ws = HeaderWorkspace::new(32);
         let req_id_str = ws.request_id().to_str().unwrap().to_string();
         ws.insert(http::header::HOST, HeaderValue::from_static("example.com"));
@@ -222,7 +467,7 @@ mod tests {
             0,
         );
 
-        let resp = reject_response(velda_core::RejectReason::TooManyRequests, ws);
+        let resp = status_response(InternalStatus::RateLimited, ws);
         assert_eq!(resp.status, StatusCode::TOO_MANY_REQUESTS);
         assert_eq!(resp.version, Version::HTTP_11);
         assert!(!resp.headers.contains_key(http::header::HOST));

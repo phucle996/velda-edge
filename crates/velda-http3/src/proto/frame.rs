@@ -2,7 +2,7 @@
 
 use bytes::{Buf, BufMut, Bytes, BytesMut};
 
-use crate::error::Http3Error;
+use crate::outcome::Http3Outcome;
 
 /// Canonical RFC 9114 HTTP/3 error codes.
 pub mod error_code {
@@ -209,7 +209,7 @@ pub fn encode_varint(val: u64, dst: &mut BytesMut) {
 /// Decodes the next HTTP/3 frame from the buffer.
 ///
 /// Inspects framing headers zero-copy via [`decode_varint_slice`] before consuming bytes.
-pub fn decode_frame(buf: &mut BytesMut) -> Result<Option<Http3Frame>, Http3Error> {
+pub fn decode_frame(buf: &mut BytesMut) -> Result<Option<Http3Frame>, Http3Outcome> {
     if buf.is_empty() {
         return Ok(None);
     }
@@ -224,12 +224,12 @@ pub fn decode_frame(buf: &mut BytesMut) -> Result<Option<Http3Frame>, Http3Error
 
     let header_bytes = type_len + len_len;
     let Ok(payload_len) = usize::try_from(length) else {
-        return Err(Http3Error::H3(
+        return Err(Http3Outcome::H3(
             "HTTP/3 frame payload length exceeds address space".into(),
         ));
     };
     let Some(total_len) = header_bytes.checked_add(payload_len) else {
-        return Err(Http3Error::H3(
+        return Err(Http3Outcome::H3(
             "HTTP/3 frame total length overflows address space".into(),
         ));
     };

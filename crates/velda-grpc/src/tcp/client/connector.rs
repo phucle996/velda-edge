@@ -8,11 +8,10 @@ use std::time::Duration;
 use http::{Method, Uri};
 use velda_core::{HeaderWorkspace, L7Request, L7Response};
 use velda_http2::client::connection::{Http2Client, Http2ClientSendStream, Http2ResponseFuture};
-use velda_http2::error::Http2Error;
 use velda_tls::TlsClientEngine;
 
 use crate::config::GrpcConfig;
-use crate::error::GrpcError;
+use crate::outcome::GrpcOutcome;
 
 /// Active gRPC client connector to an upstream backend endpoint.
 #[derive(Clone)]
@@ -43,11 +42,14 @@ impl GrpcUpstreamConnector {
 
     /// Verifies that the underlying HTTP/2 connection is healthy and ready to accept streams.
     #[inline]
-    pub async fn ready(&mut self) -> Result<(), GrpcError> {
+    pub async fn ready(&mut self) -> Result<(), GrpcOutcome> {
         if self.client.is_healthy() {
             Ok(())
         } else {
-            Err(GrpcError::Http2(Http2Error::ConnectionClosed))
+            Err(GrpcOutcome::Transport {
+                refused_or_goaway: true,
+                detail: "HTTP/2 connection closed".into(),
+            })
         }
     }
 
@@ -60,12 +62,12 @@ impl GrpcUpstreamConnector {
         tls: Option<(&TlsClientEngine, &str)>,
         config: &GrpcConfig,
         timeout: Option<Duration>,
-    ) -> Result<Self, GrpcError> {
+    ) -> Result<Self, GrpcOutcome> {
         let connect_timeout = timeout.unwrap_or(Duration::from_secs(10));
         let stream =
             velda_sock::connect::connect_tcp_u128(target_ip, target_port_be, connect_timeout)
                 .await
-                .map_err(GrpcError::Io)?;
+                .map_err(GrpcOutcome::Io)?;
         let h2_cfg = config.to_http2_config();
 
         let client = if let Some((engine, sni)) = tls {
@@ -74,19 +76,19 @@ impl GrpcUpstreamConnector {
                 tokio::time::timeout(to, tls_fut)
                     .await
                     .map_err(|_| {
-                        GrpcError::Io(std::io::Error::new(
+                        GrpcOutcome::Io(std::io::Error::new(
                             std::io::ErrorKind::TimedOut,
                             "Upstream gRPC TLS handshake timed out",
                         ))
                     })?
-                    .map_err(|e| GrpcError::Tls(e.to_string()))?
+                    .map_err(|e| GrpcOutcome::Tls(e.to_string()))?
             } else {
-                tls_fut.await.map_err(|e| GrpcError::Tls(e.to_string()))?
+                tls_fut.await.map_err(|e| GrpcOutcome::Tls(e.to_string()))?
             };
 
             let alpn = tls_stream.get_ref().1.alpn_protocol();
             if alpn != Some(b"h2") {
-                return Err(GrpcError::Tls(format!(
+                return Err(GrpcOutcome::Tls(format!(
                     "upstream negotiated ALPN {:?}, strictly expected \"h2\"",
                     alpn.map(String::from_utf8_lossy)
                 )));
@@ -94,26 +96,32 @@ impl GrpcUpstreamConnector {
 
             let h2_fut = Http2Client::handshake(tls_stream, &h2_cfg);
             if let Some(to) = timeout {
-                tokio::time::timeout(to, h2_fut).await.map_err(|_| {
-                    GrpcError::Io(std::io::Error::new(
-                        std::io::ErrorKind::TimedOut,
-                        "Upstream gRPC H2 handshake timed out",
-                    ))
-                })??
+                tokio::time::timeout(to, h2_fut)
+                    .await
+                    .map_err(|_| {
+                        GrpcOutcome::Io(std::io::Error::new(
+                            std::io::ErrorKind::TimedOut,
+                            "Upstream gRPC H2 handshake timed out",
+                        ))
+                    })?
+                    .map_err(GrpcOutcome::from_http2)?
             } else {
-                h2_fut.await?
+                h2_fut.await.map_err(GrpcOutcome::from_http2)?
             }
         } else {
             let h2_fut = Http2Client::handshake(stream, &h2_cfg);
             if let Some(to) = timeout {
-                tokio::time::timeout(to, h2_fut).await.map_err(|_| {
-                    GrpcError::Io(std::io::Error::new(
-                        std::io::ErrorKind::TimedOut,
-                        "Upstream gRPC cleartext H2 handshake timed out",
-                    ))
-                })??
+                tokio::time::timeout(to, h2_fut)
+                    .await
+                    .map_err(|_| {
+                        GrpcOutcome::Io(std::io::Error::new(
+                            std::io::ErrorKind::TimedOut,
+                            "Upstream gRPC cleartext H2 handshake timed out",
+                        ))
+                    })?
+                    .map_err(GrpcOutcome::from_http2)?
             } else {
-                h2_fut.await?
+                h2_fut.await.map_err(GrpcOutcome::from_http2)?
             }
         };
 
@@ -128,21 +136,24 @@ impl GrpcUpstreamConnector {
         stream: S,
         config: &GrpcConfig,
         timeout: Option<Duration>,
-    ) -> Result<Self, GrpcError>
+    ) -> Result<Self, GrpcOutcome>
     where
         S: tokio::io::AsyncRead + tokio::io::AsyncWrite + Unpin + Send + 'static,
     {
         let h2_cfg = config.to_http2_config();
         let h2_fut = Http2Client::handshake(stream, &h2_cfg);
         let client = if let Some(to) = timeout {
-            tokio::time::timeout(to, h2_fut).await.map_err(|_| {
-                GrpcError::Io(std::io::Error::new(
-                    std::io::ErrorKind::TimedOut,
-                    "Upstream gRPC stream handshake timed out",
-                ))
-            })??
+            tokio::time::timeout(to, h2_fut)
+                .await
+                .map_err(|_| {
+                    GrpcOutcome::Io(std::io::Error::new(
+                        std::io::ErrorKind::TimedOut,
+                        "Upstream gRPC stream handshake timed out",
+                    ))
+                })?
+                .map_err(GrpcOutcome::from_http2)?
         } else {
-            h2_fut.await?
+            h2_fut.await.map_err(GrpcOutcome::from_http2)?
         };
 
         Ok(Self {
@@ -158,11 +169,11 @@ impl GrpcUpstreamConnector {
         uri: Uri,
         headers: HeaderWorkspace,
         end_of_stream: bool,
-    ) -> Result<(Http2ResponseFuture, Http2ClientSendStream), GrpcError> {
+    ) -> Result<(Http2ResponseFuture, Http2ClientSendStream), GrpcOutcome> {
         self.client
             .send_request(method, uri, headers, end_of_stream)
             .await
-            .map_err(GrpcError::Http2)
+            .map_err(GrpcOutcome::from_http2)
     }
 
     /// Dispatches an upstream [`super::request::GrpcClientRequest`] and returns a [`super::response::GrpcClientResponse`].
@@ -170,14 +181,17 @@ impl GrpcUpstreamConnector {
         &mut self,
         req: &super::request::GrpcClientRequest,
         config: &GrpcConfig,
-    ) -> Result<super::response::GrpcClientResponse, GrpcError> {
+    ) -> Result<super::response::GrpcClientResponse, GrpcOutcome> {
         let (method, uri, headers, end_of_stream) = req.encode_headers();
         let (response_future, mut send_stream) = self
             .open_stream(method, uri, headers, end_of_stream)
             .await?;
 
         if !req.body.is_empty() {
-            send_stream.send_chunk(req.body.to_bytes(), true).await?;
+            send_stream
+                .send_chunk(req.body.to_bytes(), true)
+                .await
+                .map_err(GrpcOutcome::from_http2)?;
         }
 
         super::response::GrpcClientResponse::decode_from_future(
@@ -192,7 +206,7 @@ impl GrpcUpstreamConnector {
         &mut self,
         req: &L7Request,
         config: &GrpcConfig,
-    ) -> Result<L7Response, GrpcError> {
+    ) -> Result<L7Response, GrpcOutcome> {
         let client_req = super::request::GrpcClientRequest::from_l7(req);
         let resp = self.invoke_client_request(&client_req, config).await?;
         Ok(resp.into_l7())

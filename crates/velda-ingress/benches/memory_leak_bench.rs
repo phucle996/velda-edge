@@ -13,7 +13,7 @@ use std::thread;
 use std::time::Instant;
 
 use common::{CountingAllocator, FastRng, format_bytes, format_duration};
-use velda_ingress::ingress::IngressBinding;
+use velda_ingress::IngressBinding;
 use velda_ingress::udp::datagram::Datagram;
 use velda_ingress::{UdpSocket, UdpSocketConfig, next_connection_id};
 

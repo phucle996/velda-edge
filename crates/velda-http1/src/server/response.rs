@@ -10,7 +10,7 @@ use http::{StatusCode, Version};
 use tokio::io::{AsyncWrite, AsyncWriteExt};
 use velda_core::{Body, HeaderWorkspace, L7Response};
 
-use crate::error::Http1Error;
+use crate::outcome::Http1Outcome;
 
 /// HTTP/1.1 downstream response head metadata.
 #[derive(Debug, Clone)]
@@ -395,7 +395,7 @@ pub async fn send_parts<W>(
     headers: &HeaderWorkspace,
     body: &Body,
     opts: HeadEncodeOptions<'_>,
-) -> Result<bool, Http1Error>
+) -> Result<bool, Http1Outcome>
 where
     W: AsyncWrite + Unpin,
 {
@@ -419,14 +419,20 @@ where
     let b_slice = body.as_slice();
     if !is_no_body && !b_slice.is_empty() && b_slice.len() <= 65536 {
         write_buf.extend_from_slice(b_slice);
-        stream.write_all(write_buf).await?;
+        stream
+            .write_all(write_buf)
+            .await
+            .map_err(Http1Outcome::Io)?;
         return Ok(force_close || is_connection_close(headers));
     }
 
-    stream.write_all(write_buf).await?;
+    stream
+        .write_all(write_buf)
+        .await
+        .map_err(Http1Outcome::Io)?;
 
     if !is_no_body && !b_slice.is_empty() {
-        stream.write_all(b_slice).await?;
+        stream.write_all(b_slice).await.map_err(Http1Outcome::Io)?;
     }
 
     Ok(force_close || is_connection_close(headers))
@@ -440,14 +446,17 @@ pub async fn send_chunked_head<W>(
     status: StatusCode,
     headers: &HeaderWorkspace,
     opts: HeadEncodeOptions<'_>,
-) -> Result<bool, Http1Error>
+) -> Result<bool, Http1Outcome>
 where
     W: AsyncWrite + Unpin,
 {
     write_buf.clear();
     let force_close = opts.force_close;
     encode_chunked_head(version, status, headers, opts, write_buf);
-    stream.write_all(write_buf).await?;
+    stream
+        .write_all(write_buf)
+        .await
+        .map_err(Http1Outcome::Io)?;
 
     Ok(force_close || is_connection_close(headers))
 }
@@ -460,7 +469,7 @@ pub async fn send_head_coalesced<W>(
     initial_chunk: Option<&[u8]>,
     is_terminated: bool,
     opts: HeadEncodeOptions<'_>,
-) -> Result<bool, Http1Error>
+) -> Result<bool, Http1Outcome>
 where
     W: AsyncWrite + Unpin,
 {
@@ -484,7 +493,10 @@ where
         write_buf.put_slice(b"0\r\n\r\n");
     }
 
-    stream.write_all(write_buf).await?;
+    stream
+        .write_all(write_buf)
+        .await
+        .map_err(Http1Outcome::Io)?;
 
     Ok(force_close || is_connection_close(&head.headers))
 }

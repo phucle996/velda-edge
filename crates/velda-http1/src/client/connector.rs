@@ -10,7 +10,7 @@ use std::task::{Context, Poll};
 use tokio::io::{AsyncRead, AsyncWrite, ReadBuf};
 use velda_tls::{TlsClientEngine, TlsStream};
 
-use crate::error::Http1Error;
+use crate::outcome::Http1Outcome;
 
 /// Upstream stream connection either over cleartext TCP or encrypted TLS.
 pub enum UpstreamHttp1Stream {
@@ -163,12 +163,12 @@ pub async fn connect(
     target_port_be: u16,
     tls: Option<(&TlsClientEngine, &str)>,
     timeout: Option<std::time::Duration>,
-) -> Result<UpstreamHttp1Stream, Http1Error> {
+) -> Result<UpstreamHttp1Stream, Http1Outcome> {
     let connect_timeout = timeout.unwrap_or(std::time::Duration::from_secs(10));
     let tcp_stream =
         velda_sock::connect::connect_tcp_u128(target_ip, target_port_be, connect_timeout)
             .await
-            .map_err(Http1Error::Io)?;
+            .map_err(Http1Outcome::Io)?;
 
     if let Some((engine, sni)) = tls {
         // Enforce connect timeout on upstream TLS handshake to eliminate indefinite task hangs (tarpit / slowloris defense)
@@ -177,22 +177,22 @@ pub async fn connect(
             tokio::time::timeout(to, tls_connect_fut)
                 .await
                 .map_err(|_| {
-                    Http1Error::Io(std::io::Error::new(
+                    Http1Outcome::Io(std::io::Error::new(
                         std::io::ErrorKind::TimedOut,
                         "TLS handshake timed out",
                     ))
                 })?
-                .map_err(|e| Http1Error::Io(std::io::Error::other(e.to_string())))?
+                .map_err(|e| Http1Outcome::Io(std::io::Error::other(e.to_string())))?
         } else {
             tls_connect_fut
                 .await
-                .map_err(|e| Http1Error::Io(std::io::Error::other(e.to_string())))?
+                .map_err(|e| Http1Outcome::Io(std::io::Error::other(e.to_string())))?
         };
 
         // RFC 9112 Section 2: HTTP/1.1 over TLS strictly requires ALPN "http/1.1"
         let alpn = tls_stream.get_ref().1.alpn_protocol();
         if alpn != Some(b"http/1.1") {
-            return Err(Http1Error::Io(std::io::Error::other(format!(
+            return Err(Http1Outcome::Io(std::io::Error::other(format!(
                 "upstream negotiated ALPN {:?}, strictly expected \"http/1.1\"",
                 alpn.map(String::from_utf8_lossy)
             ))));

@@ -16,7 +16,7 @@ use velda_core::buffer::header::{
     DEFAULT_HEADER_CAPACITY, HeaderWorkspace, MAX_WIRE_HEADERS, X_REQUEST_ID, header_key,
 };
 
-use crate::error::Http3Error;
+use crate::outcome::Http3Outcome;
 use crate::proto::huffman::decode_huffman_bytes;
 
 /// RFC 9204 Appendix A Static Table (99 entries).
@@ -392,7 +392,7 @@ pub fn find_static_name(name: &str) -> Option<u64> {
 }
 
 /// Decodes an RFC 9204 QPACK-encoded field section directly into [`HeaderWorkspace`].
-pub fn decode_qpack(slice: &[u8]) -> Result<DecodedHeaders, Http3Error> {
+pub fn decode_qpack(slice: &[u8]) -> Result<DecodedHeaders, Http3Outcome> {
     decode_qpack_internal(slice, None)
 }
 
@@ -402,7 +402,7 @@ pub fn decode_qpack(slice: &[u8]) -> Result<DecodedHeaders, Http3Error> {
 pub fn decode_qpack_ingress(
     slice: &[u8],
     enrich: H3IngressEnrich,
-) -> Result<DecodedHeaders, Http3Error> {
+) -> Result<DecodedHeaders, Http3Outcome> {
     decode_qpack_internal(slice, Some(enrich))
 }
 
@@ -417,21 +417,21 @@ fn bytes_to_header_value(raw: Cow<'_, [u8]>) -> Option<HeaderValue> {
 fn decode_qpack_internal(
     mut slice: &[u8],
     enrich: Option<H3IngressEnrich>,
-) -> Result<DecodedHeaders, Http3Error> {
+) -> Result<DecodedHeaders, Http3Outcome> {
     if slice.len() < 2 {
-        return Err(Http3Error::H3("QPACK block too short for prefix".into()));
+        return Err(Http3Outcome::H3("QPACK block too short for prefix".into()));
     }
 
     // 1. Decode Field Section Prefix (RFC 9204 Section 4.5.1)
     let (_req_insert_count, ric_consumed) = decode_prefixed_int(slice, 8)
-        .ok_or_else(|| Http3Error::H3("Invalid Required Insert Count".into()))?;
+        .ok_or_else(|| Http3Outcome::H3("Invalid Required Insert Count".into()))?;
     slice = &slice[ric_consumed..];
 
     if slice.is_empty() {
-        return Err(Http3Error::H3("QPACK block missing Delta Base".into()));
+        return Err(Http3Outcome::H3("QPACK block missing Delta Base".into()));
     }
-    let (_delta_base, db_consumed) =
-        decode_prefixed_int(slice, 7).ok_or_else(|| Http3Error::H3("Invalid Delta Base".into()))?;
+    let (_delta_base, db_consumed) = decode_prefixed_int(slice, 7)
+        .ok_or_else(|| Http3Outcome::H3("Invalid Delta Base".into()))?;
     slice = &slice[db_consumed..];
 
     let mut decoded = DecodedHeaders::default();
@@ -492,13 +492,14 @@ fn decode_qpack_internal(
         if (first & 0xc0) == 0xc0 {
             // Pattern 11xxxxxx: Indexed Field Line with Static Table Reference (Section 4.5.2)
             let (idx, consumed) = decode_prefixed_int(slice, 6)
-                .ok_or_else(|| Http3Error::H3("Invalid Indexed Field Line".into()))?;
+                .ok_or_else(|| Http3Outcome::H3("Invalid Indexed Field Line".into()))?;
             slice = &slice[consumed..];
 
-            let idx_usize = usize::try_from(idx)
-                .map_err(|_| Http3Error::H3(format!("Static table index out of bounds: {idx}")))?;
+            let idx_usize = usize::try_from(idx).map_err(|_| {
+                Http3Outcome::H3(format!("Static table index out of bounds: {idx}"))
+            })?;
             let (name, val) = STATIC_TABLE.get(idx_usize).ok_or_else(|| {
-                Http3Error::H3(format!("Static table index out of bounds: {idx}"))
+                Http3Outcome::H3(format!("Static table index out of bounds: {idx}"))
             })?;
 
             apply_header_bytes(
@@ -520,24 +521,27 @@ fn decode_qpack_internal(
             // Pattern 01NTxxxx: Literal Field Line with Name Reference (Section 4.5.4)
             let is_static = (first & 0x10) != 0;
             let (idx, consumed) = decode_prefixed_int(slice, 4)
-                .ok_or_else(|| Http3Error::H3("Invalid Literal with Name Reference".into()))?;
+                .ok_or_else(|| Http3Outcome::H3("Invalid Literal with Name Reference".into()))?;
             slice = &slice[consumed..];
 
             if !is_static {
-                return Err(Http3Error::H3(
+                return Err(Http3Outcome::H3(
                     "Dynamic table references not enabled (table capacity is 0)".into(),
                 ));
             }
 
-            let idx_usize = usize::try_from(idx)
-                .map_err(|_| Http3Error::H3(format!("Static table index out of bounds: {idx}")))?;
+            let idx_usize = usize::try_from(idx).map_err(|_| {
+                Http3Outcome::H3(format!("Static table index out of bounds: {idx}"))
+            })?;
             let name = STATIC_TABLE
                 .get(idx_usize)
-                .ok_or_else(|| Http3Error::H3(format!("Static table index out of bounds: {idx}")))?
+                .ok_or_else(|| {
+                    Http3Outcome::H3(format!("Static table index out of bounds: {idx}"))
+                })?
                 .0;
 
             let (val, consumed_val) = decode_string_literal_bytes(slice, 7)
-                .ok_or_else(|| Http3Error::H3("Invalid string literal value".into()))?;
+                .ok_or_else(|| Http3Outcome::H3("Invalid string literal value".into()))?;
             slice = &slice[consumed_val..];
 
             apply_header_bytes(
@@ -558,11 +562,11 @@ fn decode_qpack_internal(
         } else if (first & 0xe0) == 0x20 {
             // Pattern 001Nxxxx: Literal Field Line with Literal Name (Section 4.5.6)
             let (name, consumed_name) = decode_string_literal_bytes(slice, 3)
-                .ok_or_else(|| Http3Error::H3("Invalid literal field name".into()))?;
+                .ok_or_else(|| Http3Outcome::H3("Invalid literal field name".into()))?;
             slice = &slice[consumed_name..];
 
             let (val, consumed_val) = decode_string_literal_bytes(slice, 7)
-                .ok_or_else(|| Http3Error::H3("Invalid literal field value".into()))?;
+                .ok_or_else(|| Http3Outcome::H3("Invalid literal field value".into()))?;
             slice = &slice[consumed_val..];
 
             apply_header_bytes(
@@ -582,7 +586,7 @@ fn decode_qpack_internal(
             )?;
         } else {
             // Unrecognized or dynamic-only field representation
-            return Err(Http3Error::H3(format!(
+            return Err(Http3Outcome::H3(format!(
                 "Unsupported QPACK field representation: {first:#x}"
             )));
         }
@@ -696,7 +700,7 @@ fn apply_header_bytes(
     raw_path: &mut Option<String>,
     raw_authority: &mut Option<String>,
     raw_scheme: &mut Option<String>,
-) -> Result<(), Http3Error> {
+) -> Result<(), Http3Outcome> {
     if name.starts_with(b":") {
         match name {
             b":method" => {
@@ -738,7 +742,7 @@ fn apply_header_bytes(
                     && !decoded.headers.contains_key(http::header::HOST)
                 {
                     let Some(next) = rem_slots.checked_sub(1) else {
-                        return Err(Http3Error::H3(
+                        return Err(Http3Outcome::H3(
                             "Header count exceeds MAX_WIRE_HEADERS".into(),
                         ));
                     };
@@ -764,7 +768,7 @@ fn apply_header_bytes(
     }
 
     let Some(next) = rem_slots.checked_sub(1) else {
-        return Err(Http3Error::H3(
+        return Err(Http3Outcome::H3(
             "Header count exceeds MAX_WIRE_HEADERS".into(),
         ));
     };

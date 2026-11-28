@@ -7,7 +7,7 @@ use velda_tls::TlsClientEngine;
 
 use crate::client::connection::Http2Client;
 use crate::config::Http2Config;
-use crate::error::Http2Error;
+use crate::outcome::Http2Outcome;
 
 /// Connects directly to an HTTP/2 backend target `(target_ip, target_port_be)` via `velda-sock`.
 ///
@@ -21,16 +21,17 @@ pub async fn connect(
     tls: Option<(&TlsClientEngine, &str)>,
     config: &Http2Config,
     timeout: Option<std::time::Duration>,
-) -> Result<Http2Client, Http2Error> {
+) -> Result<Http2Client, Http2Outcome> {
     let connect_timeout = timeout.unwrap_or(std::time::Duration::from_secs(10));
-    let stream =
-        velda_sock::connect::connect_tcp_u128(target_ip, target_port_be, connect_timeout).await?;
+    let stream = velda_sock::connect::connect_tcp_u128(target_ip, target_port_be, connect_timeout)
+        .await
+        .map_err(Http2Outcome::Io)?;
 
     let Some((engine, sni)) = tls else {
         let h2_fut = connect_stream(stream, config);
         return if let Some(to) = timeout {
             tokio::time::timeout(to, h2_fut).await.map_err(|_| {
-                Http2Error::Io(std::io::Error::new(
+                Http2Outcome::Io(std::io::Error::new(
                     std::io::ErrorKind::TimedOut,
                     "HTTP/2 cleartext handshake timed out",
                 ))
@@ -45,19 +46,21 @@ pub async fn connect(
         tokio::time::timeout(to, tls_fut)
             .await
             .map_err(|_| {
-                Http2Error::Io(std::io::Error::new(
+                Http2Outcome::Io(std::io::Error::new(
                     std::io::ErrorKind::TimedOut,
                     "Upstream TLS handshake timed out",
                 ))
             })?
-            .map_err(|e| Http2Error::Tls(e.to_string()))?
+            .map_err(|e| Http2Outcome::Tls(e.to_string()))?
     } else {
-        tls_fut.await.map_err(|e| Http2Error::Tls(e.to_string()))?
+        tls_fut
+            .await
+            .map_err(|e| Http2Outcome::Tls(e.to_string()))?
     };
 
     let alpn = tls_stream.get_ref().1.alpn_protocol();
     if alpn != Some(b"h2") {
-        return Err(Http2Error::Tls(format!(
+        return Err(Http2Outcome::Tls(format!(
             "upstream negotiated ALPN {:?}, strictly expected \"h2\" (RFC 9113 Section 3.3)",
             alpn.map(String::from_utf8_lossy)
         )));
@@ -66,7 +69,7 @@ pub async fn connect(
     let h2_fut = connect_stream(tls_stream, config);
     if let Some(to) = timeout {
         tokio::time::timeout(to, h2_fut).await.map_err(|_| {
-            Http2Error::Io(std::io::Error::new(
+            Http2Outcome::Io(std::io::Error::new(
                 std::io::ErrorKind::TimedOut,
                 "Upstream HTTP/2 TLS handshake timed out",
             ))
@@ -79,7 +82,10 @@ pub async fn connect(
 /// Performs the HTTP/2 client handshake over an arbitrary asynchronous I/O stream (e.g. TLS or TCP).
 ///
 /// Spawns the H2 connection driver onto a background Tokio task.
-pub async fn connect_stream<IO>(stream: IO, config: &Http2Config) -> Result<Http2Client, Http2Error>
+pub async fn connect_stream<IO>(
+    stream: IO,
+    config: &Http2Config,
+) -> Result<Http2Client, Http2Outcome>
 where
     IO: tokio::io::AsyncRead + tokio::io::AsyncWrite + Unpin + Send + 'static,
 {

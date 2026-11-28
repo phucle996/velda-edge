@@ -19,7 +19,7 @@ use super::response::{
     encode_head, send_chunked_head, send_head_coalesced, send_parts,
 };
 use crate::config::Http1Config;
-use crate::error::Http1Error;
+use crate::outcome::Http1Outcome;
 
 /// Non-blocking stream tee event emitted by [`Http1ServerConnection`] on mirror-enabled routes.
 #[derive(Debug)]
@@ -134,7 +134,7 @@ where
     pub async fn next_request_head(
         &mut self,
         enrich: Option<crate::simd::H1IngressEnrich<'_>>,
-    ) -> Result<Option<(Http1ServerRequestHead, Http1BodyFraming)>, Http1Error> {
+    ) -> Result<Option<(Http1ServerRequestHead, Http1BodyFraming)>, Http1Outcome> {
         self.current_request_id = None;
         self.body_tee = None;
         if self.close_requested {
@@ -176,11 +176,11 @@ where
                     .await
                 {
                     Ok(res) => res,
-                    Err(Http1Error::Timeout) => {
+                    Err(Http1Outcome::Timeout) => {
                         if self.read_buf.is_empty() {
                             return Ok(None);
                         } else {
-                            return Err(Http1Error::Timeout);
+                            return Err(Http1Outcome::Timeout);
                         }
                     }
                     Err(e) => return Err(e),
@@ -189,7 +189,7 @@ where
                 if self.read_buf.is_empty() {
                     return Ok(None);
                 } else {
-                    return Err(Http1Error::Parse(
+                    return Err(Http1Outcome::Parse(
                         "Unexpected EOF while reading HTTP request head".into(),
                     ));
                 }
@@ -198,7 +198,7 @@ where
     }
 
     /// Reads and decodes the request body according to the given framing.
-    pub async fn read_body(&mut self, framing: Http1BodyFraming) -> Result<Body, Http1Error> {
+    pub async fn read_body(&mut self, framing: Http1BodyFraming) -> Result<Body, Http1Outcome> {
         if framing == Http1BodyFraming::Empty {
             tee_end(&mut self.body_tee);
             return Ok(Body::Empty);
@@ -219,7 +219,7 @@ where
             }
 
             if self.read_buf.len() > self.config.max_body_size.saturating_add(4096) {
-                return Err(Http1Error::PayloadTooLarge(self.read_buf.len()));
+                return Err(Http1Outcome::PayloadTooLarge(self.read_buf.len()));
             }
 
             let target_reserve = match framing {
@@ -236,11 +236,11 @@ where
             let bytes_read =
                 match read_with_timeout(&mut self.stream, &mut self.read_buf, idle_timeout).await {
                     Ok(res) => res,
-                    Err(Http1Error::Timeout) => return Err(Http1Error::Timeout),
+                    Err(Http1Outcome::Timeout) => return Err(Http1Outcome::Timeout),
                     Err(e) => return Err(e),
                 };
             if bytes_read == 0 {
-                return Err(Http1Error::Parse(
+                return Err(Http1Outcome::Parse(
                     "Unexpected EOF while reading HTTP request body".into(),
                 ));
             }
@@ -260,7 +260,7 @@ where
         &mut self,
         framing: Http1BodyFraming,
         slab_pool: Option<&std::sync::Arc<velda_core::buffer::slab::PayloadSlabPool>>,
-    ) -> Result<Body, Http1Error> {
+    ) -> Result<Body, Http1Outcome> {
         if framing == Http1BodyFraming::Empty {
             tee_end(&mut self.body_tee);
             return Ok(Body::Empty);
@@ -272,7 +272,7 @@ where
                 return Ok(Body::Empty);
             }
             if total_len > self.config.max_body_size {
-                return Err(Http1Error::PayloadTooLarge(total_len));
+                return Err(Http1Outcome::PayloadTooLarge(total_len));
             }
 
             if let Some(pool) = slab_pool
@@ -291,11 +291,11 @@ where
                     let dest = &mut lease[current_offset..total_len];
                     let n = match tokio::time::timeout(idle_timeout, self.stream.read(dest)).await {
                         Ok(Ok(n)) => n,
-                        Ok(Err(e)) => return Err(Http1Error::Io(e)),
-                        Err(_) => return Err(Http1Error::Timeout),
+                        Ok(Err(e)) => return Err(Http1Outcome::Io(e)),
+                        Err(_) => return Err(Http1Outcome::Timeout),
                     };
                     if n == 0 {
-                        return Err(Http1Error::Parse(
+                        return Err(Http1Outcome::Parse(
                             "Unexpected EOF while reading HTTP request body into slab".into(),
                         ));
                     }
@@ -319,7 +319,7 @@ where
     }
 
     /// Reads and decodes the next full HTTP/1.1 request (head + body).
-    pub async fn next_request(&mut self) -> Result<Option<Http1ServerRequest>, Http1Error> {
+    pub async fn next_request(&mut self) -> Result<Option<Http1ServerRequest>, Http1Outcome> {
         self.current_request_id = None;
         self.body_tee = None;
         if self.close_requested {
@@ -354,7 +354,7 @@ where
                     .saturating_add(self.config.max_body_size)
                     .saturating_add(4096)
             {
-                return Err(Http1Error::PayloadTooLarge(self.read_buf.len()));
+                return Err(Http1Outcome::PayloadTooLarge(self.read_buf.len()));
             }
 
             let timeout_duration = if self.read_buf.is_empty() {
@@ -368,11 +368,11 @@ where
                     .await
                 {
                     Ok(res) => res,
-                    Err(Http1Error::Timeout) => {
+                    Err(Http1Outcome::Timeout) => {
                         if self.read_buf.is_empty() {
                             return Ok(None);
                         } else {
-                            return Err(Http1Error::Timeout);
+                            return Err(Http1Outcome::Timeout);
                         }
                     }
                     Err(e) => return Err(e),
@@ -381,7 +381,7 @@ where
                 if self.read_buf.is_empty() {
                     return Ok(None);
                 } else {
-                    return Err(Http1Error::Parse(
+                    return Err(Http1Outcome::Parse(
                         "Unexpected EOF while reading HTTP request".into(),
                     ));
                 }
@@ -448,7 +448,7 @@ where
     pub async fn send_response(
         &mut self,
         response: &Http1ServerResponse,
-    ) -> Result<(), Http1Error> {
+    ) -> Result<(), Http1Outcome> {
         self.last_status = response.status.as_u16();
         self.last_bytes_tx += response.body.len() as u64;
         let close = send_parts(
@@ -477,7 +477,7 @@ where
     ///
     /// Respects the Single Responsibility Principle (SRP) by keeping HTTP/1.1 ASCII wire formatting
     /// strictly within `velda-http1`. Eliminates dynamic HeaderMap heap allocation and string formatting.
-    pub async fn send_early_error(&mut self, status: StatusCode) -> Result<(), Http1Error> {
+    pub async fn send_early_error(&mut self, status: StatusCode) -> Result<(), Http1Outcome> {
         self.last_status = status.as_u16();
         super::early_response::send_early_error(
             &mut self.stream,
@@ -495,7 +495,7 @@ where
         &mut self,
         head: &Http1ServerResponseHead,
         body: &Body,
-    ) -> Result<(), Http1Error> {
+    ) -> Result<(), Http1Outcome> {
         self.last_status = head.status.as_u16();
         self.last_bytes_tx += body.len() as u64;
         let close = send_parts(
@@ -527,7 +527,7 @@ where
     pub async fn send_chunked_head(
         &mut self,
         head: &Http1ServerResponseHead,
-    ) -> Result<(), Http1Error> {
+    ) -> Result<(), Http1Outcome> {
         self.last_status = head.status.as_u16();
         let close = send_chunked_head(
             &mut self.stream,
@@ -557,7 +557,7 @@ where
         head: &Http1ServerResponseHead,
         initial_chunk: Option<&[u8]>,
         is_terminated: bool,
-    ) -> Result<bool, Http1Error> {
+    ) -> Result<bool, Http1Outcome> {
         self.last_status = head.status.as_u16();
         if let Some(chunk) = initial_chunk {
             self.last_bytes_tx += chunk.len() as u64;
@@ -584,10 +584,13 @@ where
     }
 
     /// Transmits raw body bytes directly downstream without chunked framing (for HTTP/1.0 fallback).
-    pub async fn send_raw_bytes(&mut self, bytes: &[u8]) -> Result<(), Http1Error> {
+    pub async fn send_raw_bytes(&mut self, bytes: &[u8]) -> Result<(), Http1Outcome> {
         self.last_bytes_tx += bytes.len() as u64;
-        self.stream.write_all(bytes).await?;
-        self.stream.flush().await?;
+        self.stream
+            .write_all(bytes)
+            .await
+            .map_err(Http1Outcome::Io)?;
+        self.stream.flush().await.map_err(Http1Outcome::Io)?;
         Ok(())
     }
 
@@ -595,7 +598,7 @@ where
     ///
     /// Returns `Ok(Some(bytes))` for each chunk payload, and `Ok(None)` when the terminal
     /// chunk (`0\r\n\r\n`) is reached.
-    pub async fn read_next_chunk(&mut self) -> Result<Option<bytes::Bytes>, Http1Error> {
+    pub async fn read_next_chunk(&mut self) -> Result<Option<bytes::Bytes>, Http1Outcome> {
         loop {
             if let Some(res) = crate::wire::decode_chunk(&mut self.read_buf)? {
                 if let Some(ref chunk) = res {
@@ -619,14 +622,14 @@ where
                 match tokio::time::timeout(idle_timeout, self.stream.read_buf(&mut self.read_buf))
                     .await
                 {
-                    Ok(res) => res?,
-                    Err(_) => return Err(Http1Error::Timeout),
+                    Ok(res) => res.map_err(Http1Outcome::Io)?,
+                    Err(_) => return Err(Http1Outcome::Timeout),
                 };
             if bytes_read == 0 {
                 if self.read_buf.is_empty() {
                     return Ok(None);
                 } else {
-                    return Err(Http1Error::Parse(
+                    return Err(Http1Outcome::Parse(
                         "Unexpected EOF while reading chunked body".into(),
                     ));
                 }
@@ -638,10 +641,13 @@ where
     ///
     /// Unblocks clients that paused transmission waiting for server confirmation before sending body.
     #[inline]
-    pub async fn send_100_continue(&mut self) -> Result<(), Http1Error> {
+    pub async fn send_100_continue(&mut self) -> Result<(), Http1Outcome> {
         static HTTP_100_CONTINUE: &[u8] = b"HTTP/1.1 100 Continue\r\n\r\n";
-        self.stream.write_all(HTTP_100_CONTINUE).await?;
-        self.stream.flush().await?;
+        self.stream
+            .write_all(HTTP_100_CONTINUE)
+            .await
+            .map_err(Http1Outcome::Io)?;
+        self.stream.flush().await.map_err(Http1Outcome::Io)?;
         Ok(())
     }
 
@@ -672,7 +678,7 @@ pub(crate) async fn read_with_timeout<IO>(
     stream: &mut IO,
     buf: &mut BytesMut,
     timeout_duration: std::time::Duration,
-) -> Result<usize, Http1Error>
+) -> Result<usize, Http1Outcome>
 where
     IO: AsyncRead + Unpin,
 {
@@ -691,7 +697,9 @@ where
                 }
                 std::task::Poll::Ready(Some(Ok(filled)))
             }
-            std::task::Poll::Ready(Err(e)) => std::task::Poll::Ready(Some(Err(Http1Error::Io(e)))),
+            std::task::Poll::Ready(Err(e)) => {
+                std::task::Poll::Ready(Some(Err(Http1Outcome::Io(e))))
+            }
             std::task::Poll::Pending => std::task::Poll::Ready(None),
         }
     })
@@ -702,7 +710,7 @@ where
     }
 
     match tokio::time::timeout(timeout_duration, stream.read_buf(buf)).await {
-        Ok(res) => Ok(res?),
-        Err(_) => Err(Http1Error::Timeout),
+        Ok(res) => res.map_err(Http1Outcome::Io),
+        Err(_) => Err(Http1Outcome::Timeout),
     }
 }

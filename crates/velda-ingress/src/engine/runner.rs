@@ -19,9 +19,6 @@ pub struct IngressHandle {
     reconcile_senders: Vec<mpsc::Sender<Vec<IngressBinding>>>,
 }
 
-/// Backwards compatibility alias for `IngressHandle`.
-pub type EngineHandle = IngressHandle;
-
 impl IngressHandle {
     /// Creates a handle bound to a single reconciliation sender.
     pub fn new(reconcile_tx: mpsc::Sender<Vec<IngressBinding>>) -> Self {
@@ -63,9 +60,6 @@ pub struct IngressEngine {
     reconcile_tx: mpsc::Sender<Vec<IngressBinding>>,
     reconcile_rx: mpsc::Receiver<Vec<IngressBinding>>,
 }
-
-/// Backwards compatibility alias for `IngressEngine`.
-pub type TrafficEngine = IngressEngine;
 
 impl Default for IngressEngine {
     fn default() -> Self {

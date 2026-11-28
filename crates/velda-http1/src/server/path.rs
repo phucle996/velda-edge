@@ -8,13 +8,13 @@
 
 use http::Uri;
 
-use crate::error::Http1Error;
+use crate::outcome::Http1Outcome;
 
 /// Normalizes an HTTP/1.1 URI path in-place according to RFC 9112 and RFC 3986.
 ///
 /// Preserves query parameters while stripping path traversals (`/../`),
 /// duplicate slashes (`//`), backslashes (`\`), and percent-encoded separators (`%2F`, `%2E`).
-pub fn normalize_path(uri: &mut Uri) -> Result<(), Http1Error> {
+pub fn normalize_path(uri: &mut Uri) -> Result<(), Http1Outcome> {
     let path = uri.path();
     if is_clean_path(path.as_bytes()) {
         return Ok(());
@@ -27,19 +27,19 @@ pub fn normalize_path(uri: &mut Uri) -> Result<(), Http1Error> {
             if let Some(q) = pq.query() {
                 format!("{normalized}?{q}")
                     .parse::<http::uri::PathAndQuery>()
-                    .map_err(|e| Http1Error::InvalidUri(e.to_string()))?
+                    .map_err(|e| Http1Outcome::InvalidUri(e.to_string()))?
             } else {
                 normalized
                     .parse::<http::uri::PathAndQuery>()
-                    .map_err(|e| Http1Error::InvalidUri(e.to_string()))?
+                    .map_err(|e| Http1Outcome::InvalidUri(e.to_string()))?
             }
         }
         None => normalized
             .parse::<http::uri::PathAndQuery>()
-            .map_err(|e| Http1Error::InvalidUri(e.to_string()))?,
+            .map_err(|e| Http1Outcome::InvalidUri(e.to_string()))?,
     };
     parts.path_and_query = Some(new_pq);
-    *uri = http::Uri::from_parts(parts).map_err(|e| Http1Error::InvalidUri(e.to_string()))?;
+    *uri = http::Uri::from_parts(parts).map_err(|e| Http1Outcome::InvalidUri(e.to_string()))?;
 
     Ok(())
 }
@@ -66,10 +66,10 @@ pub fn is_clean_path(bytes: &[u8]) -> bool {
 }
 
 #[inline(never)]
-fn normalize_path_cold(path: &str) -> Result<String, Http1Error> {
+fn normalize_path_cold(path: &str) -> Result<String, Http1Outcome> {
     let bytes = path.as_bytes();
     if bytes.contains(&b'\0') {
-        return Err(Http1Error::InvalidUri(
+        return Err(Http1Outcome::InvalidUri(
             "Prohibited null byte in URI path".into(),
         ));
     }
@@ -92,7 +92,7 @@ fn normalize_path_cold(path: &str) -> Result<String, Http1Error> {
                 (Some(v1), Some(v2)) => {
                     let byte = (v1 << 4) | v2;
                     if byte == 0 {
-                        return Err(Http1Error::InvalidUri(
+                        return Err(Http1Outcome::InvalidUri(
                             "Prohibited null byte in URI path".into(),
                         ));
                     }
@@ -124,7 +124,7 @@ fn normalize_path_cold(path: &str) -> Result<String, Http1Error> {
             "" | "." => {}
             ".." => {
                 if stack.pop().is_none() {
-                    return Err(Http1Error::InvalidUri(
+                    return Err(Http1Outcome::InvalidUri(
                         "Root breakout attempt in URI path".into(),
                     ));
                 }

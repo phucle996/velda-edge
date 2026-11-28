@@ -14,8 +14,8 @@ use velda_core::buffer::header::{HeaderWorkspace, X_REQUEST_ID};
 use velda_core::{Body, L7Response};
 
 use super::connection::ServerCmd;
-use crate::error::Http2Error;
 use crate::headers::sanitize_workspace_headers;
+use crate::outcome::Http2Outcome;
 use crate::proto::frame::H2ErrorCode;
 
 /// Responder handle for an active HTTP/2 multiplexed stream.
@@ -46,7 +46,7 @@ impl Http2Responder {
     }
 
     /// Sends a response using the canonical [`L7Response`] type.
-    pub fn send_response(&mut self, response: &L7Response) -> Result<(), Http2Error> {
+    pub fn send_response(&mut self, response: &L7Response) -> Result<(), Http2Outcome> {
         self.send_parts(response.status, &response.headers, &response.body)
     }
 
@@ -56,7 +56,7 @@ impl Http2Responder {
         &mut self,
         status: StatusCode,
         cancel_upload: bool,
-    ) -> Result<(), Http2Error> {
+    ) -> Result<(), Http2Outcome> {
         self.last_status = status.as_u16();
         self.cmd_tx
             .send(ServerCmd::SendEarlyError {
@@ -66,11 +66,11 @@ impl Http2Responder {
                 alt_svc: self.alt_svc.clone(),
                 cancel_upload,
             })
-            .map_err(|_| Http2Error::ConnectionClosed)
+            .map_err(|_| Http2Outcome::ConnectionClosed)
     }
 
     /// Sends a response using an owned [`L7Response`].
-    pub fn send_response_owned(&mut self, response: L7Response) -> Result<(), Http2Error> {
+    pub fn send_response_owned(&mut self, response: L7Response) -> Result<(), Http2Outcome> {
         self.send_parts(response.status, &response.headers, &response.body)
     }
 
@@ -78,7 +78,7 @@ impl Http2Responder {
     pub fn send_response_and_cancel_upload(
         &mut self,
         response: &L7Response,
-    ) -> Result<(), Http2Error> {
+    ) -> Result<(), Http2Outcome> {
         self.send_internal(response.status, &response.headers, &response.body, true)
     }
 
@@ -97,7 +97,7 @@ impl Http2Responder {
         status: StatusCode,
         headers: &HeaderWorkspace,
         body: &Body,
-    ) -> Result<(), Http2Error> {
+    ) -> Result<(), Http2Outcome> {
         self.send_internal(status, headers, body, false)
     }
 
@@ -108,7 +108,7 @@ impl Http2Responder {
         headers: &HeaderWorkspace,
         body: &Body,
         cancel_upload: bool,
-    ) -> Result<(), Http2Error> {
+    ) -> Result<(), Http2Outcome> {
         self.last_status = status.as_u16();
         let is_no_body = status.is_informational()
             || status == StatusCode::NO_CONTENT
@@ -133,7 +133,7 @@ impl Http2Responder {
                 end_stream: true,
                 cancel_upload,
             })
-            .map_err(|_| Http2Error::ConnectionClosed)
+            .map_err(|_| Http2Outcome::ConnectionClosed)
     }
 
     /// Sends the response head and returns a progressive stream sender for response chunks.
@@ -141,7 +141,7 @@ impl Http2Responder {
         &mut self,
         status: StatusCode,
         headers: &HeaderWorkspace,
-    ) -> Result<Http2StreamSender, Http2Error> {
+    ) -> Result<Http2StreamSender, Http2Outcome> {
         self.last_status = status.as_u16();
         let mut ws = sanitize_workspace_headers(headers);
         self.inject_metadata_headers(&mut ws);
@@ -156,7 +156,7 @@ impl Http2Responder {
                 queued_send_bytes: Arc::clone(&queued_send_bytes),
                 send_notify: Arc::clone(&send_notify),
             })
-            .map_err(|_| Http2Error::ConnectionClosed)?;
+            .map_err(|_| Http2Outcome::ConnectionClosed)?;
 
         Ok(Http2StreamSender {
             stream_id: self.stream_id,
@@ -184,13 +184,13 @@ pub struct Http2StreamSender {
 
 impl Http2StreamSender {
     /// Sends a `DATA` chunk downstream with bounded driver queue backpressure.
-    pub async fn send_chunk(&mut self, chunk: Bytes) -> Result<(), Http2Error> {
+    pub async fn send_chunk(&mut self, chunk: Bytes) -> Result<(), Http2Outcome> {
         if chunk.is_empty() || self.finished {
             return Ok(());
         }
         while self.queued_send_bytes.load(Ordering::Acquire) >= self.max_send_buffer_size {
             if self.cmd_tx.is_closed() {
-                return Err(Http2Error::ConnectionClosed);
+                return Err(Http2Outcome::ConnectionClosed);
             }
             self.send_notify.notified().await;
         }
@@ -202,13 +202,13 @@ impl Http2StreamSender {
                 data: chunk,
                 end_stream: false,
             })
-            .map_err(|_| Http2Error::ConnectionClosed)?;
+            .map_err(|_| Http2Outcome::ConnectionClosed)?;
         self.bytes_sent += len as u64;
         Ok(())
     }
 
     /// Sends trailing headers directly from [`HeaderWorkspace`] to conclude the stream.
-    pub fn send_trailers(&mut self, trailers: HeaderWorkspace) -> Result<(), Http2Error> {
+    pub fn send_trailers(&mut self, trailers: HeaderWorkspace) -> Result<(), Http2Outcome> {
         if self.finished {
             return Ok(());
         }
@@ -218,11 +218,11 @@ impl Http2StreamSender {
                 stream_id: self.stream_id,
                 trailers: sanitize_workspace_headers(&trailers),
             })
-            .map_err(|_| Http2Error::ConnectionClosed)
+            .map_err(|_| Http2Outcome::ConnectionClosed)
     }
 
     /// Explicitly closes the stream by sending an empty `DATA` frame with `END_STREAM`.
-    pub fn finish(&mut self) -> Result<(), Http2Error> {
+    pub fn finish(&mut self) -> Result<(), Http2Outcome> {
         if self.finished {
             return Ok(());
         }
@@ -233,7 +233,7 @@ impl Http2StreamSender {
                 data: Bytes::new(),
                 end_stream: true,
             })
-            .map_err(|_| Http2Error::ConnectionClosed)
+            .map_err(|_| Http2Outcome::ConnectionClosed)
     }
 
     /// Explicitly resets the stream with an HTTP/2 error code.

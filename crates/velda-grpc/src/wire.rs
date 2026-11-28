@@ -128,7 +128,7 @@ impl GrpcWire {
     #[cold]
     pub fn prepare_rejection_headers(
         headers: &mut velda_core::HeaderWorkspace,
-        status: velda_core::GrpcStatus,
+        status: crate::GrpcStatus,
         message: Option<&str>,
     ) {
         use velda_core::HeaderKey;
@@ -145,6 +145,19 @@ impl GrpcWire {
         {
             headers.insert_prehashed(&KEY_GRPC_MESSAGE, val);
         }
+    }
+
+    /// Maps an [`velda_core::InternalStatus`] into gRPC Trailers-Only metadata while preserving
+    /// Bit 1 bypass headers (`x-request-id`, `x-velda-fault`, etc.), returning the resolved [`crate::GrpcStatus`].
+    #[cold]
+    pub fn prepare_status_headers(
+        headers: &mut velda_core::HeaderWorkspace,
+        internal: velda_core::InternalStatus,
+    ) -> crate::GrpcStatus {
+        let grpc_status = crate::GrpcStatus::from_internal_status(internal);
+        let msg = crate::GrpcStatus::internal_status_message(internal);
+        Self::prepare_rejection_headers(headers, grpc_status, Some(msg));
+        grpc_status
     }
 }
 
@@ -214,7 +227,7 @@ mod tests {
 
         GrpcWire::prepare_rejection_headers(
             &mut ws,
-            velda_core::GrpcStatus::ResourceExhausted,
+            crate::GrpcStatus::ResourceExhausted,
             Some("quota exceeded"),
         );
 

@@ -2,10 +2,10 @@
 
 use http::Uri;
 
-use crate::error::Http2Error;
+use crate::outcome::Http2Outcome;
 
 /// Normalizes an HTTP/2 URI path in-place according to RFC 9113 and RFC 3986.
-pub fn normalize_path(uri: &mut Uri) -> Result<(), Http2Error> {
+pub fn normalize_path(uri: &mut Uri) -> Result<(), Http2Outcome> {
     let path = uri.path();
     if is_clean_path(path.as_bytes()) {
         return Ok(());
@@ -18,19 +18,19 @@ pub fn normalize_path(uri: &mut Uri) -> Result<(), Http2Error> {
             if let Some(q) = pq.query() {
                 format!("{normalized}?{q}")
                     .parse::<http::uri::PathAndQuery>()
-                    .map_err(|e| Http2Error::Parse(e.to_string()))?
+                    .map_err(|e| Http2Outcome::Parse(e.to_string()))?
             } else {
                 normalized
                     .parse::<http::uri::PathAndQuery>()
-                    .map_err(|e| Http2Error::Parse(e.to_string()))?
+                    .map_err(|e| Http2Outcome::Parse(e.to_string()))?
             }
         }
         None => normalized
             .parse::<http::uri::PathAndQuery>()
-            .map_err(|e| Http2Error::Parse(e.to_string()))?,
+            .map_err(|e| Http2Outcome::Parse(e.to_string()))?,
     };
     parts.path_and_query = Some(new_pq);
-    *uri = http::Uri::from_parts(parts).map_err(|e| Http2Error::Parse(e.to_string()))?;
+    *uri = http::Uri::from_parts(parts).map_err(|e| Http2Outcome::Parse(e.to_string()))?;
 
     Ok(())
 }
@@ -52,10 +52,12 @@ pub fn is_clean_path(bytes: &[u8]) -> bool {
 
 #[cold]
 #[inline(never)]
-fn normalize_path_cold(path: &str) -> Result<String, Http2Error> {
+fn normalize_path_cold(path: &str) -> Result<String, Http2Outcome> {
     let bytes = path.as_bytes();
     if bytes.contains(&b'\0') {
-        return Err(Http2Error::Parse("Prohibited null byte in URI path".into()));
+        return Err(Http2Outcome::Parse(
+            "Prohibited null byte in URI path".into(),
+        ));
     }
 
     let mut decoded = String::with_capacity(bytes.len() + 1);
@@ -76,7 +78,9 @@ fn normalize_path_cold(path: &str) -> Result<String, Http2Error> {
                 (Some(v1), Some(v2)) => {
                     let byte = (v1 << 4) | v2;
                     if byte == 0 {
-                        return Err(Http2Error::Parse("Prohibited null byte in URI path".into()));
+                        return Err(Http2Outcome::Parse(
+                            "Prohibited null byte in URI path".into(),
+                        ));
                     }
                     match byte {
                         b'.' => decoded.push('.'),
@@ -106,7 +110,7 @@ fn normalize_path_cold(path: &str) -> Result<String, Http2Error> {
             "" | "." => {}
             ".." => {
                 if stack.pop().is_none() {
-                    return Err(Http2Error::Parse(
+                    return Err(Http2Outcome::Parse(
                         "Root breakout attempt in URI path".into(),
                     ));
                 }

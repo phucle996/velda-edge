@@ -25,7 +25,7 @@ use tokio::sync::{Notify, mpsc, oneshot};
 use velda_core::buffer::header::HeaderWorkspace;
 
 use crate::config::Http2Config;
-use crate::error::Http2Error;
+use crate::outcome::Http2Outcome;
 use crate::proto::frame::H2ErrorCode;
 use crate::proto::{H2Connection, H2Event, H2Role};
 
@@ -37,7 +37,7 @@ enum BodyEvent {
 
 type ClientHeadAck = (
     u32,
-    oneshot::Receiver<Result<Http2ClientResponse, Http2Error>>,
+    oneshot::Receiver<Result<Http2ClientResponse, Http2Outcome>>,
 );
 
 enum ClientCmd {
@@ -46,7 +46,7 @@ enum ClientCmd {
         uri: Uri,
         headers: HeaderWorkspace,
         end_stream: bool,
-        sid_tx: oneshot::Sender<Result<ClientHeadAck, Http2Error>>,
+        sid_tx: oneshot::Sender<Result<ClientHeadAck, Http2Outcome>>,
         queued_send_bytes: Arc<AtomicUsize>,
         send_notify: Arc<Notify>,
         stream_max_body: usize,
@@ -71,9 +71,9 @@ enum ClientCmd {
 }
 
 struct ActiveClientStream {
-    head_tx: Option<oneshot::Sender<Result<Http2ClientResponse, Http2Error>>>,
-    body_rx: Option<mpsc::UnboundedReceiver<Result<BodyEvent, Http2Error>>>,
-    body_tx: mpsc::UnboundedSender<Result<BodyEvent, Http2Error>>,
+    head_tx: Option<oneshot::Sender<Result<Http2ClientResponse, Http2Outcome>>>,
+    body_rx: Option<mpsc::UnboundedReceiver<Result<BodyEvent, Http2Outcome>>>,
+    body_tx: mpsc::UnboundedSender<Result<BodyEvent, Http2Outcome>>,
     cmd_tx: mpsc::UnboundedSender<ClientCmd>,
     queued_send_bytes: Arc<AtomicUsize>,
     send_notify: Arc<Notify>,
@@ -91,7 +91,7 @@ pub struct Http2Client {
 
 impl Http2Client {
     /// Performs the HTTP/2 client preface + SETTINGS exchange and spawns the connection driver task.
-    pub async fn handshake<IO>(stream: IO, config: &Http2Config) -> Result<Self, Http2Error>
+    pub async fn handshake<IO>(stream: IO, config: &Http2Config) -> Result<Self, Http2Outcome>
     where
         IO: AsyncRead + AsyncWrite + Unpin + Send + 'static,
     {
@@ -100,8 +100,8 @@ impl Http2Client {
 
         let initial_out = conn.take_outbound();
         if !initial_out.is_empty() {
-            wr.write_all(&initial_out).await?;
-            wr.flush().await?;
+            wr.write_all(&initial_out).await.map_err(Http2Outcome::Io)?;
+            wr.flush().await.map_err(Http2Outcome::Io)?;
         }
 
         let (cmd_tx, cmd_rx) = mpsc::unbounded_channel();
@@ -145,9 +145,9 @@ impl Http2Client {
         uri: Uri,
         headers: HeaderWorkspace,
         end_stream: bool,
-    ) -> Result<(Http2ResponseFuture, Http2ClientSendStream), Http2Error> {
+    ) -> Result<(Http2ResponseFuture, Http2ClientSendStream), Http2Outcome> {
         if !self.is_healthy() {
-            return Err(Http2Error::ConnectionClosed);
+            return Err(Http2Outcome::ConnectionClosed);
         }
         let (sid_tx, sid_rx) = oneshot::channel();
         let queued_send_bytes = Arc::new(AtomicUsize::new(0));
@@ -163,9 +163,9 @@ impl Http2Client {
                 send_notify: Arc::clone(&send_notify),
                 stream_max_body: self.default_max_body_size,
             })
-            .map_err(|_| Http2Error::ConnectionClosed)?;
+            .map_err(|_| Http2Outcome::ConnectionClosed)?;
 
-        let (stream_id, head_rx) = sid_rx.await.map_err(|_| Http2Error::ConnectionClosed)??;
+        let (stream_id, head_rx) = sid_rx.await.map_err(|_| Http2Outcome::ConnectionClosed)??;
 
         let send_stream = Http2ClientSendStream {
             stream_id,
@@ -181,16 +181,16 @@ impl Http2Client {
 
 /// Future resolving to [`Http2ClientResponse`] once backend response `HEADERS` arrive.
 pub struct Http2ResponseFuture {
-    rx: oneshot::Receiver<Result<Http2ClientResponse, Http2Error>>,
+    rx: oneshot::Receiver<Result<Http2ClientResponse, Http2Outcome>>,
 }
 
 impl Future for Http2ResponseFuture {
-    type Output = Result<Http2ClientResponse, Http2Error>;
+    type Output = Result<Http2ClientResponse, Http2Outcome>;
 
     fn poll(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Self::Output> {
         match Pin::new(&mut self.rx).poll(cx) {
             Poll::Ready(Ok(res)) => Poll::Ready(res),
-            Poll::Ready(Err(_)) => Poll::Ready(Err(Http2Error::ConnectionClosed)),
+            Poll::Ready(Err(_)) => Poll::Ready(Err(Http2Outcome::ConnectionClosed)),
             Poll::Pending => Poll::Pending,
         }
     }
@@ -208,7 +208,7 @@ pub struct Http2ClientResponse {
 #[derive(Debug)]
 pub struct Http2ClientRecvStream {
     stream_id: u32,
-    body_rx: mpsc::UnboundedReceiver<Result<BodyEvent, Http2Error>>,
+    body_rx: mpsc::UnboundedReceiver<Result<BodyEvent, Http2Outcome>>,
     cmd_tx: mpsc::UnboundedSender<ClientCmd>,
     trailers: Option<HeaderWorkspace>,
     eof: bool,
@@ -218,7 +218,7 @@ pub struct Http2ClientRecvStream {
 
 impl Http2ClientRecvStream {
     /// Receives the next `DATA` payload chunk, returning `Ok(None)` at EOF / trailers.
-    pub async fn recv_chunk(&mut self) -> Result<Option<Bytes>, Http2Error> {
+    pub async fn recv_chunk(&mut self) -> Result<Option<Bytes>, Http2Outcome> {
         if self.eof {
             return Ok(None);
         }
@@ -234,7 +234,7 @@ impl Http2ClientRecvStream {
                         });
                         if self.bytes_received > self.max_body_size {
                             self.eof = true;
-                            return Err(Http2Error::PayloadTooLarge(self.bytes_received));
+                            return Err(Http2Outcome::PayloadTooLarge(self.bytes_received));
                         }
                         return Ok(Some(chunk));
                     }
@@ -259,7 +259,7 @@ impl Http2ClientRecvStream {
     /// Non-blocking check for the next queued `DATA` chunk:
     /// `Ok(None)` = queue empty, `Ok(Some(Some(bytes)))` = chunk, `Ok(Some(None))` = EOF.
     #[inline]
-    pub fn try_recv_chunk(&mut self) -> Result<Option<Option<Bytes>>, Http2Error> {
+    pub fn try_recv_chunk(&mut self) -> Result<Option<Option<Bytes>>, Http2Outcome> {
         if self.eof {
             return Ok(Some(None));
         }
@@ -275,7 +275,7 @@ impl Http2ClientRecvStream {
                         });
                         if self.bytes_received > self.max_body_size {
                             self.eof = true;
-                            return Err(Http2Error::PayloadTooLarge(self.bytes_received));
+                            return Err(Http2Outcome::PayloadTooLarge(self.bytes_received));
                         }
                         return Ok(Some(Some(chunk)));
                     }
@@ -299,7 +299,7 @@ impl Http2ClientRecvStream {
     }
 
     /// Consumes all remaining chunks into a contiguous [`Bytes`] buffer within `max_bytes`.
-    pub async fn consume_all(&mut self, max_bytes: usize) -> Result<Bytes, Http2Error> {
+    pub async fn consume_all(&mut self, max_bytes: usize) -> Result<Bytes, Http2Outcome> {
         self.max_body_size = max_bytes;
         let mut out = BytesMut::new();
         while let Some(chunk) = self.recv_chunk().await? {
@@ -315,7 +315,7 @@ impl Http2ClientRecvStream {
     }
 
     /// Awaits trailers after all DATA frames have been drained.
-    pub async fn trailers(&mut self) -> Result<Option<HeaderWorkspace>, Http2Error> {
+    pub async fn trailers(&mut self) -> Result<Option<HeaderWorkspace>, Http2Outcome> {
         if let Some(tr) = self.trailers.take() {
             return Ok(Some(tr));
         }
@@ -355,7 +355,7 @@ pub struct Http2ClientSendStream {
 impl Http2ClientSendStream {
     /// Queues an outbound `DATA` payload (non-blocking) for transmission by the driver.
     #[inline]
-    pub fn send_data(&mut self, data: Bytes, end_stream: bool) -> Result<(), Http2Error> {
+    pub fn send_data(&mut self, data: Bytes, end_stream: bool) -> Result<(), Http2Outcome> {
         if self.finished {
             return Ok(());
         }
@@ -368,17 +368,17 @@ impl Http2ClientSendStream {
                 data,
                 end_stream,
             })
-            .map_err(|_| Http2Error::ConnectionClosed)
+            .map_err(|_| Http2Outcome::ConnectionClosed)
     }
 
     /// Sends a `DATA` chunk applying backpressure when queued bytes exceed `max_send_buffer_size`.
-    pub async fn send_chunk(&mut self, data: Bytes, end_stream: bool) -> Result<(), Http2Error> {
+    pub async fn send_chunk(&mut self, data: Bytes, end_stream: bool) -> Result<(), Http2Outcome> {
         if self.finished {
             return Ok(());
         }
         while self.queued_send_bytes.load(Ordering::Acquire) >= self.max_send_buffer_size {
             if self.cmd_tx.is_closed() {
-                return Err(Http2Error::ConnectionClosed);
+                return Err(Http2Outcome::ConnectionClosed);
             }
             self.send_notify.notified().await;
         }
@@ -387,7 +387,7 @@ impl Http2ClientSendStream {
 
     /// Sends trailing headers and closes the local send side.
     #[inline]
-    pub fn send_trailers(&mut self, trailers: HeaderWorkspace) -> Result<(), Http2Error> {
+    pub fn send_trailers(&mut self, trailers: HeaderWorkspace) -> Result<(), Http2Outcome> {
         if self.finished {
             return Ok(());
         }
@@ -397,7 +397,7 @@ impl Http2ClientSendStream {
                 stream_id: self.stream_id,
                 trailers,
             })
-            .map_err(|_| Http2Error::ConnectionClosed)
+            .map_err(|_| Http2Outcome::ConnectionClosed)
     }
 
     /// Sends `RST_STREAM` with `code`.
@@ -466,7 +466,7 @@ async fn run_client_driver<IO>(
                                 }
                                 fail_all_client_streams(
                                     &mut streams,
-                                    Http2Error::Protocol(proto_err),
+                                    Http2Outcome::Protocol(proto_err),
                                 );
                                 return;
                             }
@@ -495,7 +495,7 @@ async fn run_client_driver<IO>(
         let _ = wr.write_all(&write_buf).await;
         let _ = wr.flush().await;
     }
-    fail_all_client_streams(&mut streams, Http2Error::ConnectionClosed);
+    fail_all_client_streams(&mut streams, Http2Outcome::ConnectionClosed);
 }
 
 #[inline]
@@ -556,15 +556,15 @@ fn handle_client_cmd(
                 Err(pe) => {
                     let err = if pe.code == H2ErrorCode::REFUSED_STREAM {
                         if let Some(last) = conn.peer_goaway_last_stream_id() {
-                            Http2Error::GoAway {
+                            Http2Outcome::GoAway {
                                 last_stream_id: last,
                                 code: H2ErrorCode::NO_ERROR,
                             }
                         } else {
-                            Http2Error::StreamReset(H2ErrorCode::REFUSED_STREAM)
+                            Http2Outcome::StreamReset(H2ErrorCode::REFUSED_STREAM)
                         }
                     } else {
-                        Http2Error::Protocol(pe)
+                        Http2Outcome::Protocol(pe)
                     };
                     let _ = sid_tx.send(Err(err));
                 }
@@ -667,9 +667,9 @@ fn dispatch_client_events(
                 if let Some(mut st) = streams.remove(&stream_id) {
                     st.send_notify.notify_waiters();
                     if let Some(head_tx) = st.head_tx.take() {
-                        let _ = head_tx.send(Err(Http2Error::StreamReset(error_code)));
+                        let _ = head_tx.send(Err(Http2Outcome::StreamReset(error_code)));
                     } else {
-                        let _ = st.body_tx.send(Err(Http2Error::StreamReset(error_code)));
+                        let _ = st.body_tx.send(Err(Http2Outcome::StreamReset(error_code)));
                     }
                 }
             }
@@ -686,7 +686,7 @@ fn dispatch_client_events(
                     .collect();
                 for sid in refused {
                     if let Some(mut st) = streams.remove(&sid) {
-                        let err = Http2Error::GoAway {
+                        let err = Http2Outcome::GoAway {
                             last_stream_id,
                             code: error_code,
                         };
@@ -704,20 +704,20 @@ fn dispatch_client_events(
     }
 }
 
-fn fail_all_client_streams(streams: &mut HashMap<u32, ActiveClientStream>, err: Http2Error) {
+fn fail_all_client_streams(streams: &mut HashMap<u32, ActiveClientStream>, err: Http2Outcome) {
     let msg = err.to_string();
     for (_sid, mut st) in streams.drain() {
         let cloned = match &err {
-            Http2Error::GoAway {
+            Http2Outcome::GoAway {
                 last_stream_id,
                 code,
-            } => Http2Error::GoAway {
+            } => Http2Outcome::GoAway {
                 last_stream_id: *last_stream_id,
                 code: *code,
             },
-            Http2Error::StreamReset(c) => Http2Error::StreamReset(*c),
-            Http2Error::Protocol(p) => Http2Error::Protocol(p.clone()),
-            _ => Http2Error::Parse(msg.clone()),
+            Http2Outcome::StreamReset(c) => Http2Outcome::StreamReset(*c),
+            Http2Outcome::Protocol(p) => Http2Outcome::Protocol(p.clone()),
+            _ => Http2Outcome::Parse(msg.clone()),
         };
         st.send_notify.notify_waiters();
         if let Some(head_tx) = st.head_tx.take() {

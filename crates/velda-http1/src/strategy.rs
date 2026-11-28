@@ -2,7 +2,7 @@
 
 use velda_core::StreamingMode;
 
-use crate::error::Http1Error;
+use crate::outcome::Http1Outcome;
 
 /// Discrete streaming strategies for HTTP/1.1 request handling.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
@@ -35,21 +35,21 @@ impl Http1PipeStrategy {
     /// Resolves the concrete strategy from listener capabilities and upstream requirements.
     ///
     /// # Errors
-    /// Returns [`Http1Error::StreamingViolation`] if upstream requires streaming capabilities
+    /// Returns [`Http1Outcome::StreamingViolation`] if upstream requires streaming capabilities
     /// that are disabled on the ingress listener.
     pub fn resolve(
         listener_streaming: StreamingMode,
         upstream_streaming: StreamingMode,
-    ) -> Result<Self, Http1Error> {
+    ) -> Result<Self, Http1Outcome> {
         if upstream_streaming.server && !listener_streaming.server {
-            return Err(Http1Error::StreamingViolation(
+            return Err(Http1Outcome::StreamingViolation(
                 "Upstream requires server streaming, but listener has streaming.server disabled"
                     .into(),
             ));
         }
 
         if upstream_streaming.client && !listener_streaming.client {
-            return Err(Http1Error::StreamingViolation(
+            return Err(Http1Outcome::StreamingViolation(
                 "Upstream requires client streaming, but listener has streaming.client disabled"
                     .into(),
             ));

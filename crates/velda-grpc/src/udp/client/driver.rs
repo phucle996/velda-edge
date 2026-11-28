@@ -14,7 +14,7 @@ use tokio::net::UdpSocket;
 use tokio::sync::{mpsc, oneshot};
 use velda_core::{Body, HeaderWorkspace, L7Request, L7Response};
 
-use crate::error::GrpcError;
+use crate::outcome::GrpcOutcome;
 use crate::udp::wire::{
     UdpFrame, decode_qpack, decode_udp_frame, encode_qpack_request, encode_udp_frame,
 };
@@ -25,14 +25,14 @@ pub(crate) enum ClientCommand {
     /// Dispatches an L7 request over a newly opened multiplexed bidirectional stream.
     SendRequest {
         request: L7Request,
-        reply_tx: oneshot::Sender<Result<L7Response, GrpcError>>,
+        reply_tx: oneshot::Sender<Result<L7Response, GrpcOutcome>>,
     },
     /// Gracefully closes the QUIC connection.
     Close,
 }
 
 struct ActiveStream {
-    reply_tx: oneshot::Sender<Result<L7Response, GrpcError>>,
+    reply_tx: oneshot::Sender<Result<L7Response, GrpcOutcome>>,
 }
 
 async fn flush_conn_transmits(
@@ -95,7 +95,7 @@ pub(crate) async fn run_client_driver(
                         let stream_id = match conn.streams().open(Dir::Bi) {
                             Some(id) => id,
                             None => {
-                                let _ = reply_tx.send(Err(GrpcError::Protocol(
+                                let _ = reply_tx.send(Err(GrpcOutcome::Protocol(
                                     "No bidirectional streams available on QUIC connection".into(),
                                 )));
                                 continue;
@@ -141,7 +141,7 @@ pub(crate) async fn run_client_driver(
                         }
 
                         if let Some(e) = write_err {
-                            let _ = reply_tx.send(Err(GrpcError::Internal(format!("Failed to write to stream: {e}"))));
+                            let _ = reply_tx.send(Err(GrpcOutcome::Internal(format!("Failed to write to stream: {e}"))));
                             continue;
                         }
 
@@ -268,7 +268,7 @@ pub(crate) async fn run_client_driver(
 
                     if let Some(err) = stream_reset_err {
                         if let Some(active) = active_streams.remove(&id) {
-                            let _ = active.reply_tx.send(Err(GrpcError::Internal(format!(
+                            let _ = active.reply_tx.send(Err(GrpcOutcome::Internal(format!(
                                 "Stream reset by peer: {err}"
                             ))));
                         }
@@ -285,7 +285,7 @@ pub(crate) async fn run_client_driver(
                         if let Some(active) = active_streams.remove(&id) {
                             let _ = active
                                 .reply_tx
-                                .send(Err(GrpcError::PayloadTooLarge(max_message_size + 1)));
+                                .send(Err(GrpcOutcome::PayloadTooLarge(max_message_size + 1)));
                         }
                         stream_headers.remove(&id);
                         stream_raw_bufs.remove(&id);
@@ -336,7 +336,7 @@ pub(crate) async fn run_client_driver(
                 Event::ConnectionLost { reason } => {
                     tracing::warn!(reason = %reason, "Upstream gRPC QUIC connection terminated");
                     for (_, stream) in active_streams.drain() {
-                        let _ = stream.reply_tx.send(Err(GrpcError::Protocol(format!(
+                        let _ = stream.reply_tx.send(Err(GrpcOutcome::Protocol(format!(
                             "QUIC connection lost: {reason}"
                         ))));
                     }

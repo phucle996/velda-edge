@@ -111,27 +111,81 @@ pub fn precompiled_early_hpack(status: StatusCode) -> Option<&'static [u8]> {
     }
 }
 
-/// Builds an HTTP/2 Zero-Body rejection [`L7Response`] in-place from a request [`HeaderWorkspace`],
-/// preserving bypass headers (`x-request-id`, `x-ratelimit-*`, `retry-after`) while stamping
-/// canonical HTTP/2 error headers.
+const STATUS_499: StatusCode = match StatusCode::from_u16(499) {
+    Ok(s) => s,
+    Err(_) => panic!("Valid status code 499"),
+};
+
+/// Maps an [`velda_core::InternalStatus`] into its canonical HTTP/2 [`StatusCode`].
+#[inline]
+pub const fn internal_status_to_http(internal: velda_core::InternalStatus) -> StatusCode {
+    use velda_core::InternalStatus;
+    match internal {
+        InternalStatus::Completed | InternalStatus::PoolKeep => StatusCode::OK,
+        InternalStatus::ClientCanceled | InternalStatus::PoolStreamCanceled => STATUS_499,
+        InternalStatus::UpstreamError
+        | InternalStatus::UpstreamDnsFailed
+        | InternalStatus::UpstreamConnectFailed
+        | InternalStatus::UpstreamTlsFailed
+        | InternalStatus::UpstreamStale
+        | InternalStatus::UpstreamRefused
+        | InternalStatus::UpstreamIo
+        | InternalStatus::UpstreamProtocolError => StatusCode::BAD_GATEWAY,
+        InternalStatus::UpstreamTimeout | InternalStatus::UpstreamConnectTimeout => {
+            StatusCode::GATEWAY_TIMEOUT
+        }
+        InternalStatus::RequestTimeout => StatusCode::REQUEST_TIMEOUT,
+        InternalStatus::RouteNotFound => StatusCode::NOT_FOUND,
+        InternalStatus::InternalError | InternalStatus::InvalidRuntimeConfig => {
+            StatusCode::INTERNAL_SERVER_ERROR
+        }
+        InternalStatus::ServiceUnavailable
+        | InternalStatus::NoEndpointsAvailable
+        | InternalStatus::PoolExhausted
+        | InternalStatus::PoolAcquisitionTimeout
+        | InternalStatus::PoolEvict => StatusCode::SERVICE_UNAVAILABLE,
+        InternalStatus::BadRequest
+        | InternalStatus::DownstreamIo
+        | InternalStatus::DownstreamTls
+        | InternalStatus::SmugglingDetected
+        | InternalStatus::StreamingViolation => StatusCode::BAD_REQUEST,
+        InternalStatus::Unauthorized => StatusCode::UNAUTHORIZED,
+        InternalStatus::Forbidden
+        | InternalStatus::WafBlocked
+        | InternalStatus::IpBlocked
+        | InternalStatus::BotBlocked => StatusCode::FORBIDDEN,
+        InternalStatus::MethodNotAllowed => StatusCode::METHOD_NOT_ALLOWED,
+        InternalStatus::Conflict => StatusCode::CONFLICT,
+        InternalStatus::PayloadTooLarge => StatusCode::PAYLOAD_TOO_LARGE,
+        InternalStatus::UriTooLong => StatusCode::URI_TOO_LONG,
+        InternalStatus::UnsupportedMediaType => StatusCode::UNSUPPORTED_MEDIA_TYPE,
+        InternalStatus::HeaderFieldsTooLarge => StatusCode::REQUEST_HEADER_FIELDS_TOO_LARGE,
+        InternalStatus::RateLimited | InternalStatus::FloodDetected => {
+            StatusCode::TOO_MANY_REQUESTS
+        }
+    }
+}
+
+/// Builds an HTTP/2 Zero-Body [`L7Response`] in-place from an [`velda_core::InternalStatus`]
+/// and request [`HeaderWorkspace`], preserving Bit 1 bypass headers while stamping
+/// canonical HTTP/2 headers (`cache-control: no-store`, `retry-after: 1` on 429).
 #[cold]
-pub fn reject_response(
-    reason: velda_core::RejectReason,
+pub fn status_response(
+    internal: velda_core::InternalStatus,
     mut headers: HeaderWorkspace,
 ) -> L7Response {
     const KEY_CACHE_CTRL: HeaderKey = HeaderKey::from_static("cache-control");
     const KEY_RETRY_AFTER: HeaderKey = HeaderKey::from_static("retry-after");
 
-    let meta = velda_core::lut::get_reject_meta(reason);
+    let status = internal_status_to_http(internal);
     headers.retain_bypass_only();
     headers.insert_prehashed(&KEY_CACHE_CTRL, HeaderValue::from_static("no-store"));
-    if meta.status == StatusCode::TOO_MANY_REQUESTS && !headers.contains_prehashed(&KEY_RETRY_AFTER)
-    {
+    if status == StatusCode::TOO_MANY_REQUESTS && !headers.contains_prehashed(&KEY_RETRY_AFTER) {
         headers.insert_prehashed(&KEY_RETRY_AFTER, HeaderValue::from_static("1"));
     }
 
     L7Response {
-        status: meta.status,
+        status,
         version: Version::HTTP_2,
         headers,
         body: Body::Empty,
@@ -170,12 +224,12 @@ mod tests {
     }
 
     #[test]
-    fn test_reject_response_zero_body_and_preserves_plugin_retry_after() {
+    fn test_status_response_zero_body_and_preserves_plugin_retry_after() {
         let mut ws = HeaderWorkspace::new(32);
         ws.insert(http::header::HOST, HeaderValue::from_static("example.com"));
         ws.insert_bypass_u64(http::header::RETRY_AFTER, 42);
 
-        let resp = reject_response(velda_core::RejectReason::TooManyRequests, ws);
+        let resp = status_response(velda_core::InternalStatus::RateLimited, ws);
         assert_eq!(resp.status, StatusCode::TOO_MANY_REQUESTS);
         assert_eq!(resp.version, Version::HTTP_2);
         assert!(resp.body.is_empty());

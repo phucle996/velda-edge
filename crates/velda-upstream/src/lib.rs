@@ -15,13 +15,13 @@
 //! ```
 
 pub mod catalog;
-pub mod error;
 pub mod gate;
 pub mod health;
+pub mod outcome;
 pub mod upstream;
 
 pub use catalog::{UpstreamCatalog, set_global_upstream_catalog, with_upstream_bytes};
-pub use error::{Result, UpstreamError};
 pub use gate::AdaptiveConcurrencyGate;
 pub use health::{ActiveHealthConfig, HealthConfig, HealthTracker, PassiveHealthConfig};
+pub use outcome::UpstreamOutcome;
 pub use upstream::{Upstream, UpstreamTimeouts};

@@ -1,7 +1,6 @@
-//! Socket subsystem errors and standard conversions.
+//! Socket subsystem errors.
 
 use thiserror::Error;
-use velda_core::{Error as CoreError, ErrorKind};
 
 /// Errors originating in the OS socket subsystem.
 #[derive(Debug, Error)]
@@ -41,49 +40,6 @@ pub enum SockError {
     Closed,
 }
 
-impl From<SockError> for CoreError {
-    fn from(err: SockError) -> Self {
-        match err {
-            SockError::Io(e) => {
-                CoreError::with_source(ErrorKind::Connection, "socket I/O error", e)
-            }
-            SockError::Bind {
-                ip,
-                port_be,
-                source,
-            } => CoreError::with_source(
-                ErrorKind::Connection,
-                format!(
-                    "failed to bind listener on {}",
-                    crate::connect::format_raw_addr(ip, port_be)
-                ),
-                source,
-            ),
-            SockError::Accept(e) => {
-                CoreError::with_source(ErrorKind::Connection, "failed to accept connection", e)
-            }
-            SockError::Connect {
-                ip,
-                port_be,
-                source,
-            } => CoreError::with_source(
-                ErrorKind::UpstreamUnavailable,
-                format!(
-                    "failed to connect to target {}",
-                    crate::connect::format_raw_addr(ip, port_be)
-                ),
-                source,
-            ),
-            SockError::Forward(e) => CoreError::with_source(
-                ErrorKind::Connection,
-                "socket bidirectional forwarding error",
-                e,
-            ),
-            SockError::Closed => CoreError::new(ErrorKind::Connection, "socket connection closed"),
-        }
-    }
-}
-
 /// Specialized Result type for OS socket operations.
 pub type Result<T> = std::result::Result<T, SockError>;
 
@@ -93,11 +49,9 @@ mod tests {
     use std::io::{Error as IoError, ErrorKind as IoErrorKind};
 
     #[test]
-    fn test_error_conversion_to_core_error() {
+    fn test_sock_error_display_formatting() {
         let err = SockError::Closed;
-        let core_err: CoreError = err.into();
-        assert_eq!(core_err.kind(), ErrorKind::Connection);
-        assert_eq!(core_err.message(), "socket connection closed");
+        assert_eq!(err.to_string(), "connection closed unexpectedly");
 
         let ip = velda_core::lut::ip::v4_to_u128(0x7F00_0001);
         let port_be = 9090u16.to_be();
@@ -106,16 +60,13 @@ mod tests {
             port_be,
             source: IoError::new(IoErrorKind::AddrInUse, "address in use"),
         };
-        let core_bind: CoreError = bind_err.into();
-        assert_eq!(core_bind.kind(), ErrorKind::Connection);
-        assert!(core_bind.message().contains("127.0.0.1:9090"));
+        assert!(bind_err.to_string().contains("127.0.0.1:9090"));
 
         let conn_err = SockError::Connect {
             ip,
             port_be,
             source: IoError::new(IoErrorKind::ConnectionRefused, "refused"),
         };
-        let core_conn: CoreError = conn_err.into();
-        assert_eq!(core_conn.kind(), ErrorKind::UpstreamUnavailable);
+        assert!(conn_err.to_string().contains("127.0.0.1:9090"));
     }
 }

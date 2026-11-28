@@ -7,7 +7,7 @@
 
 use bytes::{Buf, BufMut, Bytes, BytesMut};
 
-use crate::error::GrpcError;
+use crate::outcome::GrpcOutcome;
 
 /// Canonical gRPC Length-Prefixed Message (LPM) framing constants.
 pub struct GrpcFrame;
@@ -46,9 +46,9 @@ pub fn encode_grpc_frame(data: &[u8], compressed: bool, dst: &mut BytesMut) {
 /// Returns `Ok(Some((compressed, payload)))` if a complete frame is available,
 /// or `Ok(None)` if more data is required.
 ///
-/// Enforces the gRPC RFC invariant: returns [`GrpcError::Protocol`] if the compression
+/// Enforces the gRPC RFC invariant: returns [`GrpcOutcome::Protocol`] if the compression
 /// flag byte is neither `0` nor `1`.
-pub fn decode_grpc_frame(src: &mut BytesMut) -> Result<Option<(bool, Bytes)>, GrpcError> {
+pub fn decode_grpc_frame(src: &mut BytesMut) -> Result<Option<(bool, Bytes)>, GrpcOutcome> {
     if src.len() < GrpcFrame::HEADER_SIZE {
         return Ok(None);
     }
@@ -58,7 +58,7 @@ pub fn decode_grpc_frame(src: &mut BytesMut) -> Result<Option<(bool, Bytes)>, Gr
         GrpcFrame::FLAG_UNCOMPRESSED => false,
         GrpcFrame::FLAG_COMPRESSED => true,
         _ => {
-            return Err(GrpcError::Protocol(format!(
+            return Err(GrpcOutcome::Protocol(format!(
                 "invalid gRPC compression flag: {flag}; must be 0 or 1 per RFC"
             )));
         }
@@ -72,7 +72,7 @@ pub fn decode_grpc_frame(src: &mut BytesMut) -> Result<Option<(bool, Bytes)>, Gr
     ]) as usize;
 
     let Some(total) = GrpcFrame::HEADER_SIZE.checked_add(length) else {
-        return Err(GrpcError::PayloadTooLarge(length));
+        return Err(GrpcOutcome::PayloadTooLarge(length));
     };
     if src.len() < total {
         return Ok(None);
@@ -117,8 +117,8 @@ mod tests {
         buf.extend_from_slice(&[2, 0, 0, 0, 4, 1, 2, 3, 4]); // Flag 2 is invalid per RFC
         let err = decode_grpc_frame(&mut buf).unwrap_err();
         match err {
-            GrpcError::Protocol(msg) => assert!(msg.contains("invalid gRPC compression flag: 2")),
-            _ => panic!("Expected GrpcError::Protocol"),
+            GrpcOutcome::Protocol(msg) => assert!(msg.contains("invalid gRPC compression flag: 2")),
+            _ => panic!("Expected GrpcOutcome::Protocol"),
         }
     }
 }

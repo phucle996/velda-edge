@@ -22,7 +22,7 @@ pub mod path;
 pub mod response;
 
 pub use connection::{Http3Engine, Http3RequestEvent, OutgoingDatagram};
-pub use early_response::{precompiled_early_response, reject_response};
+pub use early_response::{precompiled_early_response, status_response};
 pub use header::extract_host;
 pub use path::{is_clean_path, normalize_path};
 pub use response::{build_edge_response_frames, send_response};

@@ -12,7 +12,7 @@ use tokio::io::{AsyncRead, AsyncReadExt};
 use velda_core::{Body, HeaderWorkspace, L7Response};
 
 use crate::config::Http1Config;
-use crate::error::Http1Error;
+use crate::outcome::Http1Outcome;
 use crate::server::request::Http1BodyFraming;
 use crate::wire::{cold_parse_error, parse_chunked_body};
 
@@ -98,20 +98,20 @@ impl Http1ClientResponse {
 pub fn parse_response_head(
     data: &[u8],
     config: &Http1Config,
-) -> Result<Option<(Http1ClientResponseHead, Http1BodyFraming, usize)>, Http1Error> {
+) -> Result<Option<(Http1ClientResponseHead, Http1BodyFraming, usize)>, Http1Outcome> {
     if data.is_empty() {
         return Ok(None);
     }
 
     let Some((crlf_pos, headers_offset)) = crate::simd::find_crlf_line_end(data)? else {
         if data.len() > config.max_header_size {
-            return Err(Http1Error::HeaderTooLarge(data.len()));
+            return Err(Http1Outcome::HeaderTooLarge(data.len()));
         }
         return Ok(None);
     };
 
     if crlf_pos > config.max_header_size {
-        return Err(Http1Error::HeaderTooLarge(crlf_pos));
+        return Err(Http1Outcome::HeaderTooLarge(crlf_pos));
     }
 
     let line = &data[..crlf_pos];
@@ -153,7 +153,7 @@ pub fn parse_response_head(
         + ((after_sp[1] - b'0') as u16) * 10
         + ((after_sp[2] - b'0') as u16);
     let status = StatusCode::from_u16(status_code)
-        .map_err(|e| Http1Error::Parse(format!("Invalid status code {status_code}: {e}")))?;
+        .map_err(|e| Http1Outcome::Parse(format!("Invalid status code {status_code}: {e}")))?;
 
     let Some(parsed) =
         crate::simd::parse_headers_into_workspace(data, headers_offset, config, true, None)?
@@ -187,7 +187,7 @@ pub fn parse_response_head(
 pub fn decode_response_head(
     buf: &mut BytesMut,
     config: &Http1Config,
-) -> Result<Option<(Http1ClientResponseHead, Http1BodyFraming)>, Http1Error> {
+) -> Result<Option<(Http1ClientResponseHead, Http1BodyFraming)>, Http1Outcome> {
     loop {
         if let Some((head, framing, header_len)) = parse_response_head(buf.as_ref(), config)? {
             if head.status.is_informational() && head.status != StatusCode::SWITCHING_PROTOCOLS {
@@ -206,7 +206,7 @@ pub fn decode_response_head(
 pub fn decode_response(
     buf: &mut BytesMut,
     config: &Http1Config,
-) -> Result<Option<Http1ClientResponse>, Http1Error> {
+) -> Result<Option<Http1ClientResponse>, Http1Outcome> {
     loop {
         if buf.is_empty() {
             return Ok(None);
@@ -232,7 +232,7 @@ pub fn decode_response(
             }
             Http1BodyFraming::ContentLength(body_len) => {
                 if body_len > config.max_body_size {
-                    return Err(Http1Error::PayloadTooLarge(body_len));
+                    return Err(Http1Outcome::PayloadTooLarge(body_len));
                 }
                 let total_len = header_len + body_len;
                 if buf.len() < total_len {
@@ -281,7 +281,7 @@ pub async fn read_response_head<IO>(
     stream: &mut IO,
     read_buf: &mut BytesMut,
     config: &Http1Config,
-) -> Result<(Http1ClientResponseHead, Http1BodyFraming), Http1Error>
+) -> Result<(Http1ClientResponseHead, Http1BodyFraming), Http1Outcome>
 where
     IO: AsyncRead + Unpin,
 {
@@ -290,12 +290,12 @@ where
             return Ok(parts);
         }
 
-        let n = stream.read_buf(read_buf).await?;
+        let n = stream.read_buf(read_buf).await.map_err(Http1Outcome::Io)?;
         if n == 0 {
             if let Some(parts) = decode_response_head(read_buf, config)? {
                 return Ok(parts);
             }
-            return Err(Http1Error::ConnectionClosed);
+            return Err(Http1Outcome::ConnectionClosed);
         }
     }
 }
@@ -305,7 +305,7 @@ pub async fn read_chunk_sized<IO>(
     stream: &mut IO,
     read_buf: &mut BytesMut,
     needed: usize,
-) -> Result<Option<bytes::Bytes>, Http1Error>
+) -> Result<Option<bytes::Bytes>, Http1Outcome>
 where
     IO: AsyncRead + Unpin,
 {
@@ -314,7 +314,7 @@ where
         if read_buf.capacity() - read_buf.len() < remaining_needed {
             read_buf.reserve(remaining_needed.max(65_536));
         }
-        let n = stream.read_buf(read_buf).await?;
+        let n = stream.read_buf(read_buf).await.map_err(Http1Outcome::Io)?;
         if n == 0 {
             if !read_buf.is_empty() {
                 let available = read_buf.len().min(needed);
@@ -345,7 +345,7 @@ where
 pub async fn read_next_chunk<IO>(
     stream: &mut IO,
     read_buf: &mut BytesMut,
-) -> Result<Option<bytes::Bytes>, Http1Error>
+) -> Result<Option<bytes::Bytes>, Http1Outcome>
 where
     IO: AsyncRead + Unpin,
 {
@@ -361,9 +361,9 @@ where
         } else if read_buf.capacity() - read_buf.len() < 8192 {
             read_buf.reserve(65536);
         }
-        let n = stream.read_buf(read_buf).await?;
+        let n = stream.read_buf(read_buf).await.map_err(Http1Outcome::Io)?;
         if n == 0 {
-            return Err(Http1Error::ConnectionClosed);
+            return Err(Http1Outcome::ConnectionClosed);
         }
     }
 }

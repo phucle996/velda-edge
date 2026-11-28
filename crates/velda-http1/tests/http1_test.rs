@@ -7,7 +7,7 @@ use velda_http1::client::header::sanitize_headers;
 use velda_http1::client::request::send_request_parts;
 use velda_http1::client::response::{decode_response, decode_response_head};
 use velda_http1::config::Http1Config;
-use velda_http1::error::Http1Error;
+use velda_http1::outcome::Http1Outcome;
 use velda_http1::server::connection::Http1ServerConnection;
 use velda_http1::server::header::enrich_headers;
 use velda_http1::server::request::{
@@ -145,7 +145,7 @@ fn test_smuggling_simultaneous_cl_te() {
 
     let err = decode_request(&mut buf, &TEST_CONFIG).unwrap_err();
     assert!(
-        matches!(err, Http1Error::SmugglingDetected(_)),
+        matches!(err, Http1Outcome::SmugglingDetected(_)),
         "Must fast-fail reject simultaneous CL and TE"
     );
 }
@@ -157,7 +157,7 @@ fn test_smuggling_multiple_conflicting_cl() {
 
     let err = decode_request(&mut buf, &TEST_CONFIG).unwrap_err();
     assert!(
-        matches!(err, Http1Error::SmugglingDetected(_)),
+        matches!(err, Http1Outcome::SmugglingDetected(_)),
         "Must reject conflicting multiple Content-Length headers"
     );
 }
@@ -171,7 +171,7 @@ fn test_header_too_large_rejection() {
 
     let err = decode_request(&mut buf, &TEST_CONFIG).unwrap_err();
     assert!(
-        matches!(err, Http1Error::HeaderTooLarge(_)),
+        matches!(err, Http1Outcome::HeaderTooLarge(_)),
         "Headers > 64KB must be rejected with HeaderTooLarge"
     );
 }
@@ -185,7 +185,7 @@ fn test_payload_too_large_rejection() {
 
     let err = decode_request(&mut buf, &limits).unwrap_err();
     assert!(
-        matches!(err, Http1Error::PayloadTooLarge(_)),
+        matches!(err, Http1Outcome::PayloadTooLarge(_)),
         "Payload > 10MB must be rejected with PayloadTooLarge"
     );
 }
@@ -202,7 +202,7 @@ fn test_too_many_headers_rejection() {
 
     let err = decode_request(&mut buf, &limits).unwrap_err();
     assert!(
-        matches!(err, Http1Error::TooManyHeaders(5)),
+        matches!(err, Http1Outcome::TooManyHeaders(5)),
         "Must reject when header count exceeds max_headers"
     );
 }
@@ -235,7 +235,7 @@ fn test_wire_ceiling_rejection_at_max_headers() {
 
     let err = decode_request(&mut buf, &config).unwrap_err();
     assert!(
-        matches!(err, Http1Error::TooManyHeaders(n) if n == velda_core::buffer::header::MAX_WIRE_HEADERS),
+        matches!(err, Http1Outcome::TooManyHeaders(n) if n == velda_core::buffer::header::MAX_WIRE_HEADERS),
         "Must reject when header count exceeds MAX_WIRE_HEADERS"
     );
 }
@@ -320,7 +320,7 @@ async fn test_custom_ingress_limits() {
 
     let err = conn.next_request().await.unwrap_err();
     assert!(
-        matches!(err, Http1Error::PayloadTooLarge(100)),
+        matches!(err, Http1Outcome::PayloadTooLarge(100)),
         "Must enforce custom limits on connection"
     );
 }

@@ -9,24 +9,24 @@ use bytes::{BufMut, BytesMut};
 use tokio::io::{AsyncWrite, AsyncWriteExt};
 use velda_core::Body;
 
-use crate::error::Http1Error;
+use crate::outcome::Http1Outcome;
 
 #[cold]
 #[inline(never)]
-pub fn cold_parse_error(msg: impl Into<String>) -> Http1Error {
-    Http1Error::Parse(msg.into())
+pub fn cold_parse_error(msg: impl Into<String>) -> Http1Outcome {
+    Http1Outcome::Parse(msg.into())
 }
 
 #[cold]
 #[inline(never)]
-pub fn cold_chunked_error(msg: &'static str) -> Http1Error {
-    Http1Error::InvalidChunkedEncoding(msg.into())
+pub fn cold_chunked_error(msg: &'static str) -> Http1Outcome {
+    Http1Outcome::InvalidChunkedEncoding(msg.into())
 }
 
 #[cold]
 #[inline(never)]
-pub fn cold_smuggling_error(msg: &'static str) -> Http1Error {
-    Http1Error::SmugglingDetected(msg.into())
+pub fn cold_smuggling_error(msg: &'static str) -> Http1Outcome {
+    Http1Outcome::SmugglingDetected(msg.into())
 }
 
 /// Fast SIMD-accelerated search for CRLF (`\r\n`) in byte slice.
@@ -70,7 +70,7 @@ const DEC_TABLE: [u8; 256] = {
 /// Strictly adheres to RFC 9112 Section 7.1 (`chunk-size = 1*HEXDIG`).
 /// Uses branchless 256-byte L1 cache table lookup for zero branch misprediction.
 #[inline]
-pub fn parse_hex_usize(bytes: &[u8]) -> Result<usize, Http1Error> {
+pub fn parse_hex_usize(bytes: &[u8]) -> Result<usize, Http1Outcome> {
     let mut start = 0;
     while start < bytes.len() && (bytes[start] == b' ' || bytes[start] == b'\t') {
         start += 1;
@@ -102,7 +102,7 @@ pub fn parse_hex_usize(bytes: &[u8]) -> Result<usize, Http1Error> {
 ///
 /// Uses branchless 256-byte L1 cache table lookup for zero branch misprediction.
 #[inline]
-pub fn parse_ascii_digits(bytes: &[u8]) -> Result<usize, Http1Error> {
+pub fn parse_ascii_digits(bytes: &[u8]) -> Result<usize, Http1Outcome> {
     let mut start = 0;
     while start < bytes.len() && (bytes[start] == b' ' || bytes[start] == b'\t') {
         start += 1;
@@ -134,7 +134,7 @@ pub fn parse_ascii_digits(bytes: &[u8]) -> Result<usize, Http1Error> {
 pub fn parse_chunked_body(
     data: &[u8],
     max_body_size: usize,
-) -> Result<Option<(usize, Body)>, Http1Error> {
+) -> Result<Option<(usize, Body)>, Http1Outcome> {
     let mut offset = 0;
     let mut total_body_len: usize = 0;
     let mut memoized_chunks = [(0usize, 0usize); 16];
@@ -151,7 +151,7 @@ pub fn parse_chunked_body(
                 ));
             }
             if total_body_len.saturating_add(remaining.len()) > max_body_size.saturating_add(4096) {
-                return Err(Http1Error::PayloadTooLarge(
+                return Err(Http1Outcome::PayloadTooLarge(
                     total_body_len.saturating_add(remaining.len()),
                 ));
             }
@@ -185,14 +185,14 @@ pub fn parse_chunked_body(
 
         total_body_len += chunk_size;
         if total_body_len > max_body_size {
-            return Err(Http1Error::PayloadTooLarge(total_body_len));
+            return Err(Http1Outcome::PayloadTooLarge(total_body_len));
         }
 
         if data[offset..].len() < chunk_size + 2 {
             if total_body_len.saturating_add(data[offset..].len())
                 > max_body_size.saturating_add(4096)
             {
-                return Err(Http1Error::PayloadTooLarge(
+                return Err(Http1Outcome::PayloadTooLarge(
                     total_body_len.saturating_add(data[offset..].len()),
                 ));
             }
@@ -200,7 +200,7 @@ pub fn parse_chunked_body(
         }
 
         if &data[offset + chunk_size..offset + chunk_size + 2] != b"\r\n" {
-            return Err(Http1Error::InvalidChunkedEncoding(
+            return Err(Http1Outcome::InvalidChunkedEncoding(
                 "Missing CRLF after chunk data".into(),
             ));
         }
@@ -256,7 +256,7 @@ pub type ParsedChunk<'a> = (usize, &'a [u8], bool);
 /// - `Ok(Some(Some(chunk)))`: extracted chunk payload bytes, advances `buf` past chunk and CRLF.
 /// - `Ok(Some(None))`: terminal chunk (`0\r\n\r\n`) reached and consumed, stream concluded.
 /// - `Ok(None)`: buffer incomplete, need more data from stream.
-pub fn decode_chunk(buf: &mut BytesMut) -> Result<Option<Option<bytes::Bytes>>, Http1Error> {
+pub fn decode_chunk(buf: &mut BytesMut) -> Result<Option<Option<bytes::Bytes>>, Http1Outcome> {
     use bytes::Buf;
     if buf.is_empty() {
         return Ok(None);
@@ -301,7 +301,7 @@ pub fn decode_chunk(buf: &mut BytesMut) -> Result<Option<Option<bytes::Bytes>>, 
     }
 
     if &buf[header_len + chunk_size..needed] != b"\r\n" {
-        return Err(Http1Error::InvalidChunkedEncoding(
+        return Err(Http1Outcome::InvalidChunkedEncoding(
             "Missing CRLF after chunk data".into(),
         ));
     }
@@ -326,8 +326,8 @@ pub fn decode_chunk(buf: &mut BytesMut) -> Result<Option<Option<bytes::Bytes>>, 
 ///   consumed (including chunk-size line, CRLF, payload, and trailing CRLF).
 ///   If `is_terminal` is true (chunk size == 0), this is the terminal chunk.
 /// - `Ok(None)`: Not enough bytes in `data` to form a complete chunk.
-/// - `Err(Http1Error)`: Invalid chunked framing or encoding error.
-pub fn parse_single_chunk(data: &[u8]) -> Result<Option<ParsedChunk<'_>>, Http1Error> {
+/// - `Err(Http1Outcome)`: Invalid chunked framing or encoding error.
+pub fn parse_single_chunk(data: &[u8]) -> Result<Option<ParsedChunk<'_>>, Http1Outcome> {
     if data.is_empty() {
         return Ok(None);
     }
@@ -369,7 +369,7 @@ pub fn parse_single_chunk(data: &[u8]) -> Result<Option<ParsedChunk<'_>>, Http1E
     }
 
     if &data[header_len + chunk_size..needed] != b"\r\n" {
-        return Err(Http1Error::InvalidChunkedEncoding(
+        return Err(Http1Outcome::InvalidChunkedEncoding(
             "Missing CRLF after chunk data".into(),
         ));
     }
@@ -431,8 +431,11 @@ impl ProgressiveChunkDecoder {
     /// Returns:
     /// - `Ok(Some(payload_slice))`: Slice of chunk payload bytes ready for forwarding.
     /// - `Ok(None)`: Buffer incomplete or chunk delimiter consumed; need more wire data from socket.
-    /// - `Err(Http1Error)`: Malformed chunk framing (invalid hex, missing CRLF, etc.).
-    pub fn decode_step(&mut self, buf: &mut BytesMut) -> Result<Option<bytes::Bytes>, Http1Error> {
+    /// - `Err(Http1Outcome)`: Malformed chunk framing (invalid hex, missing CRLF, etc.).
+    pub fn decode_step(
+        &mut self,
+        buf: &mut BytesMut,
+    ) -> Result<Option<bytes::Bytes>, Http1Outcome> {
         use bytes::Buf;
         loop {
             match self.state {
@@ -504,7 +507,7 @@ impl ProgressiveChunkDecoder {
                         return Ok(None);
                     }
                     if &buf[..2] != b"\r\n" {
-                        return Err(Http1Error::InvalidChunkedEncoding(
+                        return Err(Http1Outcome::InvalidChunkedEncoding(
                             "Missing CRLF after chunk data".into(),
                         ));
                     }
@@ -572,7 +575,7 @@ pub fn encode_chunked_end(dst: &mut BytesMut) {
 ///
 /// Uses vectored I/O (`write_vectored` / `writev`) to coalesce chunk framing and payload
 /// into a single atomic kernel socket write without intermediate heap allocation.
-pub async fn send_chunk<W>(stream: &mut W, chunk: &[u8]) -> Result<(), Http1Error>
+pub async fn send_chunk<W>(stream: &mut W, chunk: &[u8]) -> Result<(), Http1Outcome>
 where
     W: AsyncWrite + Unpin,
 {
@@ -593,18 +596,27 @@ where
                 IoSlice::new(chunk),
                 IoSlice::new(b"\r\n"),
             ];
-            stream.write_vectored(&active).await?
+            stream
+                .write_vectored(&active)
+                .await
+                .map_err(Http1Outcome::Io)?
         } else if written < header_len + chunk.len() {
             let chunk_offset = written - header_len;
             let active = [IoSlice::new(&chunk[chunk_offset..]), IoSlice::new(b"\r\n")];
-            stream.write_vectored(&active).await?
+            stream
+                .write_vectored(&active)
+                .await
+                .map_err(Http1Outcome::Io)?
         } else {
             let crlf_offset = written - (header_len + chunk.len());
-            stream.write(&b"\r\n"[crlf_offset..]).await?
+            stream
+                .write(&b"\r\n"[crlf_offset..])
+                .await
+                .map_err(Http1Outcome::Io)?
         };
 
         if n == 0 {
-            return Err(Http1Error::Io(std::io::Error::new(
+            return Err(Http1Outcome::Io(std::io::Error::new(
                 std::io::ErrorKind::WriteZero,
                 "failed to write whole buffer",
             )));
@@ -615,11 +627,14 @@ where
 }
 
 /// Writes the terminal zero chunk (`0\r\n\r\n`) to terminate a chunked stream.
-pub async fn send_chunked_end<W>(stream: &mut W) -> Result<(), Http1Error>
+pub async fn send_chunked_end<W>(stream: &mut W) -> Result<(), Http1Outcome>
 where
     W: AsyncWrite + Unpin,
 {
-    stream.write_all(b"0\r\n\r\n").await?;
+    stream
+        .write_all(b"0\r\n\r\n")
+        .await
+        .map_err(Http1Outcome::Io)?;
     Ok(())
 }
 
@@ -632,7 +647,7 @@ where
 pub async fn send_coalesced_chunks<W>(
     stream: &mut W,
     chunks: &[bytes::Bytes],
-) -> Result<(), Http1Error>
+) -> Result<(), Http1Outcome>
 where
     W: AsyncWrite + Unpin,
 {
@@ -691,9 +706,12 @@ where
                 break;
             }
 
-            let n = stream.write_vectored(&slices[..slice_count]).await?;
+            let n = stream
+                .write_vectored(&slices[..slice_count])
+                .await
+                .map_err(Http1Outcome::Io)?;
             if n == 0 {
-                return Err(Http1Error::Io(std::io::Error::new(
+                return Err(Http1Outcome::Io(std::io::Error::new(
                     std::io::ErrorKind::WriteZero,
                     "failed to write whole buffer",
                 )));

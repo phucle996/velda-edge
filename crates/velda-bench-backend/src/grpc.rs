@@ -11,7 +11,7 @@ use std::sync::Arc;
 use tokio::net::TcpListener;
 use tokio_rustls::TlsAcceptor;
 use tokio_rustls::rustls::ServerConfig;
-use velda_core::GrpcStatus;
+use velda_grpc::GrpcStatus;
 use velda_grpc::config::GrpcConfig;
 use velda_grpc::tcp::server::connection::GrpcServerConnection;
 

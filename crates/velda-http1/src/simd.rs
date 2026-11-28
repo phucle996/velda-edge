@@ -17,7 +17,7 @@ use velda_core::buffer::header::{
 };
 
 use crate::config::Http1Config;
-use crate::error::Http1Error;
+use crate::outcome::Http1Outcome;
 use crate::wire::{cold_parse_error, cold_smuggling_error, parse_ascii_digits};
 
 /// Mask ensuring header name hash fits in lower 63 bits of `u64` tag.
@@ -279,7 +279,7 @@ fn is_valid_header_value_scalar(bytes: &[u8]) -> bool {
 
 /// Validates and constructs a [`HeaderValue`] using explicit multi-target SIMD validation.
 #[inline(always)]
-pub fn parse_header_value_simd(raw: &[u8]) -> Result<HeaderValue, Http1Error> {
+pub fn parse_header_value_simd(raw: &[u8]) -> Result<HeaderValue, Http1Outcome> {
     let mut trimmed = raw;
     while let Some((&b, rest)) = trimmed.split_first() {
         if b == b' ' || b == b'\t' {
@@ -296,7 +296,7 @@ pub fn parse_header_value_simd(raw: &[u8]) -> Result<HeaderValue, Http1Error> {
         }
     }
     if !is_valid_header_value_simd(trimmed) {
-        return Err(Http1Error::InvalidHeader(
+        return Err(Http1Outcome::InvalidHeader(
             "Invalid control or DEL byte in header value".into(),
         ));
     }
@@ -329,9 +329,9 @@ fn eq_ascii_lower_fixed<const N: usize>(raw: &[u8], lower: &[u8; N]) -> bool {
 /// Length-partitioned well-known header name + precomputed 63-bit tag hash resolver,
 /// falling back to single-pass LUT `tchar` validation, lowercasing, and FNV-1a hashing.
 #[inline]
-pub fn resolve_header_name_and_hash(raw_name: &[u8]) -> Result<(u64, HeaderName), Http1Error> {
+pub fn resolve_header_name_and_hash(raw_name: &[u8]) -> Result<(u64, HeaderName), Http1Outcome> {
     if raw_name.is_empty() {
-        return Err(Http1Error::InvalidHeader("Empty header name".into()));
+        return Err(Http1Outcome::InvalidHeader("Empty header name".into()));
     }
 
     let fast = match raw_name.len() {
@@ -472,7 +472,7 @@ pub fn resolve_header_name_and_hash(raw_name: &[u8]) -> Result<(u64, HeaderName)
     }
 
     if raw_name.len() > MAX_HEADER_NAME_LEN {
-        return Err(Http1Error::InvalidHeader(
+        return Err(Http1Outcome::InvalidHeader(
             "Header name exceeds 256-byte limit".into(),
         ));
     }
@@ -488,13 +488,13 @@ pub fn resolve_header_name_and_hash(raw_name: &[u8]) -> Result<(u64, HeaderName)
         hash = hash.wrapping_mul(FNV1A_PRIME);
     }
     if bad {
-        return Err(Http1Error::InvalidHeader(
+        return Err(Http1Outcome::InvalidHeader(
             "Invalid character in header name".into(),
         ));
     }
 
     let name = HeaderName::from_bytes(&lower[..raw_name.len()])
-        .map_err(|e| Http1Error::InvalidHeader(e.to_string()))?;
+        .map_err(|e| Http1Outcome::InvalidHeader(e.to_string()))?;
     let hash63 = (hash & TAG_HASH_MASK).max(1);
     Ok((hash63, name))
 }
@@ -502,7 +502,7 @@ pub fn resolve_header_name_and_hash(raw_name: &[u8]) -> Result<(u64, HeaderName)
 /// Finds the end index (`lf - 1`, pointing at `\r`) of a `\r\n`-delimited HTTP/1.1 line.
 /// Returns `Ok(None)` if no `\n` is present yet, or `Err(Parse)` on bare `\n`.
 #[inline(always)]
-pub fn find_crlf_line_end(data: &[u8]) -> Result<Option<(usize, usize)>, Http1Error> {
+pub fn find_crlf_line_end(data: &[u8]) -> Result<Option<(usize, usize)>, Http1Outcome> {
     let Some(lf) = memchr(b'\n', data) else {
         return Ok(None);
     };
@@ -543,7 +543,7 @@ pub fn parse_headers_into_workspace(
     config: &Http1Config,
     is_response: bool,
     enrich: Option<H1IngressEnrich<'_>>,
-) -> Result<Option<ParsedHeaderSection>, Http1Error> {
+) -> Result<Option<ParsedHeaderSection>, Http1Outcome> {
     let mut offset = headers_offset;
     let mut ws = HeaderWorkspace::empty(DEFAULT_HEADER_CAPACITY);
     let mut xff_slot_idx: Option<usize> = None;
@@ -583,14 +583,14 @@ pub fn parse_headers_into_workspace(
         };
         let Some((line_end_rel, next_rel)) = find_crlf_line_end(remaining)? else {
             if data.len() > config.max_header_size {
-                return Err(Http1Error::HeaderTooLarge(data.len()));
+                return Err(Http1Outcome::HeaderTooLarge(data.len()));
             }
             return Ok(None);
         };
 
         let next_offset = offset + next_rel;
         if next_offset > config.max_header_size {
-            return Err(Http1Error::HeaderTooLarge(next_offset));
+            return Err(Http1Outcome::HeaderTooLarge(next_offset));
         }
 
         // Empty `\r\n` terminates the header section
@@ -627,13 +627,13 @@ pub fn parse_headers_into_workspace(
             return Err(cold_parse_error("Invalid header line bounds"));
         };
         if line[0] == b' ' || line[0] == b'\t' {
-            return Err(Http1Error::InvalidHeader(
+            return Err(Http1Outcome::InvalidHeader(
                 "Obsolete header line folding rejected".into(),
             ));
         }
 
         let Some(next_rem) = rem.checked_sub(1) else {
-            return Err(Http1Error::TooManyHeaders(config.max_headers));
+            return Err(Http1Outcome::TooManyHeaders(config.max_headers));
         };
         rem = next_rem;
 
@@ -711,16 +711,16 @@ pub fn parse_headers_into_workspace(
 
 /// Validates that a request target byte slice contains no spaces or control characters via SIMD/memchr.
 #[inline]
-pub fn validate_request_target_bytes(target: &[u8]) -> Result<&str, Http1Error> {
+pub fn validate_request_target_bytes(target: &[u8]) -> Result<&str, Http1Outcome> {
     if target.is_empty() {
-        return Err(Http1Error::InvalidUri("Empty request target".into()));
+        return Err(Http1Outcome::InvalidUri("Empty request target".into()));
     }
     if memchr2(b' ', b'\t', target).is_some() || !is_valid_header_value_simd(target) {
-        return Err(Http1Error::InvalidUri(
+        return Err(Http1Outcome::InvalidUri(
             "Invalid whitespace or control byte in request target".into(),
         ));
     }
-    std::str::from_utf8(target).map_err(|e| Http1Error::InvalidUri(e.to_string()))
+    std::str::from_utf8(target).map_err(|e| Http1Outcome::InvalidUri(e.to_string()))
 }
 
 #[cfg(test)]
@@ -823,6 +823,6 @@ Content-Type: application/json\r\n\r\n";
         let err = parse_headers_into_workspace(err_raw, headers_offset, &cfg, false, None)
             .err()
             .expect("3rd header must fail when 2 slots count down to 0");
-        assert!(matches!(err, Http1Error::TooManyHeaders(2)));
+        assert!(matches!(err, Http1Outcome::TooManyHeaders(2)));
     }
 }

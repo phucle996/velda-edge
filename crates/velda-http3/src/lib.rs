@@ -9,13 +9,13 @@
 //!   framing, flow-controlled response ingestion, and backend QUIC connection reuse.
 //! - `pipe/`: Wire pipe modules for discrete streaming strategies (buffered, server stream, client stream, duplex).
 //! - `config`: Tunable parameters for QUIC transport, stream receive windows, and timeouts.
-//! - `error`: Strongly typed HTTP/3, frame, and QPACK errors.
+//! - `outcome`: HTTP/3 protocol state transitions.
 //! - `proto/`: Sans-IO HTTP/3 protocol core (`frame`, `qpack`, `huffman`).
 
 pub mod client;
 pub mod config;
-pub mod error;
 pub mod headers;
+pub mod outcome;
 pub mod proto;
 pub mod server;
 pub mod slot;
@@ -26,8 +26,8 @@ pub use client::{
     resolve_sni, strip_port,
 };
 pub use config::Http3Config;
-pub use error::Http3Error;
 pub use headers::sanitize_headers;
+pub use outcome::Http3Outcome;
 pub use proto::frame::{
     FrameType, Http3Frame, decode_frame, decode_varint, decode_varint_slice, encode_frame,
     encode_varint, error_code, frame_id, settings_id, stream_type,
@@ -40,7 +40,7 @@ pub use proto::qpack::{
 pub use quinn_proto;
 pub use server::{
     Http3Engine, Http3RequestEvent, OutgoingDatagram, build_edge_response_frames, extract_host,
-    is_clean_path, normalize_path, precompiled_early_response, reject_response, send_response,
+    is_clean_path, normalize_path, precompiled_early_response, send_response, status_response,
 };
 pub use slot::Http3HeaderSlot;
 pub use strategy::Http3PipeStrategy;

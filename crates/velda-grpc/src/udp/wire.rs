@@ -13,7 +13,7 @@ use velda_core::buffer::header::{
     DEFAULT_HEADER_CAPACITY, HeaderWorkspace, MAX_WIRE_HEADERS, X_REQUEST_ID, header_key,
 };
 
-use crate::error::GrpcError;
+use crate::outcome::GrpcOutcome;
 
 /// RFC 9204 Appendix A Static Table entries relevant for gRPC and HTTP/3.
 #[rustfmt::skip]
@@ -286,7 +286,7 @@ pub enum UdpFrame {
 }
 
 /// Decodes the next HTTP/3 frame from the buffer.
-pub fn decode_udp_frame(buf: &mut BytesMut) -> Result<Option<UdpFrame>, GrpcError> {
+pub fn decode_udp_frame(buf: &mut BytesMut) -> Result<Option<UdpFrame>, GrpcOutcome> {
     if buf.is_empty() {
         return Ok(None);
     }
@@ -301,12 +301,12 @@ pub fn decode_udp_frame(buf: &mut BytesMut) -> Result<Option<UdpFrame>, GrpcErro
     };
     let header_len = buf.len() - peek.len();
     let Ok(payload_len) = usize::try_from(length) else {
-        return Err(GrpcError::Protocol(
+        return Err(GrpcOutcome::Protocol(
             "HTTP/3 gRPC frame payload length exceeds address space".into(),
         ));
     };
     let Some(total_len) = header_len.checked_add(payload_len) else {
-        return Err(GrpcError::Protocol(
+        return Err(GrpcOutcome::Protocol(
             "HTTP/3 gRPC frame total length overflows address space".into(),
         ));
     };
@@ -442,7 +442,7 @@ impl Default for DecodedHeaders {
 }
 
 /// Decodes QPACK encoded headers directly into [`HeaderWorkspace`].
-pub fn decode_qpack(slice: &[u8]) -> Result<DecodedHeaders, GrpcError> {
+pub fn decode_qpack(slice: &[u8]) -> Result<DecodedHeaders, GrpcOutcome> {
     decode_qpack_internal(slice, None)
 }
 
@@ -452,26 +452,26 @@ pub fn decode_qpack(slice: &[u8]) -> Result<DecodedHeaders, GrpcError> {
 pub fn decode_qpack_ingress(
     slice: &[u8],
     enrich: GrpcUdpIngressEnrich,
-) -> Result<DecodedHeaders, GrpcError> {
+) -> Result<DecodedHeaders, GrpcOutcome> {
     decode_qpack_internal(slice, Some(enrich))
 }
 
 fn decode_qpack_internal(
     mut slice: &[u8],
     enrich: Option<GrpcUdpIngressEnrich>,
-) -> Result<DecodedHeaders, GrpcError> {
+) -> Result<DecodedHeaders, GrpcOutcome> {
     if slice.len() < 2 {
-        return Err(GrpcError::Internal(
+        return Err(GrpcOutcome::Internal(
             "QPACK field section too short for prefix".into(),
         ));
     }
     // 1. Skip Required Insert Count (RIC) & Base
     let (_ric, ric_consumed) = decode_prefixed_int(slice, 8)
-        .ok_or_else(|| GrpcError::Internal("malformed QPACK RIC".into()))?;
+        .ok_or_else(|| GrpcOutcome::Internal("malformed QPACK RIC".into()))?;
     slice = &slice[ric_consumed..];
 
     let (_base, base_consumed) = decode_prefixed_int(slice, 7)
-        .ok_or_else(|| GrpcError::Internal("malformed QPACK Base".into()))?;
+        .ok_or_else(|| GrpcOutcome::Internal("malformed QPACK Base".into()))?;
     slice = &slice[base_consumed..];
 
     let mut decoded = DecodedHeaders::default();
@@ -531,7 +531,7 @@ fn decode_qpack_internal(
             // Indexed Field Line (RFC 9204 §4.5.2)
             let is_static = (first & 0x40) != 0;
             let (idx, consumed) = decode_prefixed_int(slice, 6)
-                .ok_or_else(|| GrpcError::Internal("malformed QPACK index".into()))?;
+                .ok_or_else(|| GrpcOutcome::Internal("malformed QPACK index".into()))?;
             slice = &slice[consumed..];
 
             if is_static
@@ -558,11 +558,11 @@ fn decode_qpack_internal(
             // Literal Field Line with Name Reference (RFC 9204 §4.5.4)
             let is_static = (first & 0x10) != 0;
             let (name_idx, consumed) = decode_prefixed_int(slice, 4)
-                .ok_or_else(|| GrpcError::Internal("malformed QPACK name index".into()))?;
+                .ok_or_else(|| GrpcOutcome::Internal("malformed QPACK name index".into()))?;
             slice = &slice[consumed..];
 
             let (val, val_consumed) = decode_string_literal_bytes(slice, 7)
-                .ok_or_else(|| GrpcError::Internal("malformed QPACK value string".into()))?;
+                .ok_or_else(|| GrpcOutcome::Internal("malformed QPACK value string".into()))?;
             slice = &slice[val_consumed..];
 
             if is_static
@@ -588,11 +588,11 @@ fn decode_qpack_internal(
         } else if (first & 0x20) != 0 {
             // Literal Field Line with Literal Name (RFC 9204 §4.5.6)
             let (name, name_consumed) = decode_string_literal_bytes(slice, 3)
-                .ok_or_else(|| GrpcError::Internal("malformed QPACK literal name".into()))?;
+                .ok_or_else(|| GrpcOutcome::Internal("malformed QPACK literal name".into()))?;
             slice = &slice[name_consumed..];
 
             let (val, val_consumed) = decode_string_literal_bytes(slice, 7)
-                .ok_or_else(|| GrpcError::Internal("malformed QPACK literal value".into()))?;
+                .ok_or_else(|| GrpcOutcome::Internal("malformed QPACK literal value".into()))?;
             slice = &slice[val_consumed..];
 
             apply_header_pair_bytes(
@@ -724,7 +724,7 @@ fn apply_header_pair_bytes(
     raw_path: &mut Option<String>,
     raw_authority: &mut Option<String>,
     raw_scheme: &mut Option<String>,
-) -> Result<(), GrpcError> {
+) -> Result<(), GrpcOutcome> {
     if name.starts_with(b":") {
         match name {
             b":method" => {
@@ -757,7 +757,7 @@ fn apply_header_pair_bytes(
                     && !decoded.headers.contains_key(http::header::HOST)
                 {
                     let Some(next) = rem_slots.checked_sub(1) else {
-                        return Err(GrpcError::Protocol("header count exceeds limit".into()));
+                        return Err(GrpcOutcome::Protocol("header count exceeds limit".into()));
                     };
                     *rem_slots = next;
                     decoded
@@ -788,7 +788,7 @@ fn apply_header_pair_bytes(
     }
 
     let Some(next) = rem_slots.checked_sub(1) else {
-        return Err(GrpcError::Protocol("header count exceeds limit".into()));
+        return Err(GrpcOutcome::Protocol("header count exceeds limit".into()));
     };
     *rem_slots = next;
 

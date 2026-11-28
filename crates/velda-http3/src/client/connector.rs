@@ -16,7 +16,7 @@ use velda_core::{L7Request, L7Response};
 use super::driver::{ClientCommand, run_client_driver};
 use super::response::Http3StreamResponse;
 use crate::config::Http3Config;
-use crate::error::Http3Error;
+use crate::outcome::Http3Outcome;
 use crate::proto::frame::{Http3Frame, encode_frame, encode_varint, settings_id, stream_type};
 
 /// Upstream HTTP/3 progressive request chunk streaming handle.
@@ -33,7 +33,7 @@ impl Http3StreamSender {
     /// internal command channel without parking the Tokio task when capacity is available,
     /// falling back to asynchronous `.send().await` only under channel backpressure.
     #[inline]
-    pub async fn send_chunk(&self, chunk: bytes::Bytes) -> Result<(), Http3Error> {
+    pub async fn send_chunk(&self, chunk: bytes::Bytes) -> Result<(), Http3Outcome> {
         self.send_chunk_fin(chunk, false).await
     }
 
@@ -45,7 +45,7 @@ impl Http3StreamSender {
         &self,
         chunk: bytes::Bytes,
         is_fin: bool,
-    ) -> Result<(), Http3Error> {
+    ) -> Result<(), Http3Outcome> {
         let cmd = ClientCommand::SendChunk {
             stream_id: self.stream_id,
             chunk,
@@ -57,14 +57,14 @@ impl Http3StreamSender {
                 .command_tx
                 .send(cmd)
                 .await
-                .map_err(|_| Http3Error::ConnectionClosed),
-            Err(mpsc::error::TrySendError::Closed(_)) => Err(Http3Error::ConnectionClosed),
+                .map_err(|_| Http3Outcome::ConnectionClosed),
+            Err(mpsc::error::TrySendError::Closed(_)) => Err(Http3Outcome::ConnectionClosed),
         }
     }
 
     /// Finishes the upstream HTTP/3 request stream (emits FIN bit).
     #[inline]
-    pub async fn finish(&self) -> Result<(), Http3Error> {
+    pub async fn finish(&self) -> Result<(), Http3Outcome> {
         self.send_chunk_fin(bytes::Bytes::new(), true).await
     }
 }
@@ -85,7 +85,7 @@ impl Http3Client {
     ///
     /// Consumes `req` with **ZERO cloning and ZERO heap boxing**, transferring ownership
     /// directly to the background QUIC connection driver loop.
-    pub async fn send_request(&self, req: L7Request) -> Result<L7Response, Http3Error> {
+    pub async fn send_request(&self, req: L7Request) -> Result<L7Response, Http3Outcome> {
         let (reply_tx, reply_rx) = oneshot::channel();
         self.command_tx
             .send(ClientCommand::SendRequest {
@@ -93,9 +93,9 @@ impl Http3Client {
                 reply_tx,
             })
             .await
-            .map_err(|_| Http3Error::ConnectionClosed)?;
+            .map_err(|_| Http3Outcome::ConnectionClosed)?;
 
-        reply_rx.await.map_err(|_| Http3Error::ConnectionClosed)?
+        reply_rx.await.map_err(|_| Http3Outcome::ConnectionClosed)?
     }
 
     /// Dispatches an owned [`L7Request`] over a new multiplexed bidirectional stream, returning
@@ -103,7 +103,7 @@ impl Http3Client {
     pub async fn send_stream_request(
         &self,
         req: L7Request,
-    ) -> Result<Http3StreamResponse, Http3Error> {
+    ) -> Result<Http3StreamResponse, Http3Outcome> {
         let (reply_tx, reply_rx) = oneshot::channel();
         self.command_tx
             .send(ClientCommand::SendStreamRequest {
@@ -111,9 +111,9 @@ impl Http3Client {
                 reply_tx,
             })
             .await
-            .map_err(|_| Http3Error::ConnectionClosed)?;
+            .map_err(|_| Http3Outcome::ConnectionClosed)?;
 
-        reply_rx.await.map_err(|_| Http3Error::ConnectionClosed)?
+        reply_rx.await.map_err(|_| Http3Outcome::ConnectionClosed)?
     }
 
     /// Initiates a progressive bidirectional stream on this HTTP/3 connection.
@@ -131,9 +131,9 @@ impl Http3Client {
     ) -> Result<
         (
             Http3StreamSender,
-            oneshot::Receiver<Result<Http3StreamResponse, Http3Error>>,
+            oneshot::Receiver<Result<Http3StreamResponse, Http3Outcome>>,
         ),
-        Http3Error,
+        Http3Outcome,
     > {
         let (reply_tx, reply_rx) = oneshot::channel();
         self.command_tx
@@ -146,9 +146,9 @@ impl Http3Client {
                 reply_tx,
             })
             .await
-            .map_err(|_| Http3Error::ConnectionClosed)?;
+            .map_err(|_| Http3Outcome::ConnectionClosed)?;
 
-        reply_rx.await.map_err(|_| Http3Error::ConnectionClosed)?
+        reply_rx.await.map_err(|_| Http3Outcome::ConnectionClosed)?
     }
 
     /// Returns the target physical `(ip: u128, port_be: u16)` of this client connection.
@@ -236,7 +236,7 @@ pub async fn connect(
     server_name: &str,
     config: &Http3Config,
     mut client_cfg: ClientConfig,
-) -> Result<Http3Client, Http3Error> {
+) -> Result<Http3Client, Http3Outcome> {
     let is_v4 = velda_core::lut::ip::is_v4_u128(target_ip);
     let target: std::net::SocketAddr = if is_v4 {
         std::net::SocketAddr::V4(velda_core::lut::ip::v4itoaddr(target_ip, target_port_be))
@@ -250,20 +250,21 @@ pub async fn connect(
     } else {
         socket2::Domain::IPV6
     };
-    let sock = socket2::Socket::new(domain, socket2::Type::DGRAM, None).map_err(Http3Error::Io)?;
+    let sock =
+        socket2::Socket::new(domain, socket2::Type::DGRAM, None).map_err(Http3Outcome::Io)?;
     tune_udp_socket(&sock);
-    sock.set_nonblocking(true).map_err(Http3Error::Io)?;
+    sock.set_nonblocking(true).map_err(Http3Outcome::Io)?;
     let bind_addr: std::net::SocketAddr = if is_v4 {
         "0.0.0.0:0".parse().unwrap()
     } else {
         "[::]:0".parse().unwrap()
     };
-    sock.bind(&bind_addr.into()).map_err(Http3Error::Io)?;
+    sock.bind(&bind_addr.into()).map_err(Http3Outcome::Io)?;
     // RFC 9114 client acceleration: connect UDP socket to upstream target endpoint
     // to enable Linux kernel 4-tuple route caching and eliminate routing lookups per datagram.
     let _ = sock.connect(&target.into());
     let std_socket: std::net::UdpSocket = sock.into();
-    let socket = Arc::new(UdpSocket::from_std(std_socket).map_err(Http3Error::Io)?);
+    let socket = Arc::new(UdpSocket::from_std(std_socket).map_err(Http3Outcome::Io)?);
 
     // 2. Build QUIC client endpoint and config
     let endpoint_config = Arc::new(EndpointConfig::default());
@@ -273,7 +274,7 @@ pub async fn connect(
     let now = Instant::now();
     let (handle, mut conn) = endpoint
         .connect(now, client_cfg, target, server_name)
-        .map_err(|e| Http3Error::H3(format!("Failed to initiate connect to {target}: {e}")))?;
+        .map_err(|e| Http3Outcome::H3(format!("Failed to initiate connect to {target}: {e}")))?;
 
     let mut transmit_buf = Vec::with_capacity(65535);
     let mut socket_recv_buf = vec![0u8; 65535];
@@ -284,7 +285,7 @@ pub async fn connect(
 
     while conn.is_handshaking() {
         if handshake_start.elapsed() > handshake_timeout {
-            return Err(Http3Error::H3(format!(
+            return Err(Http3Outcome::H3(format!(
                 "HTTP/3 QUIC handshake to {target} timed out"
             )));
         }
@@ -302,7 +303,7 @@ pub async fn connect(
 
         tokio::select! {
             res = socket.recv_from(&mut socket_recv_buf) => {
-                let (len, from_addr) = res.map_err(Http3Error::Io)?;
+                let (len, from_addr) = res.map_err(Http3Outcome::Io)?;
                 let now = Instant::now();
                 let payload = BytesMut::from(&socket_recv_buf[..len]);
                 let mut resp_buf = Vec::new();
@@ -325,7 +326,7 @@ pub async fn connect(
         // Poll connection events during handshake to catch connection failure fast
         while let Some(event) = conn.poll() {
             if let Event::ConnectionLost { reason } = event {
-                return Err(Http3Error::H3(format!(
+                return Err(Http3Outcome::H3(format!(
                     "HTTP/3 QUIC connection to {target} failed during handshake: {reason}"
                 )));
             }
@@ -333,7 +334,7 @@ pub async fn connect(
     }
 
     if conn.is_drained() {
-        return Err(Http3Error::ConnectionClosed);
+        return Err(Http3Outcome::ConnectionClosed);
     }
 
     // 4. RFC 9114 Section 6.2.1: Open client unidirectional Control Stream and transmit mandatory SETTINGS frame.
@@ -389,8 +390,8 @@ pub async fn connect(
 pub use super::header::{resolve_sni, strip_port};
 
 /// Builds default QUIC client configuration for HTTP/3 upstream.
-pub fn default_client_config() -> Result<ClientConfig, Http3Error> {
+pub fn default_client_config() -> Result<ClientConfig, Http3Outcome> {
     let rustls_client = velda_tls::client::build_insecure_tls13_client_config(vec![b"h3".to_vec()]);
     velda_tls::client::build_quic_client_config(rustls_client)
-        .map_err(|e| Http3Error::H3(format!("QUIC crypto config error: {e}")))
+        .map_err(|e| Http3Outcome::H3(format!("QUIC crypto config error: {e}")))
 }

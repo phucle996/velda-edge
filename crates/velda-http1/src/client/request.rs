@@ -10,7 +10,7 @@ use http::{Method, Uri};
 use tokio::io::{AsyncWrite, AsyncWriteExt};
 use velda_core::{Body, HeaderWorkspace};
 
-use crate::error::Http1Error;
+use crate::outcome::Http1Outcome;
 use crate::server::request::Http1ServerRequestHead;
 
 /// Encodes an HTTP/1.1 request line (method, path and query, version).
@@ -67,7 +67,7 @@ pub async fn send_request_parts<IO>(
     body: &Body,
     stream: &mut IO,
     write_buf: &mut BytesMut,
-) -> Result<(), Http1Error>
+) -> Result<(), Http1Outcome>
 where
     IO: AsyncWrite + Unpin,
 {
@@ -80,12 +80,18 @@ where
     encode_request_head(method, uri, headers, body_len, write_buf);
 
     if body.is_empty() {
-        stream.write_all(write_buf).await?;
+        stream
+            .write_all(write_buf)
+            .await
+            .map_err(Http1Outcome::Io)?;
     } else {
         let b_slice = body.as_slice();
         if b_slice.len() <= 65536 {
             write_buf.extend_from_slice(b_slice);
-            stream.write_all(write_buf).await?;
+            stream
+                .write_all(write_buf)
+                .await
+                .map_err(Http1Outcome::Io)?;
             return Ok(());
         }
 
@@ -103,9 +109,12 @@ where
             } else {
                 &mut io_slices[..]
             };
-            let n = stream.write_vectored(active).await?;
+            let n = stream
+                .write_vectored(active)
+                .await
+                .map_err(Http1Outcome::Io)?;
             if n == 0 {
-                return Err(Http1Error::Io(std::io::Error::new(
+                return Err(Http1Outcome::Io(std::io::Error::new(
                     std::io::ErrorKind::WriteZero,
                     "failed to write whole request",
                 )));
@@ -123,7 +132,7 @@ where
 }
 
 /// Writes an RFC 9112 chunk to an HTTP/1.1 stream using vectored I/O without copying payload bytes.
-pub async fn send_chunk_vectored<IO>(stream: &mut IO, chunk: &[u8]) -> Result<(), Http1Error>
+pub async fn send_chunk_vectored<IO>(stream: &mut IO, chunk: &[u8]) -> Result<(), Http1Outcome>
 where
     IO: AsyncWrite + Unpin,
 {
@@ -147,9 +156,12 @@ where
         } else {
             &mut io_slices[2..]
         };
-        let n = stream.write_vectored(active).await?;
+        let n = stream
+            .write_vectored(active)
+            .await
+            .map_err(Http1Outcome::Io)?;
         if n == 0 {
-            return Err(Http1Error::Io(std::io::Error::new(
+            return Err(Http1Outcome::Io(std::io::Error::new(
                 std::io::ErrorKind::WriteZero,
                 "failed to write whole chunk",
             )));

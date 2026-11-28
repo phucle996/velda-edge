@@ -18,7 +18,6 @@
 //!    - Surfaced when userspace TCP/UDP state machines encounter corrupted checksums or invalid sequences.
 
 use thiserror::Error;
-use velda_core::{Error as CoreError, ErrorKind};
 
 /// Strongly-typed error taxonomy for XDP and eBPF operations.
 #[derive(Debug, Error)]
@@ -125,25 +124,6 @@ pub enum XdpError {
     /// XDP operation timed out.
     #[error("XDP operation '{0}' timed out")]
     Timeout(&'static str),
-}
-
-impl From<XdpError> for CoreError {
-    fn from(err: XdpError) -> Self {
-        match err {
-            XdpError::Io(e) => CoreError::with_source(ErrorKind::Connection, "XDP I/O error", e),
-            XdpError::CapabilityMismatch { reason, .. } => CoreError::new(
-                ErrorKind::Connection,
-                format!("XDP capability mismatch: {reason}"),
-            ),
-            XdpError::PermissionDenied {
-                operation, reason, ..
-            } => CoreError::new(
-                ErrorKind::Internal,
-                format!("XDP permission denied for '{operation}': {reason}"),
-            ),
-            other => CoreError::new(ErrorKind::Connection, other.to_string()),
-        }
-    }
 }
 
 /// Convenience result alias for XDP operations.

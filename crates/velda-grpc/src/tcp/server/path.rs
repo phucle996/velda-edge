@@ -1,6 +1,6 @@
 //! Downstream gRPC Path Parsing and Security Validation over TCP (RFC 9113 / gRPC-over-HTTP2).
 
-use crate::error::GrpcError;
+use crate::outcome::GrpcOutcome;
 
 /// Parses and validates a gRPC request URI path into `(service, method)` components.
 ///
@@ -10,16 +10,16 @@ use crate::error::GrpcError;
 /// - Service and Method components MUST NOT be empty.
 /// - Rejects directory traversals (`..`), backslashes (`\`), and null bytes (`\0`).
 #[inline]
-pub fn parse_grpc_path(path: &str) -> Result<(&str, &str), GrpcError> {
+pub fn parse_grpc_path(path: &str) -> Result<(&str, &str), GrpcOutcome> {
     let bytes = path.as_bytes();
     if bytes.is_empty() || bytes[0] != b'/' {
-        return Err(GrpcError::Protocol(
+        return Err(GrpcOutcome::Protocol(
             "gRPC path must start with leading slash '/'".into(),
         ));
     }
 
     if bytes.contains(&b'\0') || bytes.contains(&b'\\') {
-        return Err(GrpcError::Protocol(
+        return Err(GrpcOutcome::Protocol(
             "Prohibited character in gRPC path".into(),
         ));
     }
@@ -27,7 +27,7 @@ pub fn parse_grpc_path(path: &str) -> Result<(&str, &str), GrpcError> {
     // Strip leading slash
     let remainder = &path[1..];
     let Some(slash_idx) = remainder.find('/') else {
-        return Err(GrpcError::Protocol(
+        return Err(GrpcOutcome::Protocol(
             "gRPC path must contain both service and method (/{service}/{method})".into(),
         ));
     };
@@ -36,19 +36,19 @@ pub fn parse_grpc_path(path: &str) -> Result<(&str, &str), GrpcError> {
     let method = &remainder[slash_idx + 1..];
 
     if service.is_empty() {
-        return Err(GrpcError::Protocol(
+        return Err(GrpcOutcome::Protocol(
             "gRPC service name cannot be empty".into(),
         ));
     }
 
     if method.is_empty() || method.contains('/') {
-        return Err(GrpcError::Protocol(
+        return Err(GrpcOutcome::Protocol(
             "gRPC method name cannot be empty or contain additional slashes".into(),
         ));
     }
 
     if service == ".." || method == ".." || service.contains("..") || method.contains("..") {
-        return Err(GrpcError::Protocol(
+        return Err(GrpcOutcome::Protocol(
             "Path traversal prohibited in gRPC path".into(),
         ));
     }

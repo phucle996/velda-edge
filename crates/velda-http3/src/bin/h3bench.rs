@@ -196,14 +196,11 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             ),
             SocketAddr::V6(v6) => (v6.ip().to_bits(), v6.port().to_be()),
         };
-        let client = connect(
-            p_ip,
-            p_port_be,
-            &effective_host,
-            &config,
-            default_client_config()?,
-        )
-        .await?;
+        let client_cfg = default_client_config()
+            .map_err(|e| std::io::Error::other(format!("QUIC client config failure: {e}")))?;
+        let client = connect(p_ip, p_port_be, &effective_host, &config, client_cfg)
+            .await
+            .map_err(|o| std::io::Error::other(o.to_string()))?;
         clients.push(client);
     }
     let connect_time_ms = conn_start.elapsed().as_secs_f64() * 1000.0 / num_conns as f64;

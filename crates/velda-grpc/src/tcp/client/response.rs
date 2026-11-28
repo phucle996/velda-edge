@@ -2,10 +2,11 @@
 
 use bytes::BytesMut;
 use http::{StatusCode, Version};
-use velda_core::{Body, GrpcStatus, HeaderWorkspace, L7Response};
+use velda_core::{Body, HeaderWorkspace, L7Response};
 use velda_http2::client::connection::{Http2ClientResponse, Http2ResponseFuture};
 
-use crate::error::GrpcError;
+use crate::GrpcStatus;
+use crate::outcome::GrpcOutcome;
 
 /// Upstream gRPC client response head metadata.
 #[derive(Debug, Clone)]
@@ -101,20 +102,24 @@ impl GrpcClientResponse {
     pub async fn decode_from_future(
         response_future: Http2ResponseFuture,
         max_body: usize,
-    ) -> Result<Self, GrpcError> {
+    ) -> Result<Self, GrpcOutcome> {
         let Http2ClientResponse {
             status,
             headers,
             body: mut body_stream,
-        } = response_future.await?;
+        } = response_future.await.map_err(GrpcOutcome::from_http2)?;
 
         // 1. Read data chunks
         let body = if body_stream.is_end_stream() {
             Body::Empty
-        } else if let Some(chunk) = body_stream.recv_chunk().await? {
+        } else if let Some(chunk) = body_stream
+            .recv_chunk()
+            .await
+            .map_err(GrpcOutcome::from_http2)?
+        {
             let len = chunk.len();
             if len > max_body {
-                return Err(GrpcError::PayloadTooLarge(len));
+                return Err(GrpcOutcome::PayloadTooLarge(len));
             }
 
             if body_stream.is_end_stream() {
@@ -123,10 +128,14 @@ impl GrpcClientResponse {
                 let mut resp_body = BytesMut::with_capacity(len * 2);
                 resp_body.extend_from_slice(&chunk);
 
-                while let Some(chunk) = body_stream.recv_chunk().await? {
+                while let Some(chunk) = body_stream
+                    .recv_chunk()
+                    .await
+                    .map_err(GrpcOutcome::from_http2)?
+                {
                     let len = chunk.len();
                     if resp_body.len() + len > max_body {
-                        return Err(GrpcError::PayloadTooLarge(resp_body.len() + len));
+                        return Err(GrpcOutcome::PayloadTooLarge(resp_body.len() + len));
                     }
                     resp_body.extend_from_slice(&chunk);
                 }
@@ -140,7 +149,8 @@ impl GrpcClientResponse {
         // 2. Read trailers
         let trailers = body_stream
             .trailers()
-            .await?
+            .await
+            .map_err(GrpcOutcome::from_http2)?
             .unwrap_or_else(|| HeaderWorkspace::empty(0));
 
         let grpc_status = trailers

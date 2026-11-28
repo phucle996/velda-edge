@@ -13,8 +13,8 @@ use std::thread;
 use std::time::Instant;
 
 use common::format_duration;
-use velda_ingress::ingress::IngressBinding;
-use velda_ingress::{TrafficEngine, UdpSocket, UdpSocketConfig, next_connection_id};
+use velda_ingress::IngressBinding;
+use velda_ingress::{IngressEngine, UdpSocket, UdpSocketConfig, next_connection_id};
 
 #[tokio::main]
 async fn main() {
@@ -336,7 +336,7 @@ async fn bench_reconciler_channel_contention() {
         "> Stressing EngineHandle with 80,000 concurrent declarative submissions across 16 tasks...\n"
     );
 
-    let engine = TrafficEngine::new();
+    let engine = IngressEngine::new();
     let handle = engine.handle();
     let (shutdown_tx, shutdown_rx) = tokio::sync::watch::channel(false);
 
