@@ -44,7 +44,13 @@ fn bench_disjoint_slots_scaling() {
             let pipe = MetricsStore::decode_slot_index(tid % TOTAL_PIPELINE_SLOTS).unwrap();
 
             handles.push(thread::spawn(move || {
-                let comp = StreamCompletion::new(200, 64, 512, 2_000_000, 1_000_000);
+                let comp = StreamCompletion::new(
+                    velda_core::InternalStatus::Completed,
+                    64,
+                    512,
+                    2_000_000,
+                    1_000_000,
+                );
 
                 for _ in 0..OPS_PER_THREAD {
                     store_clone.record_stream_completion(pipe, comp);
@@ -101,7 +107,13 @@ fn bench_contended_single_slot() {
         for _ in 0..num_threads {
             let store_clone = Arc::clone(&store);
             handles.push(thread::spawn(move || {
-                let comp = StreamCompletion::new(200, 64, 512, 2_000_000, 1_000_000);
+                let comp = StreamCompletion::new(
+                    velda_core::InternalStatus::Completed,
+                    64,
+                    512,
+                    2_000_000,
+                    1_000_000,
+                );
 
                 for _ in 0..OPS_PER_THREAD {
                     store_clone.record_stream_completion(PipeKind::BufferedH1H1, comp);

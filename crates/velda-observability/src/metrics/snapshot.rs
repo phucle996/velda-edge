@@ -9,9 +9,10 @@
 //! - Non-blocking Read: Snapshots are captured by reading atomics with `Relaxed` ordering,
 //!   guaranteeing that snapshot generation never blocks or stalls hot-path writers.
 
+use velda_core::InternalStatus;
 use velda_core::lut::{PipeKind, WireProtocol};
 
-use super::counter::{PIPELINE_COUNTERS_LEN, PipelineMetricsTotals};
+use super::counter::{PIPELINE_COUNTERS_LEN, PipelineMetricsTotals, add_status_counts};
 
 /// Point-in-time snapshot of metrics for a single pipeline combination.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -19,16 +20,10 @@ pub struct PipelineSnapshot {
     /// Canonical pipeline execution variant.
     pub pipe: PipeKind,
 
-    /// Total 2xx success requests.
-    pub requests_2xx: u64,
-    /// Total 3xx redirection requests.
-    pub requests_3xx: u64,
-    /// Total 4xx client error requests.
-    pub requests_4xx: u64,
-    /// Total 5xx server error requests.
-    pub requests_5xx: u64,
-    /// Total non-standard requests.
-    pub requests_other: u64,
+    /// Bitmask where bit `i` is set iff `status_counts[i] > 0`.
+    pub status_mask: u64,
+    /// Per-state cumulative request counts indexed by `InternalStatus as usize`.
+    pub status_counts: [u64; InternalStatus::COUNT],
 
     /// Number of streams actively in-flight at snapshot time.
     pub active_streams: i64,
@@ -75,15 +70,16 @@ impl PipelineSnapshot {
         self.pipe.strategy_str()
     }
 
-    /// Converts pipeline metric counters into a 20-counter array.
+    /// Returns the request count recorded for a specific [`InternalStatus`].
+    #[inline(always)]
+    pub const fn count(&self, status: InternalStatus) -> u64 {
+        self.status_counts[status as usize]
+    }
+
+    /// Converts transport & latency counters into a 16-counter array.
     #[inline(always)]
     pub fn to_counters(&self) -> [u64; PIPELINE_COUNTERS_LEN] {
         [
-            self.requests_2xx,
-            self.requests_3xx,
-            self.requests_4xx,
-            self.requests_5xx,
-            self.requests_other,
             self.bytes_rx,
             self.bytes_tx,
             self.duration_le_1ms,
@@ -99,20 +95,26 @@ impl PipelineSnapshot {
             self.ttfb_le_50ms,
             self.ttfb_le_250ms,
             self.ttfb_gt_250ms,
+            0,
         ]
     }
 
-    /// Computes total requests served across all status code classes.
-    #[inline(always)]
+    /// Computes total requests served across all observed [`InternalStatus`] states via bit-scan.
+    #[inline]
     pub fn total_requests(&self) -> u64 {
-        self.requests_2xx
-            .saturating_add(self.requests_3xx)
-            .saturating_add(self.requests_4xx)
-            .saturating_add(self.requests_5xx)
-            .saturating_add(self.requests_other)
+        let mut sum = 0u64;
+        let mut mask = self.status_mask;
+        while mask != 0 {
+            let idx = mask.trailing_zeros() as usize;
+            mask &= mask - 1;
+            if idx < InternalStatus::COUNT {
+                sum = sum.saturating_add(self.status_counts[idx]);
+            }
+        }
+        sum
     }
 
-    /// Computes the ratio of successful requests (2xx / total) in basis points (1 bp = 0.01%, 10,000 = 100.00%).
+    /// Computes the ratio of completed requests (completed / total) in basis points (1 bp = 0.01%, 10,000 = 100.00%).
     ///
     /// Operates purely in integer arithmetic (zero FPU instructions, zero float conversions).
     /// Returns 10,000 (100.00%) if no requests have been recorded yet.
@@ -122,11 +124,12 @@ impl PipelineSnapshot {
         if total == 0 {
             10_000
         } else {
-            ((self.requests_2xx as u128 * 10_000) / total as u128) as u32
+            let completed = self.status_counts[InternalStatus::Completed as usize];
+            ((completed as u128 * 10_000) / total as u128) as u32
         }
     }
 
-    /// Computes the ratio of successful requests (2xx / total).
+    /// Computes the ratio of completed requests (completed / total).
     ///
     /// Returns 1.0 (100%) if no requests have been recorded yet.
     #[inline]
@@ -292,18 +295,45 @@ pub struct MetricsSnapshot {
 }
 
 impl MetricsSnapshot {
-    /// Computes aggregate totals across all pipelines using vectorized SIMD integer arithmetic.
+    /// Computes aggregate totals across all pipelines using bitmask & vectorized counter arithmetic.
     #[inline]
     pub fn aggregate_pipelines(&self) -> PipelineMetricsTotals {
+        let mut status_mask = 0u64;
+        let mut status_counts = [0u64; InternalStatus::COUNT];
         let mut total_counters = [0u64; PIPELINE_COUNTERS_LEN];
         for p in &self.pipelines {
+            if p.status_mask == 0 && p.bytes_rx == 0 && p.bytes_tx == 0 {
+                continue;
+            }
+            if p.status_mask != 0 {
+                status_mask |= p.status_mask;
+                add_status_counts(&mut status_counts, &p.status_counts, p.status_mask);
+            }
             let counters = p.to_counters();
             super::counter::add_pipeline_counters(&mut total_counters, &counters);
         }
-        PipelineMetricsTotals::from_counters(&total_counters)
+        PipelineMetricsTotals {
+            status_mask,
+            status_counts,
+            bytes_rx: total_counters[0],
+            bytes_tx: total_counters[1],
+            duration_le_1ms: total_counters[2],
+            duration_le_5ms: total_counters[3],
+            duration_le_10ms: total_counters[4],
+            duration_le_50ms: total_counters[5],
+            duration_le_250ms: total_counters[6],
+            duration_le_1000ms: total_counters[7],
+            duration_gt_1000ms: total_counters[8],
+            ttfb_le_1ms: total_counters[9],
+            ttfb_le_5ms: total_counters[10],
+            ttfb_le_10ms: total_counters[11],
+            ttfb_le_50ms: total_counters[12],
+            ttfb_le_250ms: total_counters[13],
+            ttfb_gt_250ms: total_counters[14],
+        }
     }
 
-    /// Computes the sum of all requests served across all 36 pipelines.
+    /// Computes the sum of all requests served across all 64 pipelines.
     #[inline]
     pub fn total_requests(&self) -> u64 {
         self.aggregate_pipelines().total_requests()
@@ -326,11 +356,8 @@ impl MetricsSnapshot {
         for &pipe in &PipeKind::ALL {
             pipelines.push(PipelineSnapshot {
                 pipe,
-                requests_2xx: 0,
-                requests_3xx: 0,
-                requests_4xx: 0,
-                requests_5xx: 0,
-                requests_other: 0,
+                status_mask: 0,
+                status_counts: [0; InternalStatus::COUNT],
                 active_streams: 0,
                 bytes_rx: 0,
                 bytes_tx: 0,
@@ -401,44 +428,58 @@ impl MetricsSnapshot {
             .map(|(i, curr)| {
                 let p = prev.pipelines.get(i).filter(|p| p.pipe == curr.pipe);
                 match p {
-                    Some(prev_p) => PipelineSnapshot {
-                        pipe: curr.pipe,
-                        requests_2xx: curr.requests_2xx.saturating_sub(prev_p.requests_2xx),
-                        requests_3xx: curr.requests_3xx.saturating_sub(prev_p.requests_3xx),
-                        requests_4xx: curr.requests_4xx.saturating_sub(prev_p.requests_4xx),
-                        requests_5xx: curr.requests_5xx.saturating_sub(prev_p.requests_5xx),
-                        requests_other: curr.requests_other.saturating_sub(prev_p.requests_other),
-                        active_streams: curr.active_streams,
-                        bytes_rx: curr.bytes_rx.saturating_sub(prev_p.bytes_rx),
-                        bytes_tx: curr.bytes_tx.saturating_sub(prev_p.bytes_tx),
-                        duration_le_1ms: curr
-                            .duration_le_1ms
-                            .saturating_sub(prev_p.duration_le_1ms),
-                        duration_le_5ms: curr
-                            .duration_le_5ms
-                            .saturating_sub(prev_p.duration_le_5ms),
-                        duration_le_10ms: curr
-                            .duration_le_10ms
-                            .saturating_sub(prev_p.duration_le_10ms),
-                        duration_le_50ms: curr
-                            .duration_le_50ms
-                            .saturating_sub(prev_p.duration_le_50ms),
-                        duration_le_250ms: curr
-                            .duration_le_250ms
-                            .saturating_sub(prev_p.duration_le_250ms),
-                        duration_le_1000ms: curr
-                            .duration_le_1000ms
-                            .saturating_sub(prev_p.duration_le_1000ms),
-                        duration_gt_1000ms: curr
-                            .duration_gt_1000ms
-                            .saturating_sub(prev_p.duration_gt_1000ms),
-                        ttfb_le_1ms: curr.ttfb_le_1ms.saturating_sub(prev_p.ttfb_le_1ms),
-                        ttfb_le_5ms: curr.ttfb_le_5ms.saturating_sub(prev_p.ttfb_le_5ms),
-                        ttfb_le_10ms: curr.ttfb_le_10ms.saturating_sub(prev_p.ttfb_le_10ms),
-                        ttfb_le_50ms: curr.ttfb_le_50ms.saturating_sub(prev_p.ttfb_le_50ms),
-                        ttfb_le_250ms: curr.ttfb_le_250ms.saturating_sub(prev_p.ttfb_le_250ms),
-                        ttfb_gt_250ms: curr.ttfb_gt_250ms.saturating_sub(prev_p.ttfb_gt_250ms),
-                    },
+                    Some(prev_p) => {
+                        let mut delta_counts = [0u64; InternalStatus::COUNT];
+                        let mut delta_mask = 0u64;
+                        let mut m = curr.status_mask;
+                        while m != 0 {
+                            let idx = m.trailing_zeros() as usize;
+                            m &= m - 1;
+                            if idx < InternalStatus::COUNT {
+                                let d = curr.status_counts[idx]
+                                    .saturating_sub(prev_p.status_counts[idx]);
+                                if d > 0 {
+                                    delta_counts[idx] = d;
+                                    delta_mask |= 1u64 << idx;
+                                }
+                            }
+                        }
+                        PipelineSnapshot {
+                            pipe: curr.pipe,
+                            status_mask: delta_mask,
+                            status_counts: delta_counts,
+                            active_streams: curr.active_streams,
+                            bytes_rx: curr.bytes_rx.saturating_sub(prev_p.bytes_rx),
+                            bytes_tx: curr.bytes_tx.saturating_sub(prev_p.bytes_tx),
+                            duration_le_1ms: curr
+                                .duration_le_1ms
+                                .saturating_sub(prev_p.duration_le_1ms),
+                            duration_le_5ms: curr
+                                .duration_le_5ms
+                                .saturating_sub(prev_p.duration_le_5ms),
+                            duration_le_10ms: curr
+                                .duration_le_10ms
+                                .saturating_sub(prev_p.duration_le_10ms),
+                            duration_le_50ms: curr
+                                .duration_le_50ms
+                                .saturating_sub(prev_p.duration_le_50ms),
+                            duration_le_250ms: curr
+                                .duration_le_250ms
+                                .saturating_sub(prev_p.duration_le_250ms),
+                            duration_le_1000ms: curr
+                                .duration_le_1000ms
+                                .saturating_sub(prev_p.duration_le_1000ms),
+                            duration_gt_1000ms: curr
+                                .duration_gt_1000ms
+                                .saturating_sub(prev_p.duration_gt_1000ms),
+                            ttfb_le_1ms: curr.ttfb_le_1ms.saturating_sub(prev_p.ttfb_le_1ms),
+                            ttfb_le_5ms: curr.ttfb_le_5ms.saturating_sub(prev_p.ttfb_le_5ms),
+                            ttfb_le_10ms: curr.ttfb_le_10ms.saturating_sub(prev_p.ttfb_le_10ms),
+                            ttfb_le_50ms: curr.ttfb_le_50ms.saturating_sub(prev_p.ttfb_le_50ms),
+                            ttfb_le_250ms: curr.ttfb_le_250ms.saturating_sub(prev_p.ttfb_le_250ms),
+                            ttfb_gt_250ms: curr.ttfb_gt_250ms.saturating_sub(prev_p.ttfb_gt_250ms),
+                        }
+                    }
                     None => *curr,
                 }
             })
@@ -565,7 +606,13 @@ mod tests {
         store.record_stream_start(PipeKind::BufferedH1H1);
         store.record_stream_completion(
             PipeKind::BufferedH1H1,
-            crate::metrics::StreamCompletion::new(200, 100, 250, 2_000_000, 0),
+            crate::metrics::StreamCompletion::new(
+                velda_core::InternalStatus::Completed,
+                100,
+                250,
+                2_000_000,
+                0,
+            ),
         );
 
         let snap1 = store.snapshot();
@@ -573,17 +620,19 @@ mod tests {
         assert_eq!(d1.global.connections_total, 1);
         assert_eq!(d1.global.connections_active, 1);
         let p1 = d1.find_pipeline(PipeKind::BufferedH1H1).unwrap();
-        assert_eq!(p1.requests_2xx, 1);
+        assert_eq!(p1.count(InternalStatus::Completed), 1);
+        assert_eq!(p1.status_mask, 1u64 << InternalStatus::Completed as u64);
         assert_eq!(p1.bytes_rx, 100);
         assert_eq!(p1.bytes_tx, 250);
 
-        // Idle interval: counters must be 0, active gauges keep current state
+        // Idle interval: counters and status_mask must be 0, active gauges keep current state
         let snap2 = store.snapshot();
         let d2 = snap2.delta_since(&snap1);
         assert_eq!(d2.global.connections_total, 0);
         assert_eq!(d2.global.connections_active, 1);
         let p2 = d2.find_pipeline(PipeKind::BufferedH1H1).unwrap();
-        assert_eq!(p2.requests_2xx, 0);
+        assert_eq!(p2.status_mask, 0);
+        assert_eq!(p2.count(InternalStatus::Completed), 0);
         assert_eq!(p2.bytes_rx, 0);
         assert_eq!(p2.bytes_tx, 0);
 
@@ -592,14 +641,21 @@ mod tests {
         store.record_stream_start(PipeKind::BufferedH1H1);
         store.record_stream_completion(
             PipeKind::BufferedH1H1,
-            crate::metrics::StreamCompletion::new(404, 50, 75, 3_000_000, 0),
+            crate::metrics::StreamCompletion::new(
+                velda_core::InternalStatus::RouteNotFound,
+                50,
+                75,
+                3_000_000,
+                0,
+            ),
         );
         let snap3 = store.snapshot();
         let d3 = snap3.delta_since(&snap2);
         assert_eq!(d3.global.connections_active, 0);
         let p3 = d3.find_pipeline(PipeKind::BufferedH1H1).unwrap();
-        assert_eq!(p3.requests_2xx, 0);
-        assert_eq!(p3.requests_4xx, 1);
+        assert_eq!(p3.status_mask, 1u64 << InternalStatus::RouteNotFound as u64);
+        assert_eq!(p3.count(InternalStatus::Completed), 0);
+        assert_eq!(p3.count(InternalStatus::RouteNotFound), 1);
         assert_eq!(p3.bytes_rx, 50);
         assert_eq!(p3.bytes_tx, 75);
     }

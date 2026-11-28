@@ -40,10 +40,10 @@ fn bench_rapid_reset_flood() {
         // Immediate cancellation / RST_STREAM received
         store.global().h2_rst_stream();
 
-        // Stream completed with 499 (Client Closed Request) and 0 bytes transferred
+        // Stream completed with client cancel and 0 bytes transferred
         store.record_stream_completion(
             PipeKind::ServerStreamH2H1,
-            StreamCompletion::new(499, 0, 0, 50_000, 0),
+            StreamCompletion::new(velda_core::InternalStatus::ClientCanceled, 0, 0, 50_000, 0),
         );
     }
 
@@ -54,7 +54,10 @@ fn bench_rapid_reset_flood() {
 
     assert_eq!(snap.global.h2_rst_stream_total, iters);
     assert_eq!(pipe.active_streams, 0);
-    assert_eq!(pipe.requests_4xx, iters);
+    assert_eq!(
+        pipe.count(velda_core::InternalStatus::ClientCanceled),
+        iters
+    );
     assert_eq!(pipe.bytes_rx, 0);
     assert_eq!(pipe.bytes_tx, 0);
 
@@ -90,7 +93,7 @@ fn bench_erratic_status_and_pipeline_hopping() {
 
     for _ in 0..iters {
         let pipe = rng.next_pipe_kind();
-        let status = (rng.next_usize(500) + 100) as u16; // Random 100..599
+        let status = rng.next_internal_status();
         let bytes_rx = rng.next_usize(8192) as u64;
         let bytes_tx = rng.next_usize(131072) as u64;
         let dur_ns = ((rng.next_usize(2000) + 1) as u64) * 1_000_000;

@@ -42,14 +42,15 @@ use velda_core::lut::PipeKind;
 
 use crate::worker_tls::{WORKER_TLS, init_auto_lane};
 
+use velda_core::InternalStatus;
+
 use super::counter::{PIPELINE_COUNTERS_LEN, add_pipeline_counters};
 use super::global::GlobalMetrics;
 use super::pool::PoolMetrics;
 use super::slot::{
     IDX_BYTES_RX, IDX_BYTES_TX, IDX_DUR_1MS, IDX_DUR_5MS, IDX_DUR_10MS, IDX_DUR_50MS,
-    IDX_DUR_250MS, IDX_DUR_1000MS, IDX_DUR_INF, IDX_REQ_2XX, IDX_REQ_3XX, IDX_REQ_4XX, IDX_REQ_5XX,
-    IDX_REQ_OTHER, IDX_TTFB_1MS, IDX_TTFB_5MS, IDX_TTFB_10MS, IDX_TTFB_50MS, IDX_TTFB_250MS,
-    IDX_TTFB_INF, PipelineSlot,
+    IDX_DUR_250MS, IDX_DUR_1000MS, IDX_DUR_INF, IDX_TTFB_1MS, IDX_TTFB_5MS, IDX_TTFB_10MS,
+    IDX_TTFB_50MS, IDX_TTFB_250MS, IDX_TTFB_INF, PipelineSlot,
 };
 use super::snapshot::{GlobalSnapshot, MetricsSnapshot, PipelineSnapshot};
 use super::types::StreamCompletion;
@@ -229,12 +230,23 @@ impl MetricsStore {
     /// over contiguous pipeline slots, eliminating cacheline churn across cores.
     pub fn snapshot(&self) -> MetricsSnapshot {
         let mut slot_totals = [[0u64; PIPELINE_COUNTERS_LEN]; TOTAL_PIPELINE_SLOTS];
+        let mut status_masks = [0u64; TOTAL_PIPELINE_SLOTS];
+        let mut status_totals = [[0u64; InternalStatus::COUNT]; TOTAL_PIPELINE_SLOTS];
         let mut active_streams = [0i64; TOTAL_PIPELINE_SLOTS];
 
         for core_shard in &self.core_slots {
             for pipe_idx in 0..TOTAL_PIPELINE_SLOTS {
                 let slot = &core_shard[pipe_idx];
-                active_streams[pipe_idx] += slot.active_streams.load(Ordering::Relaxed);
+                let mask = slot.status_mask.load(Ordering::Relaxed);
+                let active = slot.active_streams.load(Ordering::Relaxed);
+                if mask == 0 && active == 0 {
+                    continue;
+                }
+                active_streams[pipe_idx] += active;
+                if mask != 0 {
+                    status_masks[pipe_idx] |= mask;
+                    slot.accumulate_status_counts(mask, &mut status_totals[pipe_idx]);
+                }
                 let mut temp = [0u64; PIPELINE_COUNTERS_LEN];
                 slot.load_counters(&mut temp);
                 add_pipeline_counters(&mut slot_totals[pipe_idx], &temp);
@@ -280,11 +292,8 @@ impl MetricsStore {
 
             pipelines.push(PipelineSnapshot {
                 pipe,
-                requests_2xx: aggregated[IDX_REQ_2XX],
-                requests_3xx: aggregated[IDX_REQ_3XX],
-                requests_4xx: aggregated[IDX_REQ_4XX],
-                requests_5xx: aggregated[IDX_REQ_5XX],
-                requests_other: aggregated[IDX_REQ_OTHER],
+                status_mask: status_masks[pipe_idx],
+                status_counts: status_totals[pipe_idx],
                 active_streams: active_streams[pipe_idx],
                 bytes_rx: aggregated[IDX_BYTES_RX],
                 bytes_tx: aggregated[IDX_BYTES_TX],

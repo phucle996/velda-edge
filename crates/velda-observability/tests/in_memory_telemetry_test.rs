@@ -3,7 +3,7 @@
 use std::sync::Arc;
 use std::sync::atomic::Ordering;
 
-use velda_core::{CompletionReason, HttpMethod, PipeKind, UaFamily};
+use velda_core::{HttpMethod, InternalStatus, PipeKind, UaFamily};
 use velda_observability::*;
 
 #[test]
@@ -23,10 +23,9 @@ fn test_multi_exporter_fanout() {
     rec.upstream_port = 8080;
     rec.bytes_rx = 256;
     rec.bytes_tx = 1024;
-    rec.status_code = 200;
     rec.route_id = 7;
     rec.pipe = PipeKind::BufferedH2H1;
-    rec.completion = CompletionReason::Complete;
+    rec.internal_status = InternalStatus::Completed;
     rec.method = HttpMethod::Get;
     let (fam, os, ver) = velda_core::lut::classify_user_agent(b"curl/8.5.0");
     rec.ua_family = fam;
@@ -41,7 +40,7 @@ fn test_multi_exporter_fanout() {
 
     assert_eq!(batch1.lease_count(), 2);
     assert_eq!(batch1[0].request_id, 0x1234_5678_9abc_def0);
-    assert_eq!(batch2[0].status_code, 200);
+    assert_eq!(batch2[0].internal_status, InternalStatus::Completed);
     assert_eq!(batch2[0].ua_family, UaFamily::Curl);
 
     drop(batch1);

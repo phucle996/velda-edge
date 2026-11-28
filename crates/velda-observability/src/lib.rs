@@ -8,7 +8,7 @@
 //!   Non-Temporal streaming stores (L1d bypass), and shared `leases`-refcounted
 //!   [`TelemetryBatchPool`] fan-out ([`TelemetryStore`]) consumed by both access log shippers and
 //!   the OTLP trace exporter.
-//! - [`sampling`]: Thread-local Weyl-sequence listener sampling gates (`HttpSampling`, `GrpcSampling`)
+//! - [`sampling`]: Thread-local Weyl-sequence listener sampling gates ([`sampling::status::StatusSampling`])
 //!   keeping log and trace emission lockstep while metrics remain 100% exact.
 
 pub(crate) mod worker_tls {

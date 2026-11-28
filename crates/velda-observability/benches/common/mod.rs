@@ -163,13 +163,13 @@ impl FastRng {
     }
 
     #[inline(always)]
-    pub fn next_status_code(&mut self) -> u16 {
+    pub fn next_internal_status(&mut self) -> velda_core::InternalStatus {
         match self.next_usize(100) {
-            0..=79 => 200,  // 80% 200 OK
-            80..=89 => 304, // 10% 304 Not Modified
-            90..=96 => 404, // 7% 404 Not Found
-            97..=98 => 502, // 2% 502 Bad Gateway
-            _ => 500,       // 1% 500 Internal Error
+            0..=79 => velda_core::InternalStatus::Completed,
+            80..=89 => velda_core::InternalStatus::ClientCanceled,
+            90..=96 => velda_core::InternalStatus::RouteNotFound,
+            97..=98 => velda_core::InternalStatus::UpstreamError,
+            _ => velda_core::InternalStatus::InternalError,
         }
     }
 
@@ -181,7 +181,7 @@ impl FastRng {
 
     #[inline(always)]
     pub fn next_completion(&mut self) -> StreamCompletion {
-        let status = self.next_status_code();
+        let status = self.next_internal_status();
         let bytes_rx = self.next_usize(4096) as u64;
         let bytes_tx = self.next_usize(65536) as u64;
         let duration_ms = (self.next_usize(50) + 1) as u64;

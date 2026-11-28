@@ -9,10 +9,10 @@
 //! │ 16..32 : peer_ip (u128 RFC 4291 mapped) │ 32..40 : ingress_time_nanos (u64 epoch nano) │
 //! │ 40..44 : bytes_rx (u32)                 │ 44..48 : bytes_tx (u32)                      │
 //! │ 48..52 : upstream_ip (u32 IPv4 bits)    │ 52..54 : upstream_port (u16)                 │
-//! │ 54..56 : status_code (u16)              │ 56..58 : route_id (u16)                      │
+//! │ 54..56 : _cl0_pad (u16)                 │ 56..58 : route_id (u16)                      │
 //! │ 58..60 : upstream_id (u16)              │ 60..61 : method (HttpMethod: u8)             │
-//! │ 61..62 : pipe (PipeKind: u8)            │ 62..63 : completion (CompletionReason: u8)   │
-//! │ 63..64 : grpc_status (GrpcStatus: u8)   │                                              │
+//! │ 61..62 : pipe (PipeKind: u8)            │ 62..63 : internal_status (u8)            │
+//! │ 63..64 : _reserved (u8)                 │                                              │
 //! ├────────────────────────────────────────────────────────────────────────────────────────┤
 //! │ CACHE LINE 1 (Bytes 64..128): Client Classification & URL Buffer Head                  │
 //! │ 64..66 : ua_major_version (u16)         │ 66..68 : rpc_msgs_or_flags (u16)             │
@@ -30,13 +30,11 @@
 //! # Hardware Layout & Rationale
 //! Exactly 256 bytes (`#[repr(C, align(64))]`, exactly 4 CPU cache lines) with zero compiler padding
 //! and zero heap pointers. All fields read by trace exporters (`request_id`, `ingress_time_nanos`,
-//! `duration_ns`, `peer_ip`, `status_code`, `route_id`, `upstream_id`, `method`) sit in Cache Line 0
+//! `duration_ns`, `peer_ip`, `internal_status`, `route_id`, `upstream_id`, `method`) sit in Cache Line 0
 //! so trace serialization touches only the first 64-byte line of each record while log shippers read
 //! the full 256-byte record.
 
-use velda_core::lut::{
-    CompletionReason, GrpcStatus, HttpMethod, PipeKind, UaFamily, UaOs, WireProtocol,
-};
+use velda_core::lut::{HttpMethod, InternalStatus, PipeKind, UaFamily, UaOs, WireProtocol};
 
 /// Canonical 256-byte (exactly 4 CPU cache lines) pure POD Access Log + Trace Record.
 ///
@@ -49,13 +47,13 @@ use velda_core::lut::{
 /// - `44..48`:  `bytes_tx: u32`
 /// - `48..52`:  `upstream_ip: u32`
 /// - `52..54`:  `upstream_port: u16`
-/// - `54..56`:  `status_code: u16`
+/// - `54..56`:  `_cl0_pad: u16` (cacheline alignment padding)
 /// - `56..58`:  `route_id: u16`
 /// - `58..60`:  `upstream_id: u16`
 /// - `60..61`:  `method: HttpMethod` (`#[repr(u8)]`, 1 byte)
 /// - `61..62`:  `pipe: PipeKind` (`#[repr(u8)]`, 1 byte, strongly typed pipeline variant)
-/// - `62..63`:  `completion: CompletionReason` (`#[repr(u8)]`, 1 byte)
-/// - `63..64`:  `grpc_status: GrpcStatus` (`#[repr(u8)]`, 1 byte)
+/// - `62..63`:  `internal_status: InternalStatus` (`#[repr(u8)]`, 1 byte, canonical internal status)
+/// - `63..64`:  `_reserved: u8` (cacheline alignment padding)
 /// - `64..66`:  `ua_major_version: u16`
 /// - `66..68`:  `rpc_msgs_or_flags: u16`
 /// - `68..69`:  `ua_family: UaFamily` (`#[repr(u8)]`, 1 byte)
@@ -73,13 +71,13 @@ pub struct TelemetryRecord {
     pub bytes_tx: u32,
     pub upstream_ip: u32,
     pub upstream_port: u16,
-    pub status_code: u16,
+    pub _cl0_pad: u16,
     pub route_id: u16,
     pub upstream_id: u16,
     pub method: HttpMethod,
     pub pipe: PipeKind,
-    pub completion: CompletionReason,
-    pub grpc_status: GrpcStatus,
+    pub internal_status: InternalStatus,
+    pub _reserved: u8,
     pub ua_major_version: u16,
     pub rpc_msgs_or_flags: u16,
     pub ua_family: UaFamily,
@@ -97,13 +95,13 @@ const _: () = assert!(std::mem::offset_of!(TelemetryRecord, bytes_rx) == 40);
 const _: () = assert!(std::mem::offset_of!(TelemetryRecord, bytes_tx) == 44);
 const _: () = assert!(std::mem::offset_of!(TelemetryRecord, upstream_ip) == 48);
 const _: () = assert!(std::mem::offset_of!(TelemetryRecord, upstream_port) == 52);
-const _: () = assert!(std::mem::offset_of!(TelemetryRecord, status_code) == 54);
+const _: () = assert!(std::mem::offset_of!(TelemetryRecord, _cl0_pad) == 54);
 const _: () = assert!(std::mem::offset_of!(TelemetryRecord, route_id) == 56);
 const _: () = assert!(std::mem::offset_of!(TelemetryRecord, upstream_id) == 58);
 const _: () = assert!(std::mem::offset_of!(TelemetryRecord, method) == 60);
 const _: () = assert!(std::mem::offset_of!(TelemetryRecord, pipe) == 61);
-const _: () = assert!(std::mem::offset_of!(TelemetryRecord, completion) == 62);
-const _: () = assert!(std::mem::offset_of!(TelemetryRecord, grpc_status) == 63);
+const _: () = assert!(std::mem::offset_of!(TelemetryRecord, internal_status) == 62);
+const _: () = assert!(std::mem::offset_of!(TelemetryRecord, _reserved) == 63);
 const _: () = assert!(std::mem::offset_of!(TelemetryRecord, ua_major_version) == 64);
 const _: () = assert!(std::mem::offset_of!(TelemetryRecord, rpc_msgs_or_flags) == 66);
 const _: () = assert!(std::mem::offset_of!(TelemetryRecord, ua_family) == 68);
@@ -130,13 +128,13 @@ impl TelemetryRecord {
             bytes_tx: 0,
             upstream_ip: 0,
             upstream_port: 0,
-            status_code: 0,
+            _cl0_pad: 0,
             route_id: velda_core::UNMATCHED_ROUTE_ID,
             upstream_id: velda_core::UNASSIGNED_UPSTREAM_ID,
             method: HttpMethod::Unknown,
             pipe: PipeKind::BufferedH1H1,
-            completion: CompletionReason::Complete,
-            grpc_status: GrpcStatus::NonGrpc,
+            internal_status: InternalStatus::Completed,
+            _reserved: 0,
             ua_major_version: 0,
             rpc_msgs_or_flags: 0,
             ua_family: UaFamily::None,

@@ -1,50 +1,32 @@
-//! Hardware-Accelerated Metric Counter Accumulation & Totals (`velda_observability::metrics::counter`).
+//! Hardware-Accelerated Metric Counter Accumulation & Bitmask Reduction (`velda_observability::metrics::counter`).
 //!
 //! ```text
 //! ┌────────────────────────────────────────────────────────────────────────────────────────┐
-//! │                 20-COUNTER PIPELINE SLOT SIMD ACCUMULATION ARCHITECTURE                 │
+//! │         16-COUNTER TRANSPORT/HISTOGRAM SIMD + BITMASK-GATED STATUS REDUCTION           │
 //! ├────────────────────────────────────────────────────────────────────────────────────────┤
-//! │ 20 Contiguous 64-Bit Integers (160 Bytes Total)                                        │
-//! │ [ 0..4  : Requests 2xx, 3xx, 4xx, 5xx, Other ]                                         │
-//! │ [ 5..6  : Bytes RX, Bytes TX ]                                                         │
-//! │ [ 7..13 : Duration Buckets (<=1ms, 5ms, 10ms, 50ms, 250ms, 1000ms, >1000ms) ]        │
-//! │ [ 14..19: TTFB Buckets (<=1ms, 5ms, 10ms, 50ms, 250ms, >250ms) ]                      │
+//! │ 1. Transport & Histogram Slice (`PIPELINE_COUNTERS_LEN = 16`, 128B):                   │
+//! │    [ 0..2  : Bytes RX, Bytes TX ]                                                      │
+//! │    [ 2..9  : Duration Buckets (<=1ms, 5ms, 10ms, 50ms, 250ms, 1000ms, >1000ms) ]       │
+//! │    [ 9..15 : TTFB Buckets (<=1ms, 5ms, 10ms, 50ms, 250ms, >250ms) ]                    │
+//! │    [ 15    : Alignment Pad (exact 4x 256-bit AVX2 / 8x 128-bit NEON registers) ]       │
 //! ├────────────────────────────────────────────────────────────────────────────────────────┤
-//! │ HARDWARE VECTOR EXECUTION:                                                             │
-//! │                                                                                        │
-//! │ 1. AVX2 PATH (x86_64, 256-bit Vector Registers):                                       │
-//! │    Chunk 0: [c0,  c1,  c2,  c3]  ──► _mm256_loadu_si256 ──► _mm256_add_epi64 ──► YMM0 │
-//! │    Chunk 1: [c4,  c5,  c6,  c7]  ──► _mm256_loadu_si256 ──► _mm256_add_epi64 ──► YMM1 │
-//! │    Chunk 2: [c8,  c9,  c10, c11] ──► _mm256_loadu_si256 ──► _mm256_add_epi64 ──► YMM2 │
-//! │    Chunk 3: [c12, c13, c14, c15] ──► _mm256_loadu_si256 ──► _mm256_add_epi64 ──► YMM3 │
-//! │    Chunk 4: [c16, c17, c18, c19] ──► _mm256_loadu_si256 ──► _mm256_add_epi64 ──► YMM4 │
-//! │    Total: Exactly 5 unrolled 256-bit vector operations (0 unaligned loop tails)        │
-//! │                                                                                        │
-//! │ 2. SSE2 / NEON PATH (x86_64 / aarch64, 128-bit Vector Registers):                      │
-//! │    10 contiguous chunks of 2x u64 (_mm_add_epi64 / vaddq_u64)                          │
-//! │                                                                                        │
-//! │ 3. SCALAR FALLBACK:                                                                    │
-//! │    Single loop 0..20 saturating_add (Zero float, pure ALU arithmetic)                  │
+//! │ 2. InternalStatus Bitmask Scan (`status_mask: u64`, TZCNT + BLSR):                     │
+//! │    while mask != 0 {                                                                   │
+//! │        idx = mask.trailing_zeros();   // Hardware jump directly to next seen status    │
+//! │        mask &= mask - 1;              // Clear lowest set bit in 1 CPU cycle           │
+//! │        dst[idx] += src[idx];                                                           │
+//! │    }                                                                                   │
 //! └────────────────────────────────────────────────────────────────────────────────────────┘
 //! ```
-//!
-//! Provides direct vector register accelerated integer addition across fixed 20-counter pipeline slots,
-//! with hardware SIMD acceleration (AVX2 for x86_64, NEON for aarch64, scalar fallback).
-//!
-//! # Architectural Invariants
-//! - Zero Float on Metrics Hot Path: All accumulations and ratios operate strictly
-//!   in pure integer arithmetic (basis points and fixed-point scaling), bypassing FPU conversions.
-//! - Direct Execution: Zero dynamic function pointer dispatch. Direct hardware acceleration
-//!   branching without indirect call overhead.
-//! - Fixed 20-Counter Geometry: Exactly 5x 256-bit (AVX2) or 10x 128-bit (SSE2/NEON) vector registers,
-//!   eliminating unaligned tails and runtime loop setup costs.
 
-/// Number of canonical 64-bit counters per pipeline slot.
-pub const PIPELINE_COUNTERS_LEN: usize = 20;
+use velda_core::InternalStatus;
 
-/// Adds 20 contiguous 64-bit pipeline counters from `src` into `dst`.
+/// Number of contiguous transport & latency histogram 64-bit counters per pipeline slot.
 ///
-/// Pure Rust loop so LLVM auto-vectorizes cleanly for the target CPU.
+/// Padded to 16 quadwords (128 bytes = 2 cache lines = 4x 256-bit AVX2 registers).
+pub const PIPELINE_COUNTERS_LEN: usize = 16;
+
+/// Adds 16 contiguous transport/latency 64-bit counters from `src` into `dst`.
 #[inline]
 pub fn add_pipeline_counters(
     dst: &mut [u64; PIPELINE_COUNTERS_LEN],
@@ -52,6 +34,22 @@ pub fn add_pipeline_counters(
 ) {
     for i in 0..PIPELINE_COUNTERS_LEN {
         dst[i] = dst[i].saturating_add(src[i]);
+    }
+}
+
+/// Accumulates only active [`InternalStatus`] counters selected by `mask` via hardware bit-scan.
+#[inline]
+pub fn add_status_counts(
+    dst: &mut [u64; InternalStatus::COUNT],
+    src: &[u64; InternalStatus::COUNT],
+    mut mask: u64,
+) {
+    while mask != 0 {
+        let idx = mask.trailing_zeros() as usize;
+        mask &= mask - 1;
+        if idx < InternalStatus::COUNT {
+            dst[idx] = dst[idx].saturating_add(src[idx]);
+        }
     }
 }
 
@@ -74,13 +72,10 @@ pub fn add_counters(dst: &mut [u64], src: &[u64]) {
 }
 
 /// Aggregated metrics totals across multiple pipelines.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct PipelineMetricsTotals {
-    pub requests_2xx: u64,
-    pub requests_3xx: u64,
-    pub requests_4xx: u64,
-    pub requests_5xx: u64,
-    pub requests_other: u64,
+    pub status_mask: u64,
+    pub status_counts: [u64; InternalStatus::COUNT],
     pub bytes_rx: u64,
     pub bytes_tx: u64,
     pub duration_le_1ms: u64,
@@ -98,77 +93,50 @@ pub struct PipelineMetricsTotals {
     pub ttfb_gt_250ms: u64,
 }
 
-impl PipelineMetricsTotals {
-    /// Constructs totals from a raw counter slice.
-    #[inline]
-    pub fn from_counters(counters: &[u64]) -> Self {
-        let get = |idx: usize| -> u64 {
-            if idx < counters.len() {
-                counters[idx]
-            } else {
-                0
-            }
-        };
-
+impl Default for PipelineMetricsTotals {
+    fn default() -> Self {
         Self {
-            requests_2xx: get(0),
-            requests_3xx: get(1),
-            requests_4xx: get(2),
-            requests_5xx: get(3),
-            requests_other: get(4),
-            bytes_rx: get(5),
-            bytes_tx: get(6),
-            duration_le_1ms: get(7),
-            duration_le_5ms: get(8),
-            duration_le_10ms: get(9),
-            duration_le_50ms: get(10),
-            duration_le_250ms: get(11),
-            duration_le_1000ms: get(12),
-            duration_gt_1000ms: get(13),
-            ttfb_le_1ms: get(14),
-            ttfb_le_5ms: get(15),
-            ttfb_le_10ms: get(16),
-            ttfb_le_50ms: get(17),
-            ttfb_le_250ms: get(18),
-            ttfb_gt_250ms: get(19),
+            status_mask: 0,
+            status_counts: [0; InternalStatus::COUNT],
+            bytes_rx: 0,
+            bytes_tx: 0,
+            duration_le_1ms: 0,
+            duration_le_5ms: 0,
+            duration_le_10ms: 0,
+            duration_le_50ms: 0,
+            duration_le_250ms: 0,
+            duration_le_1000ms: 0,
+            duration_gt_1000ms: 0,
+            ttfb_le_1ms: 0,
+            ttfb_le_5ms: 0,
+            ttfb_le_10ms: 0,
+            ttfb_le_50ms: 0,
+            ttfb_le_250ms: 0,
+            ttfb_gt_250ms: 0,
         }
     }
+}
 
-    /// Exports totals into a raw 20-counter array.
-    #[inline]
-    pub fn to_counters(&self) -> [u64; PIPELINE_COUNTERS_LEN] {
-        [
-            self.requests_2xx,
-            self.requests_3xx,
-            self.requests_4xx,
-            self.requests_5xx,
-            self.requests_other,
-            self.bytes_rx,
-            self.bytes_tx,
-            self.duration_le_1ms,
-            self.duration_le_5ms,
-            self.duration_le_10ms,
-            self.duration_le_50ms,
-            self.duration_le_250ms,
-            self.duration_le_1000ms,
-            self.duration_gt_1000ms,
-            self.ttfb_le_1ms,
-            self.ttfb_le_5ms,
-            self.ttfb_le_10ms,
-            self.ttfb_le_50ms,
-            self.ttfb_le_250ms,
-            self.ttfb_gt_250ms,
-        ]
+impl PipelineMetricsTotals {
+    /// Returns the total request count recorded for a specific [`InternalStatus`].
+    #[inline(always)]
+    pub const fn count(&self, status: InternalStatus) -> u64 {
+        self.status_counts[status as usize]
     }
 
-    /// Computes total requests across all status classes.
+    /// Computes total requests across all observed states using hardware bit-scan over `status_mask`.
     #[inline]
     pub fn total_requests(&self) -> u64 {
-        self.requests_2xx
-            .saturating_add(self.requests_3xx)
-            .saturating_add(self.requests_4xx)
-            .saturating_add(self.requests_5xx)
-            .saturating_add(self.requests_other)
+        let mut sum = 0u64;
+        let mut mask = self.status_mask;
+        while mask != 0 {
+            let idx = mask.trailing_zeros() as usize;
+            mask &= mask - 1;
+            if idx < InternalStatus::COUNT {
+                sum = sum.saturating_add(self.status_counts[idx]);
+            }
+        }
+        sum
     }
 
     /// Computes success rate in basis points (1 bp = 0.01%, 10,000 = 100.00%).
@@ -178,7 +146,8 @@ impl PipelineMetricsTotals {
         if total == 0 {
             10_000
         } else {
-            ((self.requests_2xx as u128 * 10_000) / total as u128) as u32
+            let completed = self.status_counts[InternalStatus::Completed as usize];
+            ((completed as u128 * 10_000) / total as u128) as u32
         }
     }
 }
@@ -205,19 +174,28 @@ mod tests {
     }
 
     #[test]
-    fn test_pipeline_metrics_totals() {
-        let mut counters = [0u64; PIPELINE_COUNTERS_LEN];
-        counters[0] = 100; // 2xx
-        counters[1] = 20; // 3xx
-        counters[2] = 5; // 4xx
-        counters[3] = 2; // 5xx
+    fn test_bitmask_status_aggregation_and_totals() {
+        let mut a = [0u64; InternalStatus::COUNT];
+        let mut b = [0u64; InternalStatus::COUNT];
+        a[InternalStatus::Completed as usize] = 100;
+        a[InternalStatus::ClientCanceled as usize] = 20;
+        b[InternalStatus::RouteNotFound as usize] = 5;
+        b[InternalStatus::UpstreamStale as usize] = 2;
 
-        let totals = PipelineMetricsTotals::from_counters(&counters);
-        assert_eq!(totals.requests_2xx, 100);
-        assert_eq!(totals.requests_3xx, 20);
-        assert_eq!(totals.requests_4xx, 5);
-        assert_eq!(totals.requests_5xx, 2);
+        let mut totals = PipelineMetricsTotals::default();
+        let mask_a = (1u64 << InternalStatus::Completed as u64)
+            | (1u64 << InternalStatus::ClientCanceled as u64);
+        let mask_b = (1u64 << InternalStatus::RouteNotFound as u64)
+            | (1u64 << InternalStatus::UpstreamStale as u64);
+
+        add_status_counts(&mut totals.status_counts, &a, mask_a);
+        add_status_counts(&mut totals.status_counts, &b, mask_b);
+        totals.status_mask = mask_a | mask_b;
+
+        assert_eq!(totals.count(InternalStatus::Completed), 100);
+        assert_eq!(totals.count(InternalStatus::ClientCanceled), 20);
+        assert_eq!(totals.count(InternalStatus::RouteNotFound), 5);
+        assert_eq!(totals.count(InternalStatus::UpstreamStale), 2);
         assert_eq!(totals.total_requests(), 127);
-        assert_eq!(totals.to_counters(), counters);
     }
 }

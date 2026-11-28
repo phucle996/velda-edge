@@ -44,28 +44,33 @@ fn test_slot_index_roundtrip() {
 }
 
 #[test]
-fn test_status_class_classification() {
-    assert_eq!(StatusClass::from_status_code(200), StatusClass::Success2xx);
-    assert_eq!(StatusClass::from_status_code(204), StatusClass::Success2xx);
-    assert_eq!(StatusClass::from_status_code(301), StatusClass::Redirect3xx);
-    assert_eq!(StatusClass::from_status_code(304), StatusClass::Redirect3xx);
-    assert_eq!(
-        StatusClass::from_status_code(400),
-        StatusClass::ClientError4xx
+fn test_status_bitmask_activation_and_snapshot_isolation() {
+    let store = MetricsStore::with_cores(2);
+
+    store.record_stream_completion_on_core(
+        0,
+        PipeKind::BufferedH1H1,
+        StreamCompletion::new(InternalStatus::Completed, 10, 20, 1_000_000, 0),
     );
-    assert_eq!(
-        StatusClass::from_status_code(404),
-        StatusClass::ClientError4xx
+    store.record_stream_completion_on_core(
+        1,
+        PipeKind::BufferedH1H1,
+        StreamCompletion::new(InternalStatus::UpstreamStale, 0, 0, 500_000, 0),
     );
-    assert_eq!(
-        StatusClass::from_status_code(500),
-        StatusClass::ServerError5xx
-    );
-    assert_eq!(
-        StatusClass::from_status_code(502),
-        StatusClass::ServerError5xx
-    );
-    assert_eq!(StatusClass::from_status_code(101), StatusClass::Other);
+
+    let snap = store.snapshot();
+    let p = snap.find_pipeline(PipeKind::BufferedH1H1).unwrap();
+    let expected_mask =
+        (1u64 << InternalStatus::Completed as u64) | (1u64 << InternalStatus::UpstreamStale as u64);
+    assert_eq!(p.status_mask, expected_mask);
+    assert_eq!(p.count(InternalStatus::Completed), 1);
+    assert_eq!(p.count(InternalStatus::UpstreamStale), 1);
+    assert_eq!(p.count(InternalStatus::RouteNotFound), 0);
+
+    // Untouched pipeline must have an empty bitmask
+    let idle = snap.find_pipeline(PipeKind::DuplexH3H3).unwrap();
+    assert_eq!(idle.status_mask, 0);
+    assert_eq!(idle.total_requests(), 0);
 }
 
 #[test]
@@ -83,15 +88,16 @@ fn test_record_completion_and_snapshot() {
 
     store.record_stream_completion(
         PipeKind::ServerStreamH2H1,
-        StreamCompletion::new(200, 128, 1024, 3_000_000, 1_000_000),
+        StreamCompletion::new(InternalStatus::Completed, 128, 1024, 3_000_000, 1_000_000),
     );
 
     let snap = store.snapshot();
     let pipe = snap.find_pipeline(PipeKind::ServerStreamH2H1).unwrap();
 
     assert_eq!(pipe.active_streams, 0);
-    assert_eq!(pipe.requests_2xx, 1);
-    assert_eq!(pipe.requests_5xx, 0);
+    assert_eq!(pipe.count(InternalStatus::Completed), 1);
+    assert_eq!(pipe.count(InternalStatus::UpstreamError), 0);
+    assert_eq!(pipe.status_mask, 1u64 << InternalStatus::Completed as u64);
     assert_eq!(pipe.total_requests(), 1);
     assert_eq!(pipe.bytes_rx, 128);
     assert_eq!(pipe.bytes_tx, 1024);
@@ -112,7 +118,11 @@ fn test_concurrent_multi_threaded_recording() {
         let store_clone = Arc::clone(&store);
         handles.push(std::thread::spawn(move || {
             for i in 0..requests_per_thread {
-                let status = if i % 10 == 0 { 500 } else { 200 };
+                let status = if i % 10 == 0 {
+                    InternalStatus::InternalError
+                } else {
+                    InternalStatus::Completed
+                };
                 store_clone.record_stream_start(PipeKind::BufferedH1H1);
                 store_clone.record_stream_completion(
                     PipeKind::BufferedH1H1,
@@ -132,9 +142,12 @@ fn test_concurrent_multi_threaded_recording() {
     let expected_total = threads * requests_per_thread;
     assert_eq!(pipe.total_requests(), expected_total as u64);
     assert_eq!(pipe.active_streams, 0);
-    assert_eq!(pipe.requests_5xx, (expected_total / 10) as u64);
     assert_eq!(
-        pipe.requests_2xx,
+        pipe.count(InternalStatus::InternalError),
+        (expected_total / 10) as u64
+    );
+    assert_eq!(
+        pipe.count(InternalStatus::Completed),
         (expected_total - (expected_total / 10)) as u64
     );
     assert_eq!(pipe.bytes_rx, expected_total as u64 * 64);
@@ -326,12 +339,12 @@ fn test_concurrent_pool_operations() {
 fn test_pipeline_aggregation_bps() {
     let store = MetricsStore::new();
 
-    // Pipeline 1: 100 requests (90 success 2xx, 10 errors 5xx)
+    // Pipeline 1: 100 requests (90 completed, 10 internal_error)
     for _ in 0..90 {
         store.record_stream_completion(
             PipeKind::BufferedH1H1,
             StreamCompletion {
-                status_code: 200,
+                internal_status: InternalStatus::Completed,
                 bytes_rx: 100,
                 bytes_tx: 500,
                 duration_ns: 2_000_000,
@@ -343,7 +356,7 @@ fn test_pipeline_aggregation_bps() {
         store.record_stream_completion(
             PipeKind::BufferedH1H1,
             StreamCompletion {
-                status_code: 500,
+                internal_status: InternalStatus::InternalError,
                 bytes_rx: 50,
                 bytes_tx: 200,
                 duration_ns: 50_000_000,
@@ -352,12 +365,12 @@ fn test_pipeline_aggregation_bps() {
         );
     }
 
-    // Pipeline 2: 50 requests (50 success 2xx)
+    // Pipeline 2: 50 requests (50 completed)
     for _ in 0..50 {
         store.record_stream_completion(
             PipeKind::DuplexH2H2,
             StreamCompletion {
-                status_code: 200,
+                internal_status: InternalStatus::Completed,
                 bytes_rx: 200,
                 bytes_tx: 1000,
                 duration_ns: 8_000_000,
@@ -376,8 +389,8 @@ fn test_pipeline_aggregation_bps() {
     // Vectorized aggregation across all 64 slots
     let totals = snap.aggregate_pipelines();
     assert_eq!(totals.total_requests(), 150);
-    assert_eq!(totals.requests_2xx, 140);
-    assert_eq!(totals.requests_5xx, 10);
+    assert_eq!(totals.count(InternalStatus::Completed), 140);
+    assert_eq!(totals.count(InternalStatus::InternalError), 10);
     assert_eq!(totals.bytes_rx, 90 * 100 + 10 * 50 + 50 * 200);
     assert_eq!(totals.bytes_tx, 90 * 500 + 10 * 200 + 50 * 1000);
     // 140 / 150 = 93.33% = 9333 basis points
@@ -398,7 +411,7 @@ fn test_per_core_sharded_simd_aggregation() {
             core_id,
             PipeKind::BufferedH1H1,
             StreamCompletion {
-                status_code: 200,
+                internal_status: InternalStatus::Completed,
                 bytes_rx: 100,
                 bytes_tx: 500,
                 duration_ns: (core_id as u64 + 1) * 1_000_000,
@@ -411,7 +424,7 @@ fn test_per_core_sharded_simd_aggregation() {
     let p = snap.find_pipeline(PipeKind::BufferedH1H1).unwrap();
 
     assert_eq!(p.total_requests(), 4);
-    assert_eq!(p.requests_2xx, 4);
+    assert_eq!(p.count(InternalStatus::Completed), 4);
     assert_eq!(p.bytes_rx, 400);
     assert_eq!(p.bytes_tx, 2000);
     assert_eq!(p.success_rate_basis_points(), 10_000);
@@ -426,7 +439,7 @@ fn test_sharded_store_snapshot_aggregation() {
         (
             0,
             PipeKind::BufferedH1H1,
-            200,
+            InternalStatus::Completed,
             100,
             500,
             1_000_000,
@@ -435,7 +448,7 @@ fn test_sharded_store_snapshot_aggregation() {
         (
             1,
             PipeKind::BufferedH1H1,
-            302,
+            InternalStatus::ClientCanceled,
             50,
             150,
             4_000_000,
@@ -444,7 +457,7 @@ fn test_sharded_store_snapshot_aggregation() {
         (
             2,
             PipeKind::BufferedH1H1,
-            404,
+            InternalStatus::RouteNotFound,
             80,
             200,
             8_000_000,
@@ -453,7 +466,7 @@ fn test_sharded_store_snapshot_aggregation() {
         (
             3,
             PipeKind::BufferedH1H1,
-            500,
+            InternalStatus::InternalError,
             20,
             100,
             45_000_000,
@@ -462,7 +475,7 @@ fn test_sharded_store_snapshot_aggregation() {
         (
             0,
             PipeKind::DuplexH2H2,
-            200,
+            InternalStatus::Completed,
             1024,
             4096,
             150_000_000,
@@ -471,7 +484,7 @@ fn test_sharded_store_snapshot_aggregation() {
         (
             1,
             PipeKind::DuplexH2H2,
-            502,
+            InternalStatus::UpstreamError,
             30,
             80,
             800_000_000,
@@ -480,7 +493,7 @@ fn test_sharded_store_snapshot_aggregation() {
         (
             2,
             PipeKind::DuplexH2H2,
-            200,
+            InternalStatus::Completed,
             5000,
             12000,
             1_500_000_000,
@@ -489,7 +502,7 @@ fn test_sharded_store_snapshot_aggregation() {
         (
             3,
             PipeKind::ServerStreamH3H2,
-            200,
+            InternalStatus::Completed,
             256,
             1024,
             3_000_000,
@@ -502,7 +515,7 @@ fn test_sharded_store_snapshot_aggregation() {
             core_id,
             pipe,
             StreamCompletion {
-                status_code: status,
+                internal_status: status,
                 bytes_rx: rx,
                 bytes_tx: tx,
                 duration_ns: dur_ns,
@@ -518,10 +531,11 @@ fn test_sharded_store_snapshot_aggregation() {
 
     let tot = snap.aggregate_pipelines();
     assert_eq!(tot.total_requests(), 8);
-    assert_eq!(tot.requests_2xx, 4);
-    assert_eq!(tot.requests_3xx, 1);
-    assert_eq!(tot.requests_4xx, 1);
-    assert_eq!(tot.requests_5xx, 2);
+    assert_eq!(tot.count(InternalStatus::Completed), 4);
+    assert_eq!(tot.count(InternalStatus::ClientCanceled), 1);
+    assert_eq!(tot.count(InternalStatus::RouteNotFound), 1);
+    assert_eq!(tot.count(InternalStatus::UpstreamError), 1);
+    assert_eq!(tot.count(InternalStatus::InternalError), 1);
 }
 
 #[test]
@@ -531,7 +545,7 @@ fn test_aggregate_pipelines() {
     store.record_stream_completion(
         PipeKind::BufferedH1H1,
         StreamCompletion {
-            status_code: 200,
+            internal_status: InternalStatus::Completed,
             bytes_rx: 200,
             bytes_tx: 800,
             duration_ns: 5_000_000,
@@ -543,7 +557,7 @@ fn test_aggregate_pipelines() {
     let res = snap.aggregate_pipelines();
 
     assert_eq!(res.total_requests(), 1);
-    assert_eq!(res.requests_2xx, 1);
+    assert_eq!(res.count(InternalStatus::Completed), 1);
     assert_eq!(res.bytes_rx, 200);
     assert_eq!(res.bytes_tx, 800);
 }
@@ -564,8 +578,8 @@ fn test_add_counters_arbitrary_slices() {
     let empty_src: [u64; 0] = [];
     add_counters(&mut empty_dst, &empty_src);
 
-    let mut full_dst = [10u64; 20];
-    let full_src = [5u64; 20];
+    let mut full_dst = [10u64; PIPELINE_COUNTERS_LEN];
+    let full_src = [5u64; PIPELINE_COUNTERS_LEN];
     add_counters(&mut full_dst, &full_src);
-    assert_eq!(full_dst, [15u64; 20]);
+    assert_eq!(full_dst, [15u64; PIPELINE_COUNTERS_LEN]);
 }

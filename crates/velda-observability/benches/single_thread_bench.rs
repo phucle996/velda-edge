@@ -32,7 +32,13 @@ fn bench_direct_slot_completion() {
     let iters = 10_000_000u64;
     let store = MetricsStore::new();
 
-    let completion = StreamCompletion::new(200, 128, 2048, 4_000_000, 1_000_000);
+    let completion = StreamCompletion::new(
+        velda_core::InternalStatus::Completed,
+        128,
+        2048,
+        4_000_000,
+        1_000_000,
+    );
 
     // Warm-up
     for _ in 0..10_000 {
