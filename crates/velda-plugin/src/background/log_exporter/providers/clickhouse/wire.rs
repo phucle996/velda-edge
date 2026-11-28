@@ -79,7 +79,7 @@ pub fn bake_ddl_request(etp_cfg: &ClickHouseEtpConfig, database: &str) -> Vec<u8
             timestamp DateTime64(9) CODEC(DoubleDelta, ZSTD(1)),\
             request_id UInt64 CODEC(DoubleDelta, ZSTD(1)),\
             duration_ns UInt64 CODEC(T64, ZSTD(1)),\
-            peer_ip String CODEC(ZSTD(1)),peer_port UInt16 CODEC(T64, ZSTD(1)),\
+            peer_ip String CODEC(ZSTD(1)),\
             upstream_ip String CODEC(ZSTD(1)),upstream_port UInt16 CODEC(T64, ZSTD(1)),\
             route_id UInt16 CODEC(T64, ZSTD(1)),\
             pipe LowCardinality(String) CODEC(ZSTD(1)),\
