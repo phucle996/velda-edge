@@ -62,7 +62,7 @@ pub async fn serve(
         .await;
 
     // Step 3: Emit exactly one connection-level access log record (L4 has no per-request framing).
-    // `status_code`/`method` stay 0/Unknown: raw TCP carries no HTTP semantics.
+    // `method` stays Unknown: raw TCP carries no HTTP semantics.
     let (rx, tx, upstream_ip, upstream_port, completion, forward_err) = match result {
         Ok((Ok(stats), upstream_addr)) => {
             let (up_ip, up_port) = upstream_addr
@@ -78,7 +78,7 @@ pub async fn serve(
                 stats.server_to_client_bytes,
                 up_ip,
                 up_port,
-                velda_core::CompletionReason::Complete,
+                velda_core::InternalStatus::Completed,
                 None,
             )
         }
@@ -96,7 +96,7 @@ pub async fn serve(
                 0,
                 up_ip,
                 up_port,
-                velda_core::CompletionReason::UpstreamError,
+                velda_core::InternalStatus::UpstreamError,
                 Some(e.to_string()),
             )
         }
@@ -105,7 +105,7 @@ pub async fn serve(
             0,
             0,
             0,
-            velda_core::CompletionReason::UpstreamError,
+            velda_core::InternalStatus::UpstreamError,
             Some(e.to_string()),
         ),
     };
@@ -118,15 +118,15 @@ pub async fn serve(
         bytes_tx: tx.min(u32::MAX as u64) as u32,
         upstream_ip,
         upstream_port,
-        status_code: 0,
+        _cl0_pad: 0,
         route_id,
         upstream_id,
         ua_major_version: 0,
         rpc_msgs_or_flags: 0,
         pipe: velda_core::PipeKind::TcpTcp,
-        completion,
+        internal_status: completion,
         method: velda_core::HttpMethod::Unknown,
-        grpc_status: velda_core::GrpcStatus::NonGrpc,
+        _reserved: 0,
         ua_family: velda_core::UaFamily::None,
         ua_os: velda_core::UaOs::Unknown,
         url_len: 0,

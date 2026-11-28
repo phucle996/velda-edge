@@ -49,11 +49,10 @@ pub async fn serve(
             );
             let _ = responder.send_response(&err_resp);
             return PipeOutcome::http(
-                responder.last_status,
                 receiver.bytes_received as u64,
                 responder.last_bytes_tx,
                 None,
-                velda_core::CompletionReason::UpstreamError,
+                velda_core::InternalStatus::UpstreamError,
             );
         }
     };
@@ -76,11 +75,10 @@ pub async fn serve(
             );
             let _ = responder.send_response(&err_resp);
             return PipeOutcome::http(
-                responder.last_status,
                 receiver.bytes_received as u64,
                 responder.last_bytes_tx,
                 upstream_addr,
-                velda_core::CompletionReason::Rejected,
+                velda_core::InternalStatus::BadRequest,
             );
         }
     };
@@ -114,11 +112,10 @@ pub async fn serve(
             );
             let _ = responder.send_response(&err_resp);
             return PipeOutcome::http(
-                responder.last_status,
                 receiver.bytes_received as u64,
                 responder.last_bytes_tx,
                 upstream_addr,
-                velda_core::CompletionReason::UpstreamError,
+                velda_core::InternalStatus::UpstreamError,
             );
         }
     };
@@ -146,12 +143,10 @@ pub async fn serve(
                                     b"502 Bad Gateway: upstream stream disconnected\n".to_vec(),
                                 );
                                 let _ = responder.send_response(&err_resp);
-                                return PipeOutcome::http(
-                                    responder.last_status,
-                                    receiver.bytes_received as u64,
+                                return PipeOutcome::http(receiver.bytes_received as u64,
                                     responder.last_bytes_tx,
                                     upstream_addr,
-                                    velda_core::CompletionReason::UpstreamError,
+                                    velda_core::InternalStatus::UpstreamError,
                                 );
                             }
                             if chunk_fin {
@@ -161,12 +156,10 @@ pub async fn serve(
                         }
                         Ok(None) => break 'upload,
                         Err(_) => {
-                            return PipeOutcome::http(
-                                responder.last_status,
-                                receiver.bytes_received as u64,
+                            return PipeOutcome::http(receiver.bytes_received as u64,
                                 responder.last_bytes_tx,
                                 upstream_addr,
-                                velda_core::CompletionReason::ClientCancel,
+                                velda_core::InternalStatus::ClientCanceled,
                             );
                         }
                     }
@@ -190,11 +183,10 @@ pub async fn serve(
                 );
                 let _ = responder.send_response(&err_resp);
                 return PipeOutcome::http(
-                    responder.last_status,
                     receiver.bytes_received as u64,
                     responder.last_bytes_tx,
                     upstream_addr,
-                    velda_core::CompletionReason::UpstreamError,
+                    velda_core::InternalStatus::UpstreamError,
                 );
             }
             Err(_) => {
@@ -204,11 +196,10 @@ pub async fn serve(
                 );
                 let _ = responder.send_response(&err_resp);
                 return PipeOutcome::http(
-                    responder.last_status,
                     receiver.bytes_received as u64,
                     responder.last_bytes_tx,
                     upstream_addr,
-                    velda_core::CompletionReason::UpstreamError,
+                    velda_core::InternalStatus::UpstreamError,
                 );
             }
         },
@@ -222,11 +213,10 @@ pub async fn serve(
                 );
                 let _ = responder.send_response(&err_resp);
                 return PipeOutcome::http(
-                    responder.last_status,
                     receiver.bytes_received as u64,
                     responder.last_bytes_tx,
                     upstream_addr,
-                    velda_core::CompletionReason::UpstreamError,
+                    velda_core::InternalStatus::UpstreamError,
                 );
             }
             Err(_) => {
@@ -236,11 +226,10 @@ pub async fn serve(
                 );
                 let _ = responder.send_response(&err_resp);
                 return PipeOutcome::http(
-                    responder.last_status,
                     receiver.bytes_received as u64,
                     responder.last_bytes_tx,
                     upstream_addr,
-                    velda_core::CompletionReason::UpstreamError,
+                    velda_core::InternalStatus::UpstreamError,
                 );
             }
         },
@@ -260,11 +249,10 @@ pub async fn serve(
                     );
                     let _ = responder.send_response(&err_resp);
                     return PipeOutcome::http(
-                        responder.last_status,
                         receiver.bytes_received as u64,
                         responder.last_bytes_tx,
                         upstream_addr,
-                        velda_core::CompletionReason::UpstreamError,
+                        velda_core::InternalStatus::UpstreamError,
                     );
                 }
                 resp_body.extend_from_slice(&chunk);
@@ -277,11 +265,10 @@ pub async fn serve(
                 );
                 let _ = responder.send_response(&err_resp);
                 return PipeOutcome::http(
-                    responder.last_status,
                     receiver.bytes_received as u64,
                     responder.last_bytes_tx,
                     upstream_addr,
-                    velda_core::CompletionReason::UpstreamError,
+                    velda_core::InternalStatus::UpstreamError,
                 );
             }
         }
@@ -314,10 +301,9 @@ pub async fn serve(
         tokio::spawn(async move { while let Ok(Some(_)) = receiver.recv_chunk().await {} });
     }
     PipeOutcome::http(
-        responder.last_status,
         bytes_rx,
         responder.last_bytes_tx,
         upstream_addr,
-        velda_core::CompletionReason::Complete,
+        velda_core::InternalStatus::Completed,
     )
 }

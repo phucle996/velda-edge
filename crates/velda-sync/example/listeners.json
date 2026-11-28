@@ -42,14 +42,11 @@
       ],
       "observability": {
         "sampling": {
-          "http": {
-            "1xx": 0.0,
-            "2xx": 0.01,
-            "3xx": 0.05,
-            "4xx": 1.0,
-            "5xx": 1.0,
-            "shed": 0.01
-          }
+          "default": 1.0,
+          "statuses": {
+            "completed": 0.01
+          },
+          "shed": 0.01
         }
       },
       "http1": {
@@ -87,12 +84,12 @@
       },
       "observability": {
         "sampling": {
-          "grpc": {
-            "default": 1.0,
-            "ok": 0.01,
-            "not_found": 0.1,
-            "shed": 0.01
-          }
+          "default": 1.0,
+          "statuses": {
+            "completed": 0.01,
+            "route_not_found": 0.1
+          },
+          "shed": 0.01
         }
       },
       "grpc": {

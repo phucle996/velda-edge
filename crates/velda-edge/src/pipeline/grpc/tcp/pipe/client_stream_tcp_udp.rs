@@ -8,10 +8,10 @@
 use std::sync::Arc;
 use std::time::Duration;
 
-use velda_core::GrpcStatus;
 use velda_core::{Body, L7Request, L7Response};
+use velda_grpc::GrpcStatus;
 use velda_grpc::config::GrpcConfig;
-use velda_grpc::error::GrpcError;
+use velda_grpc::outcome::GrpcOutcome;
 use velda_grpc::tcp::server::stream::GrpcServerStream;
 use velda_grpc::udp::client::connector::GrpcUdpClient;
 
@@ -23,7 +23,7 @@ async fn pipe_client_stream_udp(
     client: &GrpcUdpClient,
     req: &L7Request,
     config: &GrpcConfig,
-) -> Result<L7Response, GrpcError> {
+) -> Result<L7Response, GrpcOutcome> {
     let timeout = Duration::from_millis(config.max_call_duration_ms);
 
     let workflow = async {
@@ -34,7 +34,7 @@ async fn pipe_client_stream_udp(
         if !b.is_empty() && b.len() >= 5 {
             let declared_len = u32::from_be_bytes([b[1], b[2], b[3], b[4]]) as usize;
             if declared_len > config.max_message_size {
-                return Err(GrpcError::PayloadTooLarge(declared_len));
+                return Err(GrpcOutcome::PayloadTooLarge(declared_len));
             }
         }
 
@@ -43,7 +43,7 @@ async fn pipe_client_stream_udp(
 
     tokio::time::timeout(timeout, workflow)
         .await
-        .map_err(|_| GrpcError::Timeout)?
+        .map_err(|_| GrpcOutcome::Timeout)?
 }
 
 /// Serves a client-streaming gRPC request over TCP bridged to a gRPC UDP / QUIC backend.
@@ -63,12 +63,11 @@ pub async fn serve(
                 Some("request message size exceeds limit"),
             );
             return PipeOutcome::grpc(
-                200,
-                velda_core::GrpcStatus::ResourceExhausted,
+                velda_grpc::GrpcStatus::ResourceExhausted,
                 0,
                 0,
                 None,
-                velda_core::CompletionReason::Rejected,
+                velda_core::InternalStatus::BadRequest,
             );
         }
     };
@@ -94,12 +93,11 @@ pub async fn serve(
                 .respond
                 .send_trailers_only(GrpcStatus::Unavailable, Some("upstream unavailable"));
             return PipeOutcome::grpc(
-                200,
-                velda_core::GrpcStatus::Unavailable,
+                velda_grpc::GrpcStatus::Unavailable,
                 bytes_rx,
                 0,
                 None,
-                velda_core::CompletionReason::UpstreamError,
+                velda_core::InternalStatus::UpstreamError,
             );
         }
     };
@@ -144,12 +142,11 @@ pub async fn serve(
                 .send_unary_response(status, body_bytes.as_deref(), Some(resp.headers))
                 .await;
             PipeOutcome::grpc(
-                200,
-                velda_core::GrpcStatus::from_u8(status as u8),
+                velda_grpc::GrpcStatus::from_u8(status as u8),
                 bytes_rx,
                 bytes_tx,
                 upstream_addr,
-                velda_core::CompletionReason::Complete,
+                velda_core::InternalStatus::Completed,
             )
         }
         Err(_) => {
@@ -157,12 +154,11 @@ pub async fn serve(
                 .respond
                 .send_trailers_only(GrpcStatus::Unavailable, Some("upstream bridge failure"));
             PipeOutcome::grpc(
-                200,
-                velda_core::GrpcStatus::Unavailable,
+                velda_grpc::GrpcStatus::Unavailable,
                 bytes_rx,
                 0,
                 upstream_addr,
-                velda_core::CompletionReason::UpstreamError,
+                velda_core::InternalStatus::UpstreamError,
             )
         }
     }

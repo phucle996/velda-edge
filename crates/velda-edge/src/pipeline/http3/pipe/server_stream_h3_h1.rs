@@ -60,11 +60,10 @@ pub async fn serve(
             );
             let _ = responder.send_response(err_resp).await;
             return PipeOutcome::http(
-                StatusCode::BAD_GATEWAY.as_u16(),
                 req.body.len() as u64,
                 0,
                 None,
-                velda_core::CompletionReason::UpstreamError,
+                velda_core::InternalStatus::UpstreamError,
             );
         }
     };
@@ -100,11 +99,10 @@ pub async fn serve(
         );
         let _ = responder.send_response(err_resp).await;
         return PipeOutcome::http(
-            StatusCode::BAD_GATEWAY.as_u16(),
             req.body.len() as u64,
             0,
             upstream_addr,
-            velda_core::CompletionReason::UpstreamError,
+            velda_core::InternalStatus::UpstreamError,
         );
     }
 
@@ -133,11 +131,10 @@ pub async fn serve(
                 );
                 let _ = responder.send_response(err_resp).await;
                 return PipeOutcome::http(
-                    StatusCode::BAD_GATEWAY.as_u16(),
                     req.body.len() as u64,
                     0,
                     upstream_addr,
-                    velda_core::CompletionReason::UpstreamError,
+                    velda_core::InternalStatus::UpstreamError,
                 );
             }
         }
@@ -173,11 +170,10 @@ pub async fn serve(
                 "Failed to initiate downstream HTTP/3 streaming response"
             );
             return PipeOutcome::http(
-                status.as_u16(),
                 req.body.len() as u64,
                 0,
                 upstream_addr,
-                velda_core::CompletionReason::ClientCancel,
+                velda_core::InternalStatus::ClientCanceled,
             );
         }
     };
@@ -247,16 +243,15 @@ pub async fn serve(
     let bytes_tx = stream_sender.bytes_sent();
     let _ = stream_sender.finish().await;
     PipeOutcome::http(
-        status.as_u16(),
         req.body.len() as u64,
         bytes_tx,
         upstream_addr,
         if stream_res.is_err() {
-            velda_core::CompletionReason::ClientCancel
+            velda_core::InternalStatus::ClientCanceled
         } else if lease_closed {
-            velda_core::CompletionReason::UpstreamError
+            velda_core::InternalStatus::UpstreamError
         } else {
-            velda_core::CompletionReason::Complete
+            velda_core::InternalStatus::Completed
         },
     )
 }

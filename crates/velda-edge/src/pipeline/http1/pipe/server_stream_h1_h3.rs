@@ -32,13 +32,13 @@ use http::StatusCode;
 use http::header::{CONTENT_TYPE, HeaderValue};
 use tokio::io::{AsyncRead, AsyncWrite, AsyncWriteExt};
 use velda_core::L7Request;
-use velda_http1::error::Http1Error;
+use velda_http1::outcome::Http1Outcome;
 use velda_http1::server::connection::Http1ServerConnection;
 use velda_http1::server::request::{Http1BodyFraming, Http1ServerRequestHead};
 use velda_http1::server::response::Http1ServerResponse;
 use velda_http3::config::Http3Config;
-use velda_http3::error::Http3Error;
 use velda_http3::headers::sanitize_headers;
+use velda_http3::outcome::Http3Outcome;
 
 use crate::pipeline::DownstreamMeta;
 use crate::upstream::Http3Upstream;
@@ -52,7 +52,7 @@ pub async fn serve<IO>(
     meta: &DownstreamMeta,
     req_state: &velda_core::RequestState,
     plan: &velda_plugin::RoutePluginPlan,
-) -> Result<(), Http1Error>
+) -> Result<(), Http1Outcome>
 where
     IO: AsyncRead + AsyncWrite + Unpin + Send + 'static,
 {
@@ -68,7 +68,7 @@ where
     // 3. Read entire downstream body into RAM
     let body = match conn.read_body(framing).await {
         Ok(b) => b,
-        Err(Http1Error::Timeout) => {
+        Err(Http1Outcome::Timeout) => {
             let err_resp = Http1ServerResponse::from_bytes(
                 StatusCode::REQUEST_TIMEOUT,
                 b"408 Request Timeout: client body read idle timeout exceeded\n".to_vec(),
@@ -79,7 +79,7 @@ where
             );
             conn.close_requested = true;
             let _ = conn.send_response(&err_resp).await;
-            return Err(Http1Error::Timeout);
+            return Err(Http1Outcome::Timeout);
         }
         Err(e) => {
             let err_resp = Http1ServerResponse::from_bytes(
@@ -135,7 +135,7 @@ where
             );
             conn.close_requested = true;
             let _ = conn.send_response(&err_resp).await;
-            return Err(Http1Error::ConnectionClosed);
+            return Err(Http1Outcome::ConnectionClosed);
         }
     };
     let (__u_ip, __u_port) = client.target();
@@ -144,7 +144,7 @@ where
 
     // 6. Forward request over HTTP/3 stream and get progressive streaming response
     let mut stream_res = client.send_stream_request(l7_req.clone()).await;
-    if let Err(Http3Error::ConnectionClosed) = stream_res {
+    if let Err(Http3Outcome::ConnectionClosed) = stream_res {
         tracing::debug!(
             upstream = %upstream.id(),
             "HTTP/3 connection closed; self-healing with fresh QUIC connection"
@@ -175,7 +175,7 @@ where
             );
             conn.close_requested = true;
             let _ = conn.send_response(&err_resp).await;
-            return Err(Http1Error::ConnectionClosed);
+            return Err(Http1Outcome::ConnectionClosed);
         }
     };
 
@@ -236,7 +236,7 @@ where
             Some(Ok(c)) => c,
             Some(Err(e)) => {
                 tracing::debug!(error = %e, "Error reading HTTP/3 response stream chunk");
-                return Err(Http1Error::ConnectionClosed);
+                return Err(Http1Outcome::ConnectionClosed);
             }
             None => break,
         };
@@ -256,7 +256,7 @@ where
                 }
                 Ok(Err(e)) => {
                     tracing::debug!(error = %e, "Error reading opportunistic HTTP/3 chunk");
-                    return Err(Http1Error::ConnectionClosed);
+                    return Err(Http1Outcome::ConnectionClosed);
                 }
                 Err(tokio::sync::mpsc::error::TryRecvError::Empty) => break,
                 Err(tokio::sync::mpsc::error::TryRecvError::Disconnected) => {
@@ -277,7 +277,7 @@ where
                 error = %e,
                 "Downstream client disconnected during HTTP/3 server response streaming"
             );
-            return Err(Http1Error::ConnectionClosed);
+            return Err(Http1Outcome::ConnectionClosed);
         }
         conn.last_bytes_tx += batch_bytes as u64;
 
@@ -288,7 +288,10 @@ where
 
     // 10. Conclude chunked stream downstream
     velda_http1::wire::send_chunked_end(&mut conn.stream).await?;
-    conn.stream.flush().await?;
+    conn.stream
+        .flush()
+        .await
+        .map_err(velda_http1::Http1Outcome::Io)?;
     conn.compact_buffers();
     Ok(())
 }

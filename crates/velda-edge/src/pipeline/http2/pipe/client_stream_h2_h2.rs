@@ -14,7 +14,7 @@ use http::header::{CONTENT_TYPE, HeaderValue};
 use http::{StatusCode, Version};
 use velda_core::{Body, L7Response};
 use velda_http2::config::Http2Config;
-use velda_http2::error::Http2Error;
+use velda_http2::outcome::Http2Outcome;
 use velda_http2::server::request::{Http2ServerRequestHead, Http2StreamReceiver};
 use velda_http2::server::response::Http2Responder;
 
@@ -56,11 +56,10 @@ pub async fn serve(
                 let _ = responder.send_response(&err_resp);
             }
             return PipeOutcome::http(
-                responder.last_status,
                 receiver.bytes_received as u64,
                 responder.last_bytes_tx,
                 None,
-                velda_core::CompletionReason::UpstreamError,
+                velda_core::InternalStatus::UpstreamError,
             );
         }
     };
@@ -137,7 +136,7 @@ pub async fn serve(
                 .windows(b"text/event-stream".len())
                 .any(|w| w.eq_ignore_ascii_case(b"text/event-stream"))
         {
-            return Err(Http2Error::StreamingViolation(
+            return Err(Http2Outcome::StreamingViolation(
                 "Upstream returned text/event-stream (SSE) on client-only streaming route".into(),
             ));
         }
@@ -151,7 +150,7 @@ pub async fn serve(
         } else if let Some(first_chunk) = response.body.recv_chunk().await? {
             let len = first_chunk.len();
             if len > config.max_body_size {
-                return Err(Http2Error::PayloadTooLarge(len));
+                return Err(Http2Outcome::PayloadTooLarge(len));
             }
 
             if response.body.is_end_stream() {
@@ -164,7 +163,7 @@ pub async fn serve(
                     .and_then(|v| v.parse::<usize>().ok())
                     && content_length > config.max_body_size
                 {
-                    return Err(Http2Error::PayloadTooLarge(content_length));
+                    return Err(Http2Outcome::PayloadTooLarge(content_length));
                 }
 
                 let initial_cap = response
@@ -179,7 +178,7 @@ pub async fn serve(
 
                 while let Some(chunk_data) = response.body.recv_chunk().await? {
                     if body_buf.len() + chunk_data.len() > config.max_body_size {
-                        return Err(Http2Error::PayloadTooLarge(
+                        return Err(Http2Outcome::PayloadTooLarge(
                             body_buf.len() + chunk_data.len(),
                         ));
                     }
@@ -212,12 +211,12 @@ pub async fn serve(
         if !receiver.is_end_stream() {
             tokio::spawn(async move { while let Ok(Some(_)) = receiver.recv_chunk().await {} });
         }
-        Ok::<u64, Http2Error>(rx_bytes)
+        Ok::<u64, Http2Outcome>(rx_bytes)
     }
     .await;
 
     let (bytes_rx, completion) = match pipe_res {
-        Ok(rx) => (rx, velda_core::CompletionReason::Complete),
+        Ok(rx) => (rx, velda_core::InternalStatus::Completed),
         Err(e) => {
             tracing::warn!(
                 error = %e,
@@ -236,14 +235,8 @@ pub async fn serve(
                 meta.inject_response_headers(&mut err_resp.headers);
                 let _ = responder.send_response(&err_resp);
             }
-            (0, velda_core::CompletionReason::UpstreamError)
+            (0, velda_core::InternalStatus::UpstreamError)
         }
     };
-    PipeOutcome::http(
-        responder.last_status,
-        bytes_rx,
-        responder.last_bytes_tx,
-        upstream_addr,
-        completion,
-    )
+    PipeOutcome::http(bytes_rx, responder.last_bytes_tx, upstream_addr, completion)
 }

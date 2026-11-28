@@ -143,51 +143,49 @@ pub async fn serve(
     tokio::spawn(async move {
         let ingress_nanos = velda_core::clock::now_unix_nanos();
         let (request_id, _) = velda_core::request_id::next_request_id(ingress_nanos);
-        let emit_telemetry =
-            |peer_ip: u128,
-             upstream_addr: Option<(u128, u16)>,
-             rx: u64,
-             tx: u64,
-             completion: velda_core::CompletionReason| {
-                let (upstream_ip, upstream_port) = upstream_addr
-                    .map(|a| {
-                        (
-                            if velda_core::lut::ip::is_v4_u128(a.0) {
-                                (a.0 & 0xFFFF_FFFF) as u32
-                            } else {
-                                0
-                            },
-                            u16::from_be(a.1),
-                        )
-                    })
-                    .unwrap_or((0, 0));
-                velda_observability::global_telemetry_store().emit(
-                    &velda_observability::TelemetryRecord {
-                        request_id: velda_core::request_id::entropy(request_id),
-                        ingress_time_nanos: ingress_nanos,
-                        duration_ns: velda_core::clock::now_unix_nanos()
-                            .saturating_sub(ingress_nanos),
-                        peer_ip,
-                        bytes_rx: rx.min(u32::MAX as u64) as u32,
-                        bytes_tx: tx.min(u32::MAX as u64) as u32,
-                        upstream_ip,
-                        upstream_port,
-                        status_code: 0,
-                        route_id,
-                        upstream_id,
-                        ua_major_version: 0,
-                        rpc_msgs_or_flags: 0,
-                        pipe: velda_core::PipeKind::UdpRdma,
-                        completion,
-                        method: velda_core::HttpMethod::Unknown,
-                        grpc_status: velda_core::GrpcStatus::NonGrpc,
-                        ua_family: velda_core::UaFamily::None,
-                        ua_os: velda_core::UaOs::Unknown,
-                        url_len: 0,
-                        url_bytes: [0; 184],
-                    },
-                );
-            };
+        let emit_telemetry = |peer_ip: u128,
+                              upstream_addr: Option<(u128, u16)>,
+                              rx: u64,
+                              tx: u64,
+                              completion: velda_core::InternalStatus| {
+            let (upstream_ip, upstream_port) = upstream_addr
+                .map(|a| {
+                    (
+                        if velda_core::lut::ip::is_v4_u128(a.0) {
+                            (a.0 & 0xFFFF_FFFF) as u32
+                        } else {
+                            0
+                        },
+                        u16::from_be(a.1),
+                    )
+                })
+                .unwrap_or((0, 0));
+            velda_observability::global_telemetry_store().emit(
+                &velda_observability::TelemetryRecord {
+                    request_id: velda_core::request_id::entropy(request_id),
+                    ingress_time_nanos: ingress_nanos,
+                    duration_ns: velda_core::clock::now_unix_nanos().saturating_sub(ingress_nanos),
+                    peer_ip,
+                    bytes_rx: rx.min(u32::MAX as u64) as u32,
+                    bytes_tx: tx.min(u32::MAX as u64) as u32,
+                    upstream_ip,
+                    upstream_port,
+                    _cl0_pad: 0,
+                    route_id,
+                    upstream_id,
+                    ua_major_version: 0,
+                    rpc_msgs_or_flags: 0,
+                    pipe: velda_core::PipeKind::UdpRdma,
+                    internal_status: completion,
+                    method: velda_core::HttpMethod::Unknown,
+                    _reserved: 0,
+                    ua_family: velda_core::UaFamily::None,
+                    ua_os: velda_core::UaOs::Unknown,
+                    url_len: 0,
+                    url_bytes: [0; 184],
+                },
+            );
+        };
         // Step 4a: Lease a pre-warmed RDMA channel from the local core lane shard.
         // Conforms to AGENTS.md Sec 2.9: Frontline worker does not block on warmup.
         let lease = match up_clone.acquire().await {
@@ -205,7 +203,7 @@ pub async fn serve(
                     None,
                     0,
                     0,
-                    velda_core::CompletionReason::UpstreamError,
+                    velda_core::InternalStatus::UpstreamError,
                 );
                 return;
             }
@@ -236,14 +234,14 @@ pub async fn serve(
                 Some(upstream_addr),
                 0,
                 0,
-                velda_core::CompletionReason::UpstreamError,
+                velda_core::InternalStatus::UpstreamError,
             );
             return;
         }
 
         let mut bytes_rx = initial_bytes.len() as u64;
         let mut bytes_tx = 0u64;
-        let mut completion = velda_core::CompletionReason::Complete;
+        let mut completion = velda_core::InternalStatus::Completed;
         let has_activity = AtomicBool::new(false);
         let mut assured = false;
         let mut unassured_elapsed = Duration::ZERO;
@@ -273,7 +271,7 @@ pub async fn serve(
                                     upstream = %upstream_id,
                                     "Failed posting RDMA Send Work Request for client datagram"
                                 );
-                                completion = velda_core::CompletionReason::UpstreamError;
+                                completion = velda_core::InternalStatus::UpstreamError;
                                 lease.mark_broken();
                                 break;
                             }
@@ -297,7 +295,7 @@ pub async fn serve(
                                                 upstream = %upstream_id,
                                                 "Failed posting batched RDMA Send Work Request"
                                             );
-                                            completion = velda_core::CompletionReason::UpstreamError;
+                                            completion = velda_core::InternalStatus::UpstreamError;
                                             lease.mark_broken();
                                             break;
                                         }
@@ -345,7 +343,7 @@ pub async fn serve(
                                 upstream = %upstream_id,
                                 "RDMA channel receive failure during L4 UDP session"
                             );
-                            completion = velda_core::CompletionReason::UpstreamError;
+                            completion = velda_core::InternalStatus::UpstreamError;
                             lease.mark_broken();
                             break;
                         }

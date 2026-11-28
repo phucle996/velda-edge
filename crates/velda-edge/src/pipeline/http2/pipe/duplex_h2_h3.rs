@@ -48,11 +48,10 @@ pub async fn serve(
             );
             let _ = responder.send_response(&err_resp);
             return PipeOutcome::http(
-                responder.last_status,
                 receiver.bytes_received as u64,
                 responder.last_bytes_tx,
                 None,
-                velda_core::CompletionReason::UpstreamError,
+                velda_core::InternalStatus::UpstreamError,
             );
         }
     };
@@ -72,11 +71,10 @@ pub async fn serve(
             );
             let _ = responder.send_response(&err_resp);
             return PipeOutcome::http(
-                responder.last_status,
                 receiver.bytes_received as u64,
                 responder.last_bytes_tx,
                 upstream_addr,
-                velda_core::CompletionReason::Rejected,
+                velda_core::InternalStatus::BadRequest,
             );
         }
     };
@@ -110,11 +108,10 @@ pub async fn serve(
             );
             let _ = responder.send_response(&err_resp);
             return PipeOutcome::http(
-                responder.last_status,
                 receiver.bytes_received as u64,
                 responder.last_bytes_tx,
                 upstream_addr,
-                velda_core::CompletionReason::UpstreamError,
+                velda_core::InternalStatus::UpstreamError,
             );
         }
     };
@@ -206,22 +203,14 @@ pub async fn serve(
             }
         }
     };
-    let status = if responder.last_status > 0 {
-        responder.last_status
-    } else if !failed {
-        200
-    } else {
-        StatusCode::BAD_GATEWAY.as_u16()
-    };
     PipeOutcome::http(
-        status,
         receiver.bytes_received as u64,
         responder.last_bytes_tx,
         upstream_addr,
         if failed {
-            velda_core::CompletionReason::UpstreamError
+            velda_core::InternalStatus::UpstreamError
         } else {
-            velda_core::CompletionReason::Complete
+            velda_core::InternalStatus::Completed
         },
     )
 }

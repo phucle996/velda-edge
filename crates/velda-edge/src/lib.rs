@@ -31,7 +31,6 @@ pub use bootstrap::{EdgeSupervisor, bootstrap};
 pub use config::EdgeConfig;
 pub use error::EdgeError;
 pub use lifecycle::run_gateway;
-pub use profile as runtime_profile;
 pub use profile::{RuntimeProfile, resolve_runtime_profile};
 pub use reload::{ReloadOutcome, apply_reload, load_initial_runtime};
 pub use runtime::{Runtime, RuntimeConfig, SharedRuntime, new_shared_runtime};

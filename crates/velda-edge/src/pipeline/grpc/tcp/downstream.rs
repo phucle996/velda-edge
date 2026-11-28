@@ -7,13 +7,14 @@
 use std::sync::Arc;
 
 use tokio::io::{AsyncRead, AsyncWrite};
-use velda_core::{Action, GrpcStatus, L7Request, PipeKind};
+use velda_core::{Action, L7Request, PipeKind};
+use velda_grpc::GrpcStatus;
 use velda_grpc::config::GrpcConfig;
 use velda_grpc::tcp::server::connection::GrpcServerConnection;
 use velda_grpc::tcp::server::stream::GrpcServerStream;
 use velda_grpc::tcp::strategy::GrpcPipeStrategy;
 use velda_grpc::udp::strategy::GrpcUdpPipeStrategy;
-use velda_observability::sampling::grpc::GrpcSampling;
+use velda_observability::sampling::status::StatusSampling;
 use velda_observability::{StreamCompletion, global_metrics, global_telemetry_store};
 use velda_router::GrpcRouteRequest;
 use velda_sock::Connection;
@@ -34,7 +35,7 @@ pub async fn handle_grpc_tcp(
     listener_id: Arc<str>,
     config: GrpcConfig,
     tls_enabled: bool,
-    sampling: GrpcSampling,
+    sampling: StatusSampling,
     runtime: SharedRuntime,
 ) {
     let _conn_guard = crate::pipeline::ConnMetricGuard::enter();
@@ -118,7 +119,7 @@ pub async fn run_grpc_tcp_loop<IO>(
     stream: IO,
     meta: DownstreamMeta,
     config: GrpcConfig,
-    sampling: GrpcSampling,
+    sampling: StatusSampling,
     runtime: SharedRuntime,
 ) where
     IO: AsyncRead + AsyncWrite + Unpin + Send + 'static,
@@ -171,7 +172,7 @@ async fn dispatch_grpc_tcp_request_stream(
     mut server_stream: GrpcServerStream,
     meta: DownstreamMeta,
     config: &GrpcConfig,
-    sampling: GrpcSampling,
+    sampling: StatusSampling,
     runtime: &SharedRuntime,
 ) {
     let ingress_nanos = if server_stream.head.ingress_time_nanos != 0 {
@@ -208,9 +209,15 @@ async fn dispatch_grpc_tcp_request_stream(
         let duration_ns = velda_core::clock::now_unix_nanos().saturating_sub(ingress_nanos);
         global_metrics().record_early_completion(
             PipeKind::BufferedGrpcTcpTcp,
-            StreamCompletion::new(200, 0, 0, duration_ns, 0),
+            StreamCompletion::new(
+                velda_core::InternalStatus::HeaderFieldsTooLarge,
+                0,
+                0,
+                duration_ns,
+                0,
+            ),
         );
-        if sampling.keep(velda_core::GrpcStatus::ResourceExhausted) {
+        if sampling.keep(velda_core::InternalStatus::HeaderFieldsTooLarge) {
             global_telemetry_store().emit(&velda_observability::TelemetryRecord {
                 request_id: velda_core::request_id::entropy(request_id),
                 ingress_time_nanos: ingress_nanos,
@@ -220,15 +227,15 @@ async fn dispatch_grpc_tcp_request_stream(
                 bytes_tx: 0,
                 upstream_ip: 0,
                 upstream_port: 0,
-                status_code: 200,
+                _cl0_pad: 0,
                 route_id: velda_core::UNMATCHED_ROUTE_ID,
                 upstream_id: velda_core::UNASSIGNED_UPSTREAM_ID,
                 ua_major_version,
                 rpc_msgs_or_flags: 1,
                 pipe: PipeKind::BufferedGrpcTcpTcp,
-                completion: velda_core::CompletionReason::Rejected,
+                internal_status: velda_core::InternalStatus::HeaderFieldsTooLarge,
                 method: velda_core::HttpMethod::Post,
-                grpc_status: velda_core::GrpcStatus::ResourceExhausted,
+                _reserved: 0,
                 ua_family,
                 ua_os,
                 url_len: log_url_len,
@@ -252,9 +259,15 @@ async fn dispatch_grpc_tcp_request_stream(
         let duration_ns = velda_core::clock::now_unix_nanos().saturating_sub(ingress_nanos);
         global_metrics().record_early_completion(
             PipeKind::BufferedGrpcTcpTcp,
-            StreamCompletion::new(200, 0, 0, duration_ns, 0),
+            StreamCompletion::new(
+                velda_core::InternalStatus::RouteNotFound,
+                0,
+                0,
+                duration_ns,
+                0,
+            ),
         );
-        if sampling.keep(velda_core::GrpcStatus::Unimplemented) {
+        if sampling.keep(velda_core::InternalStatus::RouteNotFound) {
             global_telemetry_store().emit(&velda_observability::TelemetryRecord {
                 request_id: velda_core::request_id::entropy(request_id),
                 ingress_time_nanos: ingress_nanos,
@@ -264,15 +277,15 @@ async fn dispatch_grpc_tcp_request_stream(
                 bytes_tx: 0,
                 upstream_ip: 0,
                 upstream_port: 0,
-                status_code: 200,
+                _cl0_pad: 0,
                 route_id: velda_core::UNMATCHED_ROUTE_ID,
                 upstream_id: velda_core::UNASSIGNED_UPSTREAM_ID,
                 ua_major_version,
                 rpc_msgs_or_flags: 1,
                 pipe: PipeKind::BufferedGrpcTcpTcp,
-                completion: velda_core::CompletionReason::Rejected,
+                internal_status: velda_core::InternalStatus::RouteNotFound,
                 method: velda_core::HttpMethod::Post,
-                grpc_status: velda_core::GrpcStatus::Unimplemented,
+                _reserved: 0,
                 ua_family,
                 ua_os,
                 url_len: log_url_len,
@@ -294,9 +307,15 @@ async fn dispatch_grpc_tcp_request_stream(
         let duration_ns = velda_core::clock::now_unix_nanos().saturating_sub(ingress_nanos);
         global_metrics().record_early_completion(
             PipeKind::BufferedGrpcTcpTcp,
-            StreamCompletion::new(200, 0, 0, duration_ns, 0),
+            StreamCompletion::new(
+                velda_core::InternalStatus::RouteNotFound,
+                0,
+                0,
+                duration_ns,
+                0,
+            ),
         );
-        if sampling.keep(velda_core::GrpcStatus::Unimplemented) {
+        if sampling.keep(velda_core::InternalStatus::RouteNotFound) {
             global_telemetry_store().emit(&velda_observability::TelemetryRecord {
                 request_id: velda_core::request_id::entropy(request_id),
                 ingress_time_nanos: ingress_nanos,
@@ -306,15 +325,15 @@ async fn dispatch_grpc_tcp_request_stream(
                 bytes_tx: 0,
                 upstream_ip: 0,
                 upstream_port: 0,
-                status_code: 200,
+                _cl0_pad: 0,
                 route_id: velda_core::UNMATCHED_ROUTE_ID,
                 upstream_id: velda_core::UNASSIGNED_UPSTREAM_ID,
                 ua_major_version,
                 rpc_msgs_or_flags: 1,
                 pipe: PipeKind::BufferedGrpcTcpTcp,
-                completion: velda_core::CompletionReason::Rejected,
+                internal_status: velda_core::InternalStatus::RouteNotFound,
                 method: velda_core::HttpMethod::Post,
-                grpc_status: velda_core::GrpcStatus::Unimplemented,
+                _reserved: 0,
                 ua_family,
                 ua_os,
                 url_len: log_url_len,
@@ -371,13 +390,10 @@ async fn dispatch_grpc_tcp_request_stream(
                     Action::Respond(resp) => {
                         short_circuit_resp = Some(resp);
                     }
-                    Action::Reject(reason) => {
-                        let grpc_status = GrpcStatus::from_reject_reason(reason);
-                        let log_grpc_status = grpc_status;
-                        velda_grpc::GrpcWire::prepare_rejection_headers(
+                    Action::Status(internal_status) => {
+                        let _ = velda_grpc::GrpcWire::prepare_status_headers(
                             &mut l7_req.headers,
-                            grpc_status,
-                            Some(reason.canonical_phrase()),
+                            internal_status,
                         );
                         let _ = server_stream.respond.send_response_headers(
                             http::StatusCode::OK,
@@ -388,9 +404,9 @@ async fn dispatch_grpc_tcp_request_stream(
                             velda_core::clock::now_unix_nanos().saturating_sub(ingress_nanos);
                         global_metrics().record_early_completion(
                             PipeKind::BufferedGrpcTcpTcp,
-                            StreamCompletion::new(200, 0, 0, duration_ns, 0),
+                            StreamCompletion::new(internal_status, 0, 0, duration_ns, 0),
                         );
-                        if sampling.keep(log_grpc_status) {
+                        if sampling.keep(internal_status) {
                             global_telemetry_store().emit(&velda_observability::TelemetryRecord {
                                 request_id: velda_core::request_id::entropy(request_id),
                                 ingress_time_nanos: ingress_nanos,
@@ -400,15 +416,15 @@ async fn dispatch_grpc_tcp_request_stream(
                                 bytes_tx: 0,
                                 upstream_ip: 0,
                                 upstream_port: 0,
-                                status_code: 200,
+                                _cl0_pad: 0,
                                 route_id: route.id,
                                 upstream_id: velda_core::UNASSIGNED_UPSTREAM_ID,
                                 ua_major_version,
                                 rpc_msgs_or_flags: 1,
                                 pipe: PipeKind::BufferedGrpcTcpTcp,
-                                completion: velda_core::CompletionReason::Rejected,
+                                internal_status,
                                 method: velda_core::HttpMethod::Post,
-                                grpc_status: log_grpc_status,
+                                _reserved: 0,
                                 ua_family,
                                 ua_os,
                                 url_len: log_url_len,
@@ -443,13 +459,10 @@ async fn dispatch_grpc_tcp_request_stream(
                     Action::Respond(resp) => {
                         short_circuit_resp = Some(resp);
                     }
-                    Action::Reject(reason) => {
-                        let grpc_status = GrpcStatus::from_reject_reason(reason);
-                        let log_grpc_status = grpc_status;
-                        velda_grpc::GrpcWire::prepare_rejection_headers(
+                    Action::Status(internal_status) => {
+                        let _ = velda_grpc::GrpcWire::prepare_status_headers(
                             &mut l7_req.headers,
-                            grpc_status,
-                            Some(reason.canonical_phrase()),
+                            internal_status,
                         );
                         let _ = server_stream.respond.send_response_headers(
                             http::StatusCode::OK,
@@ -460,9 +473,9 @@ async fn dispatch_grpc_tcp_request_stream(
                             velda_core::clock::now_unix_nanos().saturating_sub(ingress_nanos);
                         global_metrics().record_early_completion(
                             PipeKind::BufferedGrpcTcpTcp,
-                            StreamCompletion::new(200, 0, 0, duration_ns, 0),
+                            StreamCompletion::new(internal_status, 0, 0, duration_ns, 0),
                         );
-                        if sampling.keep(log_grpc_status) {
+                        if sampling.keep(internal_status) {
                             global_telemetry_store().emit(&velda_observability::TelemetryRecord {
                                 request_id: velda_core::request_id::entropy(request_id),
                                 ingress_time_nanos: ingress_nanos,
@@ -472,15 +485,15 @@ async fn dispatch_grpc_tcp_request_stream(
                                 bytes_tx: 0,
                                 upstream_ip: 0,
                                 upstream_port: 0,
-                                status_code: 200,
+                                _cl0_pad: 0,
                                 route_id: route.id,
                                 upstream_id: velda_core::UNASSIGNED_UPSTREAM_ID,
                                 ua_major_version,
                                 rpc_msgs_or_flags: 1,
                                 pipe: PipeKind::BufferedGrpcTcpTcp,
-                                completion: velda_core::CompletionReason::Rejected,
+                                internal_status,
                                 method: velda_core::HttpMethod::Post,
-                                grpc_status: log_grpc_status,
+                                _reserved: 0,
                                 ua_family,
                                 ua_os,
                                 url_len: log_url_len,
@@ -533,9 +546,15 @@ async fn dispatch_grpc_tcp_request_stream(
         let duration_ns = velda_core::clock::now_unix_nanos().saturating_sub(ingress_nanos);
         global_metrics().record_early_completion(
             PipeKind::BufferedGrpcTcpTcp,
-            StreamCompletion::new(200, 0, 0, duration_ns, 0),
+            StreamCompletion::new(
+                velda_core::InternalStatus::ServiceUnavailable,
+                0,
+                0,
+                duration_ns,
+                0,
+            ),
         );
-        if sampling.keep(velda_core::GrpcStatus::Unavailable) {
+        if sampling.keep(velda_core::InternalStatus::ServiceUnavailable) {
             global_telemetry_store().emit(&velda_observability::TelemetryRecord {
                 request_id: velda_core::request_id::entropy(request_id),
                 ingress_time_nanos: ingress_nanos,
@@ -545,15 +564,15 @@ async fn dispatch_grpc_tcp_request_stream(
                 bytes_tx: 0,
                 upstream_ip: 0,
                 upstream_port: 0,
-                status_code: 200,
+                _cl0_pad: 0,
                 route_id: route.id,
                 upstream_id: target_upstream,
                 ua_major_version,
                 rpc_msgs_or_flags: 1,
                 pipe: PipeKind::BufferedGrpcTcpTcp,
-                completion: velda_core::CompletionReason::UpstreamError,
+                internal_status: velda_core::InternalStatus::ServiceUnavailable,
                 method: velda_core::HttpMethod::Post,
-                grpc_status: velda_core::GrpcStatus::Unavailable,
+                _reserved: 0,
                 ua_family,
                 ua_os,
                 url_len: log_url_len,
@@ -578,7 +597,13 @@ async fn dispatch_grpc_tcp_request_stream(
         let duration_ns = velda_core::clock::now_unix_nanos().saturating_sub(ingress_nanos);
         global_metrics().record_early_completion(
             PipeKind::BufferedGrpcTcpTcp,
-            StreamCompletion::new(200, 0, 0, duration_ns, 0),
+            StreamCompletion::new(
+                velda_core::InternalStatus::RateLimited,
+                0,
+                0,
+                duration_ns,
+                0,
+            ),
         );
         if sampling.keep_shed() {
             global_telemetry_store().emit(&velda_observability::TelemetryRecord {
@@ -590,15 +615,15 @@ async fn dispatch_grpc_tcp_request_stream(
                 bytes_tx: 0,
                 upstream_ip: 0,
                 upstream_port: 0,
-                status_code: 200,
+                _cl0_pad: 0,
                 route_id: route.id,
                 upstream_id: target_upstream,
                 ua_major_version,
                 rpc_msgs_or_flags: 1,
                 pipe: PipeKind::BufferedGrpcTcpTcp,
-                completion: velda_core::CompletionReason::Rejected,
+                internal_status: velda_core::InternalStatus::RateLimited,
                 method: velda_core::HttpMethod::Post,
-                grpc_status: velda_core::GrpcStatus::ResourceExhausted,
+                _reserved: 0,
                 ua_family,
                 ua_os,
                 url_len: log_url_len,
@@ -729,7 +754,7 @@ async fn dispatch_grpc_tcp_request_stream(
     global_metrics().record_stream_completion(
         pipe_kind,
         StreamCompletion::new(
-            outcome.status_code,
+            outcome.internal_status,
             outcome.bytes_rx,
             outcome.bytes_tx,
             duration_ns,
@@ -737,7 +762,7 @@ async fn dispatch_grpc_tcp_request_stream(
         ),
     );
 
-    if sampling.keep(outcome.grpc_status) {
+    if sampling.keep(outcome.internal_status) {
         let (upstream_ip, upstream_port) = match outcome.upstream_addr {
             Some(addr) => (
                 if velda_core::lut::ip::is_v4_u128(addr.0) {
@@ -758,15 +783,15 @@ async fn dispatch_grpc_tcp_request_stream(
             bytes_tx: outcome.bytes_tx.min(u32::MAX as u64) as u32,
             upstream_ip,
             upstream_port,
-            status_code: outcome.status_code,
+            _cl0_pad: 0,
             route_id: route.id,
             upstream_id: target_upstream,
             ua_major_version,
             rpc_msgs_or_flags: 1,
             pipe: pipe_kind,
-            completion: outcome.completion,
+            internal_status: outcome.internal_status,
             method: velda_core::HttpMethod::Post,
-            grpc_status: outcome.grpc_status,
+            _reserved: 0,
             ua_family,
             ua_os,
             url_len: log_url_len,
@@ -777,7 +802,7 @@ async fn dispatch_grpc_tcp_request_stream(
 
 #[cfg(test)]
 mod tests {
-    use velda_core::{GrpcStatus, HeaderWorkspace};
+    use velda_core::HeaderWorkspace;
     use velda_grpc::tcp::server::header::enrich_headers;
 
     #[test]
@@ -820,19 +845,22 @@ mod tests {
     #[test]
     fn test_stale_or_refused_detection() {
         assert!(
-            velda_grpc::error::GrpcError::Protocol("connection closed".into())
+            velda_grpc::outcome::GrpcOutcome::Protocol("connection closed".into())
                 .is_stale_or_refused()
         );
         assert!(
-            velda_grpc::error::GrpcError::Io(std::io::Error::new(
+            velda_grpc::outcome::GrpcOutcome::Io(std::io::Error::new(
                 std::io::ErrorKind::ConnectionReset,
                 "reset"
             ))
             .is_stale_or_refused()
         );
         assert!(
-            !velda_grpc::error::GrpcError::Status(GrpcStatus::InvalidArgument, "bad arg".into())
-                .is_stale_or_refused()
+            !velda_grpc::outcome::GrpcOutcome::Transport {
+                refused_or_goaway: false,
+                detail: "bad frame".into(),
+            }
+            .is_stale_or_refused()
         );
     }
 }

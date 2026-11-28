@@ -25,11 +25,7 @@ use crate::upstream::Http1Upstream;
 pub async fn serve(
     req: &L7Request,
     upstream: &Arc<Http1Upstream>,
-) -> (
-    L7Response,
-    Option<(u128, u16)>,
-    velda_core::CompletionReason,
-) {
+) -> (L7Response, Option<(u128, u16)>, velda_core::InternalStatus) {
     // 1. Ensure mandatory Host header (RFC 9112 §7.1) for upstream HTTP/1.1
     let mut headers = req.headers.clone();
     if !headers.contains_key(http::header::HOST)
@@ -58,7 +54,7 @@ pub async fn serve(
                     HeaderValue::from_static("text/plain; charset=utf-8"),
                 ),
                 None,
-                velda_core::CompletionReason::UpstreamError,
+                velda_core::InternalStatus::UpstreamError,
             );
         }
     };
@@ -137,7 +133,7 @@ pub async fn serve(
                                         HeaderValue::from_static("text/plain; charset=utf-8"),
                                     ),
                                     upstream_addr,
-                                    velda_core::CompletionReason::UpstreamError,
+                                    velda_core::InternalStatus::UpstreamError,
                                 );
                             }
                         }
@@ -158,7 +154,7 @@ pub async fn serve(
                                 HeaderValue::from_static("text/plain; charset=utf-8"),
                             ),
                             upstream_addr,
-                            velda_core::CompletionReason::UpstreamError,
+                            velda_core::InternalStatus::UpstreamError,
                         );
                     }
                 }
@@ -180,7 +176,7 @@ pub async fn serve(
                         HeaderValue::from_static("text/plain; charset=utf-8"),
                     ),
                     upstream_addr,
-                    velda_core::CompletionReason::UpstreamError,
+                    velda_core::InternalStatus::UpstreamError,
                 );
             }
         }
@@ -204,7 +200,7 @@ pub async fn serve(
                         b"413 Payload Too Large\n".to_vec(),
                     ),
                     upstream_addr,
-                    velda_core::CompletionReason::UpstreamError,
+                    velda_core::InternalStatus::UpstreamError,
                 );
             }
             if body_len > 0 {
@@ -221,7 +217,7 @@ pub async fn serve(
                                         b"502 Bad Gateway: Premature connection EOF while reading body\n".to_vec(),
                                     ),
                                     upstream_addr,
-                                    velda_core::CompletionReason::UpstreamError,
+                                    velda_core::InternalStatus::UpstreamError,
                                 );
                             }
                             Ok(_) => {}
@@ -233,7 +229,7 @@ pub async fn serve(
                                         format!("502 Bad Gateway: {e}\n").into_bytes(),
                                     ),
                                     upstream_addr,
-                                    velda_core::CompletionReason::UpstreamError,
+                                    velda_core::InternalStatus::UpstreamError,
                                 );
                             }
                         }
@@ -265,7 +261,7 @@ pub async fn serve(
                                     b"413 Payload Too Large\n".to_vec(),
                                 ),
                                 upstream_addr,
-                                velda_core::CompletionReason::UpstreamError,
+                                velda_core::InternalStatus::UpstreamError,
                             );
                         }
                         chunked_body.extend_from_slice(&chunk);
@@ -279,7 +275,7 @@ pub async fn serve(
                                 format!("502 Bad Gateway: {e}\n").into_bytes(),
                             ),
                             upstream_addr,
-                            velda_core::CompletionReason::UpstreamError,
+                            velda_core::InternalStatus::UpstreamError,
                         );
                     }
                 }
@@ -299,6 +295,6 @@ pub async fn serve(
     (
         L7Response::new(head.status, head.version, head.headers, body),
         upstream_addr,
-        velda_core::CompletionReason::Complete,
+        velda_core::InternalStatus::Completed,
     )
 }

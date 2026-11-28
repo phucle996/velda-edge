@@ -377,14 +377,12 @@ fn test_observability_sampling_parse_validate_and_binary_roundtrip() {
                 "tls": { "enabled": false },
                 "observability": {
                     "sampling": {
-                        "http": {
-                            "1xx": 0.0,
-                            "2xx": 0.01,
-                            "3xx": 0.05,
-                            "4xx": 1.0,
-                            "5xx": 1.0,
-                            "shed": 0.01
-                        }
+                        "default": 1.0,
+                        "statuses": {
+                            "completed": 0.01,
+                            "route_not_found": 0.1
+                        },
+                        "shed": 0.01
                     }
                 }
             },
@@ -396,12 +394,12 @@ fn test_observability_sampling_parse_validate_and_binary_roundtrip() {
                 "tls": { "enabled": false },
                 "observability": {
                     "sampling": {
-                        "grpc": {
-                            "default": 1.0,
-                            "ok": 0.01,
-                            "not_found": 0.1,
-                            "shed": 0.01
-                        }
+                        "default": 1.0,
+                        "statuses": {
+                            "completed": 0.01,
+                            "route_not_found": 0.1
+                        },
+                        "shed": 0.01
                     }
                 }
             }
@@ -428,7 +426,7 @@ fn test_observability_sampling_validation_errors() {
             "transport": { "protocol": "tcp" },
             "application": { "protocol": "http1", "streaming": [] },
             "tls": { "enabled": false },
-            "observability": { "sampling": { "http": { "2xx": 1.5 } } }
+            "observability": { "sampling": { "statuses": { "completed": 1.5 } } }
         }]
     }"#;
     let mut ls = parse_listeners(out_of_range.as_bytes()).unwrap();
@@ -436,27 +434,27 @@ fn test_observability_sampling_validation_errors() {
         validate_listeners(&mut ls)
             .unwrap_err()
             .to_string()
-            .contains("http.2xx")
+            .contains("completed")
     );
 
-    // 2. Mismatched protocol block (grpc block on http listener)
-    let mismatch = r#"{
+    // 2. Unknown internal status name rejected
+    let bad_status = r#"{
         "schema_version": 1,
         "listeners": [{
-            "id": "mismatch",
+            "id": "bad-status",
             "address": "127.0.0.1:61451",
             "transport": { "protocol": "tcp" },
             "application": { "protocol": "http", "streaming": [] },
             "tls": { "enabled": false },
-            "observability": { "sampling": { "grpc": { "ok": 0.1 } } }
+            "observability": { "sampling": { "statuses": { "unknown_code": 0.1 } } }
         }]
     }"#;
-    let mut ls = parse_listeners(mismatch.as_bytes()).unwrap();
+    let mut ls = parse_listeners(bad_status.as_bytes()).unwrap();
     assert!(
         validate_listeners(&mut ls)
             .unwrap_err()
             .to_string()
-            .contains("observability.sampling.grpc")
+            .contains("unknown internal status")
     );
 
     // 3. Raw listener rejects sampling
@@ -468,7 +466,7 @@ fn test_observability_sampling_validation_errors() {
             "transport": { "protocol": "tcp" },
             "application": { "protocol": "raw", "streaming": [] },
             "tls": { "enabled": false },
-            "observability": { "sampling": { "http": { "2xx": 0.1 } } }
+            "observability": { "sampling": { "default": 0.1 } }
         }]
     }"#;
     let mut ls = parse_listeners(raw_sampling.as_bytes()).unwrap();
@@ -488,7 +486,7 @@ fn test_observability_sampling_validation_errors() {
             "transport": { "protocol": "tcp" },
             "application": { "protocol": "http", "streaming": [] },
             "tls": { "enabled": false },
-            "observability": { "sampling": { "http": { "6xx": 0.1 } } }
+            "observability": { "sampling": { "http": { "2xx": 0.1 } } }
         }]
     }"#;
     assert!(parse_listeners(unknown_key.as_bytes()).is_err());

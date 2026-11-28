@@ -13,7 +13,7 @@ use velda_http1::strategy::Http1PipeStrategy;
 use velda_http2::strategy::Http2PipeStrategy;
 use velda_http3::server::connection::OutgoingDatagram;
 use velda_http3::strategy::Http3PipeStrategy;
-use velda_observability::sampling::http::HttpSampling;
+use velda_observability::sampling::status::StatusSampling;
 use velda_observability::{StreamCompletion, global_metrics};
 use velda_router::Http3RouteRequest;
 use velda_sock::{Datagram, UdpSocket};
@@ -122,7 +122,7 @@ pub async fn handle_http3_udp(
     socket: Arc<UdpSocket>,
     datagram: Datagram,
     _config: velda_http3::config::Http3Config,
-    sampling: HttpSampling,
+    sampling: StatusSampling,
     runtime: &SharedRuntime,
     precomputed_workers: Option<&Http3WorkerPool>,
 ) {
@@ -243,14 +243,14 @@ pub async fn handle_http3_udp(
                 global_metrics().record_early_completion(
                     PipeKind::BufferedH3H1,
                     StreamCompletion::new(
-                        StatusCode::TOO_EARLY.as_u16(),
+                        velda_core::InternalStatus::BadRequest,
                         req.body.len() as u64,
                         0,
                         duration_ns,
                         0,
                     ),
                 );
-                if sampling.keep(StatusCode::TOO_EARLY.as_u16()) {
+                if sampling.keep(velda_core::InternalStatus::BadRequest) {
                     let log_method =
                         velda_core::HttpMethod::from_bytes(req.method.as_str().as_bytes());
                     velda_observability::global_telemetry_store().emit(
@@ -263,15 +263,15 @@ pub async fn handle_http3_udp(
                             bytes_tx: 0,
                             upstream_ip: 0,
                             upstream_port: 0,
-                            status_code: StatusCode::TOO_EARLY.as_u16(),
+                            _cl0_pad: 0,
                             route_id: velda_core::UNMATCHED_ROUTE_ID,
                             upstream_id: velda_core::UNASSIGNED_UPSTREAM_ID,
                             ua_major_version: 0,
                             rpc_msgs_or_flags: 0,
                             pipe: velda_core::PipeKind::BufferedH3H1,
-                            completion: velda_core::CompletionReason::Complete,
+                            internal_status: velda_core::InternalStatus::BadRequest,
                             method: log_method,
-                            grpc_status: velda_core::GrpcStatus::NonGrpc,
+                            _reserved: 0,
                             ua_family: velda_core::UaFamily::None,
                             ua_os: velda_core::UaOs::Unknown,
                             url_len: log_url_len,
@@ -301,14 +301,14 @@ pub async fn handle_http3_udp(
                 global_metrics().record_early_completion(
                     PipeKind::BufferedH3H1,
                     StreamCompletion::new(
-                        StatusCode::BAD_REQUEST.as_u16(),
+                        velda_core::InternalStatus::BadRequest,
                         req.body.len() as u64,
                         0,
                         duration_ns,
                         0,
                     ),
                 );
-                if sampling.keep(StatusCode::BAD_REQUEST.as_u16()) {
+                if sampling.keep(velda_core::InternalStatus::BadRequest) {
                     let log_method =
                         velda_core::HttpMethod::from_bytes(req.method.as_str().as_bytes());
                     velda_observability::global_telemetry_store().emit(
@@ -321,15 +321,15 @@ pub async fn handle_http3_udp(
                             bytes_tx: 0,
                             upstream_ip: 0,
                             upstream_port: 0,
-                            status_code: StatusCode::BAD_REQUEST.as_u16(),
+                            _cl0_pad: 0,
                             route_id: velda_core::UNMATCHED_ROUTE_ID,
                             upstream_id: velda_core::UNASSIGNED_UPSTREAM_ID,
                             ua_major_version: 0,
                             rpc_msgs_or_flags: 0,
                             pipe: velda_core::PipeKind::BufferedH3H1,
-                            completion: velda_core::CompletionReason::Complete,
+                            internal_status: velda_core::InternalStatus::BadRequest,
                             method: log_method,
-                            grpc_status: velda_core::GrpcStatus::NonGrpc,
+                            _reserved: 0,
                             ua_family: velda_core::UaFamily::None,
                             ua_os: velda_core::UaOs::Unknown,
                             url_len: log_url_len,
@@ -349,7 +349,7 @@ pub async fn handle_http3_udp(
 async fn process_http3_request(
     mut req: L7Request,
     listener_id: &str,
-    sampling: HttpSampling,
+    sampling: StatusSampling,
     runtime: &SharedRuntime,
     responder: super::engine::Http3Responder,
 ) {
@@ -399,14 +399,14 @@ async fn process_http3_request(
         global_metrics().record_early_completion(
             PipeKind::BufferedH3H1,
             StreamCompletion::new(
-                StatusCode::NOT_FOUND.as_u16(),
+                velda_core::InternalStatus::RouteNotFound,
                 req.body.len() as u64,
                 0,
                 duration_ns,
                 0,
             ),
         );
-        if sampling.keep(StatusCode::NOT_FOUND.as_u16()) {
+        if sampling.keep(velda_core::InternalStatus::RouteNotFound) {
             velda_observability::global_telemetry_store().emit(
                 &velda_observability::TelemetryRecord {
                     request_id: velda_core::request_id::entropy(req.state.request_id),
@@ -417,15 +417,15 @@ async fn process_http3_request(
                     bytes_tx: 0,
                     upstream_ip: 0,
                     upstream_port: 0,
-                    status_code: StatusCode::NOT_FOUND.as_u16(),
+                    _cl0_pad: 0,
                     route_id: velda_core::UNMATCHED_ROUTE_ID,
                     upstream_id: velda_core::UNASSIGNED_UPSTREAM_ID,
                     ua_major_version,
                     rpc_msgs_or_flags: 0,
                     pipe: velda_core::PipeKind::BufferedH3H1,
-                    completion: velda_core::CompletionReason::Complete,
+                    internal_status: velda_core::InternalStatus::RouteNotFound,
                     method: log_method,
-                    grpc_status: velda_core::GrpcStatus::NonGrpc,
+                    _reserved: 0,
                     ua_family,
                     ua_os,
                     url_len: log_url_len,
@@ -462,12 +462,11 @@ async fn process_http3_request(
                 Action::Respond(resp) => {
                     short_circuit_resp = Some(resp);
                 }
-                Action::Reject(reason) => {
-                    // FAST-FAIL INVARIANT: Rejections terminate immediately at the Edge boundary.
+                Action::Status(internal_status) => {
+                    // FAST-FAIL INVARIANT: Status responses terminate immediately at the Edge boundary.
                     // Strictly bypasses post_response_hooks (anti-CPDoS & Zero-DDoS CPU burn),
-                    // retaining only MSB bypass headers while velda-http3 stamps HTTP/3 rejection fields.
-                    let resp = velda_http3::reject_response(reason, req.headers);
-                    let status = resp.status.as_u16();
+                    // retaining only MSB bypass headers while velda-http3 stamps HTTP/3 fields.
+                    let resp = velda_http3::status_response(internal_status, req.headers);
                     let bytes_tx = resp.body.len() as u64;
                     let _ = responder.send_response(resp).await;
                     let duration_ns =
@@ -475,14 +474,14 @@ async fn process_http3_request(
                     global_metrics().record_early_completion(
                         PipeKind::BufferedH3H1,
                         StreamCompletion::new(
-                            status,
+                            internal_status,
                             req.body.len() as u64,
                             bytes_tx,
                             duration_ns,
                             0,
                         ),
                     );
-                    if sampling.keep(status) {
+                    if sampling.keep(internal_status) {
                         velda_observability::global_telemetry_store().emit(
                             &velda_observability::TelemetryRecord {
                                 request_id: velda_core::request_id::entropy(req.state.request_id),
@@ -493,15 +492,15 @@ async fn process_http3_request(
                                 bytes_tx: bytes_tx.min(u32::MAX as u64) as u32,
                                 upstream_ip: 0,
                                 upstream_port: 0,
-                                status_code: status,
+                                _cl0_pad: 0,
                                 route_id: route.id,
                                 upstream_id: velda_core::UNASSIGNED_UPSTREAM_ID,
                                 ua_major_version,
                                 rpc_msgs_or_flags: 0,
                                 pipe: velda_core::PipeKind::BufferedH3H1,
-                                completion: velda_core::CompletionReason::Complete,
+                                internal_status,
                                 method: log_method,
-                                grpc_status: velda_core::GrpcStatus::NonGrpc,
+                                _reserved: 0,
                                 ua_family,
                                 ua_os,
                                 url_len: log_url_len,
@@ -534,12 +533,11 @@ async fn process_http3_request(
                 Action::Respond(resp) => {
                     short_circuit_resp = Some(resp);
                 }
-                Action::Reject(reason) => {
-                    // FAST-FAIL INVARIANT: Rejections terminate immediately at the Edge boundary.
+                Action::Status(internal_status) => {
+                    // FAST-FAIL INVARIANT: Status responses terminate immediately at the Edge boundary.
                     // Strictly bypasses post_response_hooks (anti-CPDoS & Zero-DDoS CPU burn),
-                    // retaining only MSB bypass headers while velda-http3 stamps HTTP/3 rejection fields.
-                    let resp = velda_http3::reject_response(reason, req.headers);
-                    let status = resp.status.as_u16();
+                    // retaining only MSB bypass headers while velda-http3 stamps HTTP/3 fields.
+                    let resp = velda_http3::status_response(internal_status, req.headers);
                     let bytes_tx = resp.body.len() as u64;
                     let _ = responder.send_response(resp).await;
                     let duration_ns =
@@ -547,14 +545,14 @@ async fn process_http3_request(
                     global_metrics().record_early_completion(
                         PipeKind::BufferedH3H1,
                         StreamCompletion::new(
-                            status,
+                            internal_status,
                             req.body.len() as u64,
                             bytes_tx,
                             duration_ns,
                             0,
                         ),
                     );
-                    if sampling.keep(status) {
+                    if sampling.keep(internal_status) {
                         velda_observability::global_telemetry_store().emit(
                             &velda_observability::TelemetryRecord {
                                 request_id: velda_core::request_id::entropy(req.state.request_id),
@@ -565,15 +563,15 @@ async fn process_http3_request(
                                 bytes_tx: bytes_tx.min(u32::MAX as u64) as u32,
                                 upstream_ip: 0,
                                 upstream_port: 0,
-                                status_code: status,
+                                _cl0_pad: 0,
                                 route_id: route.id,
                                 upstream_id: velda_core::UNASSIGNED_UPSTREAM_ID,
                                 ua_major_version,
                                 rpc_msgs_or_flags: 0,
                                 pipe: velda_core::PipeKind::BufferedH3H1,
-                                completion: velda_core::CompletionReason::Complete,
+                                internal_status,
                                 method: log_method,
-                                grpc_status: velda_core::GrpcStatus::NonGrpc,
+                                _reserved: 0,
                                 ua_family,
                                 ua_os,
                                 url_len: log_url_len,
@@ -606,15 +604,21 @@ async fn process_http3_request(
                     &mut resp,
                 );
             }
-            let status = resp.status.as_u16();
+            let internal_status = crate::pipeline::internal_status_from_http(resp.status);
             let bytes_tx = resp.body.len() as u64;
             let _ = responder.send_response(resp).await;
             let duration_ns = velda_core::clock::now_unix_nanos().saturating_sub(ingress_nanos);
             global_metrics().record_early_completion(
                 PipeKind::BufferedH3H1,
-                StreamCompletion::new(status, req.body.len() as u64, bytes_tx, duration_ns, 0),
+                StreamCompletion::new(
+                    internal_status,
+                    req.body.len() as u64,
+                    bytes_tx,
+                    duration_ns,
+                    0,
+                ),
             );
-            if sampling.keep(status) {
+            if sampling.keep(internal_status) {
                 velda_observability::global_telemetry_store().emit(
                     &velda_observability::TelemetryRecord {
                         request_id: velda_core::request_id::entropy(req.state.request_id),
@@ -625,15 +629,15 @@ async fn process_http3_request(
                         bytes_tx: bytes_tx.min(u32::MAX as u64) as u32,
                         upstream_ip: 0,
                         upstream_port: 0,
-                        status_code: status,
+                        _cl0_pad: 0,
                         route_id: route.id,
                         upstream_id: velda_core::UNASSIGNED_UPSTREAM_ID,
                         ua_major_version,
                         rpc_msgs_or_flags: 0,
                         pipe: velda_core::PipeKind::BufferedH3H1,
-                        completion: velda_core::CompletionReason::Complete,
+                        internal_status,
                         method: log_method,
-                        grpc_status: velda_core::GrpcStatus::NonGrpc,
+                        _reserved: 0,
                         ua_family,
                         ua_os,
                         url_len: log_url_len,
@@ -676,14 +680,14 @@ async fn process_http3_request(
         global_metrics().record_early_completion(
             PipeKind::BufferedH3H1,
             StreamCompletion::new(
-                StatusCode::SERVICE_UNAVAILABLE.as_u16(),
+                velda_core::InternalStatus::ServiceUnavailable,
                 req.body.len() as u64,
                 0,
                 duration_ns,
                 0,
             ),
         );
-        if sampling.keep(StatusCode::SERVICE_UNAVAILABLE.as_u16()) {
+        if sampling.keep(velda_core::InternalStatus::ServiceUnavailable) {
             velda_observability::global_telemetry_store().emit(
                 &velda_observability::TelemetryRecord {
                     request_id: velda_core::request_id::entropy(req.state.request_id),
@@ -694,15 +698,15 @@ async fn process_http3_request(
                     bytes_tx: 0,
                     upstream_ip: 0,
                     upstream_port: 0,
-                    status_code: StatusCode::SERVICE_UNAVAILABLE.as_u16(),
+                    _cl0_pad: 0,
                     route_id: route.id,
                     upstream_id: target_upstream,
                     ua_major_version,
                     rpc_msgs_or_flags: 0,
                     pipe: velda_core::PipeKind::BufferedH3H1,
-                    completion: velda_core::CompletionReason::Complete,
+                    internal_status: velda_core::InternalStatus::ServiceUnavailable,
                     method: log_method,
-                    grpc_status: velda_core::GrpcStatus::NonGrpc,
+                    _reserved: 0,
                     ua_family,
                     ua_os,
                     url_len: log_url_len,
@@ -734,7 +738,7 @@ async fn process_http3_request(
         global_metrics().record_early_completion(
             PipeKind::BufferedH3H1,
             StreamCompletion::new(
-                StatusCode::TOO_MANY_REQUESTS.as_u16(),
+                velda_core::InternalStatus::RateLimited,
                 req.body.len() as u64,
                 0,
                 duration_ns,
@@ -752,15 +756,15 @@ async fn process_http3_request(
                     bytes_tx: 0,
                     upstream_ip: 0,
                     upstream_port: 0,
-                    status_code: StatusCode::TOO_MANY_REQUESTS.as_u16(),
+                    _cl0_pad: 0,
                     route_id: route.id,
                     upstream_id: target_upstream,
                     ua_major_version,
                     rpc_msgs_or_flags: 0,
                     pipe: velda_core::PipeKind::BufferedH3H1,
-                    completion: velda_core::CompletionReason::Complete,
+                    internal_status: velda_core::InternalStatus::RateLimited,
                     method: log_method,
-                    grpc_status: velda_core::GrpcStatus::NonGrpc,
+                    _reserved: 0,
                     ua_family,
                     ua_os,
                     url_len: log_url_len,
@@ -823,17 +827,10 @@ async fn process_http3_request(
                         &mut resp,
                     );
                 }
-                let status = resp.status.as_u16();
                 let bytes_tx = resp.body.len() as u64;
                 let _ = responder.send_response(resp).await;
                 (
-                    PipeOutcome::http(
-                        status,
-                        req.body.len() as u64,
-                        bytes_tx,
-                        upstream_addr,
-                        completion,
-                    ),
+                    PipeOutcome::http(req.body.len() as u64, bytes_tx, upstream_addr, completion),
                     PIPE,
                 )
             }
@@ -858,17 +855,10 @@ async fn process_http3_request(
                         &mut resp,
                     );
                 }
-                let status = resp.status.as_u16();
                 let bytes_tx = resp.body.len() as u64;
                 let _ = responder.send_response(resp).await;
                 (
-                    PipeOutcome::http(
-                        status,
-                        req.body.len() as u64,
-                        bytes_tx,
-                        upstream_addr,
-                        completion,
-                    ),
+                    PipeOutcome::http(req.body.len() as u64, bytes_tx, upstream_addr, completion),
                     PIPE,
                 )
             }
@@ -896,17 +886,10 @@ async fn process_http3_request(
                         &mut resp,
                     );
                 }
-                let status = resp.status.as_u16();
                 let bytes_tx = resp.body.len() as u64;
                 let _ = responder.send_response(resp).await;
                 (
-                    PipeOutcome::http(
-                        status,
-                        req.body.len() as u64,
-                        bytes_tx,
-                        upstream_addr,
-                        completion,
-                    ),
+                    PipeOutcome::http(req.body.len() as u64, bytes_tx, upstream_addr, completion),
                     PIPE,
                 )
             }
@@ -931,17 +914,10 @@ async fn process_http3_request(
                         &mut resp,
                     );
                 }
-                let status = resp.status.as_u16();
                 let bytes_tx = resp.body.len() as u64;
                 let _ = responder.send_response(resp).await;
                 (
-                    PipeOutcome::http(
-                        status,
-                        req.body.len() as u64,
-                        bytes_tx,
-                        upstream_addr,
-                        completion,
-                    ),
+                    PipeOutcome::http(req.body.len() as u64, bytes_tx, upstream_addr, completion),
                     PIPE,
                 )
             }
@@ -969,17 +945,10 @@ async fn process_http3_request(
                         &mut resp,
                     );
                 }
-                let status = resp.status.as_u16();
                 let bytes_tx = resp.body.len() as u64;
                 let _ = responder.send_response(resp).await;
                 (
-                    PipeOutcome::http(
-                        status,
-                        req.body.len() as u64,
-                        bytes_tx,
-                        upstream_addr,
-                        completion,
-                    ),
+                    PipeOutcome::http(req.body.len() as u64, bytes_tx, upstream_addr, completion),
                     PIPE,
                 )
             }
@@ -1004,17 +973,10 @@ async fn process_http3_request(
                         &mut resp,
                     );
                 }
-                let status = resp.status.as_u16();
                 let bytes_tx = resp.body.len() as u64;
                 let _ = responder.send_response(resp).await;
                 (
-                    PipeOutcome::http(
-                        status,
-                        req.body.len() as u64,
-                        bytes_tx,
-                        upstream_addr,
-                        completion,
-                    ),
+                    PipeOutcome::http(req.body.len() as u64, bytes_tx, upstream_addr, completion),
                     PIPE,
                 )
             }
@@ -1033,14 +995,14 @@ async fn process_http3_request(
     global_metrics().record_stream_completion(
         pipe_kind,
         StreamCompletion::new(
-            outcome.status_code,
+            outcome.internal_status,
             outcome.bytes_rx,
             outcome.bytes_tx,
             duration_ns,
             0,
         ),
     );
-    if sampling.keep(outcome.status_code) {
+    if sampling.keep(outcome.internal_status) {
         let (upstream_ip, upstream_port) = outcome
             .upstream_addr
             .map(|a| {
@@ -1063,15 +1025,15 @@ async fn process_http3_request(
             bytes_tx: outcome.bytes_tx.min(u32::MAX as u64) as u32,
             upstream_ip,
             upstream_port,
-            status_code: outcome.status_code,
+            _cl0_pad: 0,
             route_id: route.id,
             upstream_id: target_upstream,
             ua_major_version,
             rpc_msgs_or_flags: 0,
             pipe: pipe_kind,
-            completion: outcome.completion,
+            internal_status: outcome.internal_status,
             method: log_method,
-            grpc_status: velda_core::GrpcStatus::NonGrpc,
+            _reserved: 0,
             ua_family,
             ua_os,
             url_len: log_url_len,
@@ -1144,12 +1106,13 @@ mod tests {
 
     #[test]
     fn test_connection_closed_detection() {
-        assert!(velda_http3::error::Http3Error::ConnectionClosed.is_connection_closed());
+        assert!(velda_http3::outcome::Http3Outcome::ConnectionClosed.is_connection_closed());
         assert!(
-            velda_http3::error::Http3Error::H3("H3_REQUEST_REJECTED".into()).is_connection_closed()
+            velda_http3::outcome::Http3Outcome::H3("H3_REQUEST_REJECTED".into())
+                .is_connection_closed()
         );
         assert!(
-            velda_http3::error::Http3Error::Io(std::io::Error::new(
+            velda_http3::outcome::Http3Outcome::Io(std::io::Error::new(
                 std::io::ErrorKind::BrokenPipe,
                 "broken pipe"
             ))
@@ -1157,7 +1120,7 @@ mod tests {
         );
 
         // Payload size errors are not retryable
-        assert!(!velda_http3::error::Http3Error::PayloadTooLarge(500).is_connection_closed());
+        assert!(!velda_http3::outcome::Http3Outcome::PayloadTooLarge(500).is_connection_closed());
     }
 
     #[test]

@@ -27,8 +27,8 @@ pub enum EdgeError {
     #[error("XDP error: {0}")]
     Xdp(#[from] velda_xdp::XdpError),
 
-    #[error("Upstream error: {0}")]
-    Upstream(#[from] velda_upstream::UpstreamError),
+    #[error("Upstream outcome: {0}")]
+    Upstream(String),
 
     #[error("TLS error: {0}")]
     Tls(#[from] velda_tls::TlsError),

@@ -223,15 +223,16 @@ fn allowed_etp_kinds_for_plugin(plugin_id: &str) -> Option<&'static [EtpKind]> {
             EtpKind::Elasticsearch,
             EtpKind::S3,
         ]),
-        "clickhouse_log_shipper" => Some(&[EtpKind::ClickHouse]),
-        "s3_log_shipper" => Some(&[EtpKind::S3]),
-        "loki_log_shipper" => Some(&[EtpKind::Loki]),
-        "elasticsearch_log_shipper" => Some(&[EtpKind::Elasticsearch]),
-        "otlp_metrics_exporter" | "otlp_log_shipper" | "otlp_trace_exporter" => {
-            Some(&[EtpKind::Otlp])
-        }
-        "kafka_log_shipper" => Some(&[EtpKind::Kafka]),
-        "statsd_exporter" => Some(&[EtpKind::Statsd]),
+        "log_exporter" => Some(&[
+            EtpKind::ClickHouse,
+            EtpKind::Elasticsearch,
+            EtpKind::Loki,
+            EtpKind::S3,
+            EtpKind::Kafka,
+            EtpKind::Otlp,
+        ]),
+        "metrics_exporter" => Some(&[EtpKind::Otlp, EtpKind::Statsd]),
+        "trace_exporter" => Some(&[EtpKind::Otlp]),
         "jwt_auth" => Some(&[
             EtpKind::Vault,
             EtpKind::AwsSecretsManager,
@@ -260,8 +261,101 @@ fn allowed_etp_kinds_for_plugin(plugin_id: &str) -> Option<&'static [EtpKind]> {
     }
 }
 
-/// Validates that every plugin config referencing `"etp_id"` resolves to a valid ETP entry
-/// in `etps` and matches any declared `"etp_kind"` or canonical plugin-to-ETP kind mapping.
+fn validate_etp_ref_object(
+    plugin_id: &str,
+    obj: &serde_json::Map<String, serde_json::Value>,
+    etp_kinds: &HashMap<&str, EtpKind>,
+) -> Result<(), SyncError> {
+    if let Some(mode) = obj.get("mode").and_then(|v| v.as_str())
+        && (mode == "local" || mode == "pull")
+    {
+        if obj.get("etp_id").is_some_and(|v| !v.is_null()) {
+            return Err(SyncError::Validation {
+                domain: "plugins".into(),
+                reason: format!(
+                    "Plugin '{plugin_id}' target with mode '{mode}' must not reference 'etp_id'"
+                ),
+            });
+        }
+        return Ok(());
+    }
+    let Some(etp_id_val) = obj.get("etp_id").filter(|v| !v.is_null()) else {
+        return Ok(());
+    };
+    let etp_id = etp_id_val
+        .as_str()
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .ok_or_else(|| SyncError::Validation {
+            domain: "plugins".into(),
+            reason: format!("Plugin '{plugin_id}' has empty or non-string 'etp_id'"),
+        })?;
+
+    let actual_kind = etp_kinds
+        .get(etp_id)
+        .copied()
+        .ok_or_else(|| SyncError::Validation {
+            domain: "plugins".into(),
+            reason: format!("Plugin '{plugin_id}' references unknown etp_id '{etp_id}'"),
+        })?;
+
+    if let Some(declared_kind_val) = obj.get("etp_kind") {
+        let declared_raw = declared_kind_val
+            .as_str()
+            .ok_or_else(|| SyncError::Validation {
+                domain: "plugins".into(),
+                reason: format!(
+                    "Plugin '{plugin_id}' has non-string 'etp_kind' for etp_id '{etp_id}'"
+                ),
+            })?;
+        let declared_kind =
+            EtpKind::from_str(declared_raw).ok_or_else(|| SyncError::Validation {
+                domain: "plugins".into(),
+                reason: format!(
+                    "Plugin '{plugin_id}' specifies unsupported etp_kind '{declared_raw}'"
+                ),
+            })?;
+        if actual_kind != declared_kind {
+            return Err(SyncError::Validation {
+                domain: "plugins".into(),
+                reason: format!(
+                    "Plugin '{plugin_id}' expects etp_id '{etp_id}' to have kind '{}', got '{}'",
+                    declared_kind.as_str(),
+                    actual_kind.as_str()
+                ),
+            });
+        }
+    }
+
+    match allowed_etp_kinds_for_plugin(plugin_id) {
+        Some(allowed_kinds) if !allowed_kinds.contains(&actual_kind) => {
+            let expected_list: Vec<&str> = allowed_kinds.iter().map(EtpKind::as_str).collect();
+            return Err(SyncError::Validation {
+                domain: "plugins".into(),
+                reason: format!(
+                    "Plugin '{plugin_id}' requires ETP kind in [{}], but etp_id '{etp_id}' has kind '{}'",
+                    expected_list.join(", "),
+                    actual_kind.as_str()
+                ),
+            });
+        }
+        None => {
+            return Err(SyncError::Validation {
+                domain: "plugins".into(),
+                reason: format!(
+                    "Plugin '{plugin_id}' does not support 'etp_id' references (referenced '{etp_id}' of kind '{}')",
+                    actual_kind.as_str()
+                ),
+            });
+        }
+        Some(_) => {}
+    }
+
+    Ok(())
+}
+
+/// Validates that every plugin config referencing `"etp_id"` (top-level or inside `targets[]`)
+/// resolves to a valid ETP entry in `etps` and matches declared/allowed ETP kinds.
 pub fn validate_plugin_etp_references(
     plugins: &[PluginConfig],
     etps: &[EtpSyncConfig],
@@ -279,87 +373,14 @@ pub fn validate_plugin_etp_references(
         let Some(obj) = plugin.config.as_object() else {
             continue;
         };
-        let Some(etp_id_val) = obj.get("etp_id").filter(|v| !v.is_null()) else {
-            continue;
-        };
-        let etp_id = etp_id_val
-            .as_str()
-            .map(str::trim)
-            .filter(|s| !s.is_empty())
-            .ok_or_else(|| SyncError::Validation {
-                domain: "plugins".into(),
-                reason: format!("Plugin '{}' has empty or non-string 'etp_id'", plugin.id),
-            })?;
+        validate_etp_ref_object(&plugin.id, obj, &etp_kinds)?;
 
-        let actual_kind = etp_kinds
-            .get(etp_id)
-            .copied()
-            .ok_or_else(|| SyncError::Validation {
-                domain: "plugins".into(),
-                reason: format!(
-                    "Plugin '{}' references unknown etp_id '{}'",
-                    plugin.id, etp_id
-                ),
-            })?;
-
-        if let Some(declared_kind_val) = obj.get("etp_kind") {
-            let declared_raw = declared_kind_val
-                .as_str()
-                .ok_or_else(|| SyncError::Validation {
-                    domain: "plugins".into(),
-                    reason: format!(
-                        "Plugin '{}' has non-string 'etp_kind' for etp_id '{}'",
-                        plugin.id, etp_id
-                    ),
-                })?;
-            let declared_kind =
-                EtpKind::from_str(declared_raw).ok_or_else(|| SyncError::Validation {
-                    domain: "plugins".into(),
-                    reason: format!(
-                        "Plugin '{}' specifies unsupported etp_kind '{}'",
-                        plugin.id, declared_raw
-                    ),
-                })?;
-            if actual_kind != declared_kind {
-                return Err(SyncError::Validation {
-                    domain: "plugins".into(),
-                    reason: format!(
-                        "Plugin '{}' expects etp_id '{}' to have kind '{}', got '{}'",
-                        plugin.id,
-                        etp_id,
-                        declared_kind.as_str(),
-                        actual_kind.as_str()
-                    ),
-                });
+        if let Some(targets) = obj.get("targets").and_then(|v| v.as_array()) {
+            for target in targets {
+                if let Some(target_obj) = target.as_object() {
+                    validate_etp_ref_object(&plugin.id, target_obj, &etp_kinds)?;
+                }
             }
-        }
-
-        match allowed_etp_kinds_for_plugin(&plugin.id) {
-            Some(allowed_kinds) if !allowed_kinds.contains(&actual_kind) => {
-                let expected_list: Vec<&str> = allowed_kinds.iter().map(EtpKind::as_str).collect();
-                return Err(SyncError::Validation {
-                    domain: "plugins".into(),
-                    reason: format!(
-                        "Plugin '{}' requires ETP kind in [{}], but etp_id '{}' has kind '{}'",
-                        plugin.id,
-                        expected_list.join(", "),
-                        etp_id,
-                        actual_kind.as_str()
-                    ),
-                });
-            }
-            None => {
-                return Err(SyncError::Validation {
-                    domain: "plugins".into(),
-                    reason: format!(
-                        "Plugin '{}' does not support 'etp_id' references (referenced '{}' of kind '{}')",
-                        plugin.id,
-                        etp_id,
-                        actual_kind.as_str()
-                    ),
-                });
-            }
-            Some(_) => {}
         }
     }
 
@@ -651,24 +672,24 @@ mod tests {
     fn test_validate_plugin_etp_references() {
         let etp_file = parse_etps(&sample_json()).unwrap();
 
-        // Valid reference
+        // Valid target reference
         let ok_plugins = vec![PluginConfig {
-            id: "loki_log_shipper".into(),
-            config: serde_json::json!({ "etp_id": "loki-primary" }),
+            id: "log_exporter".into(),
+            config: serde_json::json!({ "targets": [{ "mode": "etp", "etp_id": "loki-primary" }] }),
         }];
         validate_plugin_etp_references(&ok_plugins, &etp_file.etps).unwrap();
 
         // Missing etp_id
         let missing_plugins = vec![PluginConfig {
-            id: "loki_log_shipper".into(),
-            config: serde_json::json!({ "etp_id": "non-existent" }),
+            id: "log_exporter".into(),
+            config: serde_json::json!({ "targets": [{ "mode": "etp", "etp_id": "non-existent" }] }),
         }];
         assert!(validate_plugin_etp_references(&missing_plugins, &etp_file.etps).is_err());
 
         // Incompatible kind for plugin
         let wrong_kind_plugins = vec![PluginConfig {
-            id: "loki_log_shipper".into(),
-            config: serde_json::json!({ "etp_id": "redis-main" }),
+            id: "log_exporter".into(),
+            config: serde_json::json!({ "targets": [{ "mode": "etp", "etp_id": "redis-main" }] }),
         }];
         assert!(validate_plugin_etp_references(&wrong_kind_plugins, &etp_file.etps).is_err());
 

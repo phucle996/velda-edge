@@ -135,43 +135,111 @@
       }
     },
     {
-      "id": "std_log_shipper",
+      "id": "log_exporter",
       "config": {
-        "target": "stdout",
-        "format": "json",
-        "flush_interval_ms": 1000,
-        "max_batch_size": 1000
+        "targets": [
+          {
+            "mode": "local",
+            "target": "stdout",
+            "format": "json",
+            "flush_interval_ms": 1000,
+            "max_batch_size": 1000
+          },
+          {
+            "mode": "etp",
+            "etp_id": "otlp-main",
+            "service_name": "velda-edge",
+            "flush_interval_ms": 1000,
+            "max_batch_size": 1000,
+            "request_timeout_ms": 5000
+          },
+          {
+            "mode": "etp",
+            "etp_id": "loki-logs",
+            "service_name": "velda-edge",
+            "flush_interval_ms": 1000,
+            "max_batch_size": 1000,
+            "request_timeout_ms": 5000,
+            "labels": {
+              "env": "prod",
+              "cluster": "edge-1"
+            }
+          },
+          {
+            "mode": "etp",
+            "etp_id": "clickhouse-logs",
+            "database": "velda_analytics",
+            "format": "row_binary",
+            "flush_interval_ms": 1000,
+            "max_batch_size": 8000,
+            "request_timeout_ms": 5000
+          },
+          {
+            "mode": "etp",
+            "etp_id": "kafka-main",
+            "topic": "velda-access-logs",
+            "format": "json",
+            "compression": "zstd",
+            "acks": "leader",
+            "partitioner": "round_robin",
+            "flush_interval_ms": 1000,
+            "max_batch_size": 8000,
+            "request_timeout_ms": 5000,
+            "metadata_refresh_ms": 300000
+          }
+        ]
       }
     },
     {
-      "id": "prometheus_exporter",
+      "id": "metrics_exporter",
       "config": {
-        "listen": "0.0.0.0:9090",
-        "path": "/metrics",
-        "protocol": "http",
-        "scrape": {
-          "timeout_ms": 5000,
-          "max_concurrency": 16,
-          "max_buffer_size_kb": 256
-        },
-        "tls": {
-          "mode": "none",
-          "cert_file": null,
-          "key_file": null,
-          "client_ca_file": null
-        },
-        "cors": {
-          "enabled": false,
-          "allow_origins": [],
-          "allow_methods": [],
-          "allow_headers": []
-        },
-        "auth": {
-          "mode": "none",
-          "token": null,
-          "username": null,
-          "password": null
-        }
+        "targets": [
+          {
+            "mode": "pull",
+            "listen": "0.0.0.0:9090",
+            "path": "/metrics",
+            "protocol": "http",
+            "scrape": {
+              "timeout_ms": 5000,
+              "max_concurrency": 16,
+              "max_buffer_size_kb": 256
+            },
+            "tls": {
+              "mode": "none",
+              "cert_file": null,
+              "key_file": null,
+              "client_ca_file": null
+            },
+            "cors": {
+              "enabled": false,
+              "allow_origins": [],
+              "allow_methods": [],
+              "allow_headers": []
+            },
+            "auth": {
+              "mode": "none",
+              "token": null,
+              "username": null,
+              "password": null
+            }
+          },
+          {
+            "mode": "push",
+            "etp_id": "otlp-main",
+            "interval_secs": 15,
+            "request_timeout_ms": 5000,
+            "service_name": "velda-edge",
+            "temporality": "delta"
+          },
+          {
+            "mode": "push",
+            "etp_id": "statsd-main",
+            "interval_secs": 10,
+            "prefix": "velda",
+            "dialect": "dogstatsd",
+            "max_packet_size": 1432
+          }
+        ]
       }
     },
     {
@@ -243,75 +311,6 @@
         ],
         "hide_credentials": true,
         "fallback_behavior": "reject"
-      }
-    },
-    {
-      "id": "otlp_log_shipper",
-      "config": {
-        "etp_id": "otlp-main",
-        "service_name": "velda-edge",
-        "flush_interval_ms": 1000,
-        "max_batch_size": 1000,
-        "request_timeout_ms": 5000
-      }
-    },
-    {
-      "id": "loki_log_shipper",
-      "config": {
-        "etp_id": "loki-logs",
-        "service_name": "velda-edge",
-        "flush_interval_ms": 1000,
-        "max_batch_size": 1000,
-        "request_timeout_ms": 5000,
-        "labels": {
-          "env": "prod",
-          "cluster": "edge-1"
-        }
-      }
-    },
-    {
-      "id": "otlp_metrics_exporter",
-      "config": {
-        "etp_id": "otlp-main",
-        "interval_secs": 15,
-        "request_timeout_ms": 5000,
-        "service_name": "velda-edge"
-      }
-    },
-    {
-      "id": "statsd_exporter",
-      "config": {
-        "etp_id": "statsd-main",
-        "interval_secs": 10,
-        "prefix": "velda",
-        "dialect": "dogstatsd",
-        "max_packet_size": 1432
-      }
-    },
-    {
-      "id": "clickhouse_log_shipper",
-      "config": {
-        "etp_id": "clickhouse-logs",
-        "database": "velda_analytics",
-        "format": "row_binary",
-        "flush_interval_ms": 1000,
-        "max_batch_size": 8000,
-        "request_timeout_ms": 5000
-      }
-    },
-    {
-      "id": "kafka_log_shipper",
-      "config": {
-        "etp_id": "kafka-main",
-        "topic": "velda-access-logs",
-        "format": "json",
-        "compression": "zstd",
-        "acks": "leader",
-        "partitioner": "round_robin",
-        "flush_interval_ms": 1000,
-        "max_batch_size": 8000,
-        "request_timeout_ms": 5000,
-        "metadata_refresh_ms": 300000
       }
     }
   ]

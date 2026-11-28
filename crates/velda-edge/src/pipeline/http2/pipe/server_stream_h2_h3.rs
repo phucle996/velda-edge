@@ -11,8 +11,8 @@ use http::header::{CONTENT_TYPE, HeaderValue};
 use velda_core::{L7Request, L7Response};
 use velda_http2::server::request::{Http2ServerRequestHead, Http2StreamReceiver};
 use velda_http2::server::response::Http2Responder;
-use velda_http3::error::Http3Error;
 use velda_http3::headers::sanitize_headers;
+use velda_http3::outcome::Http3Outcome;
 
 use crate::pipeline::{DownstreamMeta, PipeOutcome};
 use crate::upstream::Http3Upstream;
@@ -41,11 +41,10 @@ pub async fn serve(
             );
             let _ = responder.send_response(&err_resp);
             return PipeOutcome::http(
-                responder.last_status,
                 receiver.bytes_received as u64,
                 responder.last_bytes_tx,
                 None,
-                velda_core::CompletionReason::Rejected,
+                velda_core::InternalStatus::BadRequest,
             );
         }
     };
@@ -82,11 +81,10 @@ pub async fn serve(
             );
             let _ = responder.send_response(&err_resp);
             return PipeOutcome::http(
-                responder.last_status,
                 bytes_rx,
                 responder.last_bytes_tx,
                 None,
-                velda_core::CompletionReason::UpstreamError,
+                velda_core::InternalStatus::UpstreamError,
             );
         }
     };
@@ -94,7 +92,7 @@ pub async fn serve(
 
     // 5. Pipe server-streaming response with self-healing on connection close
     let mut stream_res = client.send_stream_request(l7_req.clone()).await;
-    if let Err(Http3Error::ConnectionClosed) = stream_res {
+    if let Err(Http3Outcome::ConnectionClosed) = stream_res {
         tracing::debug!(
             upstream = %upstream.id(),
             "HTTP/3 connection closed; self-healing with fresh QUIC connection"
@@ -123,11 +121,10 @@ pub async fn serve(
             );
             let _ = responder.send_response(&err_resp);
             return PipeOutcome::http(
-                responder.last_status,
                 bytes_rx,
                 responder.last_bytes_tx,
                 upstream_addr,
-                velda_core::CompletionReason::UpstreamError,
+                velda_core::InternalStatus::UpstreamError,
             );
         }
     };
@@ -164,11 +161,10 @@ pub async fn serve(
         );
         let _ = responder.send_response(&resp);
         return PipeOutcome::http(
-            responder.last_status,
             bytes_rx,
             responder.last_bytes_tx,
             upstream_addr,
-            velda_core::CompletionReason::Complete,
+            velda_core::InternalStatus::Completed,
         );
     }
 
@@ -178,11 +174,10 @@ pub async fn serve(
         Err(e) => {
             tracing::debug!(error = %e, "Failed to initiate downstream HTTP/2 streaming response");
             return PipeOutcome::http(
-                responder.last_status,
                 bytes_rx,
                 responder.last_bytes_tx,
                 upstream_addr,
-                velda_core::CompletionReason::ClientCancel,
+                velda_core::InternalStatus::ClientCanceled,
             );
         }
     };
@@ -193,11 +188,10 @@ pub async fn serve(
                 if let Err(e) = stream_sender.send_chunk(chunk).await {
                     tracing::debug!(error = %e, "Downstream HTTP/2 client disconnected");
                     return PipeOutcome::http(
-                        responder.last_status,
                         bytes_rx,
                         stream_sender.bytes_sent,
                         upstream_addr,
-                        velda_core::CompletionReason::ClientCancel,
+                        velda_core::InternalStatus::ClientCanceled,
                     );
                 }
             }
@@ -205,11 +199,10 @@ pub async fn serve(
                 tracing::debug!(error = %e, "Error reading upstream HTTP/3 chunk");
                 responder.send_reset(velda_http2::proto::frame::H2ErrorCode::INTERNAL_ERROR);
                 return PipeOutcome::http(
-                    responder.last_status,
                     bytes_rx,
                     stream_sender.bytes_sent,
                     upstream_addr,
-                    velda_core::CompletionReason::UpstreamError,
+                    velda_core::InternalStatus::UpstreamError,
                 );
             }
         }
@@ -217,10 +210,9 @@ pub async fn serve(
 
     let _ = stream_sender.finish();
     PipeOutcome::http(
-        responder.last_status,
         bytes_rx,
         stream_sender.bytes_sent,
         upstream_addr,
-        velda_core::CompletionReason::Complete,
+        velda_core::InternalStatus::Completed,
     )
 }

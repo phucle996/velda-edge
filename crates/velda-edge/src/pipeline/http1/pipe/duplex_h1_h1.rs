@@ -35,7 +35,7 @@ use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt};
 use velda_core::Body;
 use velda_http1::client::header::sanitize_headers;
 use velda_http1::client::response::{read_chunk_sized, read_next_chunk, read_response_head};
-use velda_http1::error::Http1Error;
+use velda_http1::outcome::Http1Outcome;
 use velda_http1::server::connection::Http1ServerConnection;
 use velda_http1::server::request::{Http1BodyFraming, Http1ServerRequestHead};
 use velda_http1::server::response::{
@@ -55,7 +55,7 @@ pub async fn serve<IO>(
     meta: &DownstreamMeta,
     req_state: &velda_core::RequestState,
     plan: &velda_plugin::RoutePluginPlan,
-) -> Result<(), Http1Error>
+) -> Result<(), Http1Outcome>
 where
     IO: AsyncRead + AsyncWrite + Unpin + Send + 'static,
 {
@@ -87,7 +87,7 @@ where
             );
             conn.close_requested = true;
             let _ = conn.send_response(&err_resp).await;
-            return Err(Http1Error::ConnectionClosed);
+            return Err(Http1Outcome::ConnectionClosed);
         }
     };
     conn.last_upstream_ip = upstream_lease.endpoint.0;
@@ -203,7 +203,10 @@ where
             }
         }
 
-        upstream_lease.write_all(&conn.upstream_write_buf).await?;
+        upstream_lease
+            .write_all(&conn.upstream_write_buf)
+            .await
+            .map_err(velda_http1::Http1Outcome::Io)?;
         conn.upstream_write_buf.clear();
 
         let (mut resp_head, resp_framing) =
@@ -272,10 +275,11 @@ where
                     while conn.upstream_read_buf.len() < total_len {
                         let n = (*upstream_lease)
                             .read_buf(&mut conn.upstream_read_buf)
-                            .await?;
+                            .await
+                            .map_err(velda_http1::Http1Outcome::Io)?;
                         if n == 0 {
                             upstream_lease.mark_closed();
-                            return Err(Http1Error::Parse(
+                            return Err(Http1Outcome::Parse(
                                 "Unexpected EOF while reading upstream response body".into(),
                             ));
                         }
@@ -302,9 +306,13 @@ where
                         while !b1.is_empty() || !b2.is_empty() {
                             let bufs = [std::io::IoSlice::new(b1), std::io::IoSlice::new(b2)];
                             let bufs_slice = if b1.is_empty() { &bufs[1..] } else { &bufs[..] };
-                            let n = conn.stream.write_vectored(bufs_slice).await?;
+                            let n = conn
+                                .stream
+                                .write_vectored(bufs_slice)
+                                .await
+                                .map_err(velda_http1::Http1Outcome::Io)?;
                             if n == 0 {
-                                return Err(Http1Error::ConnectionClosed);
+                                return Err(Http1Outcome::ConnectionClosed);
                             }
                             if n < b1.len() {
                                 b1 = &b1[n..];
@@ -320,7 +328,10 @@ where
                         }
                         conn.last_bytes_tx += total_len as u64;
                     } else {
-                        conn.stream.write_all(&conn.write_buf).await?;
+                        conn.stream
+                            .write_all(&conn.write_buf)
+                            .await
+                            .map_err(velda_http1::Http1Outcome::Io)?;
                     }
                     conn.write_buf.clear();
                     return Ok(());
@@ -349,7 +360,7 @@ where
                         }
                         None => {
                             upstream_lease.mark_closed();
-                            return Err(Http1Error::Parse("Unexpected EOF".into()));
+                            return Err(Http1Outcome::Parse("Unexpected EOF".into()));
                         }
                     }
                 }
@@ -494,7 +505,7 @@ where
                 if coalesced_wire_len > 0 {
                     total_req_bytes += coalesced_payload_bytes;
                     if total_req_bytes > max_body_size {
-                        return Err(Http1Error::PayloadTooLarge(total_req_bytes));
+                        return Err(Http1Outcome::PayloadTooLarge(total_req_bytes));
                     }
                     *last_bytes_rx += coalesced_payload_bytes as u64;
                     upstream_write_buf.extend_from_slice(&read_buf[..coalesced_wire_len]);
@@ -507,7 +518,10 @@ where
                 }
 
                 // Send request head + initial chunks in a single coalesced write
-                up_write.write_all(upstream_write_buf).await?;
+                up_write
+                    .write_all(upstream_write_buf)
+                    .await
+                    .map_err(velda_http1::Http1Outcome::Io)?;
                 upstream_write_buf.clear();
 
                 if sent_terminal {
@@ -547,9 +561,9 @@ where
                         if wire_len > 0 {
                             total_req_bytes = total_req_bytes
                                 .checked_add(payload_bytes)
-                                .ok_or(Http1Error::PayloadTooLarge(usize::MAX))?;
+                                .ok_or(Http1Outcome::PayloadTooLarge(usize::MAX))?;
                             if total_req_bytes > max_body_size {
-                                return Err(Http1Error::PayloadTooLarge(total_req_bytes));
+                                return Err(Http1Outcome::PayloadTooLarge(total_req_bytes));
                             }
                             *last_bytes_rx += payload_bytes as u64;
 
@@ -560,7 +574,7 @@ where
                                         early_response = true;
                                     }
                                     write_res = up_write.write_all(&read_buf[..wire_len]) => {
-                                        write_res?;
+                                        write_res.map_err(velda_http1::Http1Outcome::Io)?;
                                     }
                                 }
                             }
@@ -592,8 +606,8 @@ where
                                 }
                                 res = tokio::time::timeout(idle_timeout, down_read.read_buf(read_buf)) => {
                                     match res {
-                                        Ok(res) => res?,
-                                        Err(_) => return Err(Http1Error::Timeout),
+                                        Ok(res) => res.map_err(velda_http1::Http1Outcome::Io)?,
+                                        Err(_) => return Err(Http1Outcome::Timeout),
                                     }
                                 }
                             }
@@ -605,7 +619,7 @@ where
                             if read_buf.is_empty() {
                                 break;
                             } else {
-                                return Err(Http1Error::Parse(
+                                return Err(Http1Outcome::Parse(
                                     "Unexpected EOF while reading chunked body".into(),
                                 ));
                             }
@@ -620,7 +634,10 @@ where
                         if !sent_terminal {
                             send_chunked_end(&mut up_write).await?;
                         }
-                        up_write.flush().await?;
+                        up_write
+                            .flush()
+                            .await
+                            .map_err(velda_http1::Http1Outcome::Io)?;
                     }
                 }
             }
@@ -648,7 +665,10 @@ where
                     *last_bytes_rx += initial_avail as u64;
                 }
 
-                up_write.write_all(upstream_write_buf).await?;
+                up_write
+                    .write_all(upstream_write_buf)
+                    .await
+                    .map_err(velda_http1::Http1Outcome::Io)?;
                 upstream_write_buf.clear();
 
                 while remaining > 0 {
@@ -671,7 +691,7 @@ where
                                     early_response = true;
                                 }
                                 write_res = up_write.write_all(&read_buf[..available]) => {
-                                    write_res?;
+                                    write_res.map_err(velda_http1::Http1Outcome::Io)?;
                                 }
                             }
                         }
@@ -697,8 +717,8 @@ where
                             }
                             res = tokio::time::timeout(idle_timeout, down_read.read_buf(read_buf)) => {
                                 match res {
-                                    Ok(res) => res?,
-                                    Err(_) => return Err(Http1Error::Timeout),
+                                    Ok(res) => res.map_err(velda_http1::Http1Outcome::Io)?,
+                                    Err(_) => return Err(Http1Outcome::Timeout),
                                 }
                             }
                         }
@@ -716,7 +736,10 @@ where
                     upload_finished.store(true, std::sync::atomic::Ordering::Release);
                 }
                 if !early_response {
-                    up_write.flush().await?;
+                    up_write
+                        .flush()
+                        .await
+                        .map_err(velda_http1::Http1Outcome::Io)?;
                 }
             }
             Http1BodyFraming::Empty => {
@@ -728,13 +751,19 @@ where
                     Some(0),
                     upstream_write_buf,
                 );
-                up_write.write_all(upstream_write_buf).await?;
-                up_write.flush().await?;
+                up_write
+                    .write_all(upstream_write_buf)
+                    .await
+                    .map_err(velda_http1::Http1Outcome::Io)?;
+                up_write
+                    .flush()
+                    .await
+                    .map_err(velda_http1::Http1Outcome::Io)?;
                 upstream_write_buf.clear();
             }
         }
 
-        Ok::<bool, Http1Error>(early_response)
+        Ok::<bool, Http1Outcome>(early_response)
     };
 
     let download_task = async {
@@ -791,7 +820,7 @@ where
                 *close_requested = true;
             }
             let _ = resp_done_tx.send(());
-            return Ok::<(), Http1Error>(());
+            return Ok::<(), Http1Outcome>(());
         }
 
         let server_head =
@@ -861,7 +890,7 @@ where
                             *last_bytes_tx += chunk.len() as u64;
                         }
                         None => {
-                            return Err(Http1Error::Parse(
+                            return Err(Http1Outcome::Parse(
                                 "Unexpected EOF while reading upstream response body".into(),
                             ));
                         }
@@ -962,9 +991,12 @@ where
         }
 
         send_chunked_end(&mut down_write).await?;
-        down_write.flush().await?;
+        down_write
+            .flush()
+            .await
+            .map_err(velda_http1::Http1Outcome::Io)?;
         let _ = resp_done_tx.send(());
-        Ok::<(), Http1Error>(())
+        Ok::<(), Http1Outcome>(())
     };
 
     let duplex_res = tokio::try_join!(upload_task, download_task);

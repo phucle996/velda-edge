@@ -41,11 +41,10 @@ pub async fn serve(
             );
             let _ = responder.send_response(&err_resp);
             return PipeOutcome::http(
-                responder.last_status,
                 receiver.bytes_received as u64,
                 responder.last_bytes_tx,
                 None,
-                velda_core::CompletionReason::Rejected,
+                velda_core::InternalStatus::BadRequest,
             );
         }
     };
@@ -79,11 +78,10 @@ pub async fn serve(
             );
             let _ = responder.send_response(&err_resp);
             return PipeOutcome::http(
-                responder.last_status,
                 bytes_rx,
                 responder.last_bytes_tx,
                 None,
-                velda_core::CompletionReason::UpstreamError,
+                velda_core::InternalStatus::UpstreamError,
             );
         }
     };
@@ -119,11 +117,10 @@ pub async fn serve(
         );
         let _ = responder.send_response(&err_resp);
         return PipeOutcome::http(
-            responder.last_status,
             bytes_rx,
             responder.last_bytes_tx,
             upstream_addr,
-            velda_core::CompletionReason::UpstreamError,
+            velda_core::InternalStatus::UpstreamError,
         );
     }
 
@@ -147,11 +144,10 @@ pub async fn serve(
                 );
                 let _ = responder.send_response(&err_resp);
                 return PipeOutcome::http(
-                    responder.last_status,
                     bytes_rx,
                     responder.last_bytes_tx,
                     upstream_addr,
-                    velda_core::CompletionReason::UpstreamError,
+                    velda_core::InternalStatus::UpstreamError,
                 );
             }
         };
@@ -192,11 +188,10 @@ pub async fn serve(
                 "Failed to initiate downstream HTTP/2 streaming response"
             );
             return PipeOutcome::http(
-                responder.last_status,
                 bytes_rx,
                 responder.last_bytes_tx,
                 upstream_addr,
-                velda_core::CompletionReason::ClientCancel,
+                velda_core::InternalStatus::ClientCanceled,
             );
         }
     };
@@ -264,10 +259,9 @@ pub async fn serve(
 
     let _ = stream_sender.finish();
     PipeOutcome::http(
-        responder.last_status,
         bytes_rx,
         stream_sender.bytes_sent,
         upstream_addr,
-        velda_core::CompletionReason::Complete,
+        velda_core::InternalStatus::Completed,
     )
 }

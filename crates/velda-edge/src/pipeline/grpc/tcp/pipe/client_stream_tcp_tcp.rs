@@ -16,9 +16,9 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use bytes::{Bytes, BytesMut};
-use velda_core::GrpcStatus;
+use velda_grpc::GrpcStatus;
 use velda_grpc::config::GrpcConfig;
-use velda_grpc::error::GrpcError;
+use velda_grpc::outcome::GrpcOutcome;
 use velda_grpc::tcp::server::stream::GrpcServerStream;
 
 use crate::pipeline::PipeOutcome;
@@ -43,12 +43,11 @@ pub async fn serve(
                 .respond
                 .send_trailers_only(GrpcStatus::Unavailable, Some("upstream unavailable"));
             return PipeOutcome::grpc(
-                200,
-                velda_core::GrpcStatus::Unavailable,
+                velda_grpc::GrpcStatus::Unavailable,
                 0,
                 0,
                 None,
-                velda_core::CompletionReason::UpstreamError,
+                velda_core::InternalStatus::UpstreamError,
             );
         }
     };
@@ -72,30 +71,46 @@ pub async fn serve(
 
         // Step 2: Pump multiple client request chunks to upstream with backpressure
         if !server_stream.receiver.is_end_stream() {
-            while let Some(chunk) = server_stream.receiver.recv_chunk().await? {
+            while let Some(chunk) = server_stream
+                .receiver
+                .recv_chunk()
+                .await
+                .map_err(GrpcOutcome::from_http2)?
+            {
                 bytes_rx += chunk.len() as u64;
-                upstream_send_stream.send_chunk(chunk, false).await?;
+                upstream_send_stream
+                    .send_chunk(chunk, false)
+                    .await
+                    .map_err(GrpcOutcome::from_http2)?;
             }
 
             if let Some(trailers) = server_stream.receiver.take_trailers() {
-                upstream_send_stream.send_trailers(trailers)?;
+                upstream_send_stream
+                    .send_trailers(trailers)
+                    .map_err(GrpcOutcome::from_http2)?;
             } else {
-                upstream_send_stream.send_chunk(Bytes::new(), true).await?;
+                upstream_send_stream
+                    .send_chunk(Bytes::new(), true)
+                    .await
+                    .map_err(GrpcOutcome::from_http2)?;
             }
         } else {
-            upstream_send_stream.send_chunk(Bytes::new(), true).await?;
+            upstream_send_stream
+                .send_chunk(Bytes::new(), true)
+                .await
+                .map_err(GrpcOutcome::from_http2)?;
         }
 
         // Step 3: Await single upstream response headers
-        let mut response = upstream_resp_fut.await?;
+        let mut response = upstream_resp_fut.await.map_err(GrpcOutcome::from_http2)?;
 
         let mut grpc_status = response
             .headers
             .get("grpc-status")
             .and_then(|v| v.to_str().ok())
             .and_then(|s| s.parse::<u8>().ok())
-            .map(velda_core::GrpcStatus::from_u8)
-            .unwrap_or(velda_core::GrpcStatus::Ok);
+            .map(velda_grpc::GrpcStatus::from_u8)
+            .unwrap_or(velda_grpc::GrpcStatus::Ok);
 
         let is_end_of_stream = response.body.is_end_stream();
         let Some(mut downstream_send_stream) = server_stream.respond.send_response_headers(
@@ -114,7 +129,12 @@ pub async fn serve(
         let mut checked_resp_lpm = false;
         let mut resp_head = BytesMut::new();
 
-        while let Some(chunk) = response.body.recv_chunk().await? {
+        while let Some(chunk) = response
+            .body
+            .recv_chunk()
+            .await
+            .map_err(GrpcOutcome::from_http2)?
+        {
             let len = chunk.len();
             resp_len += len as u64;
 
@@ -129,34 +149,46 @@ pub async fn serve(
                         resp_head[4],
                     ]) as usize;
                     if declared_len > config.max_message_size {
-                        return Err(GrpcError::PayloadTooLarge(declared_len));
+                        return Err(GrpcOutcome::PayloadTooLarge(declared_len));
                     }
                     checked_resp_lpm = true;
                 }
             }
 
             if resp_len > (config.max_message_size + 5) as u64 {
-                return Err(GrpcError::PayloadTooLarge(resp_len as usize));
+                return Err(GrpcOutcome::PayloadTooLarge(resp_len as usize));
             }
 
-            downstream_send_stream.send_chunk(chunk).await?;
+            downstream_send_stream
+                .send_chunk(chunk)
+                .await
+                .map_err(GrpcOutcome::from_http2)?;
         }
 
-        if let Some(trailers) = response.body.trailers().await? {
+        if let Some(trailers) = response
+            .body
+            .trailers()
+            .await
+            .map_err(GrpcOutcome::from_http2)?
+        {
             if let Some(code) = trailers
                 .get("grpc-status")
                 .and_then(|v| v.to_str().ok())
                 .and_then(|s| s.parse::<u8>().ok())
-                .map(velda_core::GrpcStatus::from_u8)
+                .map(velda_grpc::GrpcStatus::from_u8)
             {
                 grpc_status = code;
             }
-            downstream_send_stream.send_trailers(trailers)?;
+            downstream_send_stream
+                .send_trailers(trailers)
+                .map_err(GrpcOutcome::from_http2)?;
             has_trailers = true;
         }
 
         if !has_trailers {
-            downstream_send_stream.finish()?;
+            downstream_send_stream
+                .finish()
+                .map_err(GrpcOutcome::from_http2)?;
         }
 
         Ok((bytes_rx, resp_len, grpc_status))
@@ -164,20 +196,18 @@ pub async fn serve(
 
     match tokio::time::timeout(timeout, workflow).await {
         Ok(Ok((rx, tx, status))) => PipeOutcome::grpc(
-            200,
             status,
             rx,
             tx,
             upstream_addr,
-            velda_core::CompletionReason::Complete,
+            velda_core::InternalStatus::Completed,
         ),
         Ok(Err(_)) => PipeOutcome::grpc(
-            200,
-            velda_core::GrpcStatus::Unavailable,
+            velda_grpc::GrpcStatus::Unavailable,
             0,
             0,
             upstream_addr,
-            velda_core::CompletionReason::UpstreamError,
+            velda_core::InternalStatus::UpstreamError,
         ),
         Err(_) => {
             let _ = server_stream.respond.send_trailers_only(
@@ -185,12 +215,11 @@ pub async fn serve(
                 Some("gRPC call duration deadline exceeded"),
             );
             PipeOutcome::grpc(
-                200,
-                velda_core::GrpcStatus::DeadlineExceeded,
+                velda_grpc::GrpcStatus::DeadlineExceeded,
                 0,
                 0,
                 upstream_addr,
-                velda_core::CompletionReason::Timeout,
+                velda_core::InternalStatus::UpstreamTimeout,
             )
         }
     }

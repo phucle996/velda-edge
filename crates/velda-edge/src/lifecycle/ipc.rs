@@ -10,7 +10,7 @@ use tokio::io::{AsyncBufReadExt, BufReader};
 use tokio::net::UnixListener;
 use tokio::sync::watch;
 
-use velda_ingress::{EngineHandle, IngressHandle};
+use velda_ingress::IngressHandle;
 use velda_sync::ipc::SyncNotification;
 
 use crate::error::EdgeError;
@@ -81,7 +81,7 @@ async fn handle_ipc_client(
     stream: tokio::net::UnixStream,
     shared_runtime: &SharedRuntime,
     runtime_dir: &Path,
-    engine_handle: Option<&EngineHandle>,
+    engine_handle: Option<&IngressHandle>,
 ) -> Result<(), EdgeError> {
     let reader = BufReader::new(stream);
     let mut lines = reader.lines();

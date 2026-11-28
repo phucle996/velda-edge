@@ -14,7 +14,7 @@ use http::{StatusCode, Version};
 use velda_core::{Body, L7Response};
 use velda_http2::client::connection::Http2Client;
 use velda_http2::config::Http2Config;
-use velda_http2::error::Http2Error;
+use velda_http2::outcome::Http2Outcome;
 use velda_http2::server::request::{Http2ServerRequestHead, Http2StreamReceiver};
 use velda_http2::server::response::Http2Responder;
 
@@ -32,7 +32,7 @@ async fn forward_server_stream(
     config: &Http2Config,
     req_state: &velda_core::RequestState,
     plan: &velda_plugin::RoutePluginPlan,
-) -> Result<(), Http2Error> {
+) -> Result<(), Http2Outcome> {
     let is_head = req_head.method == http::Method::HEAD;
     let has_body = !body.is_empty();
     let (response_fut, mut send_stream) = client
@@ -84,7 +84,7 @@ async fn forward_server_stream(
         total_bytes += len;
 
         if total_bytes > config.max_body_size {
-            return Err(Http2Error::PayloadTooLarge(total_bytes));
+            return Err(Http2Outcome::PayloadTooLarge(total_bytes));
         }
 
         if pending_buf.is_empty() && len >= zero_copy_threshold {
@@ -147,11 +147,10 @@ pub async fn serve(
             meta.inject_response_headers(&mut err_resp.headers);
             let _ = responder.send_response(&err_resp);
             return PipeOutcome::http(
-                responder.last_status,
                 receiver.bytes_received as u64,
                 responder.last_bytes_tx,
                 None,
-                velda_core::CompletionReason::Rejected,
+                velda_core::InternalStatus::BadRequest,
             );
         }
     };
@@ -177,11 +176,10 @@ pub async fn serve(
             meta.inject_response_headers(&mut err_resp.headers);
             let _ = responder.send_response(&err_resp);
             return PipeOutcome::http(
-                responder.last_status,
                 bytes_rx,
                 responder.last_bytes_tx,
                 None,
-                velda_core::CompletionReason::UpstreamError,
+                velda_core::InternalStatus::UpstreamError,
             );
         }
     };
@@ -224,7 +222,7 @@ pub async fn serve(
     }
 
     let completion = match res {
-        Ok(()) => velda_core::CompletionReason::Complete,
+        Ok(()) => velda_core::InternalStatus::Completed,
         Err(e) => {
             tracing::warn!(
                 error = %e,
@@ -241,14 +239,8 @@ pub async fn serve(
             );
             meta.inject_response_headers(&mut err_resp.headers);
             let _ = responder.send_response(&err_resp);
-            velda_core::CompletionReason::UpstreamError
+            velda_core::InternalStatus::UpstreamError
         }
     };
-    PipeOutcome::http(
-        responder.last_status,
-        bytes_rx,
-        responder.last_bytes_tx,
-        upstream_addr,
-        completion,
-    )
+    PipeOutcome::http(bytes_rx, responder.last_bytes_tx, upstream_addr, completion)
 }

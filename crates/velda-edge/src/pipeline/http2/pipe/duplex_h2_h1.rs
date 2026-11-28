@@ -61,11 +61,10 @@ pub async fn serve(
             );
             let _ = responder.send_response(&err_resp);
             return PipeOutcome::http(
-                responder.last_status,
                 receiver.bytes_received as u64,
                 responder.last_bytes_tx,
                 None,
-                velda_core::CompletionReason::UpstreamError,
+                velda_core::InternalStatus::UpstreamError,
             );
         }
     };
@@ -96,11 +95,10 @@ pub async fn serve(
         );
         let _ = responder.send_response(&err_resp);
         return PipeOutcome::http(
-            responder.last_status,
             receiver.bytes_received as u64,
             responder.last_bytes_tx,
             upstream_addr,
-            velda_core::CompletionReason::UpstreamError,
+            velda_core::InternalStatus::UpstreamError,
         );
     }
 
@@ -132,7 +130,10 @@ pub async fn serve(
                 }
                 Ok(None) => break,
                 Err(e) => {
-                    return Err(std::io::Error::new(std::io::ErrorKind::ConnectionReset, e));
+                    return Err(std::io::Error::new(
+                        std::io::ErrorKind::ConnectionReset,
+                        e.to_string(),
+                    ));
                 }
             }
         }
@@ -150,7 +151,7 @@ pub async fn serve(
             &upstream.config,
         )
         .await
-        .map_err(std::io::Error::other)?;
+        .map_err(|e| std::io::Error::other(e.to_string()))?;
 
         let mut clean_headers = resp_head.headers;
         velda_http1::client::header::sanitize_headers(&mut clean_headers);
@@ -176,7 +177,7 @@ pub async fn serve(
 
         let mut stream_sender = responder
             .send_stream_response(resp_head.status, &clean_headers)
-            .map_err(std::io::Error::other)?;
+            .map_err(|e| std::io::Error::other(e.to_string()))?;
 
         match framing {
             Http1BodyFraming::Empty => {}
@@ -187,12 +188,12 @@ pub async fn serve(
                         stream_sender
                             .send_chunk(chunk)
                             .await
-                            .map_err(std::io::Error::other)?;
+                            .map_err(|e| std::io::Error::other(e.to_string()))?;
                     }
                     Ok(None) => break,
                     Err(e) => {
                         responder.last_bytes_tx = stream_sender.bytes_sent;
-                        return Err(std::io::Error::other(e));
+                        return Err(std::io::Error::other(e.to_string()));
                     }
                 }
             },
@@ -213,12 +214,12 @@ pub async fn serve(
                             stream_sender
                                 .send_chunk(chunk)
                                 .await
-                                .map_err(std::io::Error::other)?;
+                                .map_err(|e| std::io::Error::other(e.to_string()))?;
                         }
                         Ok(None) => break,
                         Err(e) => {
                             responder.last_bytes_tx = stream_sender.bytes_sent;
-                            return Err(std::io::Error::other(e));
+                            return Err(std::io::Error::other(e.to_string()));
                         }
                     }
                 }
@@ -252,14 +253,13 @@ pub async fn serve(
         tracing::warn!(upstream = %upstream.id(), "Duplex H2 to H1 bridge encountered error");
     }
     PipeOutcome::http(
-        responder.last_status,
         receiver.bytes_received as u64,
         responder.last_bytes_tx,
         upstream_addr,
         if failed {
-            velda_core::CompletionReason::UpstreamError
+            velda_core::InternalStatus::UpstreamError
         } else {
-            velda_core::CompletionReason::Complete
+            velda_core::InternalStatus::Completed
         },
     )
 }

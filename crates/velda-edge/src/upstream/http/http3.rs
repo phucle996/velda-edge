@@ -182,7 +182,7 @@ impl Http3Upstream {
                 }
             })
             .await
-            .map_err(EdgeError::Upstream)?;
+            .map_err(|e| EdgeError::Upstream(e.to_string()))?;
 
         Ok((client, lease))
     }
@@ -233,7 +233,7 @@ impl Http3Upstream {
                 }
             })
             .await
-            .map_err(EdgeError::Upstream)?;
+            .map_err(|e| EdgeError::Upstream(e.to_string()))?;
 
         Ok((client, lease))
     }

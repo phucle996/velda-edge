@@ -147,7 +147,7 @@ impl GrpcUdpUpstream {
                 }
             })
             .await
-            .map_err(EdgeError::Upstream)?;
+            .map_err(|e| EdgeError::Upstream(e.to_string()))?;
 
         Ok(fresh)
     }
@@ -188,7 +188,7 @@ impl GrpcUdpUpstream {
                 }
             })
             .await
-            .map_err(EdgeError::Upstream)?;
+            .map_err(|e| EdgeError::Upstream(e.to_string()))?;
 
         Ok(fresh)
     }

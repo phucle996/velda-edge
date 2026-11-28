@@ -16,51 +16,104 @@ pub use velda_core::buffer::header::X_REQUEST_ID;
 /// to their `downstream.rs` workflow owner for metrics and access log emission.
 #[derive(Debug, Clone, Copy)]
 pub struct PipeOutcome {
-    pub status_code: u16,
     pub bytes_rx: u64,
     pub bytes_tx: u64,
     pub upstream_addr: Option<(u128, u16)>,
-    pub grpc_status: velda_core::GrpcStatus,
-    pub completion: velda_core::CompletionReason,
+    pub grpc_status: velda_grpc::GrpcStatus,
+    pub internal_status: velda_core::InternalStatus,
 }
 
 impl PipeOutcome {
-    /// Constructs a standard completed HTTP pipe outcome.
+    /// Constructs a standard HTTP pipe outcome.
     #[inline(always)]
     pub const fn http(
-        status_code: u16,
         bytes_rx: u64,
         bytes_tx: u64,
         upstream_addr: Option<(u128, u16)>,
-        completion: velda_core::CompletionReason,
+        internal_status: velda_core::InternalStatus,
     ) -> Self {
         Self {
-            status_code,
             bytes_rx,
             bytes_tx,
             upstream_addr,
-            grpc_status: velda_core::GrpcStatus::NonGrpc,
-            completion,
+            grpc_status: velda_grpc::GrpcStatus::Ok,
+            internal_status,
         }
     }
 
     /// Constructs a gRPC pipe outcome carrying canonical wire `grpc-status`.
     #[inline(always)]
     pub const fn grpc(
-        status_code: u16,
-        grpc_status: velda_core::GrpcStatus,
+        grpc_status: velda_grpc::GrpcStatus,
         bytes_rx: u64,
         bytes_tx: u64,
         upstream_addr: Option<(u128, u16)>,
-        completion: velda_core::CompletionReason,
+        internal_status: velda_core::InternalStatus,
     ) -> Self {
         Self {
-            status_code,
             bytes_rx,
             bytes_tx,
             upstream_addr,
             grpc_status,
-            completion,
+            internal_status,
+        }
+    }
+}
+
+/// Maps an HTTP response status (e.g., from a plugin `Action::Respond`) to canonical [`velda_core::InternalStatus`].
+#[inline(always)]
+pub const fn internal_status_from_http(status: http::StatusCode) -> velda_core::InternalStatus {
+    use http::StatusCode;
+    use velda_core::InternalStatus;
+
+    if status.as_u16() < 400 {
+        return InternalStatus::Completed;
+    }
+    match status {
+        StatusCode::BAD_REQUEST => InternalStatus::BadRequest,
+        StatusCode::UNAUTHORIZED => InternalStatus::Unauthorized,
+        StatusCode::FORBIDDEN => InternalStatus::Forbidden,
+        StatusCode::NOT_FOUND => InternalStatus::RouteNotFound,
+        StatusCode::METHOD_NOT_ALLOWED => InternalStatus::MethodNotAllowed,
+        StatusCode::REQUEST_TIMEOUT => InternalStatus::RequestTimeout,
+        StatusCode::CONFLICT => InternalStatus::Conflict,
+        StatusCode::PAYLOAD_TOO_LARGE => InternalStatus::PayloadTooLarge,
+        StatusCode::URI_TOO_LONG => InternalStatus::UriTooLong,
+        StatusCode::UNSUPPORTED_MEDIA_TYPE => InternalStatus::UnsupportedMediaType,
+        StatusCode::REQUEST_HEADER_FIELDS_TOO_LARGE => InternalStatus::HeaderFieldsTooLarge,
+        StatusCode::TOO_MANY_REQUESTS => InternalStatus::RateLimited,
+        StatusCode::BAD_GATEWAY => InternalStatus::UpstreamError,
+        StatusCode::SERVICE_UNAVAILABLE => InternalStatus::ServiceUnavailable,
+        StatusCode::GATEWAY_TIMEOUT => InternalStatus::UpstreamTimeout,
+        _ if status.as_u16() < 500 => InternalStatus::BadRequest,
+        _ => InternalStatus::InternalError,
+    }
+}
+
+/// Maps a canonical gRPC status (e.g., from a plugin `Action::Respond`) to [`velda_core::InternalStatus`].
+#[inline(always)]
+pub const fn internal_status_from_grpc(
+    status: velda_grpc::GrpcStatus,
+) -> velda_core::InternalStatus {
+    use velda_core::InternalStatus;
+    use velda_grpc::GrpcStatus;
+
+    match status {
+        GrpcStatus::Ok => InternalStatus::Completed,
+        GrpcStatus::Cancelled => InternalStatus::ClientCanceled,
+        GrpcStatus::InvalidArgument | GrpcStatus::OutOfRange => InternalStatus::BadRequest,
+        GrpcStatus::DeadlineExceeded => InternalStatus::RequestTimeout,
+        GrpcStatus::NotFound => InternalStatus::RouteNotFound,
+        GrpcStatus::AlreadyExists | GrpcStatus::FailedPrecondition | GrpcStatus::Aborted => {
+            InternalStatus::Conflict
+        }
+        GrpcStatus::PermissionDenied => InternalStatus::Forbidden,
+        GrpcStatus::ResourceExhausted => InternalStatus::RateLimited,
+        GrpcStatus::Unimplemented => InternalStatus::MethodNotAllowed,
+        GrpcStatus::Unavailable => InternalStatus::ServiceUnavailable,
+        GrpcStatus::Unauthenticated => InternalStatus::Unauthorized,
+        GrpcStatus::Unknown | GrpcStatus::Internal | GrpcStatus::DataLoss => {
+            InternalStatus::InternalError
         }
     }
 }
@@ -408,7 +461,7 @@ struct HttpAutoConfig {
     tls_enabled: bool,
     streaming: velda_core::StreamingMode,
     alt_svc: Option<http::HeaderValue>,
-    sampling: velda_observability::sampling::http::HttpSampling,
+    sampling: velda_observability::sampling::status::StatusSampling,
 }
 
 /// Unified HTTP stream worker for listeners declaring the `http` family.

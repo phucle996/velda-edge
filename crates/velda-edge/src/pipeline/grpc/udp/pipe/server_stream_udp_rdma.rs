@@ -17,7 +17,7 @@ use std::sync::Arc;
 
 use velda_core::{L7Request, L7Response};
 use velda_grpc::config::GrpcConfig;
-use velda_grpc::error::GrpcError;
+use velda_grpc::outcome::GrpcOutcome;
 use velda_grpc::tcp::client::request::GrpcClientRequest;
 
 use crate::upstream::grpc::GrpcRdmaUpstream;
@@ -27,7 +27,7 @@ pub async fn serve(
     req: &L7Request,
     upstream: &Arc<GrpcRdmaUpstream>,
     config: &GrpcConfig,
-) -> Result<(L7Response, Option<(u128, u16)>), GrpcError> {
+) -> Result<(L7Response, Option<(u128, u16)>), GrpcOutcome> {
     // Step 1: Adapt inbound L7 UDP datagram into typed GrpcClientRequest projection.
     let client_req = GrpcClientRequest::from_l7(req);
 
@@ -38,7 +38,7 @@ pub async fn serve(
             upstream = %upstream.id(),
             "Failed to acquire upstream gRPC over RDMA connection"
         );
-        GrpcError::Io(std::io::Error::new(
+        GrpcOutcome::Io(std::io::Error::new(
             std::io::ErrorKind::ConnectionRefused,
             e.to_string(),
         ))

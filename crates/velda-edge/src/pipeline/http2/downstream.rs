@@ -13,13 +13,13 @@ use u16;
 use velda_core::{Action, L7Request, PipeKind};
 use velda_http1::strategy::Http1PipeStrategy;
 use velda_http2::config::Http2Config;
-use velda_http2::error::Http2Error;
+use velda_http2::outcome::Http2Outcome;
 use velda_http2::server::connection::Http2ServerConnection;
 use velda_http2::server::request::{Http2ServerRequestHead, Http2StreamReceiver};
 use velda_http2::server::response::Http2Responder;
 use velda_http2::strategy::Http2PipeStrategy;
 use velda_http3::strategy::Http3PipeStrategy;
-use velda_observability::sampling::http::HttpSampling;
+use velda_observability::sampling::status::StatusSampling;
 use velda_observability::{StreamCompletion, global_metrics};
 use velda_plugin::RoutePluginPlan;
 use velda_router::Http2RouteRequest;
@@ -38,7 +38,7 @@ pub async fn handle_http2_stream(
     config: Http2Config,
     tls_enabled: bool,
     alt_svc: Option<http::HeaderValue>,
-    sampling: HttpSampling,
+    sampling: StatusSampling,
     runtime: SharedRuntime,
 ) {
     let _conn_guard = crate::pipeline::ConnMetricGuard::enter();
@@ -127,7 +127,7 @@ pub async fn run_http2_loop<IO>(
     stream: IO,
     meta: DownstreamMeta,
     config: Http2Config,
-    sampling: HttpSampling,
+    sampling: StatusSampling,
     runtime: SharedRuntime,
 ) where
     IO: AsyncRead + AsyncWrite + Unpin + Send + 'static,
@@ -217,14 +217,14 @@ pub async fn run_http2_loop<IO>(
                         global_metrics().record_early_completion(
                             PipeKind::BufferedH2H1,
                             StreamCompletion::new(
-                                StatusCode::BAD_REQUEST.as_u16(),
+                                velda_core::InternalStatus::BadRequest,
                                 0,
                                 responder.last_bytes_tx,
                                 duration_ns,
                                 0,
                             ),
                         );
-                        if sampling.keep(StatusCode::BAD_REQUEST.as_u16()) {
+                        if sampling.keep(velda_core::InternalStatus::BadRequest) {
                             let host = velda_http2::server::request::extract_host(
                                 &req_head.headers,
                                 &req_head.uri,
@@ -253,15 +253,15 @@ pub async fn run_http2_loop<IO>(
                                     bytes_tx: responder.last_bytes_tx.min(u32::MAX as u64) as u32,
                                     upstream_ip: 0,
                                     upstream_port: 0,
-                                    status_code: StatusCode::BAD_REQUEST.as_u16(),
+                                    _cl0_pad: 0,
                                     route_id: velda_core::UNMATCHED_ROUTE_ID,
                                     upstream_id: velda_core::UNASSIGNED_UPSTREAM_ID,
                                     ua_major_version: 0,
                                     rpc_msgs_or_flags: 0,
                                     pipe: velda_core::PipeKind::BufferedH2H1,
-                                    completion: velda_core::CompletionReason::Complete,
+                                    internal_status: velda_core::InternalStatus::BadRequest,
                                     method: log_method,
-                                    grpc_status: velda_core::GrpcStatus::NonGrpc,
+                                    _reserved: 0,
                                     ua_family: velda_core::UaFamily::None,
                                     ua_os: velda_core::UaOs::Unknown,
                                     url_len: log_url_len,
@@ -316,14 +316,14 @@ pub async fn run_http2_loop<IO>(
                         global_metrics().record_early_completion(
                             PipeKind::BufferedH2H1,
                             StreamCompletion::new(
-                                StatusCode::NOT_FOUND.as_u16(),
+                                velda_core::InternalStatus::RouteNotFound,
                                 0,
                                 responder.last_bytes_tx,
                                 duration_ns,
                                 0,
                             ),
                         );
-                        if sampling.keep(StatusCode::NOT_FOUND.as_u16()) {
+                        if sampling.keep(velda_core::InternalStatus::RouteNotFound) {
                             let log_method = velda_core::HttpMethod::from_bytes(
                                 req_head.method.as_str().as_bytes(),
                             );
@@ -337,15 +337,15 @@ pub async fn run_http2_loop<IO>(
                                     bytes_tx: responder.last_bytes_tx.min(u32::MAX as u64) as u32,
                                     upstream_ip: 0,
                                     upstream_port: 0,
-                                    status_code: StatusCode::NOT_FOUND.as_u16(),
+                                    _cl0_pad: 0,
                                     route_id: velda_core::UNMATCHED_ROUTE_ID,
                                     upstream_id: velda_core::UNASSIGNED_UPSTREAM_ID,
                                     ua_major_version: 0,
                                     rpc_msgs_or_flags: 0,
                                     pipe: velda_core::PipeKind::BufferedH2H1,
-                                    completion: velda_core::CompletionReason::Complete,
+                                    internal_status: velda_core::InternalStatus::RouteNotFound,
                                     method: log_method,
-                                    grpc_status: velda_core::GrpcStatus::NonGrpc,
+                                    _reserved: 0,
                                     ua_family: velda_core::UaFamily::None,
                                     ua_os: velda_core::UaOs::Unknown,
                                     url_len: log_url_len,
@@ -379,14 +379,14 @@ pub async fn run_http2_loop<IO>(
                         global_metrics().record_early_completion(
                             PipeKind::BufferedH2H1,
                             StreamCompletion::new(
-                                StatusCode::SERVICE_UNAVAILABLE.as_u16(),
+                                velda_core::InternalStatus::ServiceUnavailable,
                                 0,
                                 responder.last_bytes_tx,
                                 duration_ns,
                                 0,
                             ),
                         );
-                        if sampling.keep(StatusCode::SERVICE_UNAVAILABLE.as_u16()) {
+                        if sampling.keep(velda_core::InternalStatus::ServiceUnavailable) {
                             let log_method = velda_core::HttpMethod::from_bytes(
                                 req_head.method.as_str().as_bytes(),
                             );
@@ -400,15 +400,15 @@ pub async fn run_http2_loop<IO>(
                                     bytes_tx: responder.last_bytes_tx.min(u32::MAX as u64) as u32,
                                     upstream_ip: 0,
                                     upstream_port: 0,
-                                    status_code: StatusCode::SERVICE_UNAVAILABLE.as_u16(),
+                                    _cl0_pad: 0,
                                     route_id: route.id,
                                     upstream_id: target_upstream_id,
                                     ua_major_version: 0,
                                     rpc_msgs_or_flags: 0,
                                     pipe: velda_core::PipeKind::BufferedH2H1,
-                                    completion: velda_core::CompletionReason::Complete,
+                                    internal_status: velda_core::InternalStatus::ServiceUnavailable,
                                     method: log_method,
-                                    grpc_status: velda_core::GrpcStatus::NonGrpc,
+                                    _reserved: 0,
                                     ua_family: velda_core::UaFamily::None,
                                     ua_os: velda_core::UaOs::Unknown,
                                     url_len: log_url_len,
@@ -437,7 +437,7 @@ pub async fn run_http2_loop<IO>(
                         global_metrics().record_early_completion(
                             PipeKind::BufferedH2H1,
                             StreamCompletion::new(
-                                StatusCode::TOO_MANY_REQUESTS.as_u16(),
+                                velda_core::InternalStatus::RateLimited,
                                 0,
                                 responder.last_bytes_tx,
                                 duration_ns,
@@ -458,15 +458,15 @@ pub async fn run_http2_loop<IO>(
                                     bytes_tx: responder.last_bytes_tx.min(u32::MAX as u64) as u32,
                                     upstream_ip: 0,
                                     upstream_port: 0,
-                                    status_code: StatusCode::TOO_MANY_REQUESTS.as_u16(),
+                                    _cl0_pad: 0,
                                     route_id: route.id,
                                     upstream_id: target_upstream_id,
                                     ua_major_version: 0,
                                     rpc_msgs_or_flags: 0,
                                     pipe: velda_core::PipeKind::BufferedH2H1,
-                                    completion: velda_core::CompletionReason::Complete,
+                                    internal_status: velda_core::InternalStatus::RateLimited,
                                     method: log_method,
-                                    grpc_status: velda_core::GrpcStatus::NonGrpc,
+                                    _reserved: 0,
                                     ua_family: velda_core::UaFamily::None,
                                     ua_os: velda_core::UaOs::Unknown,
                                     url_len: log_url_len,
@@ -499,7 +499,7 @@ pub async fn run_http2_loop<IO>(
                 }
                 Ok(Ok(None)) => break,
                 Ok(Err(e)) => {
-                    if matches!(e, Http2Error::FloodDetected) {
+                    if matches!(e, Http2Outcome::FloodDetected) {
                         tracing::warn!(
                             listener = %meta.listener_id,
                             peer_ip = %meta.peer_ip,
@@ -543,7 +543,7 @@ struct Http2StreamContext {
     request_id: u128,
     route_id: u16,
     ingress_time_nanos: u64,
-    sampling: HttpSampling,
+    sampling: StatusSampling,
 }
 
 /// Serves an individual HTTP/2 downstream multiplexed stream top-to-bottom.
@@ -627,17 +627,16 @@ async fn serve_http2_stream(
                     Action::Respond(resp) => {
                         short_circuit_resp = Some(resp);
                     }
-                    Action::Reject(reason) => {
-                        // FAST-FAIL INVARIANT: Rejections terminate immediately at the Edge boundary.
+                    Action::Status(internal_status) => {
+                        // FAST-FAIL INVARIANT: Status responses terminate immediately at the Edge boundary.
                         // Strictly bypasses post_response_hooks (anti-CPDoS & Zero-DDoS CPU burn),
-                        // retaining only MSB bypass headers while velda-http2 stamps HTTP/2 rejection fields.
+                        // retaining only MSB bypass headers while velda-http2 stamps HTTP/2 fields.
                         // RFC 9113 ZERO-BODY INVARIANT: Only HEADERS frame with END_STREAM = true.
-                        let mut resp = velda_http2::server::early_response::reject_response(
-                            reason,
+                        let mut resp = velda_http2::server::early_response::status_response(
+                            internal_status,
                             l7_req.headers,
                         );
                         meta.inject_response_headers(&mut resp.headers);
-                        let status = resp.status.as_u16();
                         let mut responder = responder;
                         if !receiver.is_end_stream() {
                             let _ = responder.send_response_and_cancel_upload(&resp);
@@ -649,14 +648,14 @@ async fn serve_http2_stream(
                         global_metrics().record_early_completion(
                             PipeKind::BufferedH2H1,
                             StreamCompletion::new(
-                                status,
+                                internal_status,
                                 0,
                                 responder.last_bytes_tx,
                                 duration_ns,
                                 0,
                             ),
                         );
-                        if sampling.keep(status) {
+                        if sampling.keep(internal_status) {
                             velda_observability::global_telemetry_store().emit(
                                 &velda_observability::TelemetryRecord {
                                     request_id: velda_core::request_id::entropy(request_id),
@@ -667,15 +666,15 @@ async fn serve_http2_stream(
                                     bytes_tx: responder.last_bytes_tx.min(u32::MAX as u64) as u32,
                                     upstream_ip: 0,
                                     upstream_port: 0,
-                                    status_code: status,
+                                    _cl0_pad: 0,
                                     route_id,
                                     upstream_id: velda_core::UNASSIGNED_UPSTREAM_ID,
                                     ua_major_version,
                                     rpc_msgs_or_flags: 0,
                                     pipe: velda_core::PipeKind::BufferedH2H1,
-                                    completion: velda_core::CompletionReason::Complete,
+                                    internal_status,
                                     method: log_method,
-                                    grpc_status: velda_core::GrpcStatus::NonGrpc,
+                                    _reserved: 0,
                                     ua_family,
                                     ua_os,
                                     url_len: log_url_len,
@@ -711,17 +710,16 @@ async fn serve_http2_stream(
                     Action::Respond(resp) => {
                         short_circuit_resp = Some(resp);
                     }
-                    Action::Reject(reason) => {
-                        // FAST-FAIL INVARIANT: Rejections terminate immediately at the Edge boundary.
+                    Action::Status(internal_status) => {
+                        // FAST-FAIL INVARIANT: Status responses terminate immediately at the Edge boundary.
                         // Strictly bypasses post_response_hooks (anti-CPDoS & Zero-DDoS CPU burn),
-                        // retaining only MSB bypass headers while velda-http2 stamps HTTP/2 rejection fields.
+                        // retaining only MSB bypass headers while velda-http2 stamps HTTP/2 fields.
                         // RFC 9113 ZERO-BODY INVARIANT: Only HEADERS frame with END_STREAM = true.
-                        let mut resp = velda_http2::server::early_response::reject_response(
-                            reason,
+                        let mut resp = velda_http2::server::early_response::status_response(
+                            internal_status,
                             l7_req.headers,
                         );
                         meta.inject_response_headers(&mut resp.headers);
-                        let status = resp.status.as_u16();
                         let mut responder = responder;
                         if !receiver.is_end_stream() {
                             let _ = responder.send_response_and_cancel_upload(&resp);
@@ -733,14 +731,14 @@ async fn serve_http2_stream(
                         global_metrics().record_early_completion(
                             PipeKind::BufferedH2H1,
                             StreamCompletion::new(
-                                status,
+                                internal_status,
                                 0,
                                 responder.last_bytes_tx,
                                 duration_ns,
                                 0,
                             ),
                         );
-                        if sampling.keep(status) {
+                        if sampling.keep(internal_status) {
                             velda_observability::global_telemetry_store().emit(
                                 &velda_observability::TelemetryRecord {
                                     request_id: velda_core::request_id::entropy(request_id),
@@ -751,15 +749,15 @@ async fn serve_http2_stream(
                                     bytes_tx: responder.last_bytes_tx.min(u32::MAX as u64) as u32,
                                     upstream_ip: 0,
                                     upstream_port: 0,
-                                    status_code: status,
+                                    _cl0_pad: 0,
                                     route_id,
                                     upstream_id: velda_core::UNASSIGNED_UPSTREAM_ID,
                                     ua_major_version,
                                     rpc_msgs_or_flags: 0,
                                     pipe: velda_core::PipeKind::BufferedH2H1,
-                                    completion: velda_core::CompletionReason::Complete,
+                                    internal_status,
                                     method: log_method,
-                                    grpc_status: velda_core::GrpcStatus::NonGrpc,
+                                    _reserved: 0,
                                     ua_family,
                                     ua_os,
                                     url_len: log_url_len,
@@ -793,7 +791,7 @@ async fn serve_http2_stream(
                     );
                 }
                 meta.inject_response_headers(&mut resp.headers);
-                let status = resp.status.as_u16();
+                let internal_status = crate::pipeline::internal_status_from_http(resp.status);
                 let mut responder = responder;
                 if !receiver.is_end_stream() {
                     let _ = responder.send_response_and_cancel_upload(&resp);
@@ -804,9 +802,15 @@ async fn serve_http2_stream(
                     velda_core::clock::now_unix_nanos().saturating_sub(ingress_time_nanos);
                 global_metrics().record_early_completion(
                     PipeKind::BufferedH2H1,
-                    StreamCompletion::new(status, 0, responder.last_bytes_tx, duration_ns, 0),
+                    StreamCompletion::new(
+                        internal_status,
+                        0,
+                        responder.last_bytes_tx,
+                        duration_ns,
+                        0,
+                    ),
                 );
-                if sampling.keep(status) {
+                if sampling.keep(internal_status) {
                     velda_observability::global_telemetry_store().emit(
                         &velda_observability::TelemetryRecord {
                             request_id: velda_core::request_id::entropy(request_id),
@@ -817,15 +821,15 @@ async fn serve_http2_stream(
                             bytes_tx: responder.last_bytes_tx.min(u32::MAX as u64) as u32,
                             upstream_ip: 0,
                             upstream_port: 0,
-                            status_code: status,
+                            _cl0_pad: 0,
                             route_id,
                             upstream_id: velda_core::UNASSIGNED_UPSTREAM_ID,
                             ua_major_version,
                             rpc_msgs_or_flags: 0,
                             pipe: velda_core::PipeKind::BufferedH2H1,
-                            completion: velda_core::CompletionReason::Complete,
+                            internal_status,
                             method: log_method,
-                            grpc_status: velda_core::GrpcStatus::NonGrpc,
+                            _reserved: 0,
                             ua_family,
                             ua_os,
                             url_len: log_url_len,
@@ -872,14 +876,14 @@ async fn serve_http2_stream(
         global_metrics().record_early_completion(
             PipeKind::BufferedH2H1,
             StreamCompletion::new(
-                StatusCode::SERVICE_UNAVAILABLE.as_u16(),
+                velda_core::InternalStatus::ServiceUnavailable,
                 0,
                 responder.last_bytes_tx,
                 duration_ns,
                 0,
             ),
         );
-        if sampling.keep(StatusCode::SERVICE_UNAVAILABLE.as_u16()) {
+        if sampling.keep(velda_core::InternalStatus::ServiceUnavailable) {
             velda_observability::global_telemetry_store().emit(
                 &velda_observability::TelemetryRecord {
                     request_id: velda_core::request_id::entropy(request_id),
@@ -890,15 +894,15 @@ async fn serve_http2_stream(
                     bytes_tx: responder.last_bytes_tx.min(u32::MAX as u64) as u32,
                     upstream_ip: 0,
                     upstream_port: 0,
-                    status_code: StatusCode::SERVICE_UNAVAILABLE.as_u16(),
+                    _cl0_pad: 0,
                     route_id,
                     upstream_id: target_upstream,
                     ua_major_version,
                     rpc_msgs_or_flags: 0,
                     pipe: velda_core::PipeKind::BufferedH2H1,
-                    completion: velda_core::CompletionReason::Complete,
+                    internal_status: velda_core::InternalStatus::ServiceUnavailable,
                     method: log_method,
-                    grpc_status: velda_core::GrpcStatus::NonGrpc,
+                    _reserved: 0,
                     ua_family,
                     ua_os,
                     url_len: log_url_len,
@@ -1070,14 +1074,14 @@ async fn serve_http2_stream(
     global_metrics().record_stream_completion(
         pipe_kind,
         StreamCompletion::new(
-            outcome.status_code,
+            outcome.internal_status,
             outcome.bytes_rx,
             outcome.bytes_tx,
             duration_ns,
             0,
         ),
     );
-    if sampling.keep(outcome.status_code) {
+    if sampling.keep(outcome.internal_status) {
         let (upstream_ip, upstream_port) = outcome
             .upstream_addr
             .map(|a| {
@@ -1100,15 +1104,15 @@ async fn serve_http2_stream(
             bytes_tx: outcome.bytes_tx.min(u32::MAX as u64) as u32,
             upstream_ip,
             upstream_port,
-            status_code: outcome.status_code,
+            _cl0_pad: 0,
             route_id,
             upstream_id: target_upstream,
             ua_major_version,
             rpc_msgs_or_flags: 0,
             pipe: pipe_kind,
-            completion: outcome.completion,
+            internal_status: outcome.internal_status,
             method: log_method,
-            grpc_status: velda_core::GrpcStatus::NonGrpc,
+            _reserved: 0,
             ua_family,
             ua_os,
             url_len: log_url_len,
@@ -1172,15 +1176,15 @@ mod tests {
 
     #[test]
     fn test_refused_or_goaway_detection() {
-        assert!(velda_http2::error::Http2Error::ConnectionClosed.is_refused_or_goaway());
+        assert!(velda_http2::outcome::Http2Outcome::ConnectionClosed.is_refused_or_goaway());
         assert!(
-            velda_http2::error::Http2Error::StreamReset(
+            velda_http2::outcome::Http2Outcome::StreamReset(
                 velda_http2::proto::frame::H2ErrorCode::REFUSED_STREAM
             )
             .is_refused_or_goaway()
         );
         assert!(
-            velda_http2::error::Http2Error::Io(std::io::Error::new(
+            velda_http2::outcome::Http2Outcome::Io(std::io::Error::new(
                 std::io::ErrorKind::BrokenPipe,
                 "broken pipe"
             ))
@@ -1188,12 +1192,12 @@ mod tests {
         );
 
         assert!(
-            !velda_http2::error::Http2Error::StreamReset(
+            !velda_http2::outcome::Http2Outcome::StreamReset(
                 velda_http2::proto::frame::H2ErrorCode::INTERNAL_ERROR
             )
             .is_refused_or_goaway()
         );
-        assert!(!velda_http2::error::Http2Error::PayloadTooLarge(500).is_refused_or_goaway());
+        assert!(!velda_http2::outcome::Http2Outcome::PayloadTooLarge(500).is_refused_or_goaway());
     }
 
     #[test]

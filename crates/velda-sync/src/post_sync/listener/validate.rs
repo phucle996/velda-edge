@@ -262,61 +262,18 @@ pub(crate) fn validate_observability(
         });
     }
 
-    if app_protocol == "grpc" && sampling.http.is_some() {
-        return Err(SyncError::Validation {
-            domain: "listeners".into(),
-            reason: format!(
-                "Listener '{id}' has protocol 'grpc' but configures 'observability.sampling.http'"
-            ),
-        });
-    }
-
-    if app_protocol != "grpc" && sampling.grpc.is_some() {
-        return Err(SyncError::Validation {
-            domain: "listeners".into(),
-            reason: format!(
-                "Listener '{id}' has protocol '{app_protocol}' but configures 'observability.sampling.grpc'"
-            ),
-        });
-    }
-
-    if let Some(ref http) = sampling.http {
-        for (k, v) in [
-            ("http.1xx", http.r1xx),
-            ("http.2xx", http.r2xx),
-            ("http.3xx", http.r3xx),
-            ("http.4xx", http.r4xx),
-            ("http.5xx", http.r5xx),
-            ("http.shed", http.shed),
-        ] {
-            validate_rate(id, k, v)?;
+    validate_rate(id, "default", sampling.default)?;
+    validate_rate(id, "shed", sampling.shed)?;
+    for (status_name, &rate) in &sampling.statuses {
+        if velda_core::InternalStatus::from_name(status_name).is_none() {
+            return Err(SyncError::Validation {
+                domain: "listeners".into(),
+                reason: format!(
+                    "Listener '{id}' has unknown internal status '{status_name}' in observability.sampling.statuses"
+                ),
+            });
         }
-    }
-
-    if let Some(ref grpc) = sampling.grpc {
-        for (k, v) in [
-            ("grpc.default", grpc.default),
-            ("grpc.ok", grpc.ok),
-            ("grpc.cancelled", grpc.cancelled),
-            ("grpc.unknown", grpc.unknown),
-            ("grpc.invalid_argument", grpc.invalid_argument),
-            ("grpc.deadline_exceeded", grpc.deadline_exceeded),
-            ("grpc.not_found", grpc.not_found),
-            ("grpc.already_exists", grpc.already_exists),
-            ("grpc.permission_denied", grpc.permission_denied),
-            ("grpc.resource_exhausted", grpc.resource_exhausted),
-            ("grpc.failed_precondition", grpc.failed_precondition),
-            ("grpc.aborted", grpc.aborted),
-            ("grpc.out_of_range", grpc.out_of_range),
-            ("grpc.unimplemented", grpc.unimplemented),
-            ("grpc.internal", grpc.internal),
-            ("grpc.unavailable", grpc.unavailable),
-            ("grpc.data_loss", grpc.data_loss),
-            ("grpc.unauthenticated", grpc.unauthenticated),
-            ("grpc.shed", grpc.shed),
-        ] {
-            validate_rate(id, k, v)?;
-        }
+        validate_rate(id, status_name, Some(rate))?;
     }
 
     Ok(())

@@ -13,7 +13,7 @@ use http::header::{CONTENT_TYPE, HeaderValue};
 use velda_core::{Body, L7Request, L7Response};
 use velda_http3::client::connector::Http3Client;
 use velda_http3::config::Http3Config;
-use velda_http3::error::Http3Error;
+use velda_http3::outcome::Http3Outcome;
 
 use crate::upstream::Http3Upstream;
 
@@ -22,10 +22,10 @@ async fn forward_client_stream(
     client: &Http3Client,
     req: &L7Request,
     config: &Http3Config,
-) -> Result<L7Response, Http3Error> {
+) -> Result<L7Response, Http3Outcome> {
     let b = req.body.as_slice();
     if b.len() > config.max_body_size {
-        return Err(Http3Error::PayloadTooLarge(b.len()));
+        return Err(Http3Outcome::PayloadTooLarge(b.len()));
     }
 
     let resp = client.send_request(req.clone()).await?;
@@ -37,14 +37,14 @@ async fn forward_client_stream(
             .windows(b"text/event-stream".len())
             .any(|w| w.eq_ignore_ascii_case(b"text/event-stream"))
     {
-        return Err(Http3Error::StreamingViolation(
+        return Err(Http3Outcome::StreamingViolation(
             "Upstream returned text/event-stream (SSE), but server streaming is disabled".into(),
         ));
     }
 
     let b = resp.body.as_slice();
     if b.len() > config.max_body_size {
-        return Err(Http3Error::PayloadTooLarge(b.len()));
+        return Err(Http3Outcome::PayloadTooLarge(b.len()));
     }
 
     let is_head = req.method == http::Method::HEAD;
@@ -68,11 +68,7 @@ async fn forward_client_stream(
 pub async fn serve(
     req: &L7Request,
     upstream: &Arc<Http3Upstream>,
-) -> (
-    L7Response,
-    Option<(u128, u16)>,
-    velda_core::CompletionReason,
-) {
+) -> (L7Response, Option<(u128, u16)>, velda_core::InternalStatus) {
     let (client, lease) = match upstream.acquire(&upstream.config).await {
         Ok(res) => res,
         Err(e) => {
@@ -91,7 +87,7 @@ pub async fn serve(
                     HeaderValue::from_static("text/plain; charset=utf-8"),
                 ),
                 None,
-                velda_core::CompletionReason::UpstreamError,
+                velda_core::InternalStatus::UpstreamError,
             );
         }
     };
@@ -121,7 +117,7 @@ pub async fn serve(
     }
 
     match pipe_res {
-        Ok(resp) => (resp, upstream_addr, velda_core::CompletionReason::Complete),
+        Ok(resp) => (resp, upstream_addr, velda_core::InternalStatus::Completed),
         Err(e) => {
             tracing::warn!(
                 error = %e,
@@ -138,7 +134,7 @@ pub async fn serve(
                     HeaderValue::from_static("text/plain; charset=utf-8"),
                 ),
                 upstream_addr,
-                velda_core::CompletionReason::UpstreamError,
+                velda_core::InternalStatus::UpstreamError,
             )
         }
     }

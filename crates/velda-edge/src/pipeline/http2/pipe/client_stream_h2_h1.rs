@@ -51,11 +51,10 @@ pub async fn serve(
             );
             let _ = responder.send_response(&err_resp);
             return PipeOutcome::http(
-                responder.last_status,
                 receiver.bytes_received as u64,
                 responder.last_bytes_tx,
                 None,
-                velda_core::CompletionReason::Rejected,
+                velda_core::InternalStatus::BadRequest,
             );
         }
     };
@@ -98,11 +97,10 @@ pub async fn serve(
             );
             let _ = responder.send_response(&err_resp);
             return PipeOutcome::http(
-                responder.last_status,
                 receiver.bytes_received as u64,
                 responder.last_bytes_tx,
                 None,
-                velda_core::CompletionReason::UpstreamError,
+                velda_core::InternalStatus::UpstreamError,
             );
         }
     };
@@ -143,7 +141,7 @@ pub async fn serve(
                     while let Some(chunk) = receiver
                         .recv_coalesced_chunk(coalesce_limit)
                         .await
-                        .map_err(std::io::Error::other)?
+                        .map_err(|e| std::io::Error::other(e.to_string()))?
                     {
                         if !chunk.is_empty() {
                             write_half.write_all(&chunk).await?;
@@ -160,7 +158,7 @@ pub async fn serve(
                 {
                     velda_http1::client::request::send_chunk_vectored(&mut write_half, &chunk)
                         .await
-                        .map_err(std::io::Error::other)?;
+                        .map_err(|e| std::io::Error::other(e.to_string()))?;
                 }
                 if is_fin {
                     write_half.write_all(b"0\r\n\r\n").await?;
@@ -168,7 +166,7 @@ pub async fn serve(
                     while let Some(chunk) = receiver
                         .recv_coalesced_chunk(coalesce_limit)
                         .await
-                        .map_err(std::io::Error::other)?
+                        .map_err(|e| std::io::Error::other(e.to_string()))?
                     {
                         if !chunk.is_empty() {
                             velda_http1::client::request::send_chunk_vectored(
@@ -176,7 +174,7 @@ pub async fn serve(
                                 &chunk,
                             )
                             .await
-                            .map_err(std::io::Error::other)?;
+                            .map_err(|e| std::io::Error::other(e.to_string()))?;
                         }
                         if receiver.is_end_stream() {
                             break;
@@ -267,7 +265,7 @@ pub async fn serve(
             if !receiver.is_end_stream() {
                 tokio::spawn(async move { while let Ok(Some(_)) = receiver.recv_chunk().await {} });
             }
-            velda_core::CompletionReason::Complete
+            velda_core::InternalStatus::Completed
         }
         Err(e) => {
             tracing::warn!(error = %e, "Failed to read upstream HTTP/1.1 response");
@@ -280,14 +278,8 @@ pub async fn serve(
             if !receiver.is_end_stream() {
                 tokio::spawn(async move { while let Ok(Some(_)) = receiver.recv_chunk().await {} });
             }
-            velda_core::CompletionReason::UpstreamError
+            velda_core::InternalStatus::UpstreamError
         }
     };
-    PipeOutcome::http(
-        responder.last_status,
-        bytes_rx,
-        responder.last_bytes_tx,
-        upstream_addr,
-        completion,
-    )
+    PipeOutcome::http(bytes_rx, responder.last_bytes_tx, upstream_addr, completion)
 }

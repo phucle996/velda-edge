@@ -64,11 +64,11 @@ impl TcpUpstream {
                     .map_err(|e| e.to_string())
             })
             .await
-            .map_err(EdgeError::Upstream)?;
+            .map_err(|o| EdgeError::Upstream(o.to_string()))?;
 
-        pipe(stream).await.map_err(|e| {
-            EdgeError::Upstream(velda_upstream::UpstreamError::Protocol(e.to_string()))
-        })
+        pipe(stream)
+            .await
+            .map_err(|e| EdgeError::Upstream(e.to_string()))
     }
 
     /// Performs periodic active health check across all physical endpoints for `lane`.

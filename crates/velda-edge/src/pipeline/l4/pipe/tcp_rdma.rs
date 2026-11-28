@@ -52,7 +52,7 @@ pub async fn serve(
     let emit_telemetry = |upstream_addr: Option<(u128, u16)>,
                           rx: u64,
                           tx: u64,
-                          completion: velda_core::CompletionReason| {
+                          completion: velda_core::InternalStatus| {
         let (upstream_ip, upstream_port) = upstream_addr
             .map(|a| {
                 (
@@ -74,15 +74,15 @@ pub async fn serve(
             bytes_tx: tx.min(u32::MAX as u64) as u32,
             upstream_ip,
             upstream_port,
-            status_code: 0,
+            _cl0_pad: 0,
             route_id,
             upstream_id,
             ua_major_version: 0,
             rpc_msgs_or_flags: 0,
             pipe: velda_core::PipeKind::TcpRdma,
-            completion,
+            internal_status: completion,
             method: velda_core::HttpMethod::Unknown,
-            grpc_status: velda_core::GrpcStatus::NonGrpc,
+            _reserved: 0,
             ua_family: velda_core::UaFamily::None,
             ua_os: velda_core::UaOs::Unknown,
             url_len: 0,
@@ -102,7 +102,7 @@ pub async fn serve(
                 peer_port = u16::from_be(peer_port_be),
                 "Failed to acquire RDMA lease for L4 raw forwarding"
             );
-            emit_telemetry(None, 0, 0, velda_core::CompletionReason::UpstreamError);
+            emit_telemetry(None, 0, 0, velda_core::InternalStatus::UpstreamError);
             return;
         }
     };
@@ -173,7 +173,7 @@ pub async fn serve(
 
     let mut rx_bytes = 0u64;
     let mut tx_bytes = 0u64;
-    let mut completion = velda_core::CompletionReason::Complete;
+    let mut completion = velda_core::InternalStatus::Completed;
 
     tokio::select! {
         c2s_res = &mut client_to_rdma => {
@@ -195,7 +195,7 @@ pub async fn serve(
                         }
                         Ok(Err(e)) => {
                             rx_bytes = c2s;
-                            completion = velda_core::CompletionReason::UpstreamError;
+                            completion = velda_core::InternalStatus::UpstreamError;
                             lease.mark_broken();
                             tracing::warn!(
                                 error = %e,
@@ -207,7 +207,7 @@ pub async fn serve(
                         }
                         Err(_) => {
                             rx_bytes = c2s;
-                            completion = velda_core::CompletionReason::Timeout;
+                            completion = velda_core::InternalStatus::UpstreamTimeout;
                             lease.mark_broken();
                             tracing::debug!(
                                 upstream = %upstream_id,
@@ -220,7 +220,7 @@ pub async fn serve(
                     }
                 }
                 Err(e) => {
-                    completion = velda_core::CompletionReason::ClientCancel;
+                    completion = velda_core::InternalStatus::ClientCanceled;
                     lease.mark_broken();
                     tracing::warn!(
                         error = %e,
@@ -245,7 +245,7 @@ pub async fn serve(
                     );
                 }
                 Err(e) => {
-                    completion = velda_core::CompletionReason::UpstreamError;
+                    completion = velda_core::InternalStatus::UpstreamError;
                     lease.mark_broken();
                     tracing::warn!(
                         error = %e,

@@ -11,7 +11,7 @@ use http::StatusCode;
 use http::header::HeaderValue;
 use tokio::io::{AsyncRead, AsyncWrite};
 use velda_http1::config::Http1Config;
-use velda_http1::error::Http1Error;
+use velda_http1::outcome::Http1Outcome;
 use velda_http1::server::connection::Http1ServerConnection;
 use velda_http1::server::request::Http1BodyFraming;
 use velda_http1::server::response::Http1ServerResponse;
@@ -27,7 +27,7 @@ use crate::upstream::HttpUpstream;
 use velda_core::{Action, L7Request, PipeKind};
 use velda_http2::strategy::Http2PipeStrategy;
 use velda_http3::strategy::Http3PipeStrategy;
-use velda_observability::sampling::http::HttpSampling;
+use velda_observability::sampling::status::StatusSampling;
 use velda_observability::{StreamCompletion, global_metrics};
 
 /// Listener configuration bundle passed into [`handle_http1_stream`].
@@ -37,7 +37,7 @@ pub struct Http1IngressConfig {
     pub tls_enabled: bool,
     pub streaming: velda_core::StreamingMode,
     pub alt_svc: Option<http::HeaderValue>,
-    pub sampling: HttpSampling,
+    pub sampling: StatusSampling,
 }
 
 /// Asynchronous stream worker dispatching incoming HTTP/1.1 connections.
@@ -143,7 +143,7 @@ pub async fn run_http1_loop<IO>(
     meta: DownstreamMeta,
     streaming: velda_core::StreamingMode,
     config: Http1Config,
-    sampling: HttpSampling,
+    sampling: StatusSampling,
     runtime: SharedRuntime,
 ) where
     IO: AsyncRead + AsyncWrite + Unpin + Send + 'static,
@@ -168,7 +168,7 @@ pub async fn run_http1_loop<IO>(
         let (req_head, framing) = match conn.next_request_head(Some(enrich)).await {
             Ok(Some(parts)) => parts,
             Ok(None) => break,
-            Err(Http1Error::Timeout) => {
+            Err(Http1Outcome::Timeout) => {
                 tracing::debug!(
                     listener = %meta.listener_id,
                     timeout_ms = config.header_read_timeout_ms,
@@ -184,14 +184,14 @@ pub async fn run_http1_loop<IO>(
                 global_metrics().record_early_completion(
                     PipeKind::BufferedH1H1,
                     StreamCompletion::new(
-                        StatusCode::REQUEST_TIMEOUT.as_u16(),
+                        velda_core::InternalStatus::RequestTimeout,
                         0,
                         conn.last_bytes_tx,
                         timeout_ns,
                         0,
                     ),
                 );
-                if sampling.keep(StatusCode::REQUEST_TIMEOUT.as_u16()) {
+                if sampling.keep(velda_core::InternalStatus::RequestTimeout) {
                     velda_observability::global_telemetry_store().emit_cold(
                         &velda_observability::TelemetryRecord {
                             request_id: velda_core::request_id::entropy(req_id),
@@ -199,9 +199,8 @@ pub async fn run_http1_loop<IO>(
                             duration_ns: timeout_ns,
                             peer_ip: meta.peer_ip,
                             bytes_tx: conn.last_bytes_tx.min(u32::MAX as u64) as u32,
-                            status_code: StatusCode::REQUEST_TIMEOUT.as_u16(),
                             pipe: velda_core::PipeKind::BufferedH1H1,
-                            completion: velda_core::CompletionReason::Timeout,
+                            internal_status: velda_core::InternalStatus::RequestTimeout,
                             ..Default::default()
                         },
                     );
@@ -211,12 +210,19 @@ pub async fn run_http1_loop<IO>(
             }
             Err(e) => {
                 tracing::debug!(error = %e, "HTTP/1.1 request head decode error");
-                let status = match e {
-                    Http1Error::HeaderTooLarge(_) | Http1Error::TooManyHeaders(_) => {
-                        StatusCode::REQUEST_HEADER_FIELDS_TOO_LARGE
-                    }
-                    Http1Error::PayloadTooLarge(_) => StatusCode::PAYLOAD_TOO_LARGE,
-                    _ => StatusCode::BAD_REQUEST,
+                let (status, internal_status) = match e {
+                    Http1Outcome::HeaderTooLarge(_) | Http1Outcome::TooManyHeaders(_) => (
+                        StatusCode::REQUEST_HEADER_FIELDS_TOO_LARGE,
+                        velda_core::InternalStatus::HeaderFieldsTooLarge,
+                    ),
+                    Http1Outcome::PayloadTooLarge(_) => (
+                        StatusCode::PAYLOAD_TOO_LARGE,
+                        velda_core::InternalStatus::PayloadTooLarge,
+                    ),
+                    _ => (
+                        StatusCode::BAD_REQUEST,
+                        velda_core::InternalStatus::BadRequest,
+                    ),
                 };
                 let ingress_nanos = velda_core::clock::now_unix_nanos();
                 let (req_id, req_id_header) =
@@ -227,9 +233,9 @@ pub async fn run_http1_loop<IO>(
                 let duration_ns = velda_core::clock::now_unix_nanos().saturating_sub(ingress_nanos);
                 global_metrics().record_early_completion(
                     PipeKind::BufferedH1H1,
-                    StreamCompletion::new(status.as_u16(), 0, conn.last_bytes_tx, duration_ns, 0),
+                    StreamCompletion::new(internal_status, 0, conn.last_bytes_tx, duration_ns, 0),
                 );
-                if sampling.keep(status.as_u16()) {
+                if sampling.keep(internal_status) {
                     velda_observability::global_telemetry_store().emit_cold(
                         &velda_observability::TelemetryRecord {
                             request_id: velda_core::request_id::entropy(req_id),
@@ -237,9 +243,8 @@ pub async fn run_http1_loop<IO>(
                             duration_ns,
                             peer_ip: meta.peer_ip,
                             bytes_tx: conn.last_bytes_tx.min(u32::MAX as u64) as u32,
-                            status_code: status.as_u16(),
                             pipe: velda_core::PipeKind::BufferedH1H1,
-                            completion: velda_core::CompletionReason::Rejected,
+                            internal_status,
                             ..Default::default()
                         },
                     );
@@ -298,14 +303,14 @@ pub async fn run_http1_loop<IO>(
             global_metrics().record_early_completion(
                 PipeKind::BufferedH1H1,
                 StreamCompletion::new(
-                    StatusCode::FORBIDDEN.as_u16(),
+                    velda_core::InternalStatus::Forbidden,
                     0,
                     conn.last_bytes_tx,
                     duration_ns,
                     0,
                 ),
             );
-            if sampling.keep(StatusCode::FORBIDDEN.as_u16()) {
+            if sampling.keep(velda_core::InternalStatus::Forbidden) {
                 velda_observability::global_telemetry_store().emit_cold(
                     &velda_observability::TelemetryRecord {
                         request_id: velda_core::request_id::entropy(request_id),
@@ -313,9 +318,8 @@ pub async fn run_http1_loop<IO>(
                         duration_ns,
                         peer_ip: meta.peer_ip,
                         bytes_tx: conn.last_bytes_tx.min(u32::MAX as u64) as u32,
-                        status_code: StatusCode::FORBIDDEN.as_u16(),
                         pipe: velda_core::PipeKind::BufferedH1H1,
-                        completion: velda_core::CompletionReason::Rejected,
+                        internal_status: velda_core::InternalStatus::Forbidden,
                         method: log_method,
                         ua_major_version,
                         ua_family,
@@ -343,14 +347,14 @@ pub async fn run_http1_loop<IO>(
             global_metrics().record_early_completion(
                 PipeKind::BufferedH1H1,
                 StreamCompletion::new(
-                    StatusCode::BAD_REQUEST.as_u16(),
+                    velda_core::InternalStatus::BadRequest,
                     0,
                     conn.last_bytes_tx,
                     duration_ns,
                     0,
                 ),
             );
-            if sampling.keep(StatusCode::BAD_REQUEST.as_u16()) {
+            if sampling.keep(velda_core::InternalStatus::BadRequest) {
                 velda_observability::global_telemetry_store().emit_cold(
                     &velda_observability::TelemetryRecord {
                         request_id: velda_core::request_id::entropy(request_id),
@@ -358,9 +362,8 @@ pub async fn run_http1_loop<IO>(
                         duration_ns,
                         peer_ip: meta.peer_ip,
                         bytes_tx: conn.last_bytes_tx.min(u32::MAX as u64) as u32,
-                        status_code: StatusCode::BAD_REQUEST.as_u16(),
                         pipe: velda_core::PipeKind::BufferedH1H1,
-                        completion: velda_core::CompletionReason::Rejected,
+                        internal_status: velda_core::InternalStatus::BadRequest,
                         method: log_method,
                         ua_major_version,
                         ua_family,
@@ -404,14 +407,14 @@ pub async fn run_http1_loop<IO>(
             global_metrics().record_early_completion(
                 PipeKind::BufferedH1H1,
                 StreamCompletion::new(
-                    StatusCode::NOT_FOUND.as_u16(),
+                    velda_core::InternalStatus::RouteNotFound,
                     0,
                     conn.last_bytes_tx,
                     duration_ns,
                     0,
                 ),
             );
-            if sampling.keep(StatusCode::NOT_FOUND.as_u16()) {
+            if sampling.keep(velda_core::InternalStatus::RouteNotFound) {
                 velda_observability::global_telemetry_store().emit_cold(
                     &velda_observability::TelemetryRecord {
                         request_id: velda_core::request_id::entropy(request_id),
@@ -419,9 +422,8 @@ pub async fn run_http1_loop<IO>(
                         duration_ns,
                         peer_ip: meta.peer_ip,
                         bytes_tx: conn.last_bytes_tx.min(u32::MAX as u64) as u32,
-                        status_code: StatusCode::NOT_FOUND.as_u16(),
                         pipe: velda_core::PipeKind::BufferedH1H1,
-                        completion: velda_core::CompletionReason::Rejected,
+                        internal_status: velda_core::InternalStatus::RouteNotFound,
                         method: log_method,
                         ua_major_version,
                         ua_family,
@@ -484,18 +486,17 @@ pub async fn run_http1_loop<IO>(
                         Action::Respond(resp) => {
                             short_circuit_resp = Some(resp);
                         }
-                        Action::Reject(reason) => {
-                            // FAST-FAIL INVARIANT: Rejections terminate immediately at the Edge boundary.
+                        Action::Status(internal_status) => {
+                            // FAST-FAIL INVARIANT: Status responses terminate immediately at the Edge boundary.
                             // Strictly bypasses post_response_hooks (anti-CPDoS & Zero-DDoS CPU burn),
-                            // retaining only MSB bypass headers while velda-http1 stamps HTTP/1.1 rejection fields.
-                            let resp = velda_http1::server::early_response::reject_response(
-                                reason,
+                            // retaining only MSB bypass headers while velda-http1 stamps HTTP/1.1 fields.
+                            let resp = velda_http1::server::early_response::status_response(
+                                internal_status,
                                 l7_req.headers,
                             );
 
                             let mut server_resp = Http1ServerResponse::from_l7_response(resp);
                             meta.inject_response_headers(&mut server_resp.headers);
-                            let status = server_resp.status.as_u16();
                             let keep_open =
                                 framing == Http1BodyFraming::Empty && !conn.close_requested;
                             if !keep_open {
@@ -507,14 +508,14 @@ pub async fn run_http1_loop<IO>(
                             global_metrics().record_early_completion(
                                 PipeKind::BufferedH1H1,
                                 StreamCompletion::new(
-                                    status,
+                                    internal_status,
                                     0,
                                     conn.last_bytes_tx,
                                     duration_ns,
                                     0,
                                 ),
                             );
-                            if sampling.keep(status) {
+                            if sampling.keep(internal_status) {
                                 velda_observability::global_telemetry_store().emit_cold(
                                     &velda_observability::TelemetryRecord {
                                         request_id: velda_core::request_id::entropy(request_id),
@@ -522,10 +523,9 @@ pub async fn run_http1_loop<IO>(
                                         duration_ns,
                                         peer_ip: l7_req.state.client_ip,
                                         bytes_tx: conn.last_bytes_tx.min(u32::MAX as u64) as u32,
-                                        status_code: status,
                                         route_id: route.id,
                                         pipe: velda_core::PipeKind::BufferedH1H1,
-                                        completion: velda_core::CompletionReason::Rejected,
+                                        internal_status,
                                         method: log_method,
                                         ua_major_version,
                                         ua_family,
@@ -569,18 +569,17 @@ pub async fn run_http1_loop<IO>(
                         Action::Respond(resp) => {
                             short_circuit_resp = Some(resp);
                         }
-                        Action::Reject(reason) => {
-                            // FAST-FAIL INVARIANT: Rejections terminate immediately at the Edge boundary.
+                        Action::Status(internal_status) => {
+                            // FAST-FAIL INVARIANT: Status responses terminate immediately at the Edge boundary.
                             // Strictly bypasses post_response_hooks (anti-CPDoS & Zero-DDoS CPU burn),
-                            // retaining only MSB bypass headers while velda-http1 stamps HTTP/1.1 rejection fields.
-                            let resp = velda_http1::server::early_response::reject_response(
-                                reason,
+                            // retaining only MSB bypass headers while velda-http1 stamps HTTP/1.1 fields.
+                            let resp = velda_http1::server::early_response::status_response(
+                                internal_status,
                                 l7_req.headers,
                             );
 
                             let mut server_resp = Http1ServerResponse::from_l7_response(resp);
                             meta.inject_response_headers(&mut server_resp.headers);
-                            let status = server_resp.status.as_u16();
                             let keep_open =
                                 framing == Http1BodyFraming::Empty && !conn.close_requested;
                             if !keep_open {
@@ -592,14 +591,14 @@ pub async fn run_http1_loop<IO>(
                             global_metrics().record_early_completion(
                                 PipeKind::BufferedH1H1,
                                 StreamCompletion::new(
-                                    status,
+                                    internal_status,
                                     0,
                                     conn.last_bytes_tx,
                                     duration_ns,
                                     0,
                                 ),
                             );
-                            if sampling.keep(status) {
+                            if sampling.keep(internal_status) {
                                 velda_observability::global_telemetry_store().emit_cold(
                                     &velda_observability::TelemetryRecord {
                                         request_id: velda_core::request_id::entropy(request_id),
@@ -607,10 +606,9 @@ pub async fn run_http1_loop<IO>(
                                         duration_ns,
                                         peer_ip: l7_req.state.client_ip,
                                         bytes_tx: conn.last_bytes_tx.min(u32::MAX as u64) as u32,
-                                        status_code: status,
                                         route_id: route.id,
                                         pipe: velda_core::PipeKind::BufferedH1H1,
-                                        completion: velda_core::CompletionReason::Rejected,
+                                        internal_status,
                                         method: log_method,
                                         ua_major_version,
                                         ua_family,
@@ -652,7 +650,8 @@ pub async fn run_http1_loop<IO>(
                     }
                     let mut server_resp = Http1ServerResponse::from_l7_response(resp);
                     meta.inject_response_headers(&mut server_resp.headers);
-                    let status = server_resp.status.as_u16();
+                    let internal_status =
+                        crate::pipeline::internal_status_from_http(server_resp.status);
                     let keep_open = framing == Http1BodyFraming::Empty && !conn.close_requested;
                     if !keep_open {
                         conn.close_requested = true;
@@ -662,9 +661,15 @@ pub async fn run_http1_loop<IO>(
                         velda_core::clock::now_unix_nanos().saturating_sub(ingress_nanos);
                     global_metrics().record_early_completion(
                         PipeKind::BufferedH1H1,
-                        StreamCompletion::new(status, 0, conn.last_bytes_tx, duration_ns, 0),
+                        StreamCompletion::new(
+                            internal_status,
+                            0,
+                            conn.last_bytes_tx,
+                            duration_ns,
+                            0,
+                        ),
                     );
-                    if sampling.keep(status) {
+                    if sampling.keep(internal_status) {
                         velda_observability::global_telemetry_store().emit_cold(
                             &velda_observability::TelemetryRecord {
                                 request_id: velda_core::request_id::entropy(request_id),
@@ -672,10 +677,9 @@ pub async fn run_http1_loop<IO>(
                                 duration_ns,
                                 peer_ip: l7_req.state.client_ip,
                                 bytes_tx: conn.last_bytes_tx.min(u32::MAX as u64) as u32,
-                                status_code: status,
                                 route_id: route.id,
                                 pipe: velda_core::PipeKind::BufferedH1H1,
-                                completion: velda_core::CompletionReason::Complete,
+                                internal_status,
                                 method: log_method,
                                 ua_major_version,
                                 ua_family,
@@ -726,14 +730,14 @@ pub async fn run_http1_loop<IO>(
             global_metrics().record_early_completion(
                 PipeKind::BufferedH1H1,
                 StreamCompletion::new(
-                    StatusCode::SERVICE_UNAVAILABLE.as_u16(),
+                    velda_core::InternalStatus::ServiceUnavailable,
                     0,
                     conn.last_bytes_tx,
                     duration_ns,
                     0,
                 ),
             );
-            if sampling.keep(StatusCode::SERVICE_UNAVAILABLE.as_u16()) {
+            if sampling.keep(velda_core::InternalStatus::ServiceUnavailable) {
                 velda_observability::global_telemetry_store().emit_cold(
                     &velda_observability::TelemetryRecord {
                         request_id: velda_core::request_id::entropy(request_id),
@@ -741,12 +745,11 @@ pub async fn run_http1_loop<IO>(
                         duration_ns,
                         peer_ip: meta.peer_ip,
                         bytes_tx: conn.last_bytes_tx.min(u32::MAX as u64) as u32,
-                        status_code: StatusCode::SERVICE_UNAVAILABLE.as_u16(),
                         route_id: route.id,
                         upstream_id: target_upstream,
                         ua_major_version,
                         pipe: velda_core::PipeKind::BufferedH1H1,
-                        completion: velda_core::CompletionReason::UpstreamError,
+                        internal_status: velda_core::InternalStatus::ServiceUnavailable,
                         method: log_method,
                         ua_family,
                         ua_os,
@@ -775,7 +778,7 @@ pub async fn run_http1_loop<IO>(
             global_metrics().record_early_completion(
                 PipeKind::BufferedH1H1,
                 StreamCompletion::new(
-                    StatusCode::TOO_MANY_REQUESTS.as_u16(),
+                    velda_core::InternalStatus::RateLimited,
                     0,
                     conn.last_bytes_tx,
                     duration_ns,
@@ -790,12 +793,11 @@ pub async fn run_http1_loop<IO>(
                         duration_ns,
                         peer_ip: meta.peer_ip,
                         bytes_tx: conn.last_bytes_tx.min(u32::MAX as u64) as u32,
-                        status_code: StatusCode::TOO_MANY_REQUESTS.as_u16(),
                         route_id: route.id,
                         upstream_id: target_upstream,
                         ua_major_version,
                         pipe: velda_core::PipeKind::BufferedH1H1,
-                        completion: velda_core::CompletionReason::Rejected,
+                        internal_status: velda_core::InternalStatus::RateLimited,
                         method: log_method,
                         ua_family,
                         ua_os,
@@ -984,13 +986,6 @@ pub async fn run_http1_loop<IO>(
             }
         }
 
-        let final_status = if conn.last_status > 0 {
-            conn.last_status
-        } else if pipe_result.is_ok() {
-            200
-        } else {
-            StatusCode::BAD_GATEWAY.as_u16()
-        };
         let (upstream_ip, upstream_port) = if conn.last_upstream_ip != 0 {
             (
                 if velda_core::lut::ip::is_v4_u128(conn.last_upstream_ip) {
@@ -1004,23 +999,23 @@ pub async fn run_http1_loop<IO>(
             (0, 0)
         };
         let completion_reason = match &pipe_result {
-            Ok(()) => velda_core::CompletionReason::Complete,
-            Err(Http1Error::Timeout) => velda_core::CompletionReason::Timeout,
-            Err(_) => velda_core::CompletionReason::UpstreamError,
+            Ok(()) => velda_core::InternalStatus::Completed,
+            Err(Http1Outcome::Timeout) => velda_core::InternalStatus::UpstreamTimeout,
+            Err(_) => velda_core::InternalStatus::UpstreamError,
         };
 
         let duration_ns = velda_core::clock::now_unix_nanos().saturating_sub(ingress_nanos);
         global_metrics().record_stream_completion(
             pipe_kind,
             StreamCompletion::new(
-                final_status,
+                completion_reason,
                 conn.last_bytes_rx,
                 conn.last_bytes_tx,
                 duration_ns,
                 0,
             ),
         );
-        if sampling.keep(final_status) {
+        if sampling.keep(completion_reason) {
             velda_observability::global_telemetry_store().emit(
                 &velda_observability::TelemetryRecord {
                     request_id: velda_core::request_id::entropy(request_id),
@@ -1031,15 +1026,15 @@ pub async fn run_http1_loop<IO>(
                     bytes_tx: conn.last_bytes_tx.min(u32::MAX as u64) as u32,
                     upstream_ip,
                     upstream_port,
-                    status_code: final_status,
+                    _cl0_pad: 0,
                     route_id: route.id,
                     upstream_id: target_upstream,
                     ua_major_version,
                     rpc_msgs_or_flags: 0,
                     pipe: pipe_kind,
-                    completion: completion_reason,
+                    internal_status: completion_reason,
                     method: log_method,
-                    grpc_status: velda_core::GrpcStatus::NonGrpc,
+                    _reserved: 0,
                     ua_family,
                     ua_os,
                     url_len: log_url_len,
@@ -1120,31 +1115,31 @@ mod tests {
 
     #[test]
     fn test_stale_connection_detection() {
-        assert!(Http1Error::ConnectionClosed.is_stale_connection());
+        assert!(Http1Outcome::ConnectionClosed.is_stale_connection());
         assert!(
-            Http1Error::Io(std::io::Error::new(
+            Http1Outcome::Io(std::io::Error::new(
                 std::io::ErrorKind::BrokenPipe,
                 "broken pipe"
             ))
             .is_stale_connection()
         );
         assert!(
-            Http1Error::Io(std::io::Error::new(
+            Http1Outcome::Io(std::io::Error::new(
                 std::io::ErrorKind::ConnectionReset,
                 "connection reset by peer"
             ))
             .is_stale_connection()
         );
         assert!(
-            Http1Error::Io(std::io::Error::new(
+            Http1Outcome::Io(std::io::Error::new(
                 std::io::ErrorKind::UnexpectedEof,
                 "unexpected eof"
             ))
             .is_stale_connection()
         );
 
-        assert!(!Http1Error::InvalidMethod("FOO".into()).is_stale_connection());
-        assert!(!Http1Error::PayloadTooLarge(100).is_stale_connection());
+        assert!(!Http1Outcome::InvalidMethod("FOO".into()).is_stale_connection());
+        assert!(!Http1Outcome::PayloadTooLarge(100).is_stale_connection());
     }
 
     #[test]

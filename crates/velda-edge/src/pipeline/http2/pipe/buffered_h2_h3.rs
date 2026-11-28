@@ -40,11 +40,10 @@ pub async fn serve(
             );
             let _ = responder.send_response(&err_resp);
             return PipeOutcome::http(
-                responder.last_status,
                 receiver.bytes_received as u64,
                 responder.last_bytes_tx,
                 None,
-                velda_core::CompletionReason::Rejected,
+                velda_core::InternalStatus::BadRequest,
             );
         }
     };
@@ -81,11 +80,10 @@ pub async fn serve(
             );
             let _ = responder.send_response(&err_resp);
             return PipeOutcome::http(
-                responder.last_status,
                 bytes_rx,
                 responder.last_bytes_tx,
                 None,
-                velda_core::CompletionReason::UpstreamError,
+                velda_core::InternalStatus::UpstreamError,
             );
         }
     };
@@ -127,7 +125,7 @@ pub async fn serve(
             }
             meta.inject_response_headers(&mut resp.headers);
             let _ = responder.send_response(&resp);
-            velda_core::CompletionReason::Complete
+            velda_core::InternalStatus::Completed
         }
         Err(e) => {
             tracing::warn!(
@@ -145,14 +143,8 @@ pub async fn serve(
             );
             meta.inject_response_headers(&mut err_resp.headers);
             let _ = responder.send_response(&err_resp);
-            velda_core::CompletionReason::UpstreamError
+            velda_core::InternalStatus::UpstreamError
         }
     };
-    PipeOutcome::http(
-        responder.last_status,
-        bytes_rx,
-        responder.last_bytes_tx,
-        upstream_addr,
-        completion,
-    )
+    PipeOutcome::http(bytes_rx, responder.last_bytes_tx, upstream_addr, completion)
 }

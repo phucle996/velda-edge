@@ -34,7 +34,7 @@ use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt};
 use velda_http1::client::header::sanitize_headers;
 use velda_http1::client::request::send_request_parts;
 use velda_http1::client::response::read_response_head;
-use velda_http1::error::Http1Error;
+use velda_http1::outcome::Http1Outcome;
 use velda_http1::server::connection::Http1ServerConnection;
 use velda_http1::server::request::{Http1BodyFraming, Http1ServerRequest, Http1ServerRequestHead};
 use velda_http1::server::response::{Http1ServerResponse, is_connection_close};
@@ -51,7 +51,7 @@ pub async fn serve<IO>(
     meta: &DownstreamMeta,
     req_state: &velda_core::RequestState,
     plan: &velda_plugin::RoutePluginPlan,
-) -> Result<(), Http1Error>
+) -> Result<(), Http1Outcome>
 where
     IO: AsyncRead + AsyncWrite + Unpin + Send + 'static,
 {
@@ -70,7 +70,7 @@ where
         .await
     {
         Ok(b) => b,
-        Err(Http1Error::Timeout) => {
+        Err(Http1Outcome::Timeout) => {
             let err_resp = Http1ServerResponse::from_bytes(
                 StatusCode::REQUEST_TIMEOUT,
                 b"408 Request Timeout: client body read idle timeout exceeded\n".to_vec(),
@@ -81,7 +81,7 @@ where
             );
             conn.close_requested = true;
             let _ = conn.send_response(&err_resp).await;
-            return Err(Http1Error::Timeout);
+            return Err(Http1Outcome::Timeout);
         }
         Err(e) => {
             let err_resp = Http1ServerResponse::from_bytes(
@@ -117,7 +117,7 @@ where
             );
             conn.close_requested = true;
             let _ = conn.send_response(&err_resp).await;
-            return Err(Http1Error::ConnectionClosed);
+            return Err(Http1Outcome::ConnectionClosed);
         }
     };
     conn.last_upstream_ip = upstream_lease.endpoint.0;
@@ -220,7 +220,7 @@ where
                 .windows(b"text/event-stream".len())
                 .any(|w| w.eq_ignore_ascii_case(b"text/event-stream"))
         {
-            return Err(Http1Error::StreamingViolation(
+            return Err(Http1Outcome::StreamingViolation(
                 "Upstream returned text/event-stream (SSE), but server streaming is disabled on this listener"
                     .into(),
             ));
@@ -231,15 +231,18 @@ where
             Http1BodyFraming::Empty => (0, None),
             Http1BodyFraming::ContentLength(len) => {
                 if len > cfg.max_body_size {
-                    return Err(Http1Error::PayloadTooLarge(len));
+                    return Err(Http1Outcome::PayloadTooLarge(len));
                 }
                 if conn.upstream_read_buf.len() < len {
                     let needed = len - conn.upstream_read_buf.len();
                     conn.upstream_read_buf.reserve(needed);
                     while conn.upstream_read_buf.len() < len {
-                        let n = lease_guard.read_buf(&mut conn.upstream_read_buf).await?;
+                        let n = lease_guard
+                            .read_buf(&mut conn.upstream_read_buf)
+                            .await
+                            .map_err(velda_http1::Http1Outcome::Io)?;
                         if n == 0 {
-                            return Err(Http1Error::Parse(
+                            return Err(Http1Outcome::Parse(
                                 "Unexpected EOF while reading upstream response body: premature connection close".into(),
                             ));
                         }
@@ -259,9 +262,12 @@ where
                             break (bytes.len(), Some(bytes));
                         }
                         None => {
-                            let n = lease_guard.read_buf(&mut conn.upstream_read_buf).await?;
+                            let n = lease_guard
+                                .read_buf(&mut conn.upstream_read_buf)
+                                .await
+                                .map_err(velda_http1::Http1Outcome::Io)?;
                             if n == 0 {
-                                return Err(Http1Error::Parse(
+                                return Err(Http1Outcome::Parse(
                                     "Unexpected EOF while reading upstream chunked response body: premature connection close".into(),
                                 ));
                             }
@@ -298,7 +304,7 @@ where
             );
             conn.close_requested = true;
             let _ = conn.send_response(&err_resp).await;
-            return Err(Http1Error::Timeout);
+            return Err(Http1Outcome::Timeout);
         }
     };
 
@@ -393,9 +399,13 @@ where
         while !b1.is_empty() || !b2.is_empty() {
             let bufs = [std::io::IoSlice::new(b1), std::io::IoSlice::new(b2)];
             let bufs_slice = if b1.is_empty() { &bufs[1..] } else { &bufs[..] };
-            let n = conn.stream.write_vectored(bufs_slice).await?;
+            let n = conn
+                .stream
+                .write_vectored(bufs_slice)
+                .await
+                .map_err(velda_http1::Http1Outcome::Io)?;
             if n == 0 {
-                return Err(Http1Error::ConnectionClosed);
+                return Err(Http1Outcome::ConnectionClosed);
             }
             if n < b1.len() {
                 b1 = &b1[n..];
@@ -409,7 +419,10 @@ where
         conn.last_bytes_tx += actual_body_len as u64;
     } else {
         conn.upstream_read_buf.clear();
-        conn.stream.write_all(&conn.write_buf).await?;
+        conn.stream
+            .write_all(&conn.write_buf)
+            .await
+            .map_err(velda_http1::Http1Outcome::Io)?;
     }
     conn.write_buf.clear();
 

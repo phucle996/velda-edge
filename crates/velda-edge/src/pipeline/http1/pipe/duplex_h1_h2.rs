@@ -32,7 +32,7 @@ use bytes::Bytes;
 use http::StatusCode;
 use http::header::{CONTENT_TYPE, HeaderValue};
 use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt};
-use velda_http1::error::Http1Error;
+use velda_http1::outcome::Http1Outcome;
 use velda_http1::server::connection::Http1ServerConnection;
 use velda_http1::server::request::{Http1BodyFraming, Http1ServerRequestHead};
 use velda_http1::server::response::{
@@ -53,7 +53,7 @@ pub async fn serve<IO>(
     meta: &DownstreamMeta,
     req_state: &velda_core::RequestState,
     plan: &velda_plugin::RoutePluginPlan,
-) -> Result<(), Http1Error>
+) -> Result<(), Http1Outcome>
 where
     IO: AsyncRead + AsyncWrite + Unpin + Send + 'static,
 {
@@ -89,7 +89,7 @@ where
             );
             conn.close_requested = true;
             let _ = conn.send_response(&err_resp).await;
-            return Err(Http1Error::ConnectionClosed);
+            return Err(Http1Outcome::ConnectionClosed);
         }
     };
     conn.last_upstream_ip = lease.endpoint.0;
@@ -134,7 +134,7 @@ where
             );
             conn.close_requested = true;
             let _ = conn.send_response(&err_resp).await;
-            return Err(Http1Error::ConnectionClosed);
+            return Err(Http1Outcome::ConnectionClosed);
         }
     };
 
@@ -155,7 +155,7 @@ where
     // Task 1: Concurrent Upload Pump (Downstream -> Upstream H2)
     let upload_task = async {
         if is_eos {
-            return Ok::<(), Http1Error>(());
+            return Ok::<(), Http1Outcome>(());
         }
 
         match framing {
@@ -173,7 +173,7 @@ where
                         send_stream
                             .send_chunk(chunk, false)
                             .await
-                            .map_err(|_| Http1Error::ConnectionClosed)?;
+                            .map_err(|_| Http1Outcome::ConnectionClosed)?;
                     }
 
                     if decoder.is_done() {
@@ -188,13 +188,13 @@ where
                         biased;
                         _ = &mut resp_done_rx => break,
                         res = client_read.read_buf(read_buf) => {
-                            let n = res?;
+                            let n = res.map_err(velda_http1::Http1Outcome::Io)?;
                             if n == 0 {
                                 if decoder.is_done() {
                                     upload_finished.store(true, Ordering::Release);
                                     break;
                                 } else {
-                                    return Err(Http1Error::Parse(
+                                    return Err(Http1Outcome::Parse(
                                         "Unexpected EOF while reading chunked body".into(),
                                     ));
                                 }
@@ -220,7 +220,7 @@ where
                         send_stream
                             .send_chunk(chunk, false)
                             .await
-                            .map_err(|_| Http1Error::ConnectionClosed)?;
+                            .map_err(|_| Http1Outcome::ConnectionClosed)?;
                         continue;
                     }
 
@@ -233,7 +233,7 @@ where
                         biased;
                         _ = &mut resp_done_rx => break,
                         res = client_read.read_buf(read_buf) => {
-                            let n = res?;
+                            let n = res.map_err(velda_http1::Http1Outcome::Io)?;
                             if n == 0 {
                                 break;
                             }
@@ -245,7 +245,7 @@ where
                             send_stream
                                 .send_chunk(chunk, false)
                                 .await
-                                .map_err(|_| Http1Error::ConnectionClosed)?;
+                                .map_err(|_| Http1Outcome::ConnectionClosed)?;
                         }
                     }
                 }
@@ -263,14 +263,14 @@ where
             velda_http1::server::connection::tee_end(&mut body_tee);
         }
         let _ = send_stream.send_data(Bytes::new(), true);
-        Ok::<(), Http1Error>(())
+        Ok::<(), Http1Outcome>(())
     };
 
     // Task 2: Concurrent Download Pump (Upstream H2 -> Downstream)
     let download_task = async {
         let mut response = response_future
             .await
-            .map_err(|_| Http1Error::ConnectionClosed)?;
+            .map_err(|_| Http1Outcome::ConnectionClosed)?;
         let mut resp_headers = response.headers;
         if let Some(req_id) = req_head.headers.get(&crate::pipeline::X_REQUEST_ID) {
             resp_headers.insert_bypass(crate::pipeline::X_REQUEST_ID, req_id.clone());
@@ -312,10 +312,16 @@ where
                 },
                 &mut write_buf,
             );
-            client_write.write_all(&write_buf).await?;
-            client_write.flush().await?;
+            client_write
+                .write_all(&write_buf)
+                .await
+                .map_err(velda_http1::Http1Outcome::Io)?;
+            client_write
+                .flush()
+                .await
+                .map_err(velda_http1::Http1Outcome::Io)?;
             let _ = resp_done_tx.send(());
-            return Ok::<(), Http1Error>(());
+            return Ok::<(), Http1Outcome>(());
         }
 
         // Fast-path for finite response payloads (e.g. echo or upload status like 200 OK "pong")
@@ -333,7 +339,7 @@ where
                     .body
                     .recv_chunk()
                     .await
-                    .map_err(|_| Http1Error::ConnectionClosed)?
+                    .map_err(|_| Http1Outcome::ConnectionClosed)?
                 {
                     Some(chunk) => body_buf.extend_from_slice(&chunk),
                     None => break,
@@ -352,11 +358,17 @@ where
                 &mut write_buf,
             );
             write_buf.extend_from_slice(&body_buf);
-            client_write.write_all(&write_buf).await?;
-            client_write.flush().await?;
+            client_write
+                .write_all(&write_buf)
+                .await
+                .map_err(velda_http1::Http1Outcome::Io)?;
+            client_write
+                .flush()
+                .await
+                .map_err(velda_http1::Http1Outcome::Io)?;
             *last_bytes_tx += body_buf.len() as u64;
             let _ = resp_done_tx.send(());
-            return Ok::<(), Http1Error>(());
+            return Ok::<(), Http1Outcome>(());
         }
 
         // True progressive chunked streaming path
@@ -379,16 +391,19 @@ where
             .body
             .recv_chunk()
             .await
-            .map_err(|_| Http1Error::ConnectionClosed)?
+            .map_err(|_| Http1Outcome::ConnectionClosed)?
         {
             send_chunk(&mut client_write, &chunk).await?;
             *last_bytes_tx += chunk.len() as u64;
         }
 
         send_chunked_end(&mut client_write).await?;
-        client_write.flush().await?;
+        client_write
+            .flush()
+            .await
+            .map_err(velda_http1::Http1Outcome::Io)?;
         let _ = resp_done_tx.send(());
-        Ok::<(), Http1Error>(())
+        Ok::<(), Http1Outcome>(())
     };
 
     // 7. Concurrently drive upload and download with zero head-of-line blocking

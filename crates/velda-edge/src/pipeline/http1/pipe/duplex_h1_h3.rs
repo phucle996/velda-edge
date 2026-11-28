@@ -31,7 +31,7 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use http::StatusCode;
 use http::header::{CONTENT_TYPE, HeaderValue};
 use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt};
-use velda_http1::error::Http1Error;
+use velda_http1::outcome::Http1Outcome;
 use velda_http1::server::connection::Http1ServerConnection;
 use velda_http1::server::request::{Http1BodyFraming, Http1ServerRequestHead};
 use velda_http1::server::response::{
@@ -53,7 +53,7 @@ pub async fn serve<IO>(
     meta: &DownstreamMeta,
     req_state: &velda_core::RequestState,
     plan: &velda_plugin::RoutePluginPlan,
-) -> Result<(), Http1Error>
+) -> Result<(), Http1Outcome>
 where
     IO: AsyncRead + AsyncWrite + Unpin + Send + 'static,
 {
@@ -90,7 +90,7 @@ where
             );
             conn.close_requested = true;
             let _ = conn.send_response(&err_resp).await;
-            return Err(Http1Error::ConnectionClosed);
+            return Err(Http1Outcome::ConnectionClosed);
         }
     };
     let (__u_ip, __u_port) = client.target();
@@ -200,7 +200,7 @@ where
                     );
                     conn.close_requested = true;
                     let _ = conn.send_response(&err_resp).await;
-                    return Err(Http1Error::ConnectionClosed);
+                    return Err(Http1Outcome::ConnectionClosed);
                 }
             };
             let (__u_ip, __u_port) = fresh_client.target();
@@ -230,7 +230,7 @@ where
                     );
                     conn.close_requested = true;
                     let _ = conn.send_response(&err_resp).await;
-                    return Err(Http1Error::ConnectionClosed);
+                    return Err(Http1Outcome::ConnectionClosed);
                 }
             }
         }
@@ -246,7 +246,7 @@ where
             );
             conn.close_requested = true;
             let _ = conn.send_response(&err_resp).await;
-            return Err(Http1Error::ConnectionClosed);
+            return Err(Http1Outcome::ConnectionClosed);
         }
     };
 
@@ -276,7 +276,7 @@ where
     let upload_task = async {
         if initial_is_fin {
             upload_finished.store(true, Ordering::Release);
-            return Ok::<(), Http1Error>(());
+            return Ok::<(), Http1Outcome>(());
         }
 
         match framing {
@@ -290,7 +290,7 @@ where
                         sender
                             .send_chunk(chunk)
                             .await
-                            .map_err(|_| Http1Error::ConnectionClosed)?;
+                            .map_err(|_| Http1Outcome::ConnectionClosed)?;
                     }
 
                     if decoder.is_done() {
@@ -301,13 +301,16 @@ where
                     if read_buf.capacity().saturating_sub(read_buf.len()) < TARGET_RESERVE {
                         read_buf.reserve(TARGET_RESERVE);
                     }
-                    let n = client_read.read_buf(read_buf).await?;
+                    let n = client_read
+                        .read_buf(read_buf)
+                        .await
+                        .map_err(velda_http1::Http1Outcome::Io)?;
                     if n == 0 {
                         if decoder.is_done() {
                             upload_finished.store(true, Ordering::Release);
                             break;
                         } else {
-                            return Err(Http1Error::Parse(
+                            return Err(Http1Outcome::Parse(
                                 "Unexpected EOF while reading chunked body".into(),
                             ));
                         }
@@ -338,7 +341,7 @@ where
                             sender
                                 .send_chunk(chunk)
                                 .await
-                                .map_err(|_| Http1Error::ConnectionClosed)?;
+                                .map_err(|_| Http1Outcome::ConnectionClosed)?;
                             continue;
                         }
 
@@ -348,7 +351,10 @@ where
                             read_buf.reserve(needed);
                         }
 
-                        let n = client_read.read_buf(read_buf).await?;
+                        let n = client_read
+                            .read_buf(read_buf)
+                            .await
+                            .map_err(velda_http1::Http1Outcome::Io)?;
                         if n == 0 {
                             // EOF — flush whatever we have accumulated
                             let chunk_len = read_buf.len().min(remaining);
@@ -362,7 +368,7 @@ where
                                 sender
                                     .send_chunk(chunk)
                                     .await
-                                    .map_err(|_| Http1Error::ConnectionClosed)?;
+                                    .map_err(|_| Http1Outcome::ConnectionClosed)?;
                             }
                             break;
                         }
@@ -375,7 +381,10 @@ where
                         read_buf.reserve(to_read);
                     }
 
-                    let n = client_read.read_buf(read_buf).await?;
+                    let n = client_read
+                        .read_buf(read_buf)
+                        .await
+                        .map_err(velda_http1::Http1Outcome::Io)?;
                     if n == 0 {
                         break;
                     }
@@ -393,7 +402,7 @@ where
             velda_http1::server::connection::tee_end(&mut body_tee);
         }
         let _ = sender.finish().await;
-        Ok::<(), Http1Error>(())
+        Ok::<(), Http1Outcome>(())
     };
 
     // Task 2: Download Pump (Upstream H3 QUIC -> Downstream H1)
@@ -402,9 +411,9 @@ where
             Ok(Ok(r)) => r,
             Ok(Err(e)) => {
                 tracing::warn!(error = %e, "Upstream HTTP/3 duplex stream failed");
-                return Err(Http1Error::ConnectionClosed);
+                return Err(Http1Outcome::ConnectionClosed);
             }
-            Err(_) => return Err(Http1Error::ConnectionClosed),
+            Err(_) => return Err(Http1Outcome::ConnectionClosed),
         };
 
         let mut resp_headers = std::mem::take(&mut resp_stream.headers);
@@ -449,9 +458,15 @@ where
                 },
                 write_buf,
             );
-            client_write.write_all(write_buf).await?;
-            client_write.flush().await?;
-            return Ok::<(), Http1Error>(());
+            client_write
+                .write_all(write_buf)
+                .await
+                .map_err(velda_http1::Http1Outcome::Io)?;
+            client_write
+                .flush()
+                .await
+                .map_err(velda_http1::Http1Outcome::Io)?;
+            return Ok::<(), Http1Outcome>(());
         }
 
         // Fast-path for finite response payloads (e.g. echo or upload status like 200 OK "pong")
@@ -469,7 +484,7 @@ where
                     Some(Ok(chunk)) => body_buf.extend_from_slice(&chunk),
                     Some(Err(e)) => {
                         tracing::warn!(error = %e, "Error reading response chunk from HTTP/3 upstream");
-                        return Err(Http1Error::ConnectionClosed);
+                        return Err(Http1Outcome::ConnectionClosed);
                     }
                     None => break,
                 }
@@ -487,10 +502,16 @@ where
                 write_buf,
             );
             write_buf.extend_from_slice(&body_buf);
-            client_write.write_all(write_buf).await?;
-            client_write.flush().await?;
+            client_write
+                .write_all(write_buf)
+                .await
+                .map_err(velda_http1::Http1Outcome::Io)?;
+            client_write
+                .flush()
+                .await
+                .map_err(velda_http1::Http1Outcome::Io)?;
             *last_bytes_tx += body_buf.len() as u64;
-            return Ok::<(), Http1Error>(());
+            return Ok::<(), Http1Outcome>(());
         }
 
         // True progressive chunked streaming path
@@ -518,14 +539,17 @@ where
                 }
                 Err(e) => {
                     tracing::warn!(error = %e, "Error reading response chunk from HTTP/3 upstream");
-                    return Err(Http1Error::ConnectionClosed);
+                    return Err(Http1Outcome::ConnectionClosed);
                 }
             }
         }
 
         send_chunked_end(&mut client_write).await?;
-        client_write.flush().await?;
-        Ok::<(), Http1Error>(())
+        client_write
+            .flush()
+            .await
+            .map_err(velda_http1::Http1Outcome::Io)?;
+        Ok::<(), Http1Outcome>(())
     };
 
     let duplex_res = tokio::try_join!(upload_task, download_task);

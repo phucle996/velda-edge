@@ -6,7 +6,7 @@
 //! # Modular Plugin Schema Architecture
 //! Individual plugin configuration schemas and validation rules are organized under
 //! dedicated sub-modules by plugin type:
-//! - [`prometheus_exporter`]: Schema and strict semantic validation for Prometheus Exporter.
+//! - [`log_exporter`], [`metrics_exporter`], [`trace_exporter`]: Consolidated observability exporters.
 //! - Future plugins (`jwt_auth`, `rate_limit`, `ip_restriction`) are isolated similarly.
 
 use std::collections::HashSet;
@@ -25,19 +25,12 @@ pub use velda_plugin::{
     validate_plugin_dependencies,
 };
 
-// Re-export all plugin configuration types from velda-plugin for seamless backward compatibility
+// Re-export plugin configuration validation types compiled by velda-plugin
 pub use velda_plugin::background::acme_cert_rotator::validation::*;
-pub use velda_plugin::background::clickhouse_log_shipper::validation::*;
-pub use velda_plugin::background::elasticsearch_log_shipper::validation::*;
 pub use velda_plugin::background::health_probe::validation::*;
-pub use velda_plugin::background::kafka_log_shipper::validation::*;
-pub use velda_plugin::background::loki_log_shipper::validation::*;
-pub use velda_plugin::background::otlp_log_shipper::validation::*;
-pub use velda_plugin::background::otlp_metrics_exporter::validation::*;
-pub use velda_plugin::background::prometheus_exporter::validation::*;
-pub use velda_plugin::background::s3_log_shipper::validation::*;
-pub use velda_plugin::background::statsd_exporter::validation::*;
-pub use velda_plugin::background::std_log_shipper::validation::*;
+pub use velda_plugin::background::log_exporter::validation::*;
+pub use velda_plugin::background::metrics_exporter::validation::*;
+pub use velda_plugin::background::trace_exporter::validation::*;
 pub use velda_plugin::post_response::cors::validation::*;
 pub use velda_plugin::post_response::http_cache_store::validation::*;
 pub use velda_plugin::post_response::response_compression::validation::*;
@@ -51,11 +44,10 @@ pub use velda_plugin::pre_upstream::api_key_auth::validation::*;
 pub use velda_plugin::pre_upstream::bot_detection::validation::*;
 pub use velda_plugin::pre_upstream::canary::validation::*;
 pub use velda_plugin::pre_upstream::csrf::validation::*;
-pub use velda_plugin::pre_upstream::grpc_fault_injection::validation::*;
+pub use velda_plugin::pre_upstream::fault_injection::validation::*;
 pub use velda_plugin::pre_upstream::header_mutation::validation::*;
 pub use velda_plugin::pre_upstream::hmac_auth::validation::*;
 pub use velda_plugin::pre_upstream::http_cache_lookup::validation::*;
-pub use velda_plugin::pre_upstream::http_fault_injection::validation::*;
 pub use velda_plugin::pre_upstream::ja4_filter::validation::*;
 pub use velda_plugin::pre_upstream::jwt_auth::validation::*;
 pub use velda_plugin::pre_upstream::oauth2_introspection::validation::*;
@@ -399,33 +391,38 @@ mod tests {
     }
 
     #[test]
-    fn test_valid_prometheus_exporter_plugin() {
+    fn test_valid_metrics_exporter_plugin() {
         let json = r#"{
             "schema_version": 1,
             "plugins": [
                 {
-                    "id": "prometheus_exporter",
+                    "id": "metrics_exporter",
                     "config": {
-                        "listen": "0.0.0.0:9090",
-                        "path": "/metrics",
-                        "protocol": "http",
-                        "scrape": {
-                            "timeout_ms": 5000,
-                            "max_concurrency": 16,
-                            "max_buffer_size_kb": 256
-                        },
-                        "tls": {
-                            "mode": "none"
-                        },
-                        "cors": {
-                            "enabled": false,
-                            "allow_origins": [],
-                            "allow_methods": [],
-                            "allow_headers": []
-                        },
-                        "auth": {
-                            "mode": "none"
-                        }
+                        "targets": [
+                            {
+                                "mode": "pull",
+                                "listen": "0.0.0.0:9090",
+                                "path": "/metrics",
+                                "protocol": "http",
+                                "scrape": {
+                                    "timeout_ms": 5000,
+                                    "max_concurrency": 16,
+                                    "max_buffer_size_kb": 256
+                                },
+                                "tls": {
+                                    "mode": "none"
+                                },
+                                "cors": {
+                                    "enabled": false,
+                                    "allow_origins": [],
+                                    "allow_methods": [],
+                                    "allow_headers": []
+                                },
+                                "auth": {
+                                    "mode": "none"
+                                }
+                            }
+                        ]
                     }
                 }
             ]

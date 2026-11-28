@@ -10,7 +10,7 @@ use std::time::Duration;
 
 use velda_core::{L7Request, L7Response};
 use velda_grpc::config::GrpcConfig;
-use velda_grpc::error::GrpcError;
+use velda_grpc::outcome::GrpcOutcome;
 use velda_grpc::udp::client::connector::GrpcUdpClient;
 
 use crate::upstream::GrpcUdpUpstream;
@@ -20,7 +20,7 @@ async fn pipe_buffered_wire(
     client: &GrpcUdpClient,
     req: &L7Request,
     config: &GrpcConfig,
-) -> Result<L7Response, GrpcError> {
+) -> Result<L7Response, GrpcOutcome> {
     let timeout = Duration::from_millis(config.max_call_duration_ms);
 
     let workflow = async {
@@ -30,11 +30,11 @@ async fn pipe_buffered_wire(
             if b.len() >= 5 {
                 let declared_len = u32::from_be_bytes([b[1], b[2], b[3], b[4]]) as usize;
                 if declared_len > config.max_message_size {
-                    return Err(GrpcError::PayloadTooLarge(declared_len));
+                    return Err(GrpcOutcome::PayloadTooLarge(declared_len));
                 }
             }
             if b.len() > config.max_message_size + 5 {
-                return Err(GrpcError::PayloadTooLarge(b.len()));
+                return Err(GrpcOutcome::PayloadTooLarge(b.len()));
             }
         }
 
@@ -47,11 +47,11 @@ async fn pipe_buffered_wire(
             if b.len() >= 5 {
                 let declared_len = u32::from_be_bytes([b[1], b[2], b[3], b[4]]) as usize;
                 if declared_len > config.max_message_size {
-                    return Err(GrpcError::PayloadTooLarge(declared_len));
+                    return Err(GrpcOutcome::PayloadTooLarge(declared_len));
                 }
             }
             if b.len() > config.max_message_size + 5 {
-                return Err(GrpcError::PayloadTooLarge(b.len()));
+                return Err(GrpcOutcome::PayloadTooLarge(b.len()));
             }
         }
 
@@ -60,7 +60,7 @@ async fn pipe_buffered_wire(
 
     tokio::time::timeout(timeout, workflow)
         .await
-        .map_err(|_| GrpcError::Timeout)?
+        .map_err(|_| GrpcOutcome::Timeout)?
 }
 
 /// Serves a buffered gRPC request over UDP forwarded to a gRPC UDP backend.
@@ -68,14 +68,14 @@ pub async fn serve(
     req: &L7Request,
     upstream: &Arc<GrpcUdpUpstream>,
     config: &GrpcConfig,
-) -> Result<(L7Response, Option<(u128, u16)>), GrpcError> {
+) -> Result<(L7Response, Option<(u128, u16)>), GrpcOutcome> {
     let client = upstream.acquire(config).await.map_err(|e| {
         tracing::warn!(
             error = %e,
             upstream = %upstream.id(),
             "Failed to acquire upstream gRPC over UDP client"
         );
-        GrpcError::Io(std::io::Error::new(
+        GrpcOutcome::Io(std::io::Error::new(
             std::io::ErrorKind::ConnectionRefused,
             e.to_string(),
         ))

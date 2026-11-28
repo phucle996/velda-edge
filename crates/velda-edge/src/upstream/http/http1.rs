@@ -409,7 +409,7 @@ impl Http1Upstream {
                 ))
             })
             .await
-            .map_err(EdgeError::Upstream)?;
+            .map_err(|e| EdgeError::Upstream(e.to_string()))?;
 
         Ok(Http1Lease {
             stream: Some(stream),
@@ -449,7 +449,7 @@ impl Http1Upstream {
                 Ok::<_, String>((stream, endpoint))
             })
             .await
-            .map_err(EdgeError::Upstream)?;
+            .map_err(|e| EdgeError::Upstream(e.to_string()))?;
 
         Ok(Http1Lease {
             stream: Some(stream),

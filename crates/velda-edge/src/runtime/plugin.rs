@@ -326,7 +326,7 @@ mod tests {
                 pbww: 1,
             })),
             LoadedPlugin::Background(Arc::new(MockBackgroundPlugin {
-                id: "loki_log_shipper".into(),
+                id: "log_exporter".into(),
                 pbww: 80,
             })),
             LoadedPlugin::PostResponse(Arc::new(MockHotPathPostPlugin {
@@ -355,28 +355,24 @@ mod tests {
                 id: "acme_cert_rotator".into(),
                 pbww: 10,
             })),
-            LoadedPlugin::Background(Arc::new(MockBackgroundPlugin {
-                id: "std_log_shipper".into(),
-                pbww: 15,
-            })),
-            LoadedPlugin::Background(Arc::new(MockBackgroundPlugin {
-                id: "statsd_exporter".into(),
-                pbww: 20,
-            })),
             LoadedPlugin::PostResponse(Arc::new(MockHotPathPostPlugin {
                 id: "openai_token_quota".into(),
                 pbww: 30,
             })),
             LoadedPlugin::Background(Arc::new(MockBackgroundPlugin {
-                id: "otlp_metrics_exporter".into(),
+                id: "metrics_exporter".into(),
                 pbww: 40,
             })),
             LoadedPlugin::Background(Arc::new(MockBackgroundPlugin {
-                id: "otlp_log_shipper".into(),
+                id: "trace_exporter".into(),
+                pbww: 50,
+            })),
+            LoadedPlugin::Background(Arc::new(MockBackgroundPlugin {
+                id: "rate_limit_rotator".into(),
                 pbww: 70,
             })),
             LoadedPlugin::Background(Arc::new(MockBackgroundPlugin {
-                id: "loki_log_shipper".into(),
+                id: "log_exporter".into(),
                 pbww: 80,
             })),
             LoadedPlugin::PostResponse(Arc::new(MockHotPathPostPlugin {
@@ -389,31 +385,31 @@ mod tests {
         let shards = partition_background_plugins(&plugins, 4);
         assert_eq!(shards.len(), 4);
 
-        // 9 active plugins with pbww > 0 must be allocated (pbww == 0 excluded)
+        // 8 active plugins with pbww > 0 must be allocated (pbww == 0 excluded)
         let total_allocated: usize = shards.iter().map(|s| s.len()).sum();
-        assert_eq!(total_allocated, 9);
+        assert_eq!(total_allocated, 8);
 
         // Every core must receive at least 1 plugin
         for (i, shard) in shards.iter().enumerate() {
             assert!(!shard.is_empty(), "Core {i} must have at least one plugin");
         }
 
-        // Two heaviest workloads (loki: 80, otlp_log: 70) must naturally be separated on different cores
-        let mut loki_core = None;
-        let mut otlp_log_core = None;
+        // Two heaviest workloads (log_exporter: 80, rate_limit_rotator: 70) must be on different cores
+        let mut log_core = None;
+        let mut other_heavy_core = None;
         for (core, shard) in shards.iter().enumerate() {
             for p in shard {
-                if p.id() == "loki_log_shipper" {
-                    loki_core = Some(core);
+                if p.id() == "log_exporter" {
+                    log_core = Some(core);
                 }
-                if p.id() == "otlp_log_shipper" {
-                    otlp_log_core = Some(core);
+                if p.id() == "rate_limit_rotator" {
+                    other_heavy_core = Some(core);
                 }
             }
         }
         assert_ne!(
-            loki_core, otlp_log_core,
-            "Loki and OTLP log shipper must naturally be on different cores"
+            log_core, other_heavy_core,
+            "Heaviest background workloads must naturally be on different cores"
         );
 
         // Compute total PBWW per core and verify tight load balance

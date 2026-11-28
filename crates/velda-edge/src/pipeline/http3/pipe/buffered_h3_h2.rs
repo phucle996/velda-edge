@@ -16,11 +16,7 @@ use crate::upstream::Http2Upstream;
 pub async fn serve(
     req: &L7Request,
     upstream: &Arc<Http2Upstream>,
-) -> (
-    L7Response,
-    Option<(u128, u16)>,
-    velda_core::CompletionReason,
-) {
+) -> (L7Response, Option<(u128, u16)>, velda_core::InternalStatus) {
     let body_bytes = req.body.to_bytes();
 
     let (client, lease) = match upstream.acquire(&upstream.config).await {
@@ -41,7 +37,7 @@ pub async fn serve(
                     HeaderValue::from_static("text/plain; charset=utf-8"),
                 ),
                 None,
-                velda_core::CompletionReason::UpstreamError,
+                velda_core::InternalStatus::UpstreamError,
             );
         }
     };
@@ -69,7 +65,7 @@ pub async fn serve(
     }
 
     match pipe_res {
-        Ok(resp) => (resp, upstream_addr, velda_core::CompletionReason::Complete),
+        Ok(resp) => (resp, upstream_addr, velda_core::InternalStatus::Completed),
         Err(e) => {
             tracing::warn!(
                 error = %e,
@@ -86,7 +82,7 @@ pub async fn serve(
                     HeaderValue::from_static("text/plain; charset=utf-8"),
                 ),
                 upstream_addr,
-                velda_core::CompletionReason::UpstreamError,
+                velda_core::InternalStatus::UpstreamError,
             )
         }
     }
@@ -96,7 +92,7 @@ async fn send_h2_buffered(
     client: &velda_http2::client::connection::Http2Client,
     req: &L7Request,
     body: &bytes::Bytes,
-) -> Result<L7Response, velda_http2::error::Http2Error> {
+) -> Result<L7Response, velda_http2::outcome::Http2Outcome> {
     let has_body = !body.is_empty();
     let (response_future, mut send_stream) = client
         .send_request(

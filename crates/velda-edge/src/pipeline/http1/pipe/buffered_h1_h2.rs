@@ -31,7 +31,7 @@ use bytes::BytesMut;
 use http::StatusCode;
 use http::header::{CONTENT_TYPE, HeaderValue};
 use tokio::io::{AsyncRead, AsyncWrite};
-use velda_http1::error::Http1Error;
+use velda_http1::outcome::Http1Outcome;
 use velda_http1::server::connection::Http1ServerConnection;
 use velda_http1::server::request::{Http1BodyFraming, Http1ServerRequestHead};
 use velda_http1::server::response::Http1ServerResponse;
@@ -49,7 +49,7 @@ pub async fn serve<IO>(
     meta: &DownstreamMeta,
     req_state: &velda_core::RequestState,
     plan: &velda_plugin::RoutePluginPlan,
-) -> Result<(), Http1Error>
+) -> Result<(), Http1Outcome>
 where
     IO: AsyncRead + AsyncWrite + Unpin + Send + 'static,
 {
@@ -68,7 +68,7 @@ where
         .await
     {
         Ok(b) => b,
-        Err(Http1Error::Timeout) => {
+        Err(Http1Outcome::Timeout) => {
             let err_resp = Http1ServerResponse::from_bytes(
                 StatusCode::REQUEST_TIMEOUT,
                 b"408 Request Timeout: client body read idle timeout exceeded\n".to_vec(),
@@ -79,7 +79,7 @@ where
             );
             conn.close_requested = true;
             let _ = conn.send_response(&err_resp).await;
-            return Err(Http1Error::Timeout);
+            return Err(Http1Outcome::Timeout);
         }
         Err(e) => {
             let err_resp = Http1ServerResponse::from_bytes(
@@ -119,7 +119,7 @@ where
             );
             conn.close_requested = true;
             let _ = conn.send_response(&err_resp).await;
-            return Err(Http1Error::ConnectionClosed);
+            return Err(Http1Outcome::ConnectionClosed);
         }
     };
     conn.last_upstream_ip = lease.endpoint.0;
@@ -211,7 +211,7 @@ where
             meta.inject_response_headers(&mut err_resp.headers);
             conn.close_requested = true;
             let _ = conn.send_response(&err_resp).await;
-            Err(Http1Error::ConnectionClosed)
+            Err(Http1Outcome::ConnectionClosed)
         }
     }
 }
@@ -223,7 +223,7 @@ async fn send_h2_buffered(
     is_tls: bool,
     upstream_host: &str,
     max_body_size: usize,
-) -> Result<Http1ServerResponse, velda_http2::error::Http2Error> {
+) -> Result<Http1ServerResponse, velda_http2::outcome::Http2Outcome> {
     let scheme = if is_tls { "https" } else { "http" };
     let authority = req_head
         .headers

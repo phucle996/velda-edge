@@ -31,7 +31,7 @@ use std::sync::Arc;
 use http::StatusCode;
 use http::header::{CONTENT_TYPE, HeaderValue};
 use tokio::io::{AsyncRead, AsyncWrite};
-use velda_http1::error::Http1Error;
+use velda_http1::outcome::Http1Outcome;
 use velda_http1::server::connection::Http1ServerConnection;
 use velda_http1::server::request::{Http1BodyFraming, Http1ServerRequestHead};
 use velda_http1::server::response::{Http1ServerResponse, Http1ServerResponseHead};
@@ -50,7 +50,7 @@ pub async fn serve<IO>(
     meta: &DownstreamMeta,
     req_state: &velda_core::RequestState,
     plan: &velda_plugin::RoutePluginPlan,
-) -> Result<(), Http1Error>
+) -> Result<(), Http1Outcome>
 where
     IO: AsyncRead + AsyncWrite + Unpin + Send + 'static,
 {
@@ -66,7 +66,7 @@ where
     // 3. Read entire downstream body into RAM
     let body = match conn.read_body(framing).await {
         Ok(b) => b,
-        Err(Http1Error::Timeout) => {
+        Err(Http1Outcome::Timeout) => {
             let err_resp = Http1ServerResponse::from_bytes(
                 StatusCode::REQUEST_TIMEOUT,
                 b"408 Request Timeout: client body read idle timeout exceeded\n".to_vec(),
@@ -77,7 +77,7 @@ where
             );
             conn.close_requested = true;
             let _ = conn.send_response(&err_resp).await;
-            return Err(Http1Error::Timeout);
+            return Err(Http1Outcome::Timeout);
         }
         Err(e) => {
             let err_resp = Http1ServerResponse::from_bytes(
@@ -117,7 +117,7 @@ where
             );
             conn.close_requested = true;
             let _ = conn.send_response(&err_resp).await;
-            return Err(Http1Error::ConnectionClosed);
+            return Err(Http1Outcome::ConnectionClosed);
         }
     };
     conn.last_upstream_ip = lease.endpoint.0;
@@ -170,7 +170,7 @@ where
             );
             conn.close_requested = true;
             let _ = conn.send_response(&err_resp).await;
-            return Err(Http1Error::ConnectionClosed);
+            return Err(Http1Outcome::ConnectionClosed);
         }
     };
 
@@ -182,7 +182,7 @@ where
         );
         conn.close_requested = true;
         let _ = conn.send_response(&err_resp).await;
-        return Err(Http1Error::ConnectionClosed);
+        return Err(Http1Outcome::ConnectionClosed);
     }
 
     let mut response = match response_future.await {
@@ -195,7 +195,7 @@ where
             );
             conn.close_requested = true;
             let _ = conn.send_response(&err_resp).await;
-            return Err(Http1Error::ConnectionClosed);
+            return Err(Http1Outcome::ConnectionClosed);
         }
     };
 
@@ -228,7 +228,7 @@ where
         Ok(opt) => opt,
         Err(e) => {
             tracing::debug!(error = %e, "Error reading HTTP/2 response stream chunk");
-            return Err(Http1Error::ConnectionClosed);
+            return Err(Http1Outcome::ConnectionClosed);
         }
     };
 
@@ -259,7 +259,7 @@ where
             Ok(None) => break,
             Err(e) => {
                 tracing::debug!(error = %e, "Error reading HTTP/2 response stream chunk");
-                return Err(Http1Error::ConnectionClosed);
+                return Err(Http1Outcome::ConnectionClosed);
             }
         };
 
@@ -282,7 +282,7 @@ where
                 Ok(None) => break,
                 Err(e) => {
                     tracing::debug!(error = %e, "Error reading opportunistic HTTP/2 chunk");
-                    return Err(Http1Error::ConnectionClosed);
+                    return Err(Http1Outcome::ConnectionClosed);
                 }
             }
         }
@@ -295,7 +295,7 @@ where
 
         if let Err(e) = send_res {
             tracing::debug!(error = %e, "Downstream client disconnected during streaming");
-            return Err(Http1Error::ConnectionClosed);
+            return Err(Http1Outcome::ConnectionClosed);
         }
         conn.last_bytes_tx += batch_bytes as u64;
 

@@ -37,7 +37,7 @@ use velda_core::Body;
 use velda_http1::client::header::sanitize_headers;
 use velda_http1::client::request::send_request_parts;
 use velda_http1::client::response::read_response_head;
-use velda_http1::error::Http1Error;
+use velda_http1::outcome::Http1Outcome;
 use velda_http1::server::connection::Http1ServerConnection;
 use velda_http1::server::request::{Http1BodyFraming, Http1ServerRequestHead};
 use velda_http1::server::response::Http1ServerResponse;
@@ -55,7 +55,7 @@ pub async fn serve<IO>(
     meta: &DownstreamMeta,
     req_state: &velda_core::RequestState,
     plan: &velda_plugin::RoutePluginPlan,
-) -> Result<(), Http1Error>
+) -> Result<(), Http1Outcome>
 where
     IO: AsyncRead + AsyncWrite + Unpin + Send + 'static,
 {
@@ -87,7 +87,7 @@ where
             );
             conn.close_requested = true;
             let _ = conn.send_response(&err_resp).await;
-            return Err(Http1Error::ConnectionClosed);
+            return Err(Http1Outcome::ConnectionClosed);
         }
     };
     conn.last_upstream_ip = upstream_lease.endpoint.0;
@@ -166,7 +166,7 @@ where
                     Some(0),
                     conn.close_requested,
                 );
-                conn.stream.write_all(&conn.write_buf).await?;
+                conn.stream.write_all(&conn.write_buf).await.map_err(velda_http1::Http1Outcome::Io)?;
                 if resp_head
                     .headers
                     .get(http::header::CONNECTION)
@@ -175,7 +175,7 @@ where
                 {
                     conn.close_requested = true;
                 }
-                return Ok::<(), Http1Error>(());
+                return Ok::<(), Http1Outcome>(());
             }
 
             match resp_framing {
@@ -188,7 +188,7 @@ where
                         Some(0),
                         conn.close_requested,
                     );
-                    conn.stream.write_all(&conn.write_buf).await?;
+                    conn.stream.write_all(&conn.write_buf).await.map_err(velda_http1::Http1Outcome::Io)?;
                     if resp_head
                         .headers
                         .get(http::header::CONNECTION)
@@ -200,7 +200,7 @@ where
                 }
                 Http1BodyFraming::ContentLength(len) => {
                     if len > cfg.max_body_size {
-                        return Err(Http1Error::PayloadTooLarge(len));
+                        return Err(Http1Outcome::PayloadTooLarge(len));
                     }
                     if conn.upstream_read_buf.len() < len {
                         let needed = len - conn.upstream_read_buf.len();
@@ -208,9 +208,9 @@ where
                         while conn.upstream_read_buf.len() < len {
                             let n = upstream_lease
                                 .read_buf(&mut conn.upstream_read_buf)
-                                .await?;
+                                .await.map_err(velda_http1::Http1Outcome::Io)?;
                             if n == 0 {
-                                return Err(Http1Error::Parse(
+                                return Err(Http1Outcome::Parse(
                                     "Unexpected EOF while reading upstream response body: premature connection close".into(),
                                 ));
                             }
@@ -228,7 +228,7 @@ where
                         conn.write_buf.extend_from_slice(&conn.upstream_read_buf[..len]);
                         conn.upstream_read_buf.advance(len);
                     }
-                    conn.stream.write_all(&conn.write_buf).await?;
+                    conn.stream.write_all(&conn.write_buf).await.map_err(velda_http1::Http1Outcome::Io)?;
                     conn.last_bytes_tx += len as u64;
                     if resp_head
                         .headers
@@ -240,12 +240,12 @@ where
                     }
                 }
                 Http1BodyFraming::Chunked => {
-                    return Err(Http1Error::StreamingViolation(
+                    return Err(Http1Outcome::StreamingViolation(
                         "Upstream returned chunked transfer-encoding on client-streaming route with server streaming disabled".into(),
                     ));
                 }
             }
-            Ok::<(), Http1Error>(())
+            Ok::<(), Http1Outcome>(())
         }
         .await;
 
@@ -273,7 +273,7 @@ where
         while let Some(slice) = decoder.decode_step(&mut conn.read_buf)? {
             total_body_bytes += slice.len();
             if total_body_bytes > cfg.max_body_size {
-                return Err(Http1Error::PayloadTooLarge(total_body_bytes));
+                return Err(Http1Outcome::PayloadTooLarge(total_body_bytes));
             }
             velda_http1::server::connection::tee_chunk(&mut conn.body_tee, slice.clone());
             encode_chunk(&slice, &mut conn.upstream_write_buf);
@@ -293,7 +293,7 @@ where
         upstream_lease
             .write_all(&conn.upstream_write_buf)
             .await
-            .map_err(Http1Error::Io)?;
+            .map_err(Http1Outcome::Io)?;
         conn.upstream_write_buf.clear();
 
         // If terminal chunk was not in the initial buffer, progressively stream remaining chunks
@@ -303,9 +303,9 @@ where
                 while let Some(slice) = decoder.decode_step(&mut conn.read_buf)? {
                     total_body_bytes = total_body_bytes
                         .checked_add(slice.len())
-                        .ok_or(Http1Error::PayloadTooLarge(usize::MAX))?;
+                        .ok_or(Http1Outcome::PayloadTooLarge(usize::MAX))?;
                     if total_body_bytes > cfg.max_body_size {
-                        return Err(Http1Error::PayloadTooLarge(total_body_bytes));
+                        return Err(Http1Outcome::PayloadTooLarge(total_body_bytes));
                     }
                     conn.last_bytes_rx += slice.len() as u64;
                     velda_http1::server::connection::tee_chunk(&mut conn.body_tee, slice.clone());
@@ -327,8 +327,8 @@ where
                 )
                 .await
                 {
-                    Ok(res) => res?,
-                    Err(_) => return Err(Http1Error::Timeout),
+                    Ok(res) => res.map_err(velda_http1::Http1Outcome::Io)?,
+                    Err(_) => return Err(Http1Outcome::Timeout),
                 };
 
                 if bytes_read == 0 {
@@ -336,7 +336,7 @@ where
                         sent_terminal = true;
                         break;
                     } else {
-                        return Err(Http1Error::Parse(
+                        return Err(Http1Outcome::Parse(
                             "Unexpected EOF while reading chunked body".into(),
                         ));
                     }
@@ -383,7 +383,7 @@ where
 
         // Validate response framing (client streaming expects non-streaming response)
         if resp_framing == Http1BodyFraming::Chunked {
-            return Err(Http1Error::StreamingViolation(
+            return Err(Http1Outcome::StreamingViolation(
                 "Upstream returned chunked transfer-encoding on client-streaming route with server streaming disabled".into(),
             ));
         }
@@ -402,7 +402,7 @@ where
                 Some(0),
                 conn.close_requested,
             );
-            conn.stream.write_all(&conn.write_buf).await?;
+            conn.stream.write_all(&conn.write_buf).await.map_err(velda_http1::Http1Outcome::Io)?;
             if resp_head
                 .headers
                 .get(http::header::CONNECTION)
@@ -411,7 +411,7 @@ where
             {
                 conn.close_requested = true;
             }
-            return Ok::<(), Http1Error>(());
+            return Ok::<(), Http1Outcome>(());
         }
 
         match resp_framing {
@@ -424,7 +424,7 @@ where
                     Some(0),
                     conn.close_requested,
                 );
-                conn.stream.write_all(&conn.write_buf).await?;
+                conn.stream.write_all(&conn.write_buf).await.map_err(velda_http1::Http1Outcome::Io)?;
                 if resp_head
                     .headers
                     .get(http::header::CONNECTION)
@@ -436,7 +436,7 @@ where
             }
             Http1BodyFraming::ContentLength(len) => {
                 if len > cfg.max_body_size {
-                    return Err(Http1Error::PayloadTooLarge(len));
+                    return Err(Http1Outcome::PayloadTooLarge(len));
                 }
                 if conn.upstream_read_buf.len() < len {
                     let needed = len - conn.upstream_read_buf.len();
@@ -444,9 +444,9 @@ where
                     while conn.upstream_read_buf.len() < len {
                         let n = upstream_lease
                             .read_buf(&mut conn.upstream_read_buf)
-                            .await?;
+                            .await.map_err(velda_http1::Http1Outcome::Io)?;
                         if n == 0 {
-                            return Err(Http1Error::Parse(
+                            return Err(Http1Outcome::Parse(
                                 "Unexpected EOF while reading upstream response body: premature connection close".into(),
                             ));
                         }
@@ -464,7 +464,7 @@ where
                     conn.write_buf.extend_from_slice(&conn.upstream_read_buf[..len]);
                     conn.upstream_read_buf.advance(len);
                 }
-                conn.stream.write_all(&conn.write_buf).await?;
+                conn.stream.write_all(&conn.write_buf).await.map_err(velda_http1::Http1Outcome::Io)?;
                 if resp_head
                     .headers
                     .get(http::header::CONNECTION)
@@ -476,7 +476,7 @@ where
             }
             Http1BodyFraming::Chunked => unreachable!(),
         }
-        Ok::<(), Http1Error>(())
+        Ok::<(), Http1Outcome>(())
     }
     .await;
 

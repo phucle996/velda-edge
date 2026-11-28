@@ -236,7 +236,7 @@ pub async fn serve(
             .send_to(&initial_bytes, target_ip, target_port_be)
             .await
         {
-            Ok(_) => velda_core::CompletionReason::Complete,
+            Ok(_) => velda_core::InternalStatus::Completed,
             Err(e) => {
                 tracing::trace!(
                     error = %e,
@@ -245,7 +245,7 @@ pub async fn serve(
                     peer = %client_addr,
                     "Failed to forward UDP datagram (unidirectional)"
                 );
-                velda_core::CompletionReason::UpstreamError
+                velda_core::InternalStatus::UpstreamError
             }
         };
         velda_observability::global_telemetry_store().emit(&velda_observability::TelemetryRecord {
@@ -261,15 +261,15 @@ pub async fn serve(
                 0
             },
             upstream_port: u16::from_be(target_addr.1),
-            status_code: 0,
+            _cl0_pad: 0,
             route_id,
             upstream_id,
             ua_major_version: 0,
             rpc_msgs_or_flags: 0,
             pipe: velda_core::PipeKind::UdpUdp,
-            completion,
+            internal_status: completion,
             method: velda_core::HttpMethod::Unknown,
-            grpc_status: velda_core::GrpcStatus::NonGrpc,
+            _reserved: 0,
             ua_family: velda_core::UaFamily::None,
             ua_os: velda_core::UaOs::Unknown,
             url_len: 0,
@@ -322,7 +322,7 @@ pub async fn serve(
         let ingress_nanos = velda_core::clock::now_unix_nanos();
         let (request_id, _) = velda_core::request_id::next_request_id(ingress_nanos);
         let emit_telemetry =
-            |peer_ip: u128, rx: u64, tx: u64, completion: velda_core::CompletionReason| {
+            |peer_ip: u128, rx: u64, tx: u64, completion: velda_core::InternalStatus| {
                 velda_observability::global_telemetry_store().emit(
                     &velda_observability::TelemetryRecord {
                         request_id: velda_core::request_id::entropy(request_id),
@@ -338,15 +338,15 @@ pub async fn serve(
                             0
                         },
                         upstream_port: u16::from_be(target_addr.1),
-                        status_code: 0,
+                        _cl0_pad: 0,
                         route_id,
                         upstream_id,
                         ua_major_version: 0,
                         rpc_msgs_or_flags: 0,
                         pipe: velda_core::PipeKind::UdpUdp,
-                        completion,
+                        internal_status: completion,
                         method: velda_core::HttpMethod::Unknown,
-                        grpc_status: velda_core::GrpcStatus::NonGrpc,
+                        _reserved: 0,
                         ua_family: velda_core::UaFamily::None,
                         ua_os: velda_core::UaOs::Unknown,
                         url_len: 0,
@@ -365,7 +365,7 @@ pub async fn serve(
                     "Failed to connect accelerated upstream UDP socket for L4 session"
                 );
                 get_udp_session_table().remove(&session_key);
-                emit_telemetry(client_ip, 0, 0, velda_core::CompletionReason::UpstreamError);
+                emit_telemetry(client_ip, 0, 0, velda_core::InternalStatus::UpstreamError);
                 return;
             }
         };
@@ -381,7 +381,7 @@ pub async fn serve(
                 "Failed to send initial UDP datagram to upstream"
             );
             get_udp_session_table().remove(&session_key);
-            emit_telemetry(client_ip, 0, 0, velda_core::CompletionReason::UpstreamError);
+            emit_telemetry(client_ip, 0, 0, velda_core::InternalStatus::UpstreamError);
             return;
         }
 
@@ -528,7 +528,7 @@ pub async fn serve(
             final_peer_ip,
             bytes_rx,
             bytes_tx,
-            velda_core::CompletionReason::Complete,
+            velda_core::InternalStatus::Completed,
         );
     });
 }

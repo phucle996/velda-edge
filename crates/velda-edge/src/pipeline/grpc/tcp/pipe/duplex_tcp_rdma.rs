@@ -22,9 +22,9 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use bytes::Bytes;
-use velda_core::GrpcStatus;
+use velda_grpc::GrpcStatus;
 use velda_grpc::config::GrpcConfig;
-use velda_grpc::error::GrpcError;
+use velda_grpc::outcome::GrpcOutcome;
 use velda_grpc::tcp::server::stream::GrpcServerStream;
 
 use crate::pipeline::PipeOutcome;
@@ -55,12 +55,11 @@ pub async fn serve(
             let _ = respond
                 .send_trailers_only(GrpcStatus::Unavailable, Some("rdma upstream unavailable"));
             return PipeOutcome::grpc(
-                200,
-                velda_core::GrpcStatus::Unavailable,
+                velda_grpc::GrpcStatus::Unavailable,
                 0,
                 0,
                 None,
-                velda_core::CompletionReason::UpstreamError,
+                velda_core::InternalStatus::UpstreamError,
             );
         }
     };
@@ -79,32 +78,47 @@ pub async fn serve(
         let upstream_forward = async {
             let mut bytes_rx: u64 = 0;
             if !receiver.is_end_stream() {
-                while let Some(data) = receiver.recv_chunk().await? {
+                while let Some(data) = receiver
+                    .recv_chunk()
+                    .await
+                    .map_err(GrpcOutcome::from_http2)?
+                {
                     bytes_rx += data.len() as u64;
-                    upstream_send_stream.send_chunk(data, false).await?;
+                    upstream_send_stream
+                        .send_chunk(data, false)
+                        .await
+                        .map_err(GrpcOutcome::from_http2)?;
                 }
                 if let Some(trailers) = receiver.take_trailers() {
-                    upstream_send_stream.send_trailers(trailers)?;
+                    upstream_send_stream
+                        .send_trailers(trailers)
+                        .map_err(GrpcOutcome::from_http2)?;
                 } else {
-                    upstream_send_stream.send_chunk(Bytes::new(), true).await?;
+                    upstream_send_stream
+                        .send_chunk(Bytes::new(), true)
+                        .await
+                        .map_err(GrpcOutcome::from_http2)?;
                 }
             } else {
-                upstream_send_stream.send_chunk(Bytes::new(), true).await?;
+                upstream_send_stream
+                    .send_chunk(Bytes::new(), true)
+                    .await
+                    .map_err(GrpcOutcome::from_http2)?;
             }
-            Ok::<u64, GrpcError>(bytes_rx)
+            Ok::<u64, GrpcOutcome>(bytes_rx)
         };
 
         // Step 6: Task B (Upstream-to-Client Pump) - Awaits headers and streams RDMA responses downstream.
         let downstream_forward = async {
-            let mut response = upstream_resp_fut.await?;
+            let mut response = upstream_resp_fut.await.map_err(GrpcOutcome::from_http2)?;
 
             let mut grpc_status = response
                 .headers
                 .get("grpc-status")
                 .and_then(|v| v.to_str().ok())
                 .and_then(|s| s.parse::<u8>().ok())
-                .map(velda_core::GrpcStatus::from_u8)
-                .unwrap_or(velda_core::GrpcStatus::Ok);
+                .map(velda_grpc::GrpcStatus::from_u8)
+                .unwrap_or(velda_grpc::GrpcStatus::Ok);
 
             let is_end_of_stream = response.body.is_end_stream();
             let Some(mut downstream_send_stream) = respond.send_response_headers(
@@ -119,54 +133,69 @@ pub async fn serve(
             let mut bytes_tx: u64 = 0;
             let mut has_trailers = false;
 
-            while let Some(data) = response.body.recv_chunk().await? {
+            while let Some(data) = response
+                .body
+                .recv_chunk()
+                .await
+                .map_err(GrpcOutcome::from_http2)?
+            {
                 bytes_tx += data.len() as u64;
-                downstream_send_stream.send_chunk(data).await?;
+                downstream_send_stream
+                    .send_chunk(data)
+                    .await
+                    .map_err(GrpcOutcome::from_http2)?;
             }
 
-            if let Some(trailers) = response.body.trailers().await? {
+            if let Some(trailers) = response
+                .body
+                .trailers()
+                .await
+                .map_err(GrpcOutcome::from_http2)?
+            {
                 if let Some(code) = trailers
                     .get("grpc-status")
                     .and_then(|v| v.to_str().ok())
                     .and_then(|s| s.parse::<u8>().ok())
-                    .map(velda_core::GrpcStatus::from_u8)
+                    .map(velda_grpc::GrpcStatus::from_u8)
                 {
                     grpc_status = code;
                 }
-                downstream_send_stream.send_trailers(trailers)?;
+                downstream_send_stream
+                    .send_trailers(trailers)
+                    .map_err(GrpcOutcome::from_http2)?;
                 has_trailers = true;
             }
 
             if !has_trailers {
-                downstream_send_stream.finish()?;
+                downstream_send_stream
+                    .finish()
+                    .map_err(GrpcOutcome::from_http2)?;
             }
 
-            Ok::<(u64, velda_core::GrpcStatus), GrpcError>((bytes_tx, grpc_status))
+            Ok::<(u64, velda_grpc::GrpcStatus), GrpcOutcome>((bytes_tx, grpc_status))
         };
 
         // Step 7: Concurrently join both pump tasks; abort if either fails.
         let (bytes_rx, (bytes_tx, grpc_status)) =
             tokio::try_join!(upstream_forward, downstream_forward)?;
-        Ok::<_, GrpcError>((bytes_rx, bytes_tx, grpc_status))
+        Ok::<_, GrpcOutcome>((bytes_rx, bytes_tx, grpc_status))
     };
 
     // Step 8: Catch deadline expiration and emit canonical DeadlineExceeded trailer.
     match tokio::time::timeout(timeout, workflow).await {
         Ok(Ok((rx, tx, status))) => PipeOutcome::grpc(
-            200,
             status,
             rx,
             tx,
             upstream_addr,
-            velda_core::CompletionReason::Complete,
+            velda_core::InternalStatus::Completed,
         ),
         Ok(Err(_)) => PipeOutcome::grpc(
-            200,
-            velda_core::GrpcStatus::Unavailable,
+            velda_grpc::GrpcStatus::Unavailable,
             0,
             0,
             upstream_addr,
-            velda_core::CompletionReason::UpstreamError,
+            velda_core::InternalStatus::UpstreamError,
         ),
         Err(_) => {
             let _ = respond.send_trailers_only(
@@ -174,12 +203,11 @@ pub async fn serve(
                 Some("gRPC call duration deadline exceeded"),
             );
             PipeOutcome::grpc(
-                200,
-                velda_core::GrpcStatus::DeadlineExceeded,
+                velda_grpc::GrpcStatus::DeadlineExceeded,
                 0,
                 0,
                 upstream_addr,
-                velda_core::CompletionReason::Timeout,
+                velda_core::InternalStatus::UpstreamTimeout,
             )
         }
     }

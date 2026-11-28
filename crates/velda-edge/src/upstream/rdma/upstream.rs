@@ -123,7 +123,7 @@ impl RdmaUpstream {
                 }
             })
             .await
-            .map_err(EdgeError::Upstream)?;
+            .map_err(|e| EdgeError::Upstream(e.to_string()))?;
 
         Ok(RdmaLease {
             channel: Some(channel),
@@ -161,7 +161,7 @@ impl RdmaUpstream {
                 }
             })
             .await
-            .map_err(EdgeError::Upstream)?;
+            .map_err(|e| EdgeError::Upstream(e.to_string()))?;
 
         Ok(channel)
     }

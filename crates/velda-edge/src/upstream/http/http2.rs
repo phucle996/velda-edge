@@ -197,7 +197,7 @@ impl Http2Upstream {
                 Ok::<_, String>(((fresh, lease), endpoint))
             })
             .await
-            .map_err(EdgeError::Upstream)?;
+            .map_err(|e| EdgeError::Upstream(e.to_string()))?;
 
         Ok(client_and_lease)
     }
@@ -241,7 +241,7 @@ impl Http2Upstream {
                 Ok::<_, String>(((fresh, lease), endpoint))
             })
             .await
-            .map_err(EdgeError::Upstream)?;
+            .map_err(|e| EdgeError::Upstream(e.to_string()))?;
 
         Ok(client_and_lease)
     }

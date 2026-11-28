@@ -16,7 +16,7 @@ use http::{StatusCode, Version};
 use velda_core::{Body, L7Response};
 use velda_http2::client::connection::Http2Client;
 use velda_http2::config::Http2Config;
-use velda_http2::error::Http2Error;
+use velda_http2::outcome::Http2Outcome;
 use velda_http2::server::request::{Http2ServerRequestHead, Http2StreamReceiver};
 use velda_http2::server::response::Http2Responder;
 
@@ -34,7 +34,7 @@ async fn forward_buffered(
     config: &Http2Config,
     req_state: &velda_core::RequestState,
     plan: &velda_plugin::RoutePluginPlan,
-) -> Result<(), Http2Error> {
+) -> Result<(), Http2Outcome> {
     let is_head = req_head.method == http::Method::HEAD;
     let has_body = !body.is_empty();
     let (response_fut, mut send_stream) = client
@@ -59,7 +59,7 @@ async fn forward_buffered(
             .windows(b"text/event-stream".len())
             .any(|w| w.eq_ignore_ascii_case(b"text/event-stream"))
     {
-        return Err(Http2Error::StreamingViolation(
+        return Err(Http2Outcome::StreamingViolation(
             "Upstream returned text/event-stream (SSE), but server streaming is disabled on this listener".into(),
         ));
     }
@@ -73,7 +73,7 @@ async fn forward_buffered(
     } else if let Some(first_chunk) = response.body.recv_chunk().await? {
         let len = first_chunk.len();
         if len > config.max_body_size {
-            return Err(Http2Error::PayloadTooLarge(len));
+            return Err(Http2Outcome::PayloadTooLarge(len));
         }
 
         if response.body.is_end_stream() {
@@ -86,7 +86,7 @@ async fn forward_buffered(
                 .and_then(|v| v.parse::<usize>().ok())
                 && content_length > config.max_body_size
             {
-                return Err(Http2Error::PayloadTooLarge(content_length));
+                return Err(Http2Outcome::PayloadTooLarge(content_length));
             }
 
             let initial_cap = response
@@ -101,7 +101,7 @@ async fn forward_buffered(
 
             while let Some(chunk_data) = response.body.recv_chunk().await? {
                 if body_buf.len() + chunk_data.len() > config.max_body_size {
-                    return Err(Http2Error::PayloadTooLarge(
+                    return Err(Http2Outcome::PayloadTooLarge(
                         body_buf.len() + chunk_data.len(),
                     ));
                 }
@@ -160,11 +160,10 @@ pub async fn serve(
             meta.inject_response_headers(&mut err_resp.headers);
             let _ = responder.send_response(&err_resp);
             return PipeOutcome::http(
-                responder.last_status,
                 receiver.bytes_received as u64,
                 responder.last_bytes_tx,
                 None,
-                velda_core::CompletionReason::Rejected,
+                velda_core::InternalStatus::BadRequest,
             );
         }
     };
@@ -190,11 +189,10 @@ pub async fn serve(
             meta.inject_response_headers(&mut err_resp.headers);
             let _ = responder.send_response(&err_resp);
             return PipeOutcome::http(
-                responder.last_status,
                 bytes_rx,
                 responder.last_bytes_tx,
                 None,
-                velda_core::CompletionReason::UpstreamError,
+                velda_core::InternalStatus::UpstreamError,
             );
         }
     };
@@ -237,7 +235,7 @@ pub async fn serve(
     }
 
     let completion = match res {
-        Ok(()) => velda_core::CompletionReason::Complete,
+        Ok(()) => velda_core::InternalStatus::Completed,
         Err(e) => {
             tracing::warn!(
                 error = %e,
@@ -254,14 +252,8 @@ pub async fn serve(
             );
             meta.inject_response_headers(&mut err_resp.headers);
             let _ = responder.send_response(&err_resp);
-            velda_core::CompletionReason::UpstreamError
+            velda_core::InternalStatus::UpstreamError
         }
     };
-    PipeOutcome::http(
-        responder.last_status,
-        bytes_rx,
-        responder.last_bytes_tx,
-        upstream_addr,
-        completion,
-    )
+    PipeOutcome::http(bytes_rx, responder.last_bytes_tx, upstream_addr, completion)
 }

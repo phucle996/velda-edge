@@ -104,21 +104,26 @@ async fn test_bootstrap_with_prometheus_exporter() {
     drop(listener);
     let prom_addr = format!("127.0.0.1:{prom_port}");
 
-    // Compile plugins.bin with Prometheus exporter
+    // Compile plugins.bin with consolidated metrics_exporter (pull mode)
     let exporter_plugin = PluginConfig {
-        id: "prometheus_exporter".into(),
+        id: "metrics_exporter".into(),
         config: serde_json::json!({
-            "listen": prom_addr,
-            "path": "/metrics",
-            "protocol": "http",
-            "scrape": {
-                "timeout_ms": 5000,
-                "max_concurrency": 8,
-                "max_buffer_size_kb": 256
-            },
-            "tls": { "mode": "none" },
-            "cors": { "enabled": false, "allow_origins": [], "allow_methods": [], "allow_headers": [] },
-            "auth": { "mode": "none" }
+            "targets": [
+                {
+                    "mode": "pull",
+                    "listen": prom_addr,
+                    "path": "/metrics",
+                    "protocol": "http",
+                    "scrape": {
+                        "timeout_ms": 5000,
+                        "max_concurrency": 8,
+                        "max_buffer_size_kb": 256
+                    },
+                    "tls": { "mode": "none" },
+                    "cors": { "enabled": false, "allow_origins": [], "allow_methods": [], "allow_headers": [] },
+                    "auth": { "mode": "none" }
+                }
+            ]
         }),
     };
     let bin = compile_plugins_to_binary(&[exporter_plugin], 1, [0x42u8; 32]).unwrap();
@@ -190,7 +195,7 @@ fn test_lkg_json_fallback_on_old_compiler_version() {
             "application": { "protocol": "http1", "streaming": [] },
             "tls": { "enabled": false },
             "observability": {
-                "sampling": { "http": { "2xx": 0.01, "shed": 0.01 } }
+                "sampling": { "statuses": { "completed": 0.01 }, "shed": 0.01 }
             }
         }]
     }"#;
@@ -212,8 +217,8 @@ fn test_lkg_json_fallback_on_old_compiler_version() {
         loaded[0]
             .observability
             .as_ref()
-            .and_then(|o| o.sampling)
-            .and_then(|s| s.http)
+            .and_then(|o| o.sampling.as_ref())
+            .and_then(|s| s.statuses.get("completed").copied())
             .is_some()
     );
 }
@@ -221,9 +226,9 @@ fn test_lkg_json_fallback_on_old_compiler_version() {
 #[tokio::test]
 async fn test_http1_unified_log_trace_sampling_and_exact_metrics() {
     use tokio::io::{AsyncReadExt, AsyncWriteExt};
-    use velda_core::StreamingMode;
+    use velda_core::{InternalStatus, StreamingMode};
     use velda_http1::config::Http1Config;
-    use velda_observability::sampling::http::HttpSampling;
+    use velda_observability::sampling::status::StatusSampling;
     use velda_observability::{global_metrics, global_telemetry_store, set_current_worker_lane};
     use velda_sock::Connection;
 
@@ -235,14 +240,14 @@ async fn test_http1_unified_log_trace_sampling_and_exact_metrics() {
     let addr = listener.local_addr().unwrap();
 
     let logs_before = global_telemetry_store().emitted_total();
-    let reqs4xx_before: u64 = global_metrics()
+    let rejected_before: u64 = global_metrics()
         .snapshot()
         .pipelines
         .iter()
-        .map(|p| p.requests_4xx)
+        .map(|p| p.count(InternalStatus::RouteNotFound))
         .sum();
 
-    // Drop all 4xx (unmatched -> 404) on one stream, keep all 4xx on another, verifying
+    // Drop RouteNotFound (unmatched -> 404) on one stream, keep all on another, verifying
     // unified TelemetryRecord emission (single store feeding logs + traces) while metrics always counts 100%.
     let (client_res, accept_res) =
         tokio::join!(tokio::net::TcpStream::connect(addr), listener.accept());
@@ -251,7 +256,11 @@ async fn test_http1_unified_log_trace_sampling_and_exact_metrics() {
     let conn_drop = Connection::from_stream(server_drop).unwrap();
     let rt_shared = velda_edge::runtime::new_shared_runtime(velda_edge::Runtime::empty());
 
-    let drop_sampling = HttpSampling::from_rates(0.0, 0.0, 0.0, 0.0, 1.0, Some(0.0));
+    let drop_sampling = StatusSampling::from_default_and_overrides(
+        1.0,
+        &[(InternalStatus::RouteNotFound, 0.0)],
+        Some(0.0),
+    );
     let server_task = tokio::spawn(
         velda_edge::pipeline::http1::downstream::handle_http1_stream(
             conn_drop,
@@ -278,16 +287,16 @@ async fn test_http1_unified_log_trace_sampling_and_exact_metrics() {
     assert_eq!(
         global_telemetry_store().emitted_total() - logs_before,
         0,
-        "dropped 404 must not emit unified TelemetryRecord"
+        "dropped route_not_found must not emit unified TelemetryRecord"
     );
-    let reqs4xx_after_drop: u64 = global_metrics()
+    let rejected_after_drop: u64 = global_metrics()
         .snapshot()
         .pipelines
         .iter()
-        .map(|p| p.requests_4xx)
+        .map(|p| p.count(InternalStatus::RouteNotFound))
         .sum();
     assert_eq!(
-        reqs4xx_after_drop - reqs4xx_before,
+        rejected_after_drop - rejected_before,
         1,
         "metrics must still record 100% of dropped requests"
     );
@@ -307,7 +316,7 @@ async fn test_http1_unified_log_trace_sampling_and_exact_metrics() {
                 tls_enabled: false,
                 streaming: StreamingMode::DISABLED,
                 alt_svc: None,
-                sampling: HttpSampling::keep_all(),
+                sampling: StatusSampling::keep_all(),
             },
             rt_shared,
         ),
@@ -322,11 +331,11 @@ async fn test_http1_unified_log_trace_sampling_and_exact_metrics() {
     server_task2.await.unwrap();
 
     assert_eq!(global_telemetry_store().emitted_total() - logs_before, 1);
-    let reqs4xx_after_keep: u64 = global_metrics()
+    let rejected_after_keep: u64 = global_metrics()
         .snapshot()
         .pipelines
         .iter()
-        .map(|p| p.requests_4xx)
+        .map(|p| p.count(InternalStatus::RouteNotFound))
         .sum();
-    assert_eq!(reqs4xx_after_keep - reqs4xx_before, 2);
+    assert_eq!(rejected_after_keep - rejected_before, 2);
 }
