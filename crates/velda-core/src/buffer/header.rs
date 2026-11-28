@@ -401,15 +401,6 @@ pub struct HeaderValues<'a> {
     idx: usize,
 }
 
-impl<'a> HeaderValues<'a> {
-    // BACKWARD-COMPAT: Drop-in adapter for `http::header::GetAll::iter()` callers; remove once call sites iterate `get_all(...)` directly.
-    /// Returns self for drop-in compatibility with `http::header::GetAll::iter()`.
-    #[inline(always)]
-    pub fn iter(self) -> Self {
-        self
-    }
-}
-
 impl<'a> Iterator for HeaderValues<'a> {
     type Item = &'a HeaderValue;
 

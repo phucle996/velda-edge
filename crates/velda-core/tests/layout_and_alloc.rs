@@ -11,7 +11,7 @@ use http::{Method, Uri, Version};
 use velda_core::l4::request::TransportProtocol;
 use velda_core::l7::request::Body;
 use velda_core::{
-    Action, ErrorKind, HeaderWorkspace, HookPhase, L4Action, L4Request, L7Request, Phase,
+    Action, HeaderWorkspace, HookPhase, InternalStatus, L4Action, L4Request, L7Request, Phase,
     RequestContext, RequestState, UNASSIGNED_UPSTREAM_ID, UNMATCHED_ROUTE_ID,
 };
 
@@ -92,7 +92,7 @@ fn type_sizes() {
     assert_eq!(size_of::<Phase>(), 1);
     assert_eq!(size_of::<HookPhase>(), 1);
     assert_eq!(size_of::<L4Action>(), 1);
-    assert_eq!(size_of::<ErrorKind>(), 1);
+    assert_eq!(size_of::<InternalStatus>(), 1);
 }
 
 #[test]

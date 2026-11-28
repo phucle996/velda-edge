@@ -9,14 +9,14 @@
 //! │                           ▼                        ▼                            ▼       │
 //! │                      [L7 Hooks]               [L7 Hooks]                   [L7 Hooks]   │
 //! │                           │                        │                            │       │
-//! │                           └──► Action::{ Continue, Respond, Reject } ◄──────────┘       │
+//! │                           └──► Action::{ Continue, Respond, Status, Delay } ◄───┘       │
 //! └─────────────────────────────────────────────────────────────────────────────────────────┘
 //! ```
 
 use std::future::Future;
 use std::time::Duration;
 
-use crate::{context::RequestContext, error::RejectReason, l7::response::L7Response};
+use crate::{context::RequestContext, l7::response::L7Response, lut::InternalStatus};
 
 /// A phase in the Velda request lifecycle.
 ///
@@ -99,8 +99,10 @@ impl Phase {
 /// 2. `Respond(L7Response)`: Short-circuits immediately with an explicit, caller-provided
 ///    HTTP response. Used when a plugin supplies explicit status, headers, and body
 ///    (e.g. CORS `204 No Content`, cache HITs, or request termination).
-/// 3. `Reject(RejectReason)`: Canonical edge rejection for policy/security failures.
-///    Synthesizes zero-alloc protocol-native error framing downstream and strips Bit 0 headers.
+/// 3. `Status(InternalStatus)`: Protocol-agnostic internal status code (`1 byte`).
+///    Outer protocol pipelines map [`InternalStatus`] into protocol-native external wire
+///    responses, retain Bit 1 bypass headers from `HeaderWorkspace`, and record this
+///    status directly in observability telemetry.
 /// 4. `Delay { duration, and_then }`: Non-blocking asynchronous sleep (used for chaos fault
 ///    injection / artificial latency) before evaluating the boxed `and_then` action.
 ///
@@ -117,11 +119,11 @@ pub enum Action {
     /// to the client.
     Respond(L7Response),
 
-    /// Stop processing because the request cannot continue.
+    /// Stop processing with an internal status code.
     ///
-    /// The proxy is responsible for translating the canonical rejection
-    /// reason into an appropriate client-facing response.
-    Reject(RejectReason),
+    /// Outer protocol pipelines translate [`InternalStatus`] into a client-facing
+    /// protocol response while preserving Bit 1 bypass headers.
+    Status(InternalStatus),
 
     /// Delay execution for the specified duration before continuing with `and_then`.
     Delay {
@@ -153,10 +155,10 @@ impl Action {
         Self::Respond(response)
     }
 
-    /// Constructs a `Reject` action with the given canonical rejection reason.
+    /// Constructs a `Status` action with the given canonical internal status code.
     #[inline]
-    pub const fn reject(reason: RejectReason) -> Self {
-        Self::Reject(reason)
+    pub const fn status(status: InternalStatus) -> Self {
+        Self::Status(status)
     }
 
     /// Returns `true` when processing should continue.
@@ -171,10 +173,10 @@ impl Action {
         matches!(self, Self::Respond(_))
     }
 
-    /// Returns `true` when the hook rejected the request.
+    /// Returns `true` when the hook terminated processing with an [`InternalStatus`].
     #[inline]
-    pub const fn is_rejected(&self) -> bool {
-        matches!(self, Self::Reject(_))
+    pub const fn is_status(&self) -> bool {
+        matches!(self, Self::Status(_))
     }
 
     /// Returns `true` when the action requires a delay before proceeding.
@@ -252,23 +254,23 @@ mod tests {
         let c = Action::r#continue();
         assert!(c.is_continue());
         assert!(!c.is_response());
-        assert!(!c.is_rejected());
+        assert!(!c.is_status());
 
         let r = Action::respond(L7Response::empty(StatusCode::OK));
         assert!(!r.is_continue());
         assert!(r.is_response());
-        assert!(!r.is_rejected());
+        assert!(!r.is_status());
 
-        let rej = Action::reject(RejectReason::Forbidden);
-        assert!(!rej.is_continue());
-        assert!(!rej.is_response());
-        assert!(rej.is_rejected());
-        assert!(!rej.is_delay());
+        let st = Action::status(InternalStatus::Forbidden);
+        assert!(!st.is_continue());
+        assert!(!st.is_response());
+        assert!(st.is_status());
+        assert!(!st.is_delay());
 
         let d = Action::delay(Duration::from_millis(100), Action::r#continue());
         assert!(!d.is_continue());
         assert!(!d.is_response());
-        assert!(!d.is_rejected());
+        assert!(!d.is_status());
         assert!(d.is_delay());
     }
 }

@@ -8,8 +8,7 @@
 //! │    ├── l4: L4Request        (connection_id: u64, peer/local ip: u128 + port_be: u16)    │
 //! │    ├── l7: L7Request        (method, uri, headers, body)                                │
 //! │    └── state: RequestState  (request_id: u128, route_id: u16, upstream_id: u16,         │
-//! │                              upstream_ip: u128, upstream_port_be: u16,                  │
-//! │                              rejection: u8, upstream_attempts: u16, timestamps...)      │
+//! │                              upstream_ip: u128, upstream_port_be: u16, timestamps...)     │
 //! └─────────────────────────────────────────────────────────────────────────────────────────┘
 //! ```
 

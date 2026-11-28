@@ -8,7 +8,7 @@
 //! │ endpoint       │ 24B POD Endpoint (ip: u128, weight: u32, port_be: u16, is_v6: u8)      │
 //! │ buffer / lut   │ Pre-warmed HeaderWorkspace/PayloadSlabPool & L1D O(1) lookup tables    │
 //! │ hardware/clock │ CPU/NIC/Memory topology probing, overload guards, dual-tier clock      │
-//! │ lifecycle/err  │ Narrow hook contracts (Continue/Respond/Reject) & shared Error/Reject  │
+//! │ lifecycle/lut  │ Narrow hook contracts (Continue/Respond/Status) & L1D InternalStatus  │
 //! └────────────────┴────────────────────────────────────────────────────────────────────────┘
 //! ```
 
@@ -17,7 +17,6 @@ pub mod buffer;
 pub mod clock;
 pub mod context;
 pub mod endpoint;
-pub mod error;
 pub mod hardware;
 pub mod l4;
 pub mod l7;
@@ -41,7 +40,7 @@ pub use buffer::header::{
 // Canonical L1D Vocabulary
 // -----------------------------------------------------------------------------
 
-pub use lut::{CompletionReason, GrpcStatus, HttpMethod, PipeKind, UaFamily, UaOs, WireProtocol};
+pub use lut::{HttpMethod, InternalStatus, PipeKind, StatusSpec, UaFamily, UaOs, WireProtocol};
 pub use protocol::ProtocolFamily;
 
 // -----------------------------------------------------------------------------
@@ -68,12 +67,6 @@ pub use context::{
     RequestContext, RequestState, UNASSIGNED_UPSTREAM_ID, UNMATCHED_ROUTE_ID, fnv1a_hash_32,
     ja4_fingerprint_id, ja4_fingerprint_id_bytes,
 };
-
-// -----------------------------------------------------------------------------
-// Errors
-// -----------------------------------------------------------------------------
-
-pub use error::{Error, ErrorKind, RejectReason, Result};
 
 // -----------------------------------------------------------------------------
 // Lifecycle

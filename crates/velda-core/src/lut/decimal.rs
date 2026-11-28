@@ -329,7 +329,7 @@ pub fn fast_format_ts_19digits_simd(now_nanos: u128, out: &mut [u8; 19]) {
 }
 
 // ============================================================================
-// Public Zero-Alloc Delegation Wrappers (Backward Compatible Hot Path API)
+// Public Zero-Alloc Delegation Helpers
 // ============================================================================
 
 /// Formats an unsigned 16-bit integer (0..=65535) into decimal ASCII bytes directly into `ptr`, returning bytes written.

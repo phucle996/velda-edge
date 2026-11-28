@@ -3,14 +3,13 @@
 //! Validates how velda-core handles unexpected socket addresses, extreme integer
 //! limits, huge or empty payloads, repeated state transitions, and unusual URI paths.
 
-use std::error::Error as StdError;
 use std::net::SocketAddr;
 
 use bytes::Bytes;
 use http::{Method, Uri, Version};
 use velda_core::l4::request::TransportProtocol;
 use velda_core::l7::request::Body;
-use velda_core::{Error, ErrorKind, HeaderWorkspace, L4Request, L7Request, RequestState};
+use velda_core::{HeaderWorkspace, L4Request, L7Request, RequestState};
 
 #[test]
 fn test_extreme_integer_boundaries() {
@@ -161,43 +160,4 @@ fn test_repeated_and_conflicting_state_mutations() {
     state.mark_upstream_started();
     assert!(state.upstream_started);
     assert!(state.upstream_completed);
-}
-
-#[test]
-fn test_error_construction_with_extreme_strings() {
-    let kinds = [
-        ErrorKind::InvalidRequest,
-        ErrorKind::Protocol,
-        ErrorKind::RouteNotFound,
-        ErrorKind::RouteConfig,
-        ErrorKind::UpstreamUnavailable,
-        ErrorKind::UpstreamFailure,
-        ErrorKind::Timeout,
-        ErrorKind::Connection,
-        ErrorKind::Rejected,
-        ErrorKind::Canceled,
-        ErrorKind::Internal,
-    ];
-
-    // 1. Empty message
-    for kind in &kinds {
-        let err = Error::new(*kind, "");
-        assert_eq!(err.kind(), *kind);
-        assert_eq!(err.message(), "");
-    }
-
-    // 2. Extremely large error message (64KB string)
-    let huge_msg = "X".repeat(65536);
-    let err = Error::new(ErrorKind::Internal, huge_msg.clone());
-    assert_eq!(err.kind(), ErrorKind::Internal);
-    assert_eq!(err.message().len(), 65536);
-
-    // 3. Error with source
-    let source_err = std::io::Error::new(
-        std::io::ErrorKind::ConnectionReset,
-        "connection reset by peer",
-    );
-    let wrap_err = Error::with_source(ErrorKind::Connection, "transport dropped", source_err);
-    assert_eq!(wrap_err.kind(), ErrorKind::Connection);
-    assert!(wrap_err.source().is_some());
 }
