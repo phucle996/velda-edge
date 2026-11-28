@@ -51,8 +51,7 @@ pub fn is_known_plugin_id(id: &str) -> bool {
 /// Returns the restricted protocol family for a known plugin identifier, if any.
 pub fn canonical_protocol_family_for_id(id: &str) -> Option<&'static str> {
     match id {
-        "grpc_fault_injection" => Some("grpc"),
-        "http_fault_injection" => Some("http"),
+        "fault_injection" => Some("l7"),
         "cors_preflight" => Some("http"),
         "https_redirect" => Some("http"),
         "cors" => Some("http"),
@@ -196,13 +195,12 @@ pub fn validate_plugin_config(plugin: &mut PluginConfig) -> Result<(), PluginErr
             plugin.config =
                 serde_json::to_value(normalized).map_err(|e| PluginError::Config(e.to_string()))?;
         }
-        "grpc_fault_injection" => {
-            let normalized = crate::pre_upstream::grpc_fault_injection::validation::validate_grpc_fault_injection_config(&plugin.id, &plugin.config)?;
-            plugin.config =
-                serde_json::to_value(normalized).map_err(|e| PluginError::Config(e.to_string()))?;
-        }
-        "http_fault_injection" => {
-            let normalized = crate::pre_upstream::http_fault_injection::validation::validate_http_fault_injection_config(&plugin.id, &plugin.config)?;
+        "fault_injection" => {
+            let normalized =
+                crate::pre_upstream::fault_injection::validation::validate_fault_injection_config(
+                    &plugin.id,
+                    &plugin.config,
+                )?;
             plugin.config =
                 serde_json::to_value(normalized).map_err(|e| PluginError::Config(e.to_string()))?;
         }
@@ -238,7 +236,7 @@ pub fn validate_plugin_config(plugin: &mut PluginConfig) -> Result<(), PluginErr
             plugin.config =
                 serde_json::to_value(normalized).map_err(|e| PluginError::Config(e.to_string()))?;
         }
-        "csrf" | "csrf_protection" => {
+        "csrf" => {
             let normalized = crate::pre_upstream::csrf::validation::validate_csrf_config(
                 &plugin.id,
                 &plugin.config,
@@ -296,28 +294,9 @@ pub fn validate_plugin_config(plugin: &mut PluginConfig) -> Result<(), PluginErr
             plugin.config =
                 serde_json::to_value(normalized).map_err(|e| PluginError::Config(e.to_string()))?;
         }
-        "prometheus_exporter" => {
-            let normalized = crate::background::prometheus_exporter::validation::validate_prometheus_exporter_config(&plugin.id, &plugin.config)?;
-            plugin.config =
-                serde_json::to_value(normalized).map_err(|e| PluginError::Config(e.to_string()))?;
-        }
         "health_probe" => {
             let normalized =
                 crate::background::health_probe::validation::validate_health_probe_config(
-                    &plugin.id,
-                    &plugin.config,
-                )?;
-            plugin.config =
-                serde_json::to_value(normalized).map_err(|e| PluginError::Config(e.to_string()))?;
-        }
-        "otlp_metrics_exporter" => {
-            let normalized = crate::background::otlp_metrics_exporter::validation::validate_otlp_metrics_exporter_config(&plugin.id, &plugin.config)?;
-            plugin.config =
-                serde_json::to_value(normalized).map_err(|e| PluginError::Config(e.to_string()))?;
-        }
-        "statsd_exporter" => {
-            let normalized =
-                crate::background::statsd_exporter::validation::validate_statsd_exporter_config(
                     &plugin.id,
                     &plugin.config,
                 )?;
@@ -329,72 +308,27 @@ pub fn validate_plugin_config(plugin: &mut PluginConfig) -> Result<(), PluginErr
             plugin.config =
                 serde_json::to_value(normalized).map_err(|e| PluginError::Config(e.to_string()))?;
         }
-        "loki_log_shipper" => {
+        "log_exporter" => {
             let normalized =
-                crate::background::loki_log_shipper::validation::validate_loki_log_shipper_config(
+                crate::background::log_exporter::validation::validate_log_exporter_config(
                     &plugin.id,
                     &plugin.config,
                 )?;
             plugin.config =
                 serde_json::to_value(normalized).map_err(|e| PluginError::Config(e.to_string()))?;
         }
-        "std_log_shipper" => {
+        "metrics_exporter" => {
             let normalized =
-                crate::background::std_log_shipper::validation::validate_std_log_shipper_config(
+                crate::background::metrics_exporter::validation::validate_metrics_exporter_config(
                     &plugin.id,
                     &plugin.config,
                 )?;
             plugin.config =
                 serde_json::to_value(normalized).map_err(|e| PluginError::Config(e.to_string()))?;
         }
-        "otlp_log_shipper" => {
+        "trace_exporter" => {
             let normalized =
-                crate::background::otlp_log_shipper::validation::validate_otlp_log_shipper_config(
-                    &plugin.id,
-                    &plugin.config,
-                )?;
-            plugin.config =
-                serde_json::to_value(normalized).map_err(|e| PluginError::Config(e.to_string()))?;
-        }
-        "otlp_trace_exporter" => {
-            let normalized =
-                crate::background::otlp_trace_exporter::validate_otlp_trace_exporter_config(
-                    &plugin.id,
-                    &plugin.config,
-                )?;
-            plugin.config =
-                serde_json::to_value(normalized).map_err(|e| PluginError::Config(e.to_string()))?;
-        }
-        "clickhouse_log_shipper" => {
-            let normalized =
-                crate::background::clickhouse_log_shipper::validation::validate_clickhouse_log_shipper_config(
-                    &plugin.id,
-                    &plugin.config,
-                )?;
-            plugin.config =
-                serde_json::to_value(normalized).map_err(|e| PluginError::Config(e.to_string()))?;
-        }
-        "elasticsearch_log_shipper" => {
-            let normalized =
-                crate::background::elasticsearch_log_shipper::validation::validate_elasticsearch_log_shipper_config(
-                    &plugin.id,
-                    &plugin.config,
-                )?;
-            plugin.config =
-                serde_json::to_value(normalized).map_err(|e| PluginError::Config(e.to_string()))?;
-        }
-        "s3_log_shipper" => {
-            let normalized =
-                crate::background::s3_log_shipper::validation::validate_s3_log_shipper_config(
-                    &plugin.id,
-                    &plugin.config,
-                )?;
-            plugin.config =
-                serde_json::to_value(normalized).map_err(|e| PluginError::Config(e.to_string()))?;
-        }
-        "kafka_log_shipper" => {
-            let normalized =
-                crate::background::kafka_log_shipper::validation::validate_kafka_log_shipper_config(
+                crate::background::trace_exporter::validation::validate_trace_exporter_config(
                     &plugin.id,
                     &plugin.config,
                 )?;

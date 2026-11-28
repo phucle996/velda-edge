@@ -1,12 +1,19 @@
 //! Background Execution Stage Plugins (`BackgroundPlugin`).
 //!
-//! Background plugins run strictly on Shadow Logistics runtimes isolated from
-//! Data Plane traffic workers (e.g., Prometheus Exporter, Health Probes).
+//! ```text
+//!   Plugins (Shadow Workers, SCHED_IDLE):
+//!   ├── health_probe        ──► local liveness / readiness HTTP endpoint
+//!   ├── acme_cert_rotator   ──► ACME / TLS certificate lifecycle automation
+//!   ├── log_exporter        ──► local streams + ETP log targets (ClickHouse/ES/Loki/S3/Kafka/OTLP)
+//!   ├── metrics_exporter    ──► Prometheus pull scrape + ETP push targets (OTLP/StatsD)
+//!   └── trace_exporter      ──► ETP distributed span targets (OTLP)
+//! ```
 //!
 //! # Strict Architectural Invariants
 //! - **Background-Only**: Background plugins MUST NEVER bind or poll client traffic sockets.
-//! - **Non-blocking Metrics Extraction**: Telemetry is extracted via lock-free atomic snapshots
-//!   (`MetricsStore::snapshot`), guaranteeing zero write contention on Data Plane worker hot paths.
+//! - **Non-blocking Telemetry**: Telemetry is extracted via lock-free atomic snapshots
+//!   (`MetricsStore::snapshot`) and SPSC record rings (`TelemetryStore`), guaranteeing zero write
+//!   contention on Data Plane worker hot paths.
 
 use std::future::Future;
 use std::pin::Pin;
@@ -17,33 +24,17 @@ use crate::capability::{Direction, PluginCapability, SupportedProtocols};
 use crate::error::PluginError;
 
 pub mod acme_cert_rotator;
-pub mod clickhouse_log_shipper;
-pub mod elasticsearch_log_shipper;
 pub mod health_probe;
-pub mod kafka_log_shipper;
-pub mod loki_log_shipper;
-pub mod otlp_log_shipper;
-pub mod otlp_metrics_exporter;
-pub mod otlp_trace_exporter;
-pub mod prometheus_exporter;
-pub mod s3_log_shipper;
-pub mod statsd_exporter;
-pub mod std_log_shipper;
+pub mod log_exporter;
+pub mod metrics_exporter;
+pub mod trace_exporter;
 
 pub use crate::config::OutboundTlsConfig;
 pub use acme_cert_rotator::{AcmeCertRotatorConfig, AcmeCertRotatorPlugin};
-pub use clickhouse_log_shipper::{ClickHouseLogShipperConfig, ClickHouseLogShipperPlugin};
-pub use elasticsearch_log_shipper::{ElasticsearchLogShipperConfig, ElasticsearchLogShipperPlugin};
 pub use health_probe::{HealthProbeConfig, HealthProbePlugin, HealthState};
-pub use kafka_log_shipper::{KafkaLogShipperConfig, KafkaLogShipperPlugin};
-pub use loki_log_shipper::{LokiLogShipperConfig, LokiLogShipperPlugin};
-pub use otlp_log_shipper::{OtlpLogShipperConfig, OtlpLogShipperPlugin};
-pub use otlp_metrics_exporter::{OtlpMetricsExporterConfig, OtlpMetricsExporterPlugin};
-pub use otlp_trace_exporter::{OtlpTraceExporterConfig, OtlpTraceExporterPlugin};
-pub use prometheus_exporter::{PrometheusExporterConfig, PrometheusExporterPlugin};
-pub use s3_log_shipper::{S3LogShipperConfig, S3LogShipperPlugin};
-pub use statsd_exporter::{StatsdExporterConfig, StatsdExporterPlugin};
-pub use std_log_shipper::{StdLogShipperConfig, StdLogShipperPlugin};
+pub use log_exporter::{LogExporterConfig, LogExporterPlugin};
+pub use metrics_exporter::{MetricsExporterConfig, MetricsExporterPlugin};
+pub use trace_exporter::{TraceExporterConfig, TraceExporterPlugin};
 
 /// Boxed future returned by any plugin's background workload loop (`pbww() > 0`).
 pub type BackgroundTaskFuture = Pin<Box<dyn Future<Output = Result<(), PluginError>> + Send>>;
@@ -78,14 +69,14 @@ pub trait BackgroundPlugin: Send + Sync {
     /// representing compute intensity, memory footprint, and cadence for static multi-core LPT bin-packing.
     fn pbww(&self) -> u32;
 
-    /// If this background plugin borrows connections from an External Third-Party (`velda-etp`)
-    /// data source, returns the target `etp_id`.
+    /// Returns all External Third-Party (`velda-etp`) pool identifiers referenced by this
+    /// background plugin (empty for local/pull-only background services).
     #[inline(always)]
-    fn etp_id(&self) -> Option<&str> {
-        None
+    fn etp_ids(&self) -> Vec<&str> {
+        Vec::new()
     }
 
-    /// Attaches the resolved [`velda_etp::EtpInstance`] from [`velda_etp::EtpRegistry`] before
+    /// Attaches a resolved [`velda_etp::EtpInstance`] from [`velda_etp::EtpRegistry`] before
     /// background workers start.
     #[inline(always)]
     fn attach_etp(&self, _instance: &velda_etp::EtpInstance) -> Result<(), PluginError> {
@@ -99,25 +90,14 @@ pub fn owns_id(id: &str) -> bool {
     matches!(
         id,
         "health_probe"
-            | "prometheus_exporter"
-            | "otlp_metrics_exporter"
-            | "statsd_exporter"
             | "acme_cert_rotator"
-            | "loki_log_shipper"
-            | "std_log_shipper"
-            | "otlp_log_shipper"
-            | "clickhouse_log_shipper"
-            | "elasticsearch_log_shipper"
-            | "s3_log_shipper"
-            | "kafka_log_shipper"
-            | "otlp_trace_exporter"
+            | "log_exporter"
+            | "metrics_exporter"
+            | "trace_exporter"
     )
 }
 
 /// Sub-dispatcher: instantiates background plugin descriptors.
-///
-/// # Open-Closed Principle (OCP)
-/// Background services are instantiated on dedicated supervisory threads.
 pub fn instantiate(
     config: &crate::config::PluginConfig,
 ) -> Result<Arc<dyn BackgroundPlugin>, PluginError> {
@@ -127,52 +107,20 @@ pub fn instantiate(
             probe.state.set_ready(true);
             Ok(Arc::new(probe))
         }
-        "prometheus_exporter" => {
-            let exporter = PrometheusExporterPlugin::from_config(config)?;
-            Ok(Arc::new(exporter))
-        }
-        "otlp_metrics_exporter" => {
-            let exporter = OtlpMetricsExporterPlugin::from_config(config)?;
-            Ok(Arc::new(exporter))
-        }
-        "statsd_exporter" => {
-            let exporter = StatsdExporterPlugin::from_config(config)?;
-            Ok(Arc::new(exporter))
-        }
         "acme_cert_rotator" => {
             let rotator = AcmeCertRotatorPlugin::from_config(config)?;
             Ok(Arc::new(rotator))
         }
-        "loki_log_shipper" => {
-            let shipper = LokiLogShipperPlugin::from_config(config)?;
-            Ok(Arc::new(shipper))
+        "log_exporter" => {
+            let exporter = LogExporterPlugin::from_config(config)?;
+            Ok(Arc::new(exporter))
         }
-        "std_log_shipper" => {
-            let shipper = StdLogShipperPlugin::from_config(config)?;
-            Ok(Arc::new(shipper))
+        "metrics_exporter" => {
+            let exporter = MetricsExporterPlugin::from_config(config)?;
+            Ok(Arc::new(exporter))
         }
-        "otlp_log_shipper" => {
-            let shipper = OtlpLogShipperPlugin::from_config(config)?;
-            Ok(Arc::new(shipper))
-        }
-        "clickhouse_log_shipper" => {
-            let shipper = ClickHouseLogShipperPlugin::from_config(config)?;
-            Ok(Arc::new(shipper))
-        }
-        "elasticsearch_log_shipper" => {
-            let shipper = ElasticsearchLogShipperPlugin::from_config(config)?;
-            Ok(Arc::new(shipper))
-        }
-        "s3_log_shipper" => {
-            let shipper = S3LogShipperPlugin::from_config(config)?;
-            Ok(Arc::new(shipper))
-        }
-        "kafka_log_shipper" => {
-            let shipper = KafkaLogShipperPlugin::from_config(config)?;
-            Ok(Arc::new(shipper))
-        }
-        "otlp_trace_exporter" => {
-            let exporter = OtlpTraceExporterPlugin::from_config(config)?;
+        "trace_exporter" => {
+            let exporter = TraceExporterPlugin::from_config(config)?;
             Ok(Arc::new(exporter))
         }
         other => Err(PluginError::Config(format!(

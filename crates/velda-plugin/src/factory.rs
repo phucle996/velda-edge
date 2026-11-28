@@ -230,19 +230,13 @@ pub fn build_route_plugin_plan(
 }
 
 /// Wires External Third-Party (`velda-etp`) pool handles from `etp_registry` into any
-/// instantiated pre-upstream, background, or post-response plugins that declare `etp_id()`.
+/// instantiated pre-upstream, background, or post-response plugins that declare ETP references.
 pub fn wire_plugin_etps(
     available_plugins: &FxHashMap<String, LoadedPlugin>,
     etp_registry: &velda_etp::EtpRegistry,
 ) -> Result<(), PluginError> {
     for (id, plugin) in available_plugins {
-        let etp_id = match plugin {
-            LoadedPlugin::PreUpstream(pu) => pu.etp_id(),
-            LoadedPlugin::Background(bg) => bg.etp_id(),
-            LoadedPlugin::PostResponse(pr) => pr.etp_id(),
-            _ => None,
-        };
-        if let Some(etp_id) = etp_id {
+        let wire_one = |etp_id: &str| -> Result<(), PluginError> {
             let inst = etp_registry.entries.get(etp_id).ok_or_else(|| {
                 PluginError::Config(format!(
                     "Plugin '{id}' requires etp_id '{etp_id}' in EtpRegistry, but none was found"
@@ -252,7 +246,7 @@ pub fn wire_plugin_etps(
                 LoadedPlugin::PreUpstream(pu) => pu.attach_etp(inst)?,
                 LoadedPlugin::Background(bg) => bg.attach_etp(inst)?,
                 LoadedPlugin::PostResponse(pr) => pr.attach_etp(inst)?,
-                _ => {}
+                LoadedPlugin::PreRoute(_) => {}
             }
             tracing::info!(
                 plugin_id = %id,
@@ -260,6 +254,26 @@ pub fn wire_plugin_etps(
                 etp_kind = %inst.kind,
                 "Successfully wired ETP pool to plugin"
             );
+            Ok(())
+        };
+
+        match plugin {
+            LoadedPlugin::PreUpstream(pu) => {
+                if let Some(etp_id) = pu.etp_id() {
+                    wire_one(etp_id)?;
+                }
+            }
+            LoadedPlugin::PostResponse(pr) => {
+                if let Some(etp_id) = pr.etp_id() {
+                    wire_one(etp_id)?;
+                }
+            }
+            LoadedPlugin::Background(bg) => {
+                for etp_id in bg.etp_ids() {
+                    wire_one(etp_id)?;
+                }
+            }
+            LoadedPlugin::PreRoute(_) => {}
         }
     }
     Ok(())
